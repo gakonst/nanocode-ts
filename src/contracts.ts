@@ -24,7 +24,9 @@ export type AgentConfiguration = {
   session_id: string;
   subscription: boolean;
   endpoint: string;
-  gateway?: "vercel";
+  gateway?: "vercel" | "workers_ai";
+  cloudflare_account_id?: string;
+  max_tokens?: number;
   remote?: boolean;
   executor?: string;
   hands?: boolean;

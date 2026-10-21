@@ -41,6 +41,7 @@ export function nanocodeHarness(options = {}) {
                     provider: session.provider,
                     model: session.model,
                     thinking: session.thinking,
+                    max_tokens: session.max_tokens,
                     instructions: options.instructions,
                     subscription: false,
                     endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
@@ -127,11 +128,13 @@ export function nanocodeHarness(options = {}) {
                 const provider = chosen?.provider ?? options.provider ?? "claude";
                 const model = chosen?.provider ? chosen.model : options.model;
                 const thinking = chosen?.provider ? chosen.thinking : options.thinking;
-                const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking } }, async () => ({
+                const max_tokens = chosen?.provider ? chosen.max_tokens : undefined;
+                const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking, ...(max_tokens ? { max_tokens } : {}) } }, async () => ({
                     session_id: sessionUuid(),
                     provider,
                     ...(model ? { model } : {}),
                     ...(thinking ? { thinking } : {}),
+                    ...(max_tokens ? { max_tokens } : {}),
                 }));
                 await run(ctx, journal, session, counts);
                 if (ctx.signal.aborted) {

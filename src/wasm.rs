@@ -16,16 +16,18 @@ use std::{
 };
 
 use nanocode::{
-    ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection,
-    ModelTransport, Nanocode, OpenAi, PromptRejection, ServiceTier, Thinking, Tools,
+    ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost, HarnessFamily,
+    Model, ModelSelection, ModelTransport, Nanocode, NanocodeError, OpenAi, PromptRejection,
+    ServiceTier, Thinking, Tools,
     backend::Prompt,
     codex::{
         OpenAiAuth,
-        transport::{ResponsesGateway, ResponsesTransport},
+        transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
     durability::{InitialSettings, SessionRecord, SqlStore},
     session_host::{
-        Driven, ImportedTurn, SessionLog, Submission, Submitted, TurnInbox, TurnRecord, TurnState,
+        Driven, ImportedTurn, InboxError, SessionLog, Submission, Submitted, TurnInbox, TurnRecord,
+        TurnState,
     },
 };
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
@@ -44,6 +46,7 @@ enum Provider {
 #[serde(rename_all = "snake_case")]
 enum Gateway {
     Vercel,
+    WorkersAi,
 }
 
 impl Provider {
@@ -74,6 +77,10 @@ struct Configuration {
     #[serde(default)]
     gateway: Option<Gateway>,
     #[serde(default)]
+    cloudflare_account_id: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
     remote: bool,
     #[serde(default)]
     executor: Option<String>,
@@ -90,9 +97,20 @@ impl Configuration {
         let Some(model) = &self.model else {
             return Ok(self.provider.model());
         };
-        model
-            .parse::<ModelSelection>()
-            .map_err(|error| format!("model {model}: {error}"))
+        let selection = match self.provider {
+            Provider::Claude => model.parse::<ClaudeModel>().map_or_else(
+                |_| ModelSelection::new(HarnessFamily::Claude, model.as_str()),
+                ModelSelection::Claude,
+            ),
+            Provider::Codex => model
+                .parse::<Model>()
+                .map(ModelSelection::Codex)
+                .map_err(|error| format!("model {model}: {error}"))?,
+        };
+        selection
+            .validate()
+            .map_err(|error| format!("model {model}: {error}"))?;
+        Ok(selection)
     }
 
     fn thinking(&self) -> Result<Option<Thinking>, String> {
@@ -222,6 +240,7 @@ struct Session {
     executors: CodeModeExecutors,
     hands: RefCell<HashMap<String, Hand>>,
     inbox: TurnInbox<store::WorkerStore>,
+    model: ModelSelection,
     scope: String,
 }
 
@@ -300,9 +319,6 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     let mut builder = Nanocode::builder();
     builder = match config.provider {
         Provider::Claude => {
-            if model.as_claude().is_none() {
-                return Err(configuration(format!("{model} is not a Claude model")));
-            }
             let http = nanocode::claude::transport::HttpClient::new(
                 nanocode::claude::transport::SenderTransport(transport::WorkerTransport),
             );
@@ -311,7 +327,13 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             if config.subscription {
                 client = client.subscription_compatibility();
             }
-            builder.claude(client)
+            let harness = ClaudeHarness::new(client);
+            builder.claude(match config.max_tokens {
+                Some(max_tokens) => {
+                    harness.configure(move |claude| Ok(claude.max_tokens(max_tokens)))
+                }
+                None => harness,
+            })
         }
         Provider::Codex => {
             let Some(codex) = model.as_codex() else {
@@ -323,6 +345,24 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                         "the Vercel AI Gateway serves Codex API-key sessions, not ChatGPT subscriptions",
                     ));
                 }
+                (true, Some(Gateway::WorkersAi)) => {
+                    return Err(configuration(
+                        "Workers AI serves Codex API-key sessions, not ChatGPT subscriptions",
+                    ));
+                }
+                (false, Some(Gateway::WorkersAi)) => {
+                    let Some(account_id) = config
+                        .cloudflare_account_id
+                        .as_deref()
+                        .filter(|account| !account.trim().is_empty())
+                    else {
+                        return Err(configuration(
+                            "the Workers AI gateway needs cloudflare_account_id",
+                        ));
+                    };
+                    OpenAi::builder(OpenAiAuth::gateway_managed())
+                        .chat_gateway(ChatGateway::workers_ai(account_id))
+                }
                 (true, None) => OpenAi::builder(OpenAiAuth::host_managed_chatgpt())
                     .transport(ResponsesTransport::WebSocket)
                     .websocket_warmup(false),
@@ -331,11 +371,14 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                 (false, None) => OpenAi::builder(OpenAiAuth::gateway_managed())
                     .transport(ResponsesTransport::Https),
             };
+            let openai = match config.gateway {
+                Some(Gateway::WorkersAi) => openai,
+                _ => openai.api_base_url(config.endpoint),
+            };
             builder.openai(
                 openai
                     .model(codex)
                     .raw_api_events(false)
-                    .api_base_url(config.endpoint)
                     .host_transport(transport::WorkerTransport)
                     .build()
                     .map_err(configuration)?,
@@ -384,7 +427,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         config.started_ms,
         executors.clone(),
     ));
-    let mut record = SessionRecord::root(&config.session_id, model, None);
+    let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
     record.initial = thinking.map(|thinking| InitialSettings {
         thinking,
         service_tier: ServiceTier::Standard,
@@ -405,12 +448,18 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
                 executors,
                 hands: RefCell::default(),
                 inbox,
+                model,
                 scope: config.scope,
             })
         }
         Err(error) => {
             let _ = runtime.shutdown().await;
-            Err(Opening::Failed(error.to_string()))
+            Err(match error {
+                InboxError::Agent(NanocodeError::InvalidRequest(_)) => {
+                    Opening::Configuration(error.to_string())
+                }
+                error => Opening::Failed(error.to_string()),
+            })
         }
     }
 }
@@ -703,10 +752,7 @@ fn execute(command: Command) -> Executed {
             let thinking = thinking.parse::<Thinking>().map_err(text)?;
             let session = ready()?;
             session
-                .inbox
-                .model()
-                .parse::<ModelSelection>()
-                .map_err(text)?
+                .model
                 .capabilities(ModelTransport::Native)
                 .check_thinking(thinking)
                 .map_err(text)?;

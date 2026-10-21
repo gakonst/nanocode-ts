@@ -14,7 +14,7 @@ export const DEFAULT_EVENT_COALESCE_MS = 50;
 
 export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
 
-export type NanocodeSession = { session_id: string; provider: ModelProvider; model?: string; thinking?: Thinking };
+export type NanocodeSession = { session_id: string; provider: ModelProvider; model?: string; thinking?: Thinking; max_tokens?: number };
 
 export const EFFORT_COMMAND = /^\/effort\s+(\S+)\s*$/;
 
@@ -74,6 +74,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           provider: session.provider,
           model: session.model,
           thinking: session.thinking,
+          max_tokens: session.max_tokens,
           instructions: options.instructions,
           subscription: false,
           endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
@@ -146,15 +147,17 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       let failure: unknown;
       try {
         if (ctx.pending().length === 0 && isIdle(ctx.state(), journal.batches)) return;
-        const chosen = (ctx.config as { nanocode?: { provider?: ModelProvider; model?: string; thinking?: Thinking } } | undefined)?.nanocode;
+        const chosen = (ctx.config as { nanocode?: { provider?: ModelProvider; model?: string; thinking?: Thinking; max_tokens?: number } } | undefined)?.nanocode;
         const provider = chosen?.provider ?? options.provider ?? "claude";
         const model = chosen?.provider ? chosen.model : options.model;
         const thinking = chosen?.provider ? chosen.thinking : options.thinking;
-        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking } }, async (): Promise<NanocodeSession> => ({
+        const max_tokens = chosen?.provider ? chosen.max_tokens : undefined;
+        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking, ...(max_tokens ? { max_tokens } : {}) } }, async (): Promise<NanocodeSession> => ({
           session_id: sessionUuid(),
           provider,
           ...(model ? { model } : {}),
           ...(thinking ? { thinking } : {}),
+          ...(max_tokens ? { max_tokens } : {}),
         }));
         await run(ctx, journal, session, counts);
         if (ctx.signal.aborted) {

@@ -107,7 +107,7 @@ export class AgentRuntime {
     this.subscription = config.subscription;
     try {
       const initStarted = performance.now();
-      const opened = await this.command("init", { config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", model: config.model, thinking: config.thinking, instructions: config.instructions, subscription: config.subscription, endpoint: config.endpoint, gateway: config.gateway, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
+      const opened = await this.command("init", { config: { scope: config.scope, session_id: config.session_id, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", model: config.model, thinking: config.thinking, instructions: config.instructions, subscription: config.subscription, endpoint: config.endpoint, gateway: config.gateway, cloudflare_account_id: config.cloudflare_account_id, max_tokens: config.max_tokens, remote: config.remote ?? false, executor: config.executor, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
       if (opened.rejected) throw new HostFailure(opened.rejected.error, opened.rejected.kind, true);
       this.timings.record("sdk.open", performance.now() - initStarted);
     } catch (error) {

@@ -12,6 +12,7 @@ export type NanocodeSession = {
     provider: ModelProvider;
     model?: string;
     thinking?: Thinking;
+    max_tokens?: number;
 };
 export declare const EFFORT_COMMAND: RegExp;
 export type ModelCall = {
