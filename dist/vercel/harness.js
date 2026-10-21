@@ -72,7 +72,7 @@ export function nanocodeHarness(options = {}) {
                 const pending = ctx.pending();
                 let thinking = pending[0] && effort(ctx.state(), pending[0].id, session.thinking);
                 for (const submission of pending)
-                    thinking = await place(ctx, journal, runtime, submission, thinking);
+                    thinking = await place(ctx, journal, runtime, submission, thinking, options.maxPrompts);
                 const next = (await runtime.pending(SCOPE))[0];
                 if (!next) {
                     if (await runtime.settle())
@@ -86,7 +86,7 @@ export function nanocodeHarness(options = {}) {
                     applied = wanted;
                 }
                 const driving = runtime.drive(next.report.request_id);
-                const steering = steer(ctx, journal, runtime, driving);
+                const steering = steer(ctx, journal, runtime, driving, options.maxPrompts);
                 const driven = await driving;
                 await steering;
                 if (ctx.signal.aborted)
@@ -178,7 +178,24 @@ export function effort(state, before, initial) {
     }
     return current;
 }
-async function place(ctx, journal, runtime, submission, thinking) {
+export function exceeds(state, id, limit) {
+    if (limit === undefined)
+        return false;
+    let index = 0;
+    for (const submission of state.submissions) {
+        if (submission.id === id)
+            return index >= limit;
+        if (submission.kind !== "chaos" && submission.kind !== "withdraw")
+            index++;
+    }
+    return false;
+}
+async function place(ctx, journal, runtime, submission, thinking, limit) {
+    if (exceeds(ctx.state(), submission.id, limit)) {
+        await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.refused", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ refused: "limit" }));
+        ctx.live({ type: "error", message: `this session takes at most ${limit} prompts; start a new session`, request_id: submission.id });
+        return thinking;
+    }
     const command = submission.kind === "prompt" ? EFFORT_COMMAND.exec(submission.text ?? "") : null;
     if (command) {
         const level = command[1];
@@ -195,7 +212,7 @@ async function place(ctx, journal, runtime, submission, thinking) {
         ctx.live({ type: "error", message: `message ${submission.id} was already submitted with another prompt` });
     return thinking;
 }
-async function steer(ctx, journal, runtime, driving) {
+async function steer(ctx, journal, runtime, driving, limit) {
     let done = false;
     const finished = driving.then(() => { done = true; }, () => { done = true; });
     for (;;) {
@@ -204,7 +221,7 @@ async function steer(ctx, journal, runtime, driving) {
             return;
         await ctx.refresh();
         for (const submission of ctx.pending()) {
-            if (submission.kind !== "steer" || !await runtime.steer(submission.id, submission.text ?? ""))
+            if (submission.kind !== "steer" || exceeds(ctx.state(), submission.id, limit) || !await runtime.steer(submission.id, submission.text ?? ""))
                 continue;
             await journal.durable();
             await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.steer", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ steered: true }));

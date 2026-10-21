@@ -52,8 +52,10 @@ export interface NanocodeHarnessOptions {
     eventCoalesceMs?: number;
     module?: () => Promise<WebAssembly.Module>;
     report?: (report: DriveReport) => void;
+    maxPrompts?: number;
 }
 export declare function isIdle(state: SessionState, batches: number): boolean;
 export declare function nanocodeHarness(options?: NanocodeHarnessOptions): Harness;
 export declare function effort(state: SessionState, before: string, initial: Thinking | undefined): Thinking | undefined;
+export declare function exceeds(state: SessionState, id: string, limit: number | undefined): boolean;
 export declare function liveEvent(logged: LoggedEvent): Record<string, unknown> | undefined;
