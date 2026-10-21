@@ -17,6 +17,8 @@ export type AgentConfiguration = {
     gateway?: "vercel" | "workers_ai";
     cloudflare_account_id?: string;
     max_tokens?: number;
+    service_tier?: "standard" | "priority" | "fast";
+    subagents?: boolean;
     remote?: boolean;
     executor?: string;
     hands?: boolean;

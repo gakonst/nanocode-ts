@@ -81,6 +81,10 @@ struct Configuration {
     #[serde(default)]
     max_tokens: Option<u32>,
     #[serde(default)]
+    service_tier: Option<ServiceTier>,
+    #[serde(default)]
+    subagents: Option<bool>,
+    #[serde(default)]
     remote: bool,
     #[serde(default)]
     executor: Option<String>,
@@ -386,13 +390,20 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         }
     };
     let executors = CodeModeExecutors::new();
+    let placement = config.remote || config.hands;
+    let base = Tools::builder().without_defaults();
+    let base = if placement {
+        base.tool(executors.tool())
+    } else {
+        base
+    };
     let selected = tools::tools(config.tools)
-        .fold(
-            Tools::builder().without_defaults().tool(executors.tool()),
-            |selected, tool| selected.tool(tool),
-        )
+        .fold(base, |selected, tool| selected.tool(tool))
         .build()
         .map_err(configuration)?;
+    if config.subagents == Some(false) {
+        builder = builder.without_subagents();
+    }
     builder = builder
         .workspace("/")
         .tools(selected)
@@ -402,7 +413,6 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
         executors.set_default(Some(name));
     }
-    let placement = config.remote || config.hands;
     let instructions = [
         config.instructions.as_deref(),
         placement.then_some(PLACEMENT_INSTRUCTIONS),
@@ -428,10 +438,11 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         executors.clone(),
     ));
     let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
-    record.initial = thinking.map(|thinking| InitialSettings {
-        thinking,
-        service_tier: ServiceTier::Standard,
-    });
+    record.initial =
+        (thinking.is_some() || config.service_tier.is_some()).then(|| InitialSettings {
+            thinking: thinking.unwrap_or_else(|| model.default_thinking()),
+            service_tier: config.service_tier.unwrap_or_default(),
+        });
     match TurnInbox::open(
         (*runtime).clone(),
         &store,

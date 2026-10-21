@@ -7,12 +7,14 @@ export declare const SESSION_KEY = "nanocode.session";
 export declare const WAIT_POLL_MS = 250;
 export declare const DEFAULT_EVENT_COALESCE_MS = 50;
 export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
+export type ServiceTier = NonNullable<AgentConfiguration["service_tier"]>;
 export type NanocodeSession = {
     session_id: string;
     provider: ModelProvider;
     model?: string;
     thinking?: Thinking;
     max_tokens?: number;
+    service_tier?: ServiceTier;
 };
 export declare const EFFORT_COMMAND: RegExp;
 export type ModelCall = {
@@ -54,6 +56,7 @@ export interface NanocodeHarnessOptions {
     module?: () => Promise<WebAssembly.Module>;
     report?: (report: DriveReport) => void;
     maxPrompts?: number;
+    subagents?: boolean;
 }
 export declare function isIdle(state: SessionState, batches: number): boolean;
 export declare function nanocodeHarness(options?: NanocodeHarnessOptions): Harness;
