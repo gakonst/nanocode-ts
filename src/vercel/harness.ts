@@ -113,7 +113,10 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           await runtime.setThinking(wanted);
           applied = wanted;
         }
-        const driven = await runtime.drive(next.report.request_id);
+        const driving = runtime.drive(next.report.request_id);
+        const steering = steer(ctx, journal, runtime, driving);
+        const driven = await driving;
+        await steering;
         if (ctx.signal.aborted) return;
         if (driven.retry) {
           if (ctx.attempt === 0) throw new Restart(`nanocode asked to reopen its runtime for ${driven.request_id ?? next.report.request_id}`);
@@ -211,6 +214,37 @@ async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
   return thinking;
 }
 
+async function steer(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, driving: Promise<unknown>): Promise<void> {
+  let done = false;
+  const finished = driving.then(() => { done = true; }, () => { done = true; });
+  for (;;) {
+    await Promise.race([finished, submitted(ctx)]);
+    if (done || ctx.signal.aborted) return;
+    await ctx.refresh();
+    for (const submission of ctx.pending()) {
+      if (submission.kind !== "steer" || !await runtime.steer(submission.id, submission.text ?? "")) continue;
+      await journal.durable();
+      await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.steer", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ steered: true }));
+      ctx.live({ type: "steered", request_id: submission.id });
+    }
+  }
+}
+
+function submitted(ctx: DriveContext): Promise<void> {
+  return new Promise(resolve => {
+    let unsubscribe: (() => void) | undefined;
+    const timer = ctx.onHint ? undefined : setTimeout(done, WAIT_POLL_MS);
+    unsubscribe = ctx.onHint?.(hint => {
+      if (hint.eventType === "hook_received") done();
+    });
+    function done() {
+      clearTimeout(timer);
+      unsubscribe?.();
+      resolve();
+    }
+  });
+}
+
 async function callTool(ctx: DriveContext, journal: SqlJournal, tools: Map<string, HostTool>, name: string, input: unknown, signal: AbortSignal, callId: string): Promise<unknown> {
   const tool = tools.get(name);
   if (!tool) throw new Error(`no host tool is named ${name}`);
@@ -266,8 +300,8 @@ export function liveEvent(logged: LoggedEvent): Record<string, unknown> | undefi
   if (body.source === "agent" && body.event) {
     const { type, payload } = body.event;
     switch (type) {
-      case "assistant.delta": return { type: "text", delta: payload.text, ...base };
-      case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, ...base };
+      case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...base };
+      case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, item: `reasoning:${payload.model_call_index}`, ...base };
       case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, ...base };
       case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, status: payload.status, result: payload.result, ...base };
       default: return undefined;

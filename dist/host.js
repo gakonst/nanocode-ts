@@ -176,6 +176,9 @@ export class AgentRuntime {
     async settle() {
         return await this.command("settle", {}) === true;
     }
+    async steer(requestId, prompt) {
+        return await this.command("steer", { request_id: requestId, prompt }) === true;
+    }
     async checkThinking(thinking) {
         await this.command("thinking", { thinking, apply: false });
     }

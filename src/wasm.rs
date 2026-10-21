@@ -198,6 +198,10 @@ enum Command {
         thinking: String,
         apply: bool,
     },
+    Steer {
+        request_id: String,
+        prompt: String,
+    },
     Dispose {},
     Catalog {
         frame: String,
@@ -715,6 +719,14 @@ fn execute(command: Command) -> Executed {
                     .map_err(text)?;
             }
             Ok(Value::Null)
+        }),
+        Command::Steer { request_id, prompt } => executed(async move {
+            let steered = ready()?
+                .inbox
+                .steer(&request_id, Prompt::from(prompt))
+                .await
+                .map_err(text)?;
+            Ok(Value::Bool(steered))
         }),
         Command::Dispose {} => executed(dispose()),
         Command::Catalog {

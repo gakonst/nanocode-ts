@@ -228,6 +228,10 @@ export class AgentRuntime {
     return await this.command("settle", {}) === true;
   }
 
+  async steer(requestId: string, prompt: string): Promise<boolean> {
+    return await this.command("steer", { request_id: requestId, prompt }) === true;
+  }
+
   async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
     await this.command("thinking", { thinking, apply: false });
   }
