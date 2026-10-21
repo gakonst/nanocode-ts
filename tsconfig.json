@@ -9,8 +9,16 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "types": [],
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "ESNext.Disposable"
+    ],
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/*.ts",
+    "src/cloudflare/*.ts"
+  ]
 }

@@ -1,6 +1,5 @@
 /node_modules/
 /target/
-/dist/
 /output/
 /.env
 /.env.*

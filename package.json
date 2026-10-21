@@ -1,17 +1,44 @@
 {
-  "name": "nanocode-wasm",
+  "name": "nanocode-ts",
+  "version": "0.1.0",
   "private": true,
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "check": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "typescript": "6.0.2"
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json"
   },
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./vercel": {
+      "types": "./dist/vercel/index.d.ts",
+      "default": "./dist/vercel/index.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/cloudflare/index.d.ts",
+      "default": "./dist/cloudflare/index.js"
+    },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
+  },
+  "peerDependencies": {
+    "@vercel/oidc": "^3.2.0",
+    "durable-harness": "0.0.1-beta.6"
+  },
+  "peerDependenciesMeta": {
+    "@vercel/oidc": {
+      "optional": true
+    },
+    "durable-harness": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@vercel/oidc": "3.2.0",
+    "durable-harness": "0.0.1-beta.6",
+    "typescript": "6.0.2"
   }
 }
