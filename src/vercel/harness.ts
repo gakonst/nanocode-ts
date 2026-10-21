@@ -41,11 +41,9 @@ export function isIdle(state: SessionState, batches: number): boolean {
 }
 
 export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
-  const provider = options.provider ?? "claude";
   const tools = new Map((options.tools ?? []).map(tool => [tool.name, tool]));
   const definitions = [...tools.values()].map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema as Record<string, unknown> }));
   const dispatch = options.dispatch ?? gatewayDispatch();
-  const endpoint = options.endpoint ?? gatewayEndpoint(provider);
   const gateway = options.endpoint ? options.gateway : "vercel";
   const module = options.module ?? nanocodeModule;
   const durability = options.durability ?? "on";
@@ -73,7 +71,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           thinking: session.thinking,
           instructions: options.instructions,
           subscription: false,
-          endpoint,
+          endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
           gateway,
           event_coalesce_ms: options.eventCoalesceMs ?? DEFAULT_EVENT_COALESCE_MS,
           tools: definitions,
@@ -132,10 +130,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       let failure: unknown;
       try {
         if (ctx.pending().length === 0 && isIdle(ctx.state(), journal.batches)) return;
-        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model: options.model, thinking: options.thinking } }, async (): Promise<NanocodeSession> => ({
+        const chosen = (ctx.config as { nanocode?: { provider?: ModelProvider; model?: string } } | undefined)?.nanocode;
+        const provider = chosen?.provider ?? options.provider ?? "claude";
+        const model = chosen?.provider ? chosen.model : options.model;
+        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking: options.thinking } }, async (): Promise<NanocodeSession> => ({
           session_id: sessionUuid(),
           provider,
-          ...(options.model ? { model: options.model } : {}),
+          ...(model ? { model } : {}),
           ...(options.thinking ? { thinking: options.thinking } : {}),
         }));
         await run(ctx, journal, session, counts);
