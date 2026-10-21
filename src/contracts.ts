@@ -36,6 +36,14 @@ export type AgentConfiguration = {
   tools?: HostTool[];
 };
 
+export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
+
+export type ModelGateway = "direct" | "vercel" | "workers_ai";
+
+export type ModelEntry = { id: string; name: string; efforts: Thinking[]; effort: Thinking; priority: boolean; gateways: ModelGateway[] };
+
+export type ModelCatalog = { harnesses: { id: ModelProvider; models: ModelEntry[] }[] };
+
 export type TurnReport = Record<string, unknown> & { request_id: string; status: string };
 
 export class HostFailure extends Error {

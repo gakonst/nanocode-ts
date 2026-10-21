@@ -4,6 +4,11 @@
   "private": true,
   "license": "MIT OR Apache-2.0",
   "type": "module",
+  "files": [
+    "dist",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json"
@@ -20,6 +25,14 @@
     "./cloudflare": {
       "types": "./dist/cloudflare/index.d.ts",
       "default": "./dist/cloudflare/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./models": {
+      "types": "./dist/models.d.ts",
+      "default": "./dist/models.js"
     },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
   },

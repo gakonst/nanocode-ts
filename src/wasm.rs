@@ -59,6 +59,7 @@ impl Provider {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Configuration {
     scope: String,
     session_id: String,
@@ -150,7 +151,7 @@ enum Command {
         value_limit: Option<usize>,
     },
     Init {
-        config: Configuration,
+        config: Value,
     },
     Submit {
         scope: String,
@@ -234,6 +235,7 @@ enum Command {
         recorded: Option<Provider>,
         requested: Provider,
     },
+    Models {},
 }
 
 type Log = SessionLog<store::WorkerStore>;
@@ -475,7 +477,15 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     }
 }
 
-async fn init(config: Configuration) -> Result<Value, String> {
+async fn init(config: Value) -> Result<Value, String> {
+    let config = match serde_json::from_value::<Configuration>(config) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(
+                json!({"rejected": {"error": format!("configuration: {error}"), "kind": "configuration"}}),
+            );
+        }
+    };
     let admitted = PHASE.with_borrow_mut(|phase| {
         matches!(phase, Phase::Empty) && {
             *phase = Phase::Starting;
@@ -675,6 +685,49 @@ fn raw(value: &impl Serialize) -> Result<Box<RawValue>, String> {
 
 type Executed = Pin<Box<dyn Future<Output = Result<Box<RawValue>, String>>>>;
 
+fn models() -> Value {
+    let entry = |id: &str, model: ModelSelection, gateways: Vec<&str>| {
+        let capabilities = model.capabilities(ModelTransport::Native);
+        json!({
+            "id": id,
+            "name": capabilities.display_name(),
+            "efforts": capabilities.thinking().map(Thinking::as_str).collect::<Vec<_>>(),
+            "effort": capabilities.default_thinking().as_str(),
+            "priority": capabilities.supports_service_tier(ServiceTier::Priority),
+            "gateways": gateways,
+        })
+    };
+    let claude = HarnessFamily::Claude
+        .models()
+        .map(|model| entry(model.as_str(), model.clone(), vec!["direct", "vercel"]))
+        .collect::<Vec<_>>();
+    let vercel = ResponsesGateway::vercel();
+    let workers_ai = ChatGateway::workers_ai("catalog");
+    let codex = Model::ALL
+        .into_iter()
+        .chain([Model::Glm53, Model::Kimi, Model::Mimo])
+        .map(|model| {
+            let gateways = [
+                (Model::ALL.contains(&model), "direct"),
+                (vercel.serves(model), "vercel"),
+                (workers_ai.serves_model(model), "workers_ai"),
+            ]
+            .into_iter()
+            .filter_map(|(serves, gateway)| serves.then_some(gateway))
+            .collect();
+            let id = match model {
+                Model::Glm53 => "glm-5.3",
+                _ => model.as_str(),
+            };
+            entry(id, ModelSelection::Codex(model), gateways)
+        })
+        .collect::<Vec<_>>();
+    json!({"harnesses": [
+        {"id": "claude", "models": claude},
+        {"id": "codex", "models": codex},
+    ]})
+}
+
 fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'static) -> Executed {
     Box::pin(async move { raw(&future.await?) })
 }
@@ -755,6 +808,7 @@ fn execute(command: Command) -> Executed {
             })
         }),
         Command::Settle {} => executed(async move { ready()?.inbox.settle().await.map_err(text) }),
+        Command::Models {} => executed(async move { Ok(models()) }),
         Command::Preconnect {} => executed(async move {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;
             Ok(Value::Null)

@@ -1,4 +1,5 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
+import { liveEvent } from "../client.ts";
 import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type ModelProvider, sessionUuid } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
@@ -316,24 +317,4 @@ function publish(ctx: DriveContext, events: LoggedEvent[]): void {
   }
 }
 
-type AgentEvent = { type: string; payload: Record<string, unknown> };
 
-type LoggedBody = { source?: string; event?: AgentEvent; type?: string; status?: string; ok?: { message?: string }; error?: unknown };
-
-export function liveEvent(logged: LoggedEvent): Record<string, unknown> | undefined {
-  const body = logged.event as LoggedBody;
-  const base = { seq: logged.seq, request_id: logged.request_id };
-  if (body.source === "agent" && body.event) {
-    const { type, payload } = body.event;
-    switch (type) {
-      case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...base };
-      case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, item: `reasoning:${payload.model_call_index}`, ...base };
-      case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, ...base };
-      case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, status: payload.status, result: payload.result, ...base };
-      default: return undefined;
-    }
-  }
-  if (body.type === "result") return { type: "turn", status: body.status, ...(body.ok?.message !== undefined ? { message: body.ok.message } : {}), ...(body.error !== undefined ? { error: body.error } : {}), ...base };
-  if (body.type === "retrying") return { type: "retrying", ...body, ...base };
-  return undefined;
-}

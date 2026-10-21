@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: nanocode-ts
+          persist-credentials: false
+
+      - name: Read SDK revision
+        id: sdk
+        run: echo "revision=$(jq -r .revision nanocode-ts/sdk-revision.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gakonst/nanocode
+          ref: ${{ steps.sdk.outputs.revision }}
+          path: nanocodex
+          persist-credentials: false
+
+      - name: Setup Rust
+        id: rust
+        working-directory: nanocode-ts
+        run: echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('nanocode-ts/Cargo.lock', 'nanocode-ts/sdk-revision.json') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Cache WASM Build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            nanocode-ts/target
+            nanocode-ts/output/wasm-build-fingerprint
+          key: wasm-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ steps.sdk.outputs.revision }}-${{ hashFiles('nanocode-ts/Cargo.lock', 'nanocode-ts/src/**/*.rs') }}
+          restore-keys: wasm-${{ runner.os }}-${{ steps.rust.outputs.version }}-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install Dependencies
+        working-directory: nanocode-ts
+        run: npm ci
+
+      - name: Build
+        working-directory: nanocode-ts
+        run: npm run build
+
+      - name: Check Types
+        working-directory: nanocode-ts
+        run: npm run check
+
+      - name: Pack
+        id: pack
+        working-directory: nanocode-ts
+        run: |
+          short="${GITHUB_SHA::7}"
+          tarball="$(npm pack --silent --pack-destination "$RUNNER_TEMP")"
+          mv "$RUNNER_TEMP/$tarball" "$RUNNER_TEMP/nanocode-ts-$short.tgz"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "path=$RUNNER_TEMP/nanocode-ts-$short.tgz" >> "$GITHUB_OUTPUT"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ steps.pack.outputs.short }}" "${{ steps.pack.outputs.path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "nanocode-ts ${{ steps.pack.outputs.short }}" \
+            --notes "Built from $GITHUB_SHA against SDK ${{ steps.sdk.outputs.revision }}. Install with \`npm install https://github.com/$GITHUB_REPOSITORY/releases/download/build-${{ steps.pack.outputs.short }}/nanocode-ts-${{ steps.pack.outputs.short }}.tgz\`."

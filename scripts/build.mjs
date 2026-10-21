@@ -3,6 +3,20 @@ import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
+function fields(path, start, pattern) {
+  const source = readFileSync(path, "utf8");
+  const body = source.slice(source.indexOf(start) + start.length);
+  return new Set([...body.slice(0, body.indexOf("\n}")).matchAll(pattern)].map(match => match[1]));
+}
+const rust = fields("src/wasm.rs", "struct Configuration {", /^\s+(\w+):/gm);
+const typescript = fields("src/contracts.ts", "export type AgentConfiguration = {", /^\s+(\w+)\??:/gm);
+for (const field of ["runtime_id", "started_ms"]) typescript.add(field);
+const differing = [...rust].filter(field => !typescript.has(field)).concat([...typescript].filter(field => !rust.has(field)));
+if (differing.length > 0 || rust.size === 0) {
+  console.error(`AgentConfiguration in src/contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(", ") || "no fields found"}`);
+  process.exit(1);
+}
+
 const digest = createHash("sha256");
 function include(path) {
   digest.update(path);
@@ -42,3 +56,10 @@ const bytes = readFileSync(artifact);
 let previous;
 try { previous = readFileSync("dist/nanocode_wasm.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previous?.equals(bytes)) writeFileSync("dist/nanocode_wasm.wasm", bytes);
+
+const { AgentRuntime } = await import("../src/index.ts");
+const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });
+const catalog = await runtime.modelCatalog();
+await runtime.dispose();
+writeFileSync("dist/models.js", `export const models = ${JSON.stringify(catalog, null, 2)};\n`);
+writeFileSync("dist/models.d.ts", `import type { ModelCatalog } from "./contracts.js";\nexport declare const models: ModelCatalog;\n`);
