@@ -144,7 +144,7 @@ async function prepare(provider, history) {
   const session = await instance(module, provider, path, sessionId);
   for (let index = 0; index < history; index++) await turn(session, `history-${index}`);
   await session.runtime.dispose();
-  const size = session.store.db.prepare("SELECT (SELECT COALESCE(SUM(LENGTH(value)), 0) FROM records) AS records, (SELECT COUNT(*) FROM records) AS count, (SELECT LENGTH(payload) FROM states ORDER BY LENGTH(payload) DESC LIMIT 1) AS head").get();
+  const size = session.store.db.prepare("SELECT (SELECT COALESCE(SUM(LENGTH(value)), 0) FROM blobs) AS records, (SELECT COUNT(*) FROM blobs) AS count, (SELECT LENGTH(payload) FROM states ORDER BY LENGTH(payload) DESC LIMIT 1) AS head").get();
   session.store.db.close();
   return { path, sessionId, records_bytes: size.records, records: size.count, head_bytes: size.head };
 }
