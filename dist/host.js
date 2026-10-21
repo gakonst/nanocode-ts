@@ -176,6 +176,12 @@ export class AgentRuntime {
     async settle() {
         return await this.command("settle", {}) === true;
     }
+    async checkThinking(thinking) {
+        await this.command("thinking", { thinking, apply: false });
+    }
+    async setThinking(thinking) {
+        await this.command("thinking", { thinking, apply: true });
+    }
     async preconnect() {
         await this.command("preconnect", {});
     }

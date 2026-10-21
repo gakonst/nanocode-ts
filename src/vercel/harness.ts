@@ -12,7 +12,11 @@ export const WAIT_POLL_MS = 250;
 
 export const DEFAULT_EVENT_COALESCE_MS = 50;
 
-export type NanocodeSession = { session_id: string; provider: ModelProvider; model?: string; thinking?: AgentConfiguration["thinking"] };
+export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
+
+export type NanocodeSession = { session_id: string; provider: ModelProvider; model?: string; thinking?: Thinking };
+
+export const EFFORT_COMMAND = /^\/effort\s+(\S+)\s*$/;
 
 export type ModelCall = { index: number; replayed: boolean; first_output_ms: number | null; duration_ms: number; input_tokens: number; cached_tokens: number; output_tokens: number };
 
@@ -92,14 +96,22 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         throw error;
       }
       counts.open_ms = performance.now() - opening;
+      let applied: Thinking | undefined;
       for (;;) {
         await ctx.refresh();
-        for (const submission of ctx.pending()) await place(ctx, journal, runtime, submission);
+        const pending = ctx.pending();
+        let thinking = pending[0] && effort(ctx.state(), pending[0].id, session.thinking);
+        for (const submission of pending) thinking = await place(ctx, journal, runtime, submission, thinking);
         const next = (await runtime.pending(SCOPE))[0];
         if (!next) {
           if (await runtime.settle()) return;
           await changed(runtime, ctx.signal);
           continue;
+        }
+        const wanted = (next.metadata as { thinking?: Thinking } | null)?.thinking;
+        if (wanted && wanted !== applied) {
+          await runtime.setThinking(wanted);
+          applied = wanted;
         }
         const driven = await runtime.drive(next.report.request_id);
         if (ctx.signal.aborted) return;
@@ -130,14 +142,15 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       let failure: unknown;
       try {
         if (ctx.pending().length === 0 && isIdle(ctx.state(), journal.batches)) return;
-        const chosen = (ctx.config as { nanocode?: { provider?: ModelProvider; model?: string } } | undefined)?.nanocode;
+        const chosen = (ctx.config as { nanocode?: { provider?: ModelProvider; model?: string; thinking?: Thinking } } | undefined)?.nanocode;
         const provider = chosen?.provider ?? options.provider ?? "claude";
         const model = chosen?.provider ? chosen.model : options.model;
-        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking: options.thinking } }, async (): Promise<NanocodeSession> => ({
+        const thinking = chosen?.provider ? chosen.thinking : options.thinking;
+        const session = await ctx.effect(SESSION_KEY, { name: SESSION_KEY, replay: "safe", input: { provider, model, thinking } }, async (): Promise<NanocodeSession> => ({
           session_id: sessionUuid(),
           provider,
           ...(model ? { model } : {}),
-          ...(options.thinking ? { thinking: options.thinking } : {}),
+          ...(thinking ? { thinking } : {}),
         }));
         await run(ctx, journal, session, counts);
         if (ctx.signal.aborted) {
@@ -171,12 +184,31 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   };
 }
 
-async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission): Promise<void> {
-  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: submission.text ?? "", metadata: { kind: submission.kind } });
+export function effort(state: SessionState, before: string, initial: Thinking | undefined): Thinking | undefined {
+  let current = initial;
+  for (const submission of state.submissions) {
+    if (submission.id === before) break;
+    const placed = state.effects.get(`nanocode.place:${submission.id}`)?.output as { thinking?: Thinking } | undefined;
+    if (placed?.thinking) current = placed.thinking;
+  }
+  return current;
+}
+
+async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined): Promise<Thinking | undefined> {
+  const command = submission.kind === "prompt" ? EFFORT_COMMAND.exec(submission.text ?? "") : null;
+  if (command) {
+    const level = command[1] as Thinking;
+    const outcome = await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.effort", replay: "safe", placed: [submission.id], input: { thinking: level } }, () =>
+      runtime.checkThinking(level).then(() => ({ thinking: level }), (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }))) as { thinking?: Thinking; error?: string };
+    ctx.live(outcome.thinking ? { type: "effort", thinking: outcome.thinking, request_id: submission.id } : { type: "error", message: outcome.error, request_id: submission.id });
+    return outcome.thinking ?? thinking;
+  }
+  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: submission.text ?? "", metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) } });
   await journal.durable();
   await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.place", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ submitted: submitted.submitted }));
   if (submitted.submitted === "too_large") ctx.live({ type: "error", message: `the prompt needs ${submitted.bytes} bytes and the session log stores ${submitted.limit}` });
   else if (submitted.submitted === "conflict") ctx.live({ type: "error", message: `message ${submission.id} was already submitted with another prompt` });
+  return thinking;
 }
 
 async function callTool(ctx: DriveContext, journal: SqlJournal, tools: Map<string, HostTool>, name: string, input: unknown, signal: AbortSignal, callId: string): Promise<unknown> {

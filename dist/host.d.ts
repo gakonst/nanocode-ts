@@ -102,6 +102,8 @@ export declare class AgentRuntime {
     attach(hand: string, connection: string): Promise<void>;
     detach(connection: string): Promise<void>;
     settle(): Promise<boolean>;
+    checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void>;
+    setThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void>;
     preconnect(): Promise<void>;
     changed(signal?: AbortSignal): Promise<void>;
     dispose(): Promise<void>;

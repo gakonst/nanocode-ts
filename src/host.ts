@@ -228,6 +228,14 @@ export class AgentRuntime {
     return await this.command("settle", {}) === true;
   }
 
+  async checkThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
+    await this.command("thinking", { thinking, apply: false });
+  }
+
+  async setThinking(thinking: NonNullable<AgentConfiguration["thinking"]>): Promise<void> {
+    await this.command("thinking", { thinking, apply: true });
+  }
+
   async preconnect(): Promise<void> {
     await this.command("preconnect", {});
   }

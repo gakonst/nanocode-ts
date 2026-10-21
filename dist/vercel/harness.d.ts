@@ -6,12 +6,14 @@ export declare const SCOPE = "session";
 export declare const SESSION_KEY = "nanocode.session";
 export declare const WAIT_POLL_MS = 250;
 export declare const DEFAULT_EVENT_COALESCE_MS = 50;
+export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
 export type NanocodeSession = {
     session_id: string;
     provider: ModelProvider;
     model?: string;
-    thinking?: AgentConfiguration["thinking"];
+    thinking?: Thinking;
 };
+export declare const EFFORT_COMMAND: RegExp;
 export type ModelCall = {
     index: number;
     replayed: boolean;
@@ -53,4 +55,5 @@ export interface NanocodeHarnessOptions {
 }
 export declare function isIdle(state: SessionState, batches: number): boolean;
 export declare function nanocodeHarness(options?: NanocodeHarnessOptions): Harness;
+export declare function effort(state: SessionState, before: string, initial: Thinking | undefined): Thinking | undefined;
 export declare function liveEvent(logged: LoggedEvent): Record<string, unknown> | undefined;

@@ -16,8 +16,8 @@ use std::{
 };
 
 use nanocode::{
-    ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection, Nanocode,
-    OpenAi, PromptRejection, ServiceTier, Thinking, Tools,
+    ClaudeClient, ClaudeModel, CodeModeExecutors, CodeModeHost, Model, ModelSelection,
+    ModelTransport, Nanocode, OpenAi, PromptRejection, ServiceTier, Thinking, Tools,
     backend::Prompt,
     codex::{
         OpenAiAuth,
@@ -194,6 +194,10 @@ enum Command {
     },
     Settle {},
     Preconnect {},
+    Thinking {
+        thinking: String,
+        apply: bool,
+    },
     Dispose {},
     Catalog {
         frame: String,
@@ -689,6 +693,27 @@ fn execute(command: Command) -> Executed {
         Command::Settle {} => executed(async move { ready()?.inbox.settle().await.map_err(text) }),
         Command::Preconnect {} => executed(async move {
             ready()?.inbox.agent().preconnect().await.map_err(text)?;
+            Ok(Value::Null)
+        }),
+        Command::Thinking { thinking, apply } => executed(async move {
+            let thinking = thinking.parse::<Thinking>().map_err(text)?;
+            let session = ready()?;
+            session
+                .inbox
+                .model()
+                .parse::<ModelSelection>()
+                .map_err(text)?
+                .capabilities(ModelTransport::Native)
+                .check_thinking(thinking)
+                .map_err(text)?;
+            if apply {
+                session
+                    .inbox
+                    .agent()
+                    .set_thinking(thinking)
+                    .await
+                    .map_err(text)?;
+            }
             Ok(Value::Null)
         }),
         Command::Dispose {} => executed(dispose()),
