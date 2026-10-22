@@ -1,5 +1,6 @@
 import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
+import { LocalHand } from "./hand.ts";
 
 type Exports = {
   memory: WebAssembly.Memory;
@@ -102,12 +103,13 @@ export class AgentRuntime {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
     this.options = { ...options, published: this.options.published, wake: this.options.wake };
+    if (config.code_mode && !this.options.remote) this.options.remote = new LocalHand();
     this.hands = config.hands ?? false;
     this.remote = config.remote ?? false;
     this.subscription = config.subscription;
     try {
       const initStarted = performance.now();
-      const opened = await this.command("init", { config: { ...config, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", remote: this.remote, hands: this.hands, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
+      const opened = await this.command("init", { config: { ...config, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", remote: this.remote, hands: this.hands, code_mode: config.code_mode ?? false, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
       if (opened.rejected) throw new HostFailure(opened.rejected.error, opened.rejected.kind, true);
       this.timings.record("sdk.open", performance.now() - initStarted);
     } catch (error) {

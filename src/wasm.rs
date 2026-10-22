@@ -32,6 +32,8 @@ use nanocode::{
 };
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
+
+const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run inside this host's own JavaScript runtime, not on a separate machine: they have no file system or shell, but the global fetch makes HTTP requests from the host, which may pay for them.";
 use serde_json::{Map, Value, json, value::RawValue};
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -91,6 +93,8 @@ struct Configuration {
     executor: Option<String>,
     #[serde(default)]
     hands: bool,
+    #[serde(default)]
+    code_mode: bool,
     #[serde(default)]
     event_coalesce_ms: u64,
     #[serde(default)]
@@ -395,8 +399,12 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             )
         }
     };
+    if config.code_mode && config.remote {
+        return Err(configuration("code_mode runs cells in this host; leave remote unset"));
+    }
     let executors = CodeModeExecutors::new();
     let placement = config.remote || config.hands;
+    let local = config.code_mode;
     let base = Tools::builder().without_defaults();
     let base = if placement {
         base.tool(executors.tool())
@@ -414,14 +422,19 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         .workspace("/")
         .tools(selected)
         .durability(store.clone());
-    if config.remote {
-        let name: Arc<str> = config.executor.as_deref().unwrap_or("default").into();
+    if config.remote || local {
+        let name: Arc<str> = config
+            .executor
+            .as_deref()
+            .unwrap_or(if local { "local" } else { "default" })
+            .into();
         executors.insert(Arc::clone(&name), Arc::new(remote::host(None).await?));
         executors.set_default(Some(name));
     }
     let instructions = [
         config.instructions.as_deref(),
         placement.then_some(PLACEMENT_INSTRUCTIONS),
+        local.then_some(LOCAL_INSTRUCTIONS),
     ]
     .into_iter()
     .flatten()
@@ -430,7 +443,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     if !instructions.is_empty() {
         builder = builder.instructions(instructions);
     }
-    if placement {
+    if placement || local {
         builder = builder
             .code_mode_host(executors.clone())
             .map_err(configuration)?;
