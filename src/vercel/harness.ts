@@ -1,6 +1,6 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
 import { liveEvent } from "../client.ts";
-import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type ModelProvider, sessionUuid } from "../index.ts";
+import { AgentRuntime, type AgentConfiguration, HostFailure, LocalHand, type LoggedEvent, type ModelProvider, sessionUuid } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
@@ -42,6 +42,8 @@ export interface NanocodeHarnessOptions {
   maxPrompts?: number;
   subagents?: boolean;
   streamToolInput?: boolean;
+  codeMode?: boolean;
+  fetch?: typeof fetch;
 }
 
 const settledKey = (batches: number) => `nanocode.settled:${batches}`;
@@ -88,8 +90,10 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           gateway,
           event_coalesce_ms: options.eventCoalesceMs ?? DEFAULT_EVENT_COALESCE_MS,
           stream_tool_input: options.streamToolInput,
+          code_mode: options.codeMode,
           tools: definitions,
         }, {
+          remote: options.codeMode ? new LocalHand({ fetch: options.fetch }) : undefined,
           dispatch: (request, signal) => {
             counts.model_requests++;
             return dispatch(request, signal);

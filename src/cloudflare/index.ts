@@ -38,3 +38,4 @@ export class DurableObjectSql implements SqlHost {
     }
   }
 }
+export { workerLoader, type WorkerCode, type WorkerLoader, type WorkerLoaderOptions } from "./loader.ts";

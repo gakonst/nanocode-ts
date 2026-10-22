@@ -1,9 +1,26 @@
 import type { RemoteRequest } from "./contracts.ts";
+import { CELL_GLOBALS, CELL_SCOPE } from "./cell.ts";
+
+export type CellDefinition = { name: string; tool_name: string; kind: "function" | "freeform"; description: string; parameters: unknown };
+
+export type CellHost = {
+  call(name: string, input: unknown): Promise<unknown>;
+  content(item: Record<string, unknown>): void;
+  notify(text: string): void;
+  yield(): void;
+  fetch(request: Request): Promise<Response>;
+  setTimeout?(callback: (...values: unknown[]) => void, delay?: number, ...values: unknown[]): number;
+  clearTimeout?(id?: number): void;
+};
+
+export type CellOutcome = { error?: string; stored: Record<string, unknown> };
+
+export type CellEvaluator = (code: string, host: CellHost, definitions: CellDefinition[], stored: Record<string, unknown>) => Promise<CellOutcome>;
 
 export type LocalHandOptions = {
   name?: string;
   fetch?: typeof fetch;
-  globals?: Record<string, unknown>;
+  evaluate?: CellEvaluator;
   max_frame_bytes?: number;
   timeout_ms?: number;
 };
@@ -14,9 +31,9 @@ type Content = Record<string, Json>;
 type Nested = { call_id: string; name: string; input: Json; output: Json; structured_result: Json; success: boolean; started_after_ns: number; duration_ns: number; metadata: null };
 type Notification = { call_id: string; text: string };
 type Execution = { cell: { origin_call_id: string; running: boolean } | null; output: string | Content[]; success: boolean; nested_calls: Nested[]; notifications: Notification[] };
-type Definition = { name: string; tool_name: string; kind: "function" | "freeform"; description: string; parameters: Json };
 type Callback = { resolve(value: Json): void; reject(error: unknown): void };
 type Session = { id: string; cells: Map<number, Cell>; next: number; stored: Map<string, Json> };
+type Scope = { run(build: () => (...values: unknown[]) => Promise<unknown>): Promise<CellOutcome> };
 
 const BUDGET_MAX = "18446744073709551615";
 const INITIAL_YIELD_MS = 10_000;
@@ -24,9 +41,15 @@ const OBSERVER_GRACE_MS = 1_000;
 const TIMER_LIMIT_MS = 2_147_483_647;
 const PRAGMA = "// @exec:";
 const NOT_RECEIVED = "the hand never received this operation before its connection dropped; it was not dispatched";
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+let scope: ((host: CellHost, definitions: CellDefinition[], stored: Record<string, unknown>) => Scope) | undefined;
+
+export const inRealm: CellEvaluator = (code, host, definitions, stored) => {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
+  scope ??= new Function("return " + CELL_SCOPE)() as NonNullable<typeof scope>;
+  return scope(host, definitions, stored).run(() => new AsyncFunction(...CELL_GLOBALS, code));
+};
 
 function decode(text: string): any {
   return JSON.parse(text.replace(/"output_token_budget":18446744073709551615(?=[,}])/g, '"output_token_budget":-1'));
@@ -36,93 +59,8 @@ function encode(frame: unknown): string {
   return JSON.stringify(frame).replace(/"output_token_budget":-1(?=[,}])/g, '"output_token_budget":' + BUDGET_MAX);
 }
 
-function stringify(value: unknown): string {
-  if (value === null || ["undefined", "boolean", "number", "bigint", "string"].includes(typeof value)) return String(value);
-  if (Object.prototype.toString.call(value) === "[object Error]") return String(value);
-  return JSON.stringify(value) ?? String(value);
-}
-
-function scriptStack(stack: unknown): string {
-  if (typeof stack !== "string") return "";
-  return stack.split("\n").filter(line => !/^\s+at /.test(line) || line.includes("<anonymous>")).map(line => line.replace(/eval at .*?\), (<anonymous>)/, "$1")).join("\n");
-}
-
-function errorText(error: any): string {
-  if (!error) return String(error);
-  const message = error.message;
-  const label = message && error.name ? error.name + ": " + message : message;
-  const stack = scriptStack(error.stack);
-  if (stack && label && !stack.startsWith(label)) return label + "\n" + stack;
-  return stack || label || String(error);
-}
-
-function dataUrl(block: any): string {
-  const mime = block.mimeType ?? block.mime_type;
-  return /^data:/i.test(block.data) ? block.data : "data:" + (typeof mime === "string" && mime ? mime : "application/octet-stream") + ";base64," + block.data;
-}
-
-function normalizeImage(value: any, detail?: unknown): Content {
-  const expected = "image expects a non-empty image URL string, an object with exactly one of image_url or file_id and optional detail, or a raw MCP image block";
-  if (detail != null && typeof detail !== "string") throw "image detail must be a string when provided";
-  let url: string | undefined;
-  let fileId: string | undefined;
-  let embedded: unknown;
-  if (typeof value === "string") url = value;
-  else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    if (value.file_id !== undefined) {
-      if (value.image_url !== undefined || typeof value.file_id !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(value.file_id)) throw "image file_id is malformed or ambiguous";
-      fileId = value.file_id;
-      embedded = value.detail;
-      if (embedded != null && typeof embedded !== "string") throw "image detail must be a string when provided";
-    } else if (value.image_url !== undefined) {
-      url = value.image_url;
-      if (typeof url !== "string") throw expected;
-      embedded = value.detail;
-      if (embedded != null && typeof embedded !== "string") throw "image detail must be a string when provided";
-    } else {
-      const block = JSON.parse(JSON.stringify(value));
-      if (typeof block?.type !== "string") throw expected;
-      if (block.type !== "image") throw 'image only accepts MCP image blocks, got "' + block.type + '"';
-      if (typeof block.data !== "string" || !block.data) throw "image expected MCP image data";
-      url = dataUrl(block);
-      const metadata = block._meta?.["codex/imageDetail"];
-      if (["auto", "low", "high", "original"].includes(metadata)) embedded = metadata;
-    }
-  } else throw expected;
-  if (!url && !fileId) throw expected;
-  if (url && /^https?:/i.test(url)) throw "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead";
-  if (url && !/^data:/i.test(url)) throw "Tool call failed: invalid image output. Pass a base64 data URI instead";
-  const selected = String(detail ?? embedded ?? "high").replace(/[A-Z]/g, character => character.toLowerCase());
-  if (!["auto", "low", "high", "original"].includes(selected)) throw "image detail must be one of: auto, low, high, original";
-  return { type: "input_image", ...(fileId ? { file_id: fileId } : { image_url: url as string }), detail: selected };
-}
-
-function normalizeAudio(value: any): Content {
-  const expected = "audio expects a non-empty audio URL string, an object with audio_url, or a raw MCP audio block";
-  let url: string | undefined;
-  if (typeof value === "string") url = value;
-  else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    if (value.audio_url !== undefined) {
-      url = value.audio_url;
-      if (typeof url !== "string") throw expected;
-    } else {
-      const block = JSON.parse(JSON.stringify(value));
-      if (typeof block?.type !== "string") throw expected;
-      if (block.type !== "audio") throw 'audio only accepts MCP audio blocks, got "' + block.type + '"';
-      if (typeof block.data !== "string" || !block.data) throw "audio expected MCP audio data";
-      url = dataUrl(block);
-    }
-  } else throw expected;
-  if (!url) throw expected;
-  if (!/^data:/i.test(url)) throw "Tool call failed: invalid audio output. Pass a base64 data URI instead";
-  return { type: "input_audio", audio_url: url };
-}
-
-function generatedImageItems(value: any): Content[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw "generatedImage expects an image generation result object";
-  const hint = value.output_hint;
-  if (hint !== undefined && typeof hint !== "string") throw "generatedImage output_hint must be a string when provided";
-  return [normalizeImage(value), ...(hint === undefined ? [] : [{ type: "input_text", text: hint }])];
+function message(error: unknown): string {
+  return typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
 }
 
 function identifier(name: string): string {
@@ -134,8 +72,8 @@ function identifier(name: string): string {
   return result || "_";
 }
 
-function definitions(tools: any[]): Definition[] {
-  return tools.flatMap((tool): Definition[] => {
+function definitions(tools: any[]): CellDefinition[] {
+  return tools.flatMap((tool): CellDefinition[] => {
     if (tool?.type === "namespace") return definitions(tool.tools ?? []);
     if (tool?.type !== "function" && tool?.type !== "custom") return [];
     return [{ name: identifier(tool.name), tool_name: tool.name, kind: tool.type === "custom" ? "freeform" : "function", description: tool.description ?? "", parameters: tool.type === "custom" ? null : tool.parameters ?? null }];
@@ -281,124 +219,64 @@ class Cell {
     this.changed();
   }
 
-  async run(code: string, tools: Definition[], fetcher: typeof fetch, globals: Record<string, unknown>) {
-    const stored = new Map(this.session.stored);
-    const writes = new Map<string, Json>();
-    const EXIT = Symbol("exit");
+  async run(code: string, definitions: CellDefinition[], fetcher: typeof fetch, evaluate: CellEvaluator) {
     const live = () => this.status === "running";
-    const invoke = (definition: Definition, input: unknown) => this.call(definition, input === undefined && definition.kind === "function" ? {} : input);
-    const declared = new Map(tools.map(definition => [definition.name, definition]));
-    const target = Object.create(null);
-    for (const [name, definition] of declared) {
-      Object.defineProperty(target, name, {
-        enumerable: true,
-        value(input: unknown) {
-          const promise = invoke(definition, input);
-          promise.catch(() => {});
-          return promise;
-        },
-      });
-    }
-    Object.freeze(target);
-    const toolsProxy = new Proxy(target, {
-      get(object, name) {
-        if (Object.prototype.hasOwnProperty.call(object, name)) return object[name];
-        if (typeof name !== "string" || name === "then") return undefined;
-        return () => {
-          const error: any = new Error('TOOL_NOT_AVAILABLE: Tool "' + name + '" is not available in this Code Mode execution. Check ALL_TOOLS for callable names. A tool exposed directly by the host may need to be called through its direct tool entry instead.');
-          error.code = "TOOL_NOT_AVAILABLE";
-          error.tool = name;
-          const promise = Promise.reject(error);
-          promise.catch(() => {});
-          return promise;
-        };
-      },
-    });
-    const allTools = Object.freeze(tools.map(tool => Object.freeze({ name: tool.name, description: tool.description })));
-    const toolSchema = (name: unknown) => {
-      if (typeof name !== "string" || !name) throw "toolSchema expects a non-empty tool name";
-      const tool = tools.find(entry => entry.name === name || entry.tool_name === name);
-      return tool ? { inputSchema: structuredClone(tool.parameters), outputSchema: null } : undefined;
-    };
-    const push = (item: Content) => {
-      if (!live()) return;
-      this.content.push(item);
-    };
-    const text = (value: unknown) => push({ type: "input_text", text: stringify(value) });
-    const image = (value: unknown, detail?: unknown) => push(normalizeImage(value, detail));
-    const audio = (value: unknown) => push(normalizeAudio(value));
-    const generatedImage = (value: unknown) => { for (const item of generatedImageItems(value)) push(item); };
-    const notify = (value: unknown) => {
-      const notification = stringify(value);
-      if (!notification.trim()) throw "notify expects non-empty text";
-      if (!live()) return;
-      const entry = { call_id: this.origin, text: notification };
-      this.notifications.push(entry);
-      this.emit({ notification: entry });
-    };
-    const key = (value: unknown, helper: string) => {
-      try { return String(value); } catch { throw helper + " key must be a string"; }
-    };
-    const store = (name: unknown, value: unknown) => {
-      const normalized = key(name, "store");
-      const encoded = JSON.stringify(value);
-      if (encoded === undefined) throw "Unable to store " + JSON.stringify(normalized) + ". Only plain serializable objects can be stored.";
-      stored.set(normalized, JSON.parse(encoded));
-      writes.set(normalized, JSON.parse(encoded));
-    };
-    const load = (name: unknown) => {
-      const normalized = key(name, "load");
-      return stored.has(normalized) ? structuredClone(stored.get(normalized)) : undefined;
-    };
-    const yieldControl = () => {
-      if (!live()) return;
-      this.yielded = true;
-      this.changed();
-    };
-    const exit = () => { throw EXIT; };
-    const setTimer = (callback: unknown, delay?: unknown, ...rest: unknown[]) => {
-      if (typeof callback !== "function") throw new TypeError("setTimeout expects a function");
-      const id = ++this.nextTimer;
-      const milliseconds = Math.min(Math.max(Number(delay) || 0, 0), TIMER_LIMIT_MS);
-      this.timers.set(id, setTimeout(() => {
-        this.timers.delete(id);
-        if (live()) callback(...rest);
-      }, milliseconds));
-      return id;
-    };
-    const clearTimer = (id?: unknown) => {
-      const timer = this.timers.get(Number(id));
-      if (timer === undefined) return;
-      clearTimeout(timer);
-      this.timers.delete(Number(id));
-    };
     const signal = this.controller.signal;
-    const cellFetch = (input: RequestInfo | URL, init?: RequestInit) => {
-      const signals = [signal, init?.signal, input instanceof Request ? input.signal : undefined].filter((entry): entry is AbortSignal => !!entry);
-      const combined = signals.length > 1 && typeof AbortSignal.any === "function" ? AbortSignal.any(signals) : signal;
-      return fetcher(input, { ...init, signal: combined });
+    const host: CellHost = {
+      call: (name, input) => {
+        const definition = definitions.find(entry => entry.tool_name === name);
+        return definition ? this.call(definition, input) : Promise.reject("unknown tool " + name);
+      },
+      content: item => {
+        if (live()) this.content.push(JSON.parse(JSON.stringify(item)) as Content);
+      },
+      notify: text => {
+        if (!live()) return;
+        const entry = { call_id: this.origin, text: String(text) };
+        this.notifications.push(entry);
+        this.emit({ notification: entry });
+      },
+      yield: () => {
+        if (!live()) return;
+        this.yielded = true;
+        this.changed();
+      },
+      fetch: async request => {
+        if (!live()) throw new Error("Code Mode cell ended");
+        const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
+        return fetcher(request.url, { body, headers: request.headers, method: request.method, redirect: request.redirect, signal });
+      },
+      setTimeout: (callback, delay, ...values) => {
+        if (typeof callback !== "function") throw new TypeError("setTimeout expects a function");
+        const id = ++this.nextTimer;
+        const milliseconds = Math.min(Math.max(Number(delay) || 0, 0), TIMER_LIMIT_MS);
+        this.timers.set(id, setTimeout(() => {
+          this.timers.delete(id);
+          if (live()) callback(...values);
+        }, milliseconds));
+        return id;
+      },
+      clearTimeout: id => {
+        const timer = this.timers.get(Number(id));
+        if (timer === undefined) return;
+        clearTimeout(timer);
+        this.timers.delete(Number(id));
+      },
     };
-    const names = ["tools", "ALL_TOOLS", "toolSchema", "text", "image", "audio", "generatedImage", "notify", "store", "load", "yield_control", "exit", "setTimeout", "clearTimeout", "fetch", ...Object.keys(globals)];
-    const values = [toolsProxy, allTools, toolSchema, text, image, audio, generatedImage, notify, store, load, yieldControl, exit, setTimer, clearTimer, cellFetch, ...Object.values(globals)];
-    let failure: string | undefined;
+    let outcome: CellOutcome;
     try {
-      const script = new AsyncFunction(...names, code);
-      try {
-        await script(...values);
-      } catch (error) {
-        if (error !== EXIT) throw error;
-      }
+      outcome = await evaluate(code, host, definitions, Object.fromEntries(this.session.stored));
     } catch (error) {
-      failure = errorText(error);
+      outcome = { error: error instanceof Error ? (error.stack || error.message) : String(error), stored: {} };
     }
     if (!live()) return;
-    for (const [name, value] of writes) this.session.stored.set(name, value);
-    if (failure === undefined) this.finish("completed");
-    else this.finish("failed", failure);
+    for (const [name, value] of Object.entries(outcome.stored ?? {})) this.session.stored.set(name, value as Json);
+    if (outcome.error === undefined) this.finish("completed");
+    else this.finish("failed", outcome.error);
   }
 
-  private call(definition: Definition, input: unknown): Promise<unknown> {
-    if (!this.live()) return Promise.reject("Code Mode cell ended");
+  private call(definition: CellDefinition, input: unknown): Promise<unknown> {
+    if (this.status !== "running") return Promise.reject("Code Mode cell ended");
     const call_id = this.origin + "/code-" + ++this.nextTool;
     const value = (input === undefined ? null : JSON.parse(JSON.stringify(input))) as Json;
     const started = performance.now();
@@ -406,7 +284,7 @@ class Cell {
     return new Promise((resolve, reject) => {
       const record = (output: Json, structured: Json, success: boolean) => {
         const call: Nested = { call_id, name: definition.tool_name, input: value, output, structured_result: structured, success, started_after_ns: Math.round((started - this.started) * 1e6), duration_ns: Math.round((performance.now() - started) * 1e6), metadata: null };
-        if (!this.live()) return false;
+        if (this.status !== "running") return false;
         this.nested.push(call);
         this.emit({ completed: call });
         return true;
@@ -422,25 +300,21 @@ class Cell {
           else reject(structured);
         },
         reject: (error: unknown) => {
-          const message = typeof error === "string" ? error : errorText(error);
+          const text = message(error);
           this.callbacks.delete(id);
-          if (!record(message, message, false)) return;
-          reject(message);
+          if (!record(text, text, false)) return;
+          reject(text);
         },
       });
       this.callbacks.add(id);
     });
-  }
-
-  private live() {
-    return this.status === "running";
   }
 }
 
 export class LocalHand {
   readonly name: string;
   readonly #fetch: typeof fetch;
-  readonly #globals: Record<string, unknown>;
+  readonly #evaluate: CellEvaluator;
   readonly #maxFrameBytes: number;
   readonly #timeoutMs: number;
   readonly #sessions = new Map<string, Session>();
@@ -453,7 +327,7 @@ export class LocalHand {
   constructor(options: LocalHandOptions = {}) {
     this.name = options.name ?? "local";
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    this.#globals = options.globals ?? {};
+    this.#evaluate = options.evaluate ?? inRealm;
     this.#maxFrameBytes = options.max_frame_bytes ?? 64 * 1024 * 1024;
     this.#timeoutMs = options.timeout_ms ?? 300_000;
   }
@@ -609,7 +483,7 @@ export class LocalHand {
     const budget = parsed.max_output_tokens ?? -1;
     const cell = new Cell(this, session, session.next++, body.context, budget);
     session.cells.set(cell.id, cell);
-    void cell.run(parsed.code, definitions(body.local_tools ?? []), this.#fetch, this.#globals);
+    void cell.run(parsed.code, definitions(body.local_tools ?? []), this.#fetch, this.#evaluate);
     return this.#observe(cell, id, started, observerYield(parsed.yield_time_ms ?? INITIAL_YIELD_MS), parsed.max_output_tokens ?? null);
   }
 
