@@ -335,13 +335,15 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             if config.subscription {
                 client = client.subscription_compatibility();
             }
-            let harness = ClaudeHarness::new(client);
-            builder.claude(match config.max_tokens {
-                Some(max_tokens) => {
-                    harness.configure(move |claude| Ok(claude.max_tokens(max_tokens)))
-                }
-                None => harness,
-            })
+            let max_tokens = config.max_tokens;
+            let stream_tool_input = config.stream_tool_input;
+            builder.claude(ClaudeHarness::new(client).configure(move |claude| {
+                let claude = claude.tool_input_deltas(stream_tool_input);
+                Ok(match max_tokens {
+                    Some(max_tokens) => claude.max_tokens(max_tokens),
+                    None => claude,
+                })
+            }))
         }
         Provider::Codex => {
             let Some(codex) = model.as_codex() else {
@@ -386,7 +388,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
             builder.openai(
                 openai
                     .model(codex)
-                    .raw_api_events(false)
+                    .tool_input_deltas(config.stream_tool_input)
                     .host_transport(transport::WorkerTransport)
                     .build()
                     .map_err(configuration)?,
@@ -439,7 +441,6 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
         config.started_ms,
-        config.stream_tool_input,
         executors.clone(),
     ));
     let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
