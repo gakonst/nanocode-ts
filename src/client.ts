@@ -20,6 +20,7 @@ export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
     switch (type) {
       case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...base };
       case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, item: `reasoning:${payload.model_call_index}`, ...base };
+      case "tool.input.delta": return { type: "tool_input", name: payload.tool, delta: payload.text, call_id: payload.call_id, ...base };
       case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, ...base };
       case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, status: payload.status, result: payload.result, ...base };
       default: return undefined;

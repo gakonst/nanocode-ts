@@ -41,6 +41,7 @@ export interface NanocodeHarnessOptions {
   report?: (report: DriveReport) => void;
   maxPrompts?: number;
   subagents?: boolean;
+  streamToolInput?: boolean;
 }
 
 const settledKey = (batches: number) => `nanocode.settled:${batches}`;
@@ -86,6 +87,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
           gateway,
           event_coalesce_ms: options.eventCoalesceMs ?? DEFAULT_EVENT_COALESCE_MS,
+          stream_tool_input: options.streamToolInput,
           tools: definitions,
         }, {
           dispatch: (request, signal) => {

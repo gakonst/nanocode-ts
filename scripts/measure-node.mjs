@@ -80,7 +80,7 @@ async function open(provider, path, sessionId) {
   const started = performance.now();
   const runtime = await AgentRuntime.instantiate(module, store.sql, { published: batch => events.push(...batch) });
   const instantiated = performance.now();
-  await runtime.open({ scope: SCOPE, session_id: sessionId, provider, subscription: false, endpoint: ENDPOINTS[provider], event_coalesce_ms: 0, tools: [LOOKUP] }, {
+  await runtime.open({ scope: SCOPE, session_id: sessionId, provider, subscription: false, endpoint: ENDPOINTS[provider], event_coalesce_ms: 0, stream_tool_input: true, tools: [LOOKUP] }, {
     dispatch: async request => {
       const body = JSON.parse(new TextDecoder().decode(request.body));
       requests.push({ provider, endpoint: request.endpoint, credential_free: !request.headers.some(([name]) => ["authorization", "x-api-key"].includes(name.toLowerCase())), messages: (body.messages ?? body.input).length, tools: (body.tools ?? body.input.flatMap(item => item.type === "additional_tools" ? item.tools : [])).map(tool => tool.name) });
@@ -133,6 +133,14 @@ async function scenario(provider) {
   if (!requests.slice(firstRequests).every(request => request.credential_free && request.tools.includes(LOOKUP.name))) throw new Error(`${provider} requests did not offer the host tool`);
   if (replayed.events.length < firstEvents) throw new Error(`${provider} lost logged events across instances`);
   if (last.messages <= requests[firstRequests].messages) throw new Error(`${provider} did not replay its history after reopening`);
+  const inputs = new Map();
+  for (const { event } of replayed.events) {
+    if (event.event?.type !== "tool.input.delta") continue;
+    const { call_id, tool, text } = event.event.payload;
+    if (tool !== LOOKUP.name) throw new Error(`${provider} streamed input for ${tool}`);
+    inputs.set(call_id, (inputs.get(call_id) ?? "") + text);
+  }
+  if (inputs.size !== 2 || ![...inputs.values()].every(text => text === JSON.stringify({ key: "alpha" }))) throw new Error(`${provider} streamed tool input ${JSON.stringify([...inputs])}`);
   await restored.runtime.dispose();
   const metrics = restored.runtime.metrics;
   restored.store.db.close();
@@ -146,6 +154,7 @@ async function scenario(provider) {
     model_requests: requests.filter(request => request.provider === provider).length,
     host_tool_calls: toolCalls.filter(call => call.provider === provider).length,
     logged_events: replayed.events.length,
+    streamed_tool_inputs: inputs.size,
     store_calls: first.store.counts.store + restored.store.counts.store,
     log_calls: first.store.counts.log + restored.store.counts.log,
     wasm_memory_bytes: metrics.wasm_memory_bytes,

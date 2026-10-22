@@ -14,14 +14,21 @@ use super::{
 pub struct WorkerInbox {
     runtime_id: String,
     started_ms: f64,
+    stream_tool_input: bool,
     executors: CodeModeExecutors,
 }
 
 impl WorkerInbox {
-    pub const fn new(runtime_id: String, started_ms: f64, executors: CodeModeExecutors) -> Self {
+    pub const fn new(
+        runtime_id: String,
+        started_ms: f64,
+        stream_tool_input: bool,
+        executors: CodeModeExecutors,
+    ) -> Self {
         Self {
             runtime_id,
             started_ms,
+            stream_tool_input,
             executors,
         }
     }
@@ -78,5 +85,9 @@ impl InboxHost for WorkerInbox {
 
     fn idle(&self) -> bool {
         !remote::busy()
+    }
+
+    fn streams_tool_input(&self) -> bool {
+        self.stream_tool_input
     }
 }

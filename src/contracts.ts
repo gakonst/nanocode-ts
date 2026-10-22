@@ -13,7 +13,7 @@ export function sessionUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export type HostTool = { name: string; description: string; parameters: Record<string, unknown> };
+export type HostTool = { name: string; description: string; parameters: Record<string, unknown>; content?: boolean };
 
 export type AgentConfiguration = {
   scope: string;
@@ -33,6 +33,7 @@ export type AgentConfiguration = {
   executor?: string;
   hands?: boolean;
   event_coalesce_ms?: number;
+  stream_tool_input?: boolean;
   tools?: HostTool[];
 };
 

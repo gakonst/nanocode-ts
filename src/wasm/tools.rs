@@ -12,6 +12,8 @@ pub struct HostTool {
     name: String,
     description: String,
     parameters: Value,
+    #[serde(default)]
+    content: bool,
 }
 
 struct Bridge;
@@ -46,5 +48,6 @@ pub fn tools(definitions: Vec<HostTool>) -> impl Iterator<Item = FunctionTool> {
             Arc::clone(&bridge),
         )
         .parallel_tool_calls(true)
+        .content_results(tool.content)
     })
 }

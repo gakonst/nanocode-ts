@@ -94,6 +94,8 @@ struct Configuration {
     #[serde(default)]
     event_coalesce_ms: u64,
     #[serde(default)]
+    stream_tool_input: bool,
+    #[serde(default)]
     tools: Vec<tools::HostTool>,
 }
 
@@ -437,6 +439,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
         config.started_ms,
+        config.stream_tool_input,
         executors.clone(),
     ));
     let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
