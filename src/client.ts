@@ -53,6 +53,86 @@ export function paragraphs(text: string, from: number, final = false): { chunks:
   return { chunks, next: text.length };
 }
 
+const ESCAPES: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+const SPECIAL = /["\\]/g;
+
+export class ToolInput {
+  raw = "";
+  readonly fields = new Map<string, string>();
+  private object: boolean | undefined;
+  private depth = 0;
+  private key: string | undefined;
+  private expectingKey = true;
+  private role: "key" | "value" | "other" | undefined;
+  private value = "";
+  private pending = "";
+
+  push(delta: string): void {
+    this.raw += delta;
+    const text = this.pending + delta;
+    this.pending = "";
+    let index = 0;
+    if (this.object === undefined) {
+      const start = text.search(/\S/);
+      if (start < 0) return;
+      this.object = text[start] === "{";
+      index = start + 1;
+    }
+    if (!this.object) return;
+    while (index < text.length) {
+      if (this.role === undefined) {
+        const char = text[index++];
+        if (char === '"') {
+          this.role = this.depth > 0 ? "other" : this.expectingKey ? "key" : this.key === undefined ? "other" : "value";
+          this.value = "";
+        } else if (this.depth === 0 && char === ":") this.expectingKey = false;
+        else if (this.depth === 0 && char === ",") {
+          this.expectingKey = true;
+          this.key = undefined;
+        } else if (char === "{" || char === "[") this.depth++;
+        else if (char === "}" || char === "]") this.depth--;
+        continue;
+      }
+      SPECIAL.lastIndex = index;
+      const found = SPECIAL.exec(text);
+      const end = found ? found.index : text.length;
+      this.value += text.slice(index, end);
+      if (!found) break;
+      if (text[end] === '"') {
+        if (this.role === "key") this.key = this.value;
+        else if (this.role === "value" && this.key !== undefined) {
+          this.fields.set(this.key, this.value);
+          this.key = undefined;
+        }
+        this.role = undefined;
+        this.value = "";
+        index = end + 1;
+        continue;
+      }
+      const escape = text[end + 1];
+      if (escape === undefined || (escape === "u" && end + 6 > text.length)) {
+        this.pending = text.slice(end);
+        break;
+      }
+      if (escape === "u") {
+        this.value += String.fromCharCode(Number.parseInt(text.slice(end + 2, end + 6), 16));
+        index = end + 6;
+      } else {
+        this.value += ESCAPES[escape] ?? escape;
+        index = end + 2;
+      }
+    }
+    if (this.role === "value" && this.key !== undefined) this.fields.set(this.key, this.value);
+  }
+
+  text(): string {
+    if (!this.fields.size) return this.raw;
+    if (this.fields.size === 1) return [...this.fields.values()][0];
+    return [...this.fields].map(([key, value]) => `${key}: ${value}`).join("\n");
+  }
+}
+
 export function clip(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
@@ -107,7 +187,7 @@ export type TranscriptOptions = {
   limit?: number;
 };
 
-type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string };
+type Stream = { kind?: "assistant" | "reasoning" | "tool"; item?: unknown; posted: number; shown: number; text: string; input?: ToolInput };
 
 type Queued = { event: LiveEvent } | { run: () => void };
 
@@ -176,12 +256,13 @@ export class Transcript {
       const current = this.stream;
       const next = this.queue[0];
       const event = next && "event" in next ? next.event : undefined;
-      const kind = event?.type === "text" ? "assistant" : event?.type === "reasoning" ? "reasoning" : undefined;
-      if (event && kind && (!current.kind || (current.kind === kind && current.item === event.item))) {
+      const kind = event?.type === "text" ? "assistant" : event?.type === "reasoning" ? "reasoning" : event?.type === "tool_input" ? "tool" : undefined;
+      const item = event?.type === "tool_input" ? event.call_id : event?.item;
+      if (event && kind && (!current.kind || (current.kind === kind && current.item === item))) {
         this.queue.shift();
         current.kind = kind;
-        current.item = event.item;
-        current.text += typeof event.delta === "string" ? event.delta : "";
+        current.item = item;
+        append(current, event);
         continue;
       }
       if (current.shown < current.text.length) {
@@ -200,16 +281,31 @@ export class Transcript {
         continue;
       }
       if (kind) {
-        this.stream = { kind, item: next.event.item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "" };
+        this.stream = { kind, item, posted: 0, shown: 0, text: "" };
+        append(this.stream, next.event);
         continue;
       }
       const entry = describe(next.event, this.options.limit);
       if (entry) this.options.add(entry);
       this.options.apply?.(next.event);
     }
+    if (this.stream.kind === "tool") this.options.live({ kind: "tool", text: this.stream.text });
     if (this.queue.length || this.stream.shown < this.stream.text.length) this.frame = setTimeout(() => this.step(), this.options.frameMs ?? 16);
     else this.clock = 0;
   }
+}
+
+function append(stream: Stream, event: LiveEvent): void {
+  const delta = typeof event.delta === "string" ? event.delta : "";
+  if (stream.kind !== "tool") {
+    stream.text += delta;
+    return;
+  }
+  stream.input ??= new ToolInput();
+  stream.input.push(delta);
+  const body = stream.input.text();
+  stream.text = typeof event.name === "string" ? `${event.name} ${body}`.trimEnd() : body;
+  stream.shown = stream.text.length;
 }
 
 export type PickerModel = Pick<ModelEntry, "id" | "name" | "efforts" | "effort">;
