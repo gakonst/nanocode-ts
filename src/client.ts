@@ -336,10 +336,11 @@ export function describeTool(cell: ToolCell, args: unknown): ToolCell {
 
 function textOf(result: unknown): string {
   if (typeof result === "string") return result;
-  if (Array.isArray(result)) return result.map(textOf).join("");
+  if (Array.isArray(result)) return result.map(textOf).reduce((text, part) => !part ? text : !text || text.endsWith("\n") ? text + part : `${text}\n${part}`, "");
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
     if (typeof record.text === "string") return record.text;
+    if (Array.isArray(record.content_blocks)) return textOf(record.content_blocks);
     if (Array.isArray(record.content)) return textOf(record.content);
     if (Array.isArray(record.Content)) return textOf(record.Content);
     if (typeof record.Text === "string") return record.Text;
