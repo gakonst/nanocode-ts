@@ -9,6 +9,7 @@ export type CellHost = {
   notify(text: string): void;
   yield(): void;
   fetch(request: Request): Promise<Response>;
+  bash?(script: string, stdin?: string): Promise<BashOutcome>;
   setTimeout?(callback: (...values: unknown[]) => void, delay?: number, ...values: unknown[]): number;
   clearTimeout?(id?: number): void;
 };
@@ -17,9 +18,14 @@ export type CellOutcome = { error?: string; stored: Record<string, unknown> };
 
 export type CellEvaluator = (code: string, host: CellHost, definitions: CellDefinition[], stored: Record<string, unknown>) => Promise<CellOutcome>;
 
+export type BashOutcome = { stdout: string; stderr: string; exitCode: number };
+
+export type BashHost = { exec(script: string, options?: { stdin?: string; signal?: AbortSignal }): Promise<BashOutcome> };
+
 export type LocalHandOptions = {
   name?: string;
   fetch?: typeof fetch;
+  bash?: BashHost;
   evaluate?: CellEvaluator;
   max_frame_bytes?: number;
   timeout_ms?: number;
@@ -219,7 +225,7 @@ class Cell {
     this.changed();
   }
 
-  async run(code: string, definitions: CellDefinition[], fetcher: typeof fetch, evaluate: CellEvaluator) {
+  async run(code: string, definitions: CellDefinition[], fetcher: typeof fetch, evaluate: CellEvaluator, shell: BashHost | undefined) {
     const live = () => this.status === "running";
     const signal = this.controller.signal;
     const host: CellHost = {
@@ -246,6 +252,13 @@ class Cell {
         const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
         return fetcher(request.url, { body, headers: request.headers, method: request.method, redirect: request.redirect, signal });
       },
+      bash: shell
+        ? async (script, stdin) => {
+            if (!live()) throw new Error("Code Mode cell ended");
+            const result = await shell.exec(String(script), { stdin: stdin === undefined ? undefined : String(stdin), signal });
+            return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+          }
+        : undefined,
       setTimeout: (callback, delay, ...values) => {
         if (typeof callback !== "function") throw new TypeError("setTimeout expects a function");
         const id = ++this.nextTimer;
@@ -315,6 +328,7 @@ export class LocalHand {
   readonly name: string;
   readonly #fetch: typeof fetch;
   readonly #evaluate: CellEvaluator;
+  readonly #bash: BashHost | undefined;
   readonly #maxFrameBytes: number;
   readonly #timeoutMs: number;
   readonly #sessions = new Map<string, Session>();
@@ -328,6 +342,7 @@ export class LocalHand {
     this.name = options.name ?? "local";
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#evaluate = options.evaluate ?? inRealm;
+    this.#bash = options.bash;
     this.#maxFrameBytes = options.max_frame_bytes ?? 64 * 1024 * 1024;
     this.#timeoutMs = options.timeout_ms ?? 300_000;
   }
@@ -483,7 +498,7 @@ export class LocalHand {
     const budget = parsed.max_output_tokens ?? -1;
     const cell = new Cell(this, session, session.next++, body.context, budget);
     session.cells.set(cell.id, cell);
-    void cell.run(parsed.code, definitions(body.local_tools ?? []), this.#fetch, this.#evaluate);
+    void cell.run(parsed.code, definitions(body.local_tools ?? []), this.#fetch, this.#evaluate, this.#bash);
     return this.#observe(cell, id, started, observerYield(parsed.yield_time_ms ?? INITIAL_YIELD_MS), parsed.max_output_tokens ?? null);
   }
 

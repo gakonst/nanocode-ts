@@ -19,6 +19,8 @@
   },
   "include": [
     "src/*.ts",
-    "src/cloudflare/*.ts"
+    "src/cloudflare/*.ts",
+    "src/bash/*.ts",
+    "src/bash/commands/*.ts"
   ]
 }

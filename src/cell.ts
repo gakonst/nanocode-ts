@@ -1,4 +1,4 @@
-export const CELL_GLOBALS = ["tools", "ALL_TOOLS", "toolSchema", "text", "image", "audio", "generatedImage", "notify", "store", "load", "yield_control", "exit", "setTimeout", "clearTimeout", "fetch"] as const;
+export const CELL_GLOBALS = ["tools", "ALL_TOOLS", "toolSchema", "text", "image", "audio", "generatedImage", "notify", "store", "load", "yield_control", "exit", "setTimeout", "clearTimeout", "fetch", "bash"] as const;
 
 export const CELL_SCOPE = String.raw`(host, definitions, stored) => {
   const jsonParse = JSON.parse;
@@ -155,7 +155,22 @@ export const CELL_SCOPE = String.raw`(host, definitions, stored) => {
   const setTimer = host.setTimeout ?? ((callback, delay, ...rest) => setTimeout(callback, delay, ...rest));
   const clearTimer = host.clearTimeout ?? ((id) => clearTimeout(id));
   const fetch = (input, init) => Promise.resolve(host.fetch(new Request(input, init)));
-  const values = [tools, ALL_TOOLS, toolSchema, text, image, audio, generatedImage, notify, store, load, yield_control, exit, setTimer, clearTimer, fetch];
+  const quoteArgument = (value) => {
+    const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : jsonStringify(value) ?? "";
+    return /^[\w@%+=:,.\/-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";
+  };
+  const shell = (script, stdin) => host.bash ? Promise.resolve(host.bash(script, stdin)) : Promise.reject(new Error("bash is not available in this hand"));
+  const bash = (script, ...values) => shell(typeof script === "string" ? script : script.raw.reduce((out, part, i) => out + part + (i < values.length ? quoteArgument(values[i]) : ""), ""));
+  bash.readFile = async (path) => {
+    const result = await shell("cat -- " + quoteArgument(path));
+    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "cat exited with " + result.exitCode);
+    return result.stdout;
+  };
+  bash.writeFile = async (path, content) => {
+    const result = await shell("mkdir -p -- \"$(dirname -- " + quoteArgument(path) + ")\" && cat > " + quoteArgument(path), String(content));
+    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "write exited with " + result.exitCode);
+  };
+  const values = [tools, ALL_TOOLS, toolSchema, text, image, audio, generatedImage, notify, store, load, yield_control, exit, setTimer, clearTimer, fetch, bash];
   return {
     async run(build) {
       try {

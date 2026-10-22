@@ -34,6 +34,10 @@
       "types": "./dist/models.d.ts",
       "default": "./dist/models.js"
     },
+    "./bash": {
+      "types": "./dist/bash/index.d.ts",
+      "default": "./dist/bash/index.js"
+    },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
   },
   "peerDependencies": {
