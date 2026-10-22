@@ -1,0 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { cpSync, rmSync } from "node:fs";
+
+rmSync("output/zyzz-react", { force: true, recursive: true });
+const result = spawnSync("npx", ["zyzz", "build", "dist/react", "--out-dir", "output/zyzz-react", "--package-id", "nanocode-ts", "--minify", "--external", "react", "--external", "react/*", "--external", "../client.js"], { stdio: "inherit" });
+if (result.error) throw result.error;
+if (result.status !== 0) process.exit(result.status ?? 1);
+cpSync("output/zyzz-react", "dist/react", { recursive: true });

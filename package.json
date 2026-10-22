@@ -10,7 +10,7 @@
     "LICENSE-MIT"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/zyzz.mjs",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json"
   },
   "exports": {
@@ -34,7 +34,15 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
-    "./react/styles.css": "./dist/react/styles.css",
+    "./react/site": {
+      "types": "./dist/react/site.d.ts",
+      "default": "./dist/react/site.js"
+    },
+    "./react/theme": {
+      "types": "./dist/react/theme.d.ts",
+      "default": "./dist/react/theme.js"
+    },
+    "./react/zyzz.css": "./dist/react/zyzz.css",
     "./highlight": {
       "types": "./dist/highlight.d.ts",
       "default": "./dist/highlight.js"
@@ -56,7 +64,8 @@
   },
   "dependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
-    "quickjs-emscripten-core": "0.32.0"
+    "quickjs-emscripten-core": "0.32.0",
+    "zyzz": "0.0.40"
   },
   "peerDependencies": {
     "@pierre/highlights": "^0.2.0",

@@ -62,9 +62,6 @@ let quickjsPrevious;
 try { quickjsPrevious = readFileSync("dist/quickjs.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!quickjsPrevious?.equals(quickjsBytes)) writeFileSync("dist/quickjs.wasm", quickjsBytes);
 
-mkdirSync("dist/react", { recursive: true });
-writeFileSync("dist/react/styles.css", readFileSync("src/react/styles.css"));
-
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });
 const catalog = await runtime.modelCatalog();
