@@ -4,6 +4,7 @@ mod remote;
 mod store;
 mod tools;
 mod transport;
+mod workspace;
 
 use std::{
     cell::{Cell, RefCell},
@@ -101,6 +102,8 @@ struct Configuration {
     stream_tool_input: bool,
     #[serde(default)]
     tools: Vec<tools::HostTool>,
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 impl Configuration {
@@ -400,12 +403,30 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         }
     };
     if config.code_mode && config.remote {
-        return Err(configuration("code_mode runs cells in this host; leave remote unset"));
+        return Err(configuration(
+            "code_mode runs cells in this host; leave remote unset",
+        ));
     }
     let executors = CodeModeExecutors::new();
     let placement = config.remote || config.hands;
     let local = config.code_mode;
-    let base = Tools::builder().without_defaults();
+    let base = match config.workspace.as_deref() {
+        Some(root) => match config.provider {
+            Provider::Claude => nanocode::claude::host_tools(
+                root.into(),
+                Arc::new(workspace::HostFiles),
+                Arc::new(workspace::HostShell),
+            ),
+            Provider::Codex => nanocode::codex_tools::host_tools(
+                root.into(),
+                Arc::new(workspace::HostFiles),
+                Arc::new(workspace::HostShell),
+            ),
+        }
+        .map_err(configuration)?
+        .into_builder(),
+        None => Tools::builder().without_defaults(),
+    };
     let base = if placement {
         base.tool(executors.tool())
     } else {
@@ -419,7 +440,7 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
         builder = builder.without_subagents();
     }
     builder = builder
-        .workspace("/")
+        .workspace(config.workspace.as_deref().unwrap_or("/"))
         .tools(selected)
         .durability(store.clone());
     if config.remote || local {

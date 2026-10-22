@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type Submitted, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Driven, type HostOptions, type LogPage, type MessageSocket, type ModelCatalog, type ModelTiming, type RuntimeOptions, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -427,6 +427,14 @@ export class AgentRuntime {
         this.onCancel(id, () => controller.abort());
         return await this.options.tools.call(request.name, request.input, controller.signal, { call_id: request.call_id }) ?? null;
       }
+      case "file_read": return await this.workspace().read(request.path);
+      case "file_write": return await this.workspace().write(request.path, request.contents) ?? null;
+      case "file_remove": return await this.workspace().remove(request.path) ?? null;
+      case "shell_run": {
+        const controller = new AbortController();
+        this.onCancel(id, () => controller.abort());
+        return await this.workspace().run({ command: request.command, cwd: request.cwd, timeout_ms: request.timeout_ms ?? null }, controller.signal);
+      }
       case "socket_open": {
         if (!this.options.socket) throw new Error("model sockets are not configured");
         this.counters.model_sockets++;
@@ -528,6 +536,11 @@ export class AgentRuntime {
       }
       default: throw new Error("unsupported host operation");
     }
+  }
+
+  private workspace(): WorkspaceHost {
+    if (!this.options.workspace) throw new Error("the host workspace is not configured");
+    return this.options.workspace;
   }
 
   private notify() {

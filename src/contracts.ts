@@ -36,6 +36,7 @@ export type AgentConfiguration = {
   event_coalesce_ms?: number;
   stream_tool_input?: boolean;
   tools?: HostTool[];
+  workspace?: string;
 };
 
 export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
@@ -120,6 +121,17 @@ export type SocketHandshake = {
 
 export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; reason?: string };
 
+export type ShellRun = { command: string; cwd: string; timeout_ms: number | null };
+
+export type ShellOutput = { stdout: string; stderr: string; exit_code: number; truncated: boolean };
+
+export interface WorkspaceHost {
+  read(path: string): Promise<string | null>;
+  write(path: string, contents: string): Promise<void>;
+  remove(path: string): Promise<void>;
+  run(request: ShellRun, signal: AbortSignal): Promise<ShellOutput>;
+}
+
 export type HostOptions = {
   published(events: LoggedEvent[], bytes: number[]): void;
   wake?(): void;
@@ -135,6 +147,7 @@ export type RuntimeOptions = {
   tools?: {
     call(name: string, input: unknown, signal: AbortSignal, context: { call_id: string }): Promise<unknown>;
   };
+  workspace?: WorkspaceHost;
   remote?: {
     failed?(): boolean;
     execute(request: RemoteRequest, id: number): Promise<unknown>;

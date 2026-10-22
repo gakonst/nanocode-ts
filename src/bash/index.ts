@@ -1,5 +1,5 @@
-import type { HostTool } from "../contracts.ts";
-import { MemoryFileSystem, decode, encode, parentOf, resolvePath, type FileInput, type FileSystem } from "./fs.ts";
+import type { HostTool, WorkspaceHost } from "../contracts.ts";
+import { FsError, MemoryFileSystem, decode, encode, parentOf, resolvePath, type FileInput, type FileSystem } from "./fs.ts";
 import { Input, Output, Runner, State, run, type CommandHandler, type Limits } from "./shell.ts";
 import { fileCommands, mkdirs } from "./commands/files.ts";
 import { textCommands } from "./commands/text.ts";
@@ -101,6 +101,26 @@ export class Bash {
     const target = resolvePath(this.cwd, path);
     await mkdirs(this.fs, parentOf(target));
     await this.fs.write(target, typeof content === "string" ? encode(content) : content);
+  }
+
+  workspace(): WorkspaceHost {
+    return {
+      read: async path => {
+        const target = resolvePath(this.cwd, path);
+        const stat = await this.fs.stat(target);
+        if (!stat) return null;
+        if (stat.kind !== "file") throw new FsError("EISDIR", target);
+        return decode(await this.fs.read(target));
+      },
+      write: (path, contents) => this.writeFile(path, contents),
+      remove: async path => this.fs.remove(resolvePath(this.cwd, path)),
+      run: async (request, signal) => {
+        const signals = [signal];
+        if (request.timeout_ms !== null) signals.push(AbortSignal.timeout(request.timeout_ms));
+        const result = await this.exec(request.command, { cwd: request.cwd, signal: AbortSignal.any(signals) });
+        return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, truncated: result.truncated };
+      },
+    };
   }
 
   tool(options: BashToolOptions = {}): { definition: HostTool; call(input: unknown, signal?: AbortSignal): Promise<string> } {
