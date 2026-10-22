@@ -12,11 +12,7 @@
 
 .chat button { font: inherit; }
 
-.log { display: flex; flex-direction: column; height: 18rem; overflow-y: auto; padding: 1rem; scrollbar-color: var(--rule, #cdc9bd) transparent; }
-
-.log-entries, .log-live { display: flex; flex-direction: column; gap: 0.5rem; }
-
-.log-entries:not(:empty) + .log-live:not(:empty) { margin-top: 0.5rem; }
+.log { display: flex; flex-direction: column; gap: 0.5rem; height: 18rem; overflow-y: auto; padding: 1rem; scrollbar-color: var(--rule, #cdc9bd) transparent; }
 
 .turn { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
 
@@ -48,7 +44,7 @@
 
 .image { border: 1px solid var(--rule, #cdc9bd); display: block; margin-block: 0.5rem; max-width: min(100%, 24rem); }
 
-.entry.tool { font-style: normal; opacity: 1; white-space: normal; }
+.entry-cell { white-space: normal; }
 
 .tool { display: flex; flex-direction: column; min-width: 0; }
 
@@ -123,8 +119,6 @@
 .typing { box-sizing: content-box; font-style: italic; height: var(--line, 1.0625rem); margin: 0; padding: 0 1rem 0.5rem; }
 
 .typing-visible::after { animation: nanocode-ellipsis 1.2s steps(4, end) infinite; content: "..."; display: inline-block; overflow: hidden; vertical-align: bottom; width: 0; }
-
-.chat-extras:empty { display: none; }
 
 .row { align-items: center; border-top: 1px solid var(--rule, #cdc9bd); display: flex; gap: 0.5rem; padding: 0.5rem 1rem; }
 

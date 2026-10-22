@@ -30,11 +30,11 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
-    "./ui": {
-      "types": "./dist/ui.d.ts",
-      "default": "./dist/ui.js"
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
     },
-    "./ui.css": "./dist/ui.css",
+    "./react/styles.css": "./dist/react/styles.css",
     "./highlight": {
       "types": "./dist/highlight.d.ts",
       "default": "./dist/highlight.js"
@@ -61,7 +61,8 @@
   "peerDependencies": {
     "@pierre/highlights": "^0.2.0",
     "@vercel/oidc": "^3.2.0",
-    "durable-harness": "0.0.1-beta.6"
+    "durable-harness": "0.0.1-beta.6",
+    "react": "^19.0.0"
   },
   "peerDependenciesMeta": {
     "@pierre/highlights": {
@@ -72,11 +73,15 @@
     },
     "durable-harness": {
       "optional": true
+    },
+    "react": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@pierre/highlights": "0.2.0",
     "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
     "@vercel/oidc": "3.2.0",
     "durable-harness": "0.0.1-beta.6",
     "typescript": "6.0.2"

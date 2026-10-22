@@ -15,13 +15,15 @@
       "DOM.Iterable",
       "ESNext.Disposable"
     ],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "jsx": "react-jsx"
   },
   "include": [
     "src/*.ts",
     "src/cloudflare/*.ts",
     "src/bash/*.ts",
     "src/bash/commands/*.ts",
-    "src/quickjs/*.ts"
+    "src/quickjs/*.ts",
+    "src/react/*.tsx"
   ]
 }

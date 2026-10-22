@@ -1,5 +1,5 @@
 import { codeToTokens, isSupportedLanguage, type Theme } from "@pierre/highlights";
-import type { Token } from "./ui.ts";
+import type { Token } from "./react/index.tsx";
 
 type Palette = { comment: string; constant: string; fg: string; function: string; keyword: string; name: string; string: string; type: "dark" | "light"; types: string; inserted: string; deleted: string };
 

@@ -688,3 +688,104 @@ export function thinkingItems(model: PickerModel | undefined, thinking: string |
   const current = model && thinking && model.efforts.includes(thinking as PickerModel["effort"]) ? thinking : model?.effort;
   return (model?.efforts ?? []).map(level => ({ kind: "choice", label: level, detail: level === model?.effort ? "default" : "", current: level === current }));
 }
+
+export type ChatStatus = "idle" | "pending";
+
+export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined };
+
+export type TransportParameters = { prompt: string; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void };
+
+export type Transport = {
+  send(parameters: TransportParameters): Promise<void>;
+  steer?(parameters: TransportParameters): Promise<boolean>;
+  resume?(parameters: Omit<TransportParameters, "prompt">): Promise<void>;
+};
+
+export type ConfigOptions = {
+  transport: Transport;
+  persist?: { load(): readonly Entry[]; save(entries: readonly Entry[]): void };
+  apply?(event: LiveEvent): void;
+  revealMs?: number;
+  keep?: number;
+};
+
+export type Config = {
+  getState(): ChatState;
+  subscribe(listener: () => void): () => void;
+  send(prompt: string): Promise<void>;
+  resume(): Promise<void>;
+  push(event: LiveEvent): void;
+  run(callback: () => void): void;
+  note(kind: EntryKind, text: string): void;
+  clear(): void;
+  reset(): void;
+};
+
+export function createConfig(options: ConfigOptions): Config {
+  const listeners = new Set<() => void>();
+  let state: ChatState = { entries: options.persist?.load() ?? [], live: [], status: "idle", error: undefined };
+  const set = (next: Partial<ChatState>) => {
+    state = { ...state, ...next };
+    for (const listener of [...listeners]) listener();
+  };
+  const add = (entry: Entry) => {
+    const entries = [...state.entries, entry].slice(-(options.keep ?? 500));
+    options.persist?.save(entries);
+    set({ entries });
+  };
+  const transcript = new Transcript({
+    add,
+    live: live => set({ live }),
+    apply: event => options.apply?.(event),
+    revealMs: options.revealMs,
+    reducedMotion: () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches,
+  });
+  const note = (kind: EntryKind, text: string) => transcript.run(() => add({ kind, text }));
+  const parameters = (prompt: string): TransportParameters => ({ prompt, push: event => transcript.push(event), note });
+  const settle = (work: Promise<void>) => {
+    set({ status: "pending", error: undefined });
+    return work.catch((error: unknown) => {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      note("error", failure.message);
+      set({ error: failure });
+    }).finally(() => transcript.run(() => set({ status: "idle" })));
+  };
+  return {
+    getState: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    async send(prompt) {
+      const text = prompt.trim();
+      if (!text) return;
+      note("user", text);
+      if (state.status === "pending") {
+        if (!options.transport.steer) return;
+        try {
+          if (await options.transport.steer(parameters(text))) note("tool", "steered into the running turn");
+        } catch (error) {
+          note("error", error instanceof Error ? error.message : String(error));
+        }
+        return;
+      }
+      await settle(options.transport.send(parameters(text)));
+    },
+    async resume() {
+      if (!options.transport.resume || state.status === "pending") return;
+      await settle(options.transport.resume({ push: event => transcript.push(event), note }));
+    },
+    push: event => transcript.push(event),
+    run: callback => transcript.run(callback),
+    note,
+    clear() {
+      transcript.reset();
+      options.persist?.save([]);
+      set({ entries: [], live: [], error: undefined });
+    },
+    reset() {
+      transcript.reset();
+      set({ live: [], status: "idle" });
+    },
+  };
+}
