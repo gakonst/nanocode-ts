@@ -73,7 +73,7 @@ impl Sender for WorkerTransport {
         Box::pin(async move {
             let headers = header_pairs(&request.headers).map_err(layer_error)?;
             let started = call_with_body(
-                json!({"op": "http_start", "endpoint": request.url, "headers": headers}),
+                json!({"op": "http_start", "endpoint": request.url, "method": request.method.as_str(), "headers": headers}),
                 &request.body,
             )
             .await

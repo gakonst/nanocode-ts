@@ -1,5 +1,6 @@
 mod bridge;
 mod events;
+mod mcp;
 mod remote;
 mod store;
 mod tools;
@@ -101,6 +102,8 @@ struct Configuration {
     stream_tool_input: bool,
     #[serde(default)]
     tools: Vec<tools::HostTool>,
+    #[serde(default)]
+    mcp_servers: Vec<mcp::Server>,
 }
 
 impl Configuration {
@@ -411,6 +414,14 @@ async fn open(config: Configuration) -> Result<Session, Opening> {
     } else {
         base
     };
+    let base = mcp::tools(config.mcp_servers)
+        .await
+        .map_err(|failure| match failure {
+            mcp::Failure::Configuration(error) => configuration(error),
+            mcp::Failure::Unavailable(error) => Opening::Failed(error),
+        })?
+        .into_iter()
+        .fold(base, |selected, tool| selected.tool(tool));
     let selected = tools::tools(config.tools)
         .fold(base, |selected, tool| selected.tool(tool))
         .build()

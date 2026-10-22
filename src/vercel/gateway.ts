@@ -1,6 +1,6 @@
 import type { ModelProvider } from "../index.ts";
 
-export type Dispatch = (request: { endpoint: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal) => Promise<Response>;
+export type Dispatch = (request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal) => Promise<Response>;
 
 export const gatewayUrl = () => process.env.AI_GATEWAY_BASE_URL ?? "https://ai-gateway.vercel.sh";
 
