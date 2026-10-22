@@ -229,10 +229,12 @@ class Cell {
   async run(code: string, definitions: CellDefinition[], fetcher: typeof fetch, evaluate: CellEvaluator, shell: BashHost | undefined) {
     const live = () => this.status === "running";
     const signal = this.controller.signal;
+    const ended = new Promise<never>(() => {});
+    const guard = <T>(work: Promise<T>): Promise<T> => work.then(value => live() ? value : ended, error => live() ? Promise.reject(error) : ended);
     const host: CellHost = {
       call: (name, input) => {
         const definition = definitions.find(entry => entry.tool_name === name);
-        return definition ? this.call(definition, input) : Promise.reject("unknown tool " + name);
+        return definition ? this.call(definition, input) : guard(Promise.reject("unknown tool " + name));
       },
       content: item => {
         if (live()) this.content.push(JSON.parse(JSON.stringify(item)) as Content);
@@ -249,18 +251,16 @@ class Cell {
         this.changed();
       },
       signal,
-      fetch: async (input, init) => {
-        if (!live()) throw new Error("Code Mode cell ended");
+      fetch: (input, init) => !live() ? ended : guard((async () => {
         const request = new Request(input, init);
         const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
         return fetcher(request.url, { body, headers: request.headers, method: request.method, redirect: request.redirect, signal });
-      },
+      })()),
       bash: shell
-        ? async (script, stdin) => {
-            if (!live()) throw new Error("Code Mode cell ended");
+        ? (script, stdin) => !live() ? ended : guard((async () => {
             const result = await shell.exec(String(script), { stdin: stdin === undefined ? undefined : String(stdin), signal });
             return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-          }
+          })())
         : undefined,
       setTimeout: (callback, delay, ...values) => {
         if (typeof callback !== "function") throw new TypeError("setTimeout expects a function");
@@ -292,7 +292,7 @@ class Cell {
   }
 
   private call(definition: CellDefinition, input: unknown): Promise<unknown> {
-    if (this.status !== "running") return Promise.reject("Code Mode cell ended");
+    if (this.status !== "running") return new Promise(() => {});
     const call_id = this.origin + "/code-" + ++this.nextTool;
     const value = (input === undefined ? null : JSON.parse(JSON.stringify(input))) as Json;
     const started = performance.now();

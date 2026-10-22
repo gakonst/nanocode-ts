@@ -12,3 +12,16 @@ export function nanocodeModule(): Promise<WebAssembly.Module> {
     });
   return scope[MODULE];
 }
+
+const QUICKJS = Symbol.for("nanocode-ts//vercel//quickjs");
+
+export function quickjsModule(): Promise<WebAssembly.Module> {
+  const scope = globalThis as { [QUICKJS]?: Promise<WebAssembly.Module> };
+  scope[QUICKJS] ??= readFile(new URL("../quickjs.wasm", import.meta.url))
+    .then(bytes => WebAssembly.compile(bytes))
+    .catch(error => {
+      scope[QUICKJS] = undefined;
+      throw error;
+    });
+  return scope[QUICKJS];
+}

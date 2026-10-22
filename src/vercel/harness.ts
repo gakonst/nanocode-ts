@@ -3,7 +3,8 @@ import { liveEvent } from "../client.ts";
 import { AgentRuntime, type AgentConfiguration, HostFailure, LocalHand, type LoggedEvent, type ModelProvider, sessionUuid } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
-import { nanocodeModule } from "./module.ts";
+import { nanocodeModule, quickjsModule } from "./module.ts";
+import { quickjs } from "../quickjs/index.ts";
 
 export const SCOPE = "session";
 
@@ -93,7 +94,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           code_mode: options.codeMode,
           tools: definitions,
         }, {
-          remote: options.codeMode ? new LocalHand({ fetch: options.fetch }) : undefined,
+          remote: options.codeMode ? new LocalHand({ evaluate: quickjs({ wasm: await quickjsModule() }), fetch: options.fetch }) : undefined,
           dispatch: (request, signal) => {
             counts.model_requests++;
             return dispatch(request, signal);
