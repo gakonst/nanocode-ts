@@ -1,6 +1,6 @@
 import type { HostTool, WorkspaceHost } from "../contracts.ts";
 import { FsError, MemoryFileSystem, decode, encode, parentOf, resolvePath, type FileInput, type FileSystem } from "./fs.ts";
-import { Input, Output, Runner, State, run, type CommandHandler, type Limits } from "./shell.ts";
+import { BUILTINS, Input, LimitError, Output, Runner, State, run, type CommandHandler, type Limits } from "./shell.ts";
 import { fileCommands, mkdirs } from "./commands/files.ts";
 import { textCommands } from "./commands/text.ts";
 import { sed } from "./commands/sed.ts";
@@ -19,11 +19,18 @@ export type BashOptions = {
   fetch?: typeof fetch;
   limits?: Partial<Limits>;
   commands?: Record<string, CommandHandler>;
+  observe?: (event: BashEvent) => void;
 };
 
 export type ExecOptions = { stdin?: string; env?: Record<string, string>; cwd?: string; signal?: AbortSignal };
 
 export type BashResult = { stdout: string; stderr: string; exitCode: number; truncated: boolean };
+
+export type BashCategory = "none" | "search_admission" | "resource_limit" | "timeout" | "cancelled" | "syntax" | "command_not_found" | "command_exit" | "input_validation" | "exception";
+
+export type BashEvent =
+  | { phase: "started"; call: number; command: string }
+  | { phase: "finished"; call: number; command: string; status: "success" | "error"; category: BashCategory; exitCode: number | null; durationMs: number; outputTruncated: boolean };
 
 export type BashToolOptions = { name?: string; description?: string; maxOutputLength?: number };
 
@@ -33,6 +40,7 @@ export const DEFAULT_LIMITS: Limits = {
   maxCallDepth: 64,
   maxOutputLength: 1_000_000,
   maxBufferLength: 16_000_000,
+  maxFileOperations: 100_000,
   timeoutMs: 30_000,
 };
 
@@ -47,6 +55,8 @@ export class Bash {
   readonly limits: Limits;
   readonly commands: Map<string, CommandHandler>;
   readonly fetch?: typeof fetch;
+  readonly observe?: (event: BashEvent) => void;
+  #calls = 0;
 
   private constructor(options: BashOptions) {
     this.fs = options.fs ?? new MemoryFileSystem(options.files);
@@ -55,6 +65,7 @@ export class Bash {
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.commands = new Map(Object.entries({ ...COMMANDS, ...options.commands }));
     this.fetch = options.fetch;
+    this.observe = options.observe;
   }
 
   static async create(options: BashOptions = {}): Promise<Bash> {
@@ -65,8 +76,16 @@ export class Bash {
   }
 
   async exec(script: string, options: ExecOptions = {}): Promise<BashResult> {
+    const call = ++this.#calls;
+    const command = this.#command(script);
+    const started = Date.now();
+    this.#emit({ phase: "started", call, command });
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort("execution timed out after " + this.limits.timeoutMs + " ms"), this.limits.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort("execution timed out after " + this.limits.timeoutMs + " ms");
+    }, this.limits.timeoutMs);
     const onAbort = () => controller.abort("execution aborted");
     if (options.signal?.aborted) onAbort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -77,20 +96,42 @@ export class Bash {
       state.vars.set(name, [value]);
       state.exported.add(name);
     }
-    const runner = new Runner({ fs: this.fs, commands: this.commands, fetch: this.fetch, limits: this.limits }, state, controller.signal);
+    const budget = { used: 0, refused: false };
+    const runner = new Runner({ fs: budgeted(this.fs, this.limits.maxFileOperations, budget), commands: this.commands, fetch: this.fetch, limits: this.limits }, state, controller.signal);
     const stdout = new Output(this.limits.maxOutputLength, false);
     const stderr = new Output(this.limits.maxOutputLength, false);
     let exitCode: number;
+    let category: BashCategory | undefined;
     try {
       exitCode = await run(runner, script, { stdin: new Input(options.stdin ?? ""), stdout, stderr });
     } catch (error) {
       stderr.write("bash: " + (error instanceof Error ? error.message : String(error)) + "\n");
       exitCode = 1;
+      category = "exception";
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
     }
-    return { stdout: stdout.text(), stderr: stderr.text(), exitCode, truncated: stdout.truncated || stderr.truncated };
+    const truncated = stdout.truncated || stderr.truncated;
+    if (exitCode === 0) category = "none";
+    else if (options.signal?.aborted) category = (options.signal.reason as { name?: unknown } | undefined)?.name === "TimeoutError" ? "timeout" : "cancelled";
+    else if (timedOut) category = "timeout";
+    else if (budget.refused) category = "search_admission";
+    else if (category === undefined) category = runner.failure === "syntax" ? "syntax" : runner.failure === "limit" ? "resource_limit" : exitCode === 127 ? "command_not_found" : "command_exit";
+    this.#emit({ phase: "finished", call, command, status: exitCode === 0 ? "success" : "error", category, exitCode, durationMs: Date.now() - started, outputTruncated: truncated });
+    return { stdout: stdout.text(), stderr: stderr.text(), exitCode, truncated };
+  }
+
+  #command(script: string): string {
+    const name = /^\s*([A-Za-z_][\w.-]*)(?=\s|;|\||&|$)/.exec(script.slice(0, 128))?.[1];
+    return name !== undefined && (this.commands.has(name) || Object.hasOwn(BUILTINS, name)) ? name : "other";
+  }
+
+  #emit(event: BashEvent) {
+    if (!this.observe) return;
+    try {
+      Promise.resolve(this.observe(event)).catch(() => {});
+    } catch {}
   }
 
   async readFile(path: string): Promise<string> {
@@ -129,12 +170,34 @@ export class Bash {
       definition: bashTool(options),
       call: async (input, signal) => {
         const command = typeof input === "string" ? input : (input as { command?: unknown } | null)?.command;
-        if (typeof command !== "string") throw new Error("bash: input must be { command: string }");
+        if (typeof command !== "string") {
+          const call = ++this.#calls;
+          this.#emit({ phase: "started", call, command: "other" });
+          this.#emit({ phase: "finished", call, command: "other", status: "error", category: "input_validation", exitCode: null, durationMs: 0, outputTruncated: false });
+          throw new Error("bash: input must be { command: string }");
+        }
         return formatResult(await this.exec(command, { signal }), limit);
       },
     };
   }
 
+}
+
+function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused: boolean }): FileSystem {
+  const charge = () => {
+    if (++budget.used <= limit) return;
+    budget.refused = true;
+    throw new LimitError("too many file operations (limit " + limit + "); search a narrower path");
+  };
+  return {
+    stat: path => (charge(), fs.stat(path)),
+    read: path => (charge(), fs.read(path)),
+    write: (path, data, append) => (charge(), fs.write(path, data, append)),
+    list: path => (charge(), fs.list(path)),
+    mkdir: path => (charge(), fs.mkdir(path)),
+    remove: path => (charge(), fs.remove(path)),
+    rename: (from, to) => (charge(), fs.rename(from, to)),
+  };
 }
 
 export const BASH_CODE_MODE_INSTRUCTIONS = "Code Mode cells also have `bash`, a simulated bash over an in-memory filesystem that keeps its files for this session: `await bash(\"ls -la | wc -l\")`, or as a tagged template, await bash`grep -rn ${pattern} src`, which quotes each interpolated value, resolves to { stdout, stderr, exitCode }, and `bash.readFile(path)` and `bash.writeFile(path, text)` reach the same files from JavaScript. It has the usual file and text tools (cat, ls, find, grep, sed, awk, jq, sort, uniq, cut, tr, xargs, head, tail, wc, diff, base64, sha256sum, ...), and its curl goes through the same paying fetch as `fetch`, so curl can call MPP services. Variables and the working directory reset between calls; files persist.";

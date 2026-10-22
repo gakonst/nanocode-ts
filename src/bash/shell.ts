@@ -10,6 +10,7 @@ export type Limits = {
   maxCallDepth: number;
   maxOutputLength: number;
   maxBufferLength: number;
+  maxFileOperations: number;
   timeoutMs: number;
 };
 
@@ -279,6 +280,7 @@ export class Runner {
   state: State;
   readonly host: ShellHost;
   readonly signal: AbortSignal;
+  failure: "syntax" | "limit" | undefined;
   #steps = 0;
   #depth = 0;
   #condition = 0;
@@ -1603,10 +1605,12 @@ export async function run(runner: Runner, source: string, io: IO): Promise<numbe
     if (error instanceof ExitSignal || error instanceof ReturnSignal) return error.status;
     if (error instanceof LoopSignal) return 0;
     if (error instanceof ParseError) {
+      runner.failure = "syntax";
       io.stderr.write("bash: " + error.message + "\n");
       return 2;
     }
     if (error instanceof LimitError) {
+      runner.failure = "limit";
       io.stderr.write("bash: " + error.message + "\n");
       return error.status;
     }
