@@ -154,7 +154,7 @@ export const CELL_SCOPE = String.raw`(host, definitions, stored) => {
   const exit = () => { throw EXIT; };
   const setTimer = host.setTimeout ?? ((callback, delay, ...rest) => setTimeout(callback, delay, ...rest));
   const clearTimer = host.clearTimeout ?? ((id) => clearTimeout(id));
-  const fetch = (input, init) => Promise.resolve(host.fetch(new Request(input, init)));
+  const fetch = (input, init) => Promise.resolve(host.fetch(input, init));
   const quoteArgument = (value) => {
     const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : jsonStringify(value) ?? "";
     return /^[\w@%+=:,.\/-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";

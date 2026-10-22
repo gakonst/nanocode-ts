@@ -8,7 +8,8 @@ export type CellHost = {
   content(item: Record<string, unknown>): void;
   notify(text: string): void;
   yield(): void;
-  fetch(request: Request): Promise<Response>;
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  signal?: AbortSignal;
   bash?(script: string, stdin?: string): Promise<BashOutcome>;
   setTimeout?(callback: (...values: unknown[]) => void, delay?: number, ...values: unknown[]): number;
   clearTimeout?(id?: number): void;
@@ -247,8 +248,10 @@ class Cell {
         this.yielded = true;
         this.changed();
       },
-      fetch: async request => {
+      signal,
+      fetch: async (input, init) => {
         if (!live()) throw new Error("Code Mode cell ended");
+        const request = new Request(input, init);
         const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
         return fetcher(request.url, { body, headers: request.headers, method: request.method, redirect: request.redirect, signal });
       },

@@ -38,7 +38,16 @@
       "types": "./dist/bash/index.d.ts",
       "default": "./dist/bash/index.js"
     },
-    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
+    "./quickjs": {
+      "types": "./dist/quickjs/index.d.ts",
+      "default": "./dist/quickjs/index.js"
+    },
+    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
+    "./quickjs.wasm": "./dist/quickjs.wasm"
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "quickjs-emscripten-core": "0.32.0"
   },
   "peerDependencies": {
     "@vercel/oidc": "^3.2.0",

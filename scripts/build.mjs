@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function fields(path, start, pattern) {
   const source = readFileSync(path, "utf8");
@@ -56,6 +57,10 @@ const bytes = readFileSync(artifact);
 let previous;
 try { previous = readFileSync("dist/nanocode_wasm.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previous?.equals(bytes)) writeFileSync("dist/nanocode_wasm.wasm", bytes);
+const quickjsBytes = readFileSync(fileURLToPath(import.meta.resolve("@jitl/quickjs-wasmfile-release-sync/wasm")));
+let quickjsPrevious;
+try { quickjsPrevious = readFileSync("dist/quickjs.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+if (!quickjsPrevious?.equals(quickjsBytes)) writeFileSync("dist/quickjs.wasm", quickjsBytes);
 
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });
