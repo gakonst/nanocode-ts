@@ -739,7 +739,7 @@ export function createConfig(options: ConfigOptions): Config {
     live: live => set({ live }),
     apply: event => options.apply?.(event),
     revealMs: options.revealMs,
-    reducedMotion: () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches,
+    reducedMotion: () => { const media = (globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia; return typeof media === "function" && media("(prefers-reduced-motion: reduce)").matches; },
   });
   const note = (kind: EntryKind, text: string) => transcript.run(() => add({ kind, text }));
   const parameters = (prompt: string): TransportParameters => ({ prompt, push: event => transcript.push(event), note });

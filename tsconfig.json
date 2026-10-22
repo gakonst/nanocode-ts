@@ -20,7 +20,9 @@
   },
   "include": [
     "src/*.ts",
-    "src/cloudflare/*.ts",
+    "src/cloudflare/sql.ts",
+    "src/cloudflare/transport.ts",
+    "src/vercel/transport.ts",
     "src/bash/*.ts",
     "src/bash/commands/*.ts",
     "src/quickjs/*.ts",

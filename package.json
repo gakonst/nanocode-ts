@@ -4,14 +4,17 @@
   "private": true,
   "license": "MIT OR Apache-2.0",
   "type": "module",
+  "sideEffects": [
+    "*.css"
+  ],
   "files": [
     "dist",
     "LICENSE-APACHE",
     "LICENSE-MIT"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && node scripts/zyzz.mjs",
-    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json"
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json && tsc -p tsconfig.cloudflare.build.json && node scripts/zyzz.mjs",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json && tsc --noEmit -p tsconfig.cloudflare.json"
   },
   "exports": {
     ".": {
@@ -22,9 +25,17 @@
       "types": "./dist/vercel/index.d.ts",
       "default": "./dist/vercel/index.js"
     },
+    "./vercel/transport": {
+      "types": "./dist/vercel/transport.d.ts",
+      "default": "./dist/vercel/transport.js"
+    },
     "./cloudflare": {
       "types": "./dist/cloudflare/index.d.ts",
       "default": "./dist/cloudflare/index.js"
+    },
+    "./cloudflare/transport": {
+      "types": "./dist/cloudflare/transport.d.ts",
+      "default": "./dist/cloudflare/transport.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
@@ -88,6 +99,7 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20261016.1",
     "@pierre/highlights": "0.2.0",
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",

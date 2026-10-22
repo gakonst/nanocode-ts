@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types"
+    ],
+    "lib": [
+      "ES2022",
+      "ESNext.Disposable"
+    ]
+  },
+  "include": [
+    "src/cloudflare/*.ts"
+  ]
+}

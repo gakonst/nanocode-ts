@@ -4,3 +4,4 @@ export { type Dispatch, gatewayCredential, gatewayDispatch, gatewayEndpoint, gat
 export { batchKey, committedBatches, type Durability, type JournalStats, LocalSql, SQL_STEP, SqlJournal, type Transaction } from "./journal.ts";
 export { type NanocodeReader, openReader } from "./reader.ts";
 export { nanocodeModule } from "./module.ts";
+export { type Authorize, createNanocode, type NanocodeAppOptions, type Selection, type SelectionHarness, type SelectionModel, selectionOf } from "./app.ts";

@@ -13,5 +13,15 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx"
+  ],
+  "exclude": [
+    "src/cloudflare/contracts.ts",
+    "src/cloudflare/gateway.ts",
+    "src/cloudflare/index.ts",
+    "src/cloudflare/limit.ts",
+    "src/cloudflare/remote.ts",
+    "src/cloudflare/runtime.ts",
+    "src/cloudflare/store.ts",
+    "src/cloudflare/wasm.d.ts"
   ]
 }
