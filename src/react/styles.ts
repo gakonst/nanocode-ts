@@ -1,25 +1,41 @@
 import type { Vars } from "zyzz";
 import { ellipsis, flicker, style, variants, vars } from "./theme.ts";
 
-export const chat = style({
-  backgroundColor: "surface",
-  border: "1px solid",
-  borderColor: "rule",
-  color: "text",
-  display: "flex",
-  flexDirection: "column",
-  selectors: { "[data-xframe] &": { inset: "0 !custom", position: "fixed", zIndex: 200 } },
+export const chat = variants({
+  base: {
+    backgroundColor: "surface",
+    border: "1px solid",
+    borderColor: "rule",
+    color: "text",
+    display: "flex",
+    flexDirection: "column",
+    selectors: { "[data-xframe] &": { inset: "0 !custom", position: "fixed", zIndex: 200 } },
+  },
+  variants: {
+    expanded: {
+      false: {},
+      true: { borderInline: "none", bottom: "0", left: "0", position: "fixed", right: "0", top: "nav", zIndex: 90 },
+    },
+  },
+  defaultVariants: { expanded: false },
 });
 
-export const log = style({
-  display: "flex",
-  flexDirection: "column",
-  gap: "sm",
-  height: "18rem !custom",
-  overflowY: "auto",
-  padding: "md",
-  selectors: { "[data-xframe] &": { flex: "1 !custom", height: "auto !custom", minHeight: "0" } },
+export const log = variants({
+  base: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "sm",
+    height: "18rem !custom",
+    overflowY: "auto",
+    padding: "md",
+    selectors: { "[data-xframe] &": { flex: "1 !custom", height: "auto !custom", minHeight: "0" } },
+  },
+  variants: {
+    expanded: { false: {}, true: { flex: "1 !custom", height: "auto !custom", minHeight: "0", paddingInline: "gutter" } },
+  },
+  defaultVariants: { expanded: false },
 });
+
 
 export const turn = style({ display: "flex", flexDirection: "column", gap: "xs", minWidth: "0" });
 
@@ -311,6 +327,18 @@ export const status = style({ borderTop: "1px solid", borderTopColor: "rule", di
 export const statusText = style({ flex: "1 !custom", opacity: "dim", overflow: "hidden", textOverflow: "ellipsis" });
 
 export const actions = style({ display: "flex", gap: "indent" });
+
+export const expand = style({
+  backgroundColor: "transparent",
+  border: "none",
+  color: "middle",
+  cursor: "pointer",
+  font: "inherit !custom",
+  padding: "0",
+  textDecoration: "none",
+  ":hover": { color: "text" },
+  selectors: { "[data-xframe] &": { display: "none" } },
+});
 
 export const site = style({
   color: "text",

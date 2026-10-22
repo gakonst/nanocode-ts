@@ -238,6 +238,7 @@ export type ChatProps = {
   activity?: { who: string; text: string };
   empty?: string;
   label?: string;
+  expandable?: boolean;
 };
 
 const TYPING_DELAY_MS = 500;
@@ -251,6 +252,7 @@ export function Chat(props: ChatProps) {
   const [typing, setTyping] = useState(false);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [recalled, setRecalled] = useState(-1);
+  const [full, setFull] = useState(false);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
@@ -271,7 +273,22 @@ export function Chat(props: ChatProps) {
 
   useLayoutEffect(() => {
     if (stick.current && log.current) log.current.scrollTop = log.current.scrollHeight;
-  }, [entries, live]);
+  }, [entries, live, full]);
+
+  useEffect(() => {
+    if (!full) return;
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) setFull(false);
+    };
+    const overflow = document.documentElement.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+    addEventListener("keydown", escape);
+    input.current?.focus();
+    return () => {
+      document.documentElement.style.overflow = overflow;
+      removeEventListener("keydown", escape);
+    };
+  }, [full]);
 
   useEffect(() => {
     setPrompt("");
@@ -356,9 +373,9 @@ export function Chat(props: ChatProps) {
           if (target.closest("a, button, input, textarea, select") || getSelection()?.toString()) return;
           input.current?.focus();
         }}
-        {...styles.chat()}
+        {...styles.chat({ expanded: full })}
       >
-        <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...styles.log()}>
+        <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...styles.log({ expanded: full })}>
           {entries.length === 0 && live.length === 0 && props.empty && <p {...styles.entry({ kind: "tool" })}>{props.empty}</p>}
           {entries.map((entry, index) => <EntryView entry={entry} key={index} previous={entries[index - 1]} />)}
           {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} />)}
@@ -423,6 +440,11 @@ export function Chat(props: ChatProps) {
           <span {...styles.statusText()}>{props.status}</span>
           {props.actions && <span {...styles.actions()}>{props.actions}</span>}
           {props.link && <a href={props.link.href} rel="noreferrer" target="_blank" {...styles.site()}>{props.link.label}</a>}
+          {props.expandable !== false && (
+            <button aria-label={full ? "Collapse chat" : "Expand chat"} aria-pressed={full} onClick={() => setFull(value => !value)} title={full ? "Collapse (Esc)" : "Expand"} type="button" {...styles.expand()}>
+              {full ? "↙ collapse" : "↗ expand"}
+            </button>
+          )}
         </p>
       </section>
     </ExpandedContext.Provider>
