@@ -247,6 +247,8 @@ export class Chat {
   private offered: readonly Suggestion[];
   private history: string[] = [];
   private recalled = -1;
+  private doing: { who: string; text: string } | undefined;
+  private hint: string | undefined;
 
   constructor(root: HTMLElement, options: ChatOptions) {
     this.options = options;
@@ -339,6 +341,16 @@ export class Chat {
     }, TYPING_DELAY_MS) : undefined;
     this.renderTyping();
     this.renderSuggestions();
+    this.renderMenu();
+  }
+
+  set activity(value: { who: string; text: string } | undefined) {
+    this.doing = value;
+    this.renderTyping();
+  }
+
+  set placeholder(text: string | undefined) {
+    this.hint = text;
     this.renderMenu();
   }
 
@@ -495,7 +507,8 @@ export class Chat {
 
   private renderTyping(): void {
     const visible = this.working && (this.typingTimer === undefined || this.live.length > 0);
-    this.typing.className = visible ? "typing typing-visible" : "typing";
+    this.typing.className = visible || this.doing ? "typing typing-visible" : "typing";
+    if (!visible && this.doing) return this.typing.replaceChildren(element("span", "speaker speaker-agent", this.doing.who), ` ${this.doing.text}`);
     if (!visible) return this.typing.replaceChildren();
     const last = this.live[this.live.length - 1];
     const doing = last?.kind === "reasoning" ? "is thinking" : last?.tool?.status === "running" ? last.tool.name === "code" ? "is running code" : `is running ${last.tool.name}` : "is typing";
@@ -525,7 +538,7 @@ export class Chat {
     const items = this.items();
     this.choices = items.filter(item => item.kind === "choice");
     this.highlight = Math.min(this.highlight, Math.max(0, this.choices.length - 1));
-    this.input.placeholder = picker?.filter ? "type to filter" : this.working ? this.options.steering ?? "Steer the running turn" : this.options.placeholder ?? "Ask the agent, or type / for commands";
+    this.input.placeholder = picker?.filter ? "type to filter" : this.working ? this.options.steering ?? "Steer the running turn" : this.hint ?? this.options.placeholder ?? "Ask the agent, or type / for commands";
     const open = picker !== null || items.length > 0;
     this.menu.hidden = !open;
     if (!open) return this.menu.replaceChildren();
