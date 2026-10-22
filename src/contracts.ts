@@ -37,7 +37,10 @@ export type AgentConfiguration = {
   stream_tool_input?: boolean;
   tools?: HostTool[];
   workspace?: string;
+  mcp_servers?: McpServer[];
 };
+
+export type McpServer = { name: string; url: string; headers?: Record<string, string>; bearer_token?: string };
 
 export type Thinking = NonNullable<AgentConfiguration["thinking"]>;
 
@@ -138,7 +141,7 @@ export type HostOptions = {
 };
 
 export type RuntimeOptions = {
-  dispatch(request: { endpoint: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
+  dispatch(request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array }, signal: AbortSignal, timing: RuntimeTiming): Promise<Response>;
   finishing?(request_id: string): Record<string, unknown> | Promise<Record<string, unknown>>;
   socket?: {
     open(request: { headers: [string, string][] }, signal: AbortSignal, timing: RuntimeTiming): Promise<SocketHandshake>;

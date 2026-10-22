@@ -358,7 +358,7 @@ export class AgentRuntime {
         this.models.push(timing);
         if (this.models.length > RECENT_MODEL_LIMIT) this.models.shift();
         let response: Response;
-        try { response = await this.options.dispatch({ endpoint: request.endpoint, headers: request.headers, body: request.body }, controller.signal, timing); }
+        try { response = await this.options.dispatch({ endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = response.status;
@@ -372,9 +372,8 @@ export class AgentRuntime {
           this.finishModel(timing, "failed");
           throw new Error("provider redirect rejected");
         }
-        if (!response.body) { this.finishModel(timing, "failed"); throw new Error("provider response has no body"); }
         const body = ++this.nextBody;
-        const reader = response.body.getReader();
+        const reader = (response.body ?? new ReadableStream<Uint8Array>({ start: controller => controller.close() })).getReader();
         this.bodies.set(body, { reader, timing });
         this.onCancel(id, () => {
           if (!this.bodies.delete(body)) return;
