@@ -2,7 +2,29 @@ import type { LoggedEvent, ModelEntry, ModelProvider } from "./contracts.ts";
 
 export type EntryKind = "assistant" | "error" | "reasoning" | "tool" | "user";
 
-export type Entry = { kind: EntryKind; text: string };
+export type ToolStatus = "running" | "completed" | "failed" | "cancelled" | "yielded";
+
+export type ToolBody = "text" | "code" | "diff";
+
+export type ToolCell = {
+  call_id: string;
+  tool: string;
+  name: string;
+  title: string;
+  input: string;
+  body: ToolBody;
+  language: string;
+  output: string;
+  output_language: string;
+  status: ToolStatus;
+  started_at: number;
+  duration_ms?: number;
+  exit_code?: number;
+  details: string[];
+  children: ToolCell[];
+};
+
+export type Entry = { kind: EntryKind; text: string; tool?: ToolCell };
 
 export type LiveEvent = { type: string; [field: string]: unknown };
 
@@ -11,6 +33,13 @@ export type ServerEvent = { id?: string; event: string; data: string };
 type AgentEvent = { type: string; payload: Record<string, unknown> };
 
 type LoggedBody = { source?: string; event?: AgentEvent; type?: string; status?: string; ok?: { message?: string }; error?: unknown };
+
+function parentOf(payload: Record<string, unknown>): string | undefined {
+  if (typeof payload.parent_call_id === "string" && payload.parent_call_id) return payload.parent_call_id;
+  const id = typeof payload.call_id === "string" ? payload.call_id : "";
+  const slash = id.lastIndexOf("/");
+  return slash > 0 ? id.slice(0, slash) : undefined;
+}
 
 export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
   const body = logged.event as LoggedBody;
@@ -21,8 +50,9 @@ export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
       case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...base };
       case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, item: `reasoning:${payload.model_call_index}`, ...base };
       case "tool.input.delta": return { type: "tool_input", name: payload.tool, delta: payload.text, call_id: payload.call_id, ...base };
-      case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, ...base };
-      case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, status: payload.status, result: payload.result, ...base };
+      case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, parent: parentOf(payload), ...base };
+      case "tool.notification": return { type: "tool_output", call_id: payload.call_id, text: payload.text, ...base };
+      case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, parent: parentOf(payload), status: payload.status, result: payload.result, structured: payload.structured_result, duration_ns: payload.duration_ns, ...base };
       default: return undefined;
     }
   }
@@ -131,10 +161,270 @@ export class ToolInput {
     if (this.fields.size === 1) return [...this.fields.values()][0];
     return [...this.fields].map(([key, value]) => `${key}: ${value}`).join("\n");
   }
+
+  arguments(): unknown {
+    return this.object ? Object.fromEntries(this.fields) : this.raw;
+  }
 }
 
 export function clip(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+const CODE_TOOLS = new Set(["exec", "code_mode", "js"]);
+
+const PRAGMA = /^\s*\/\/ @exec:[^\n]*(?:\n|$)/;
+
+function decoded(value: unknown): unknown {
+  if (typeof value !== "string") return value ?? {};
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return value;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function firstLine(text: string): { first: string; more: boolean } {
+  const lines = text.trim().split("\n");
+  return { first: lines[0] ?? "", more: lines.length > 1 };
+}
+
+function patchFiles(patch: string): string[] {
+  return patch.split("\n").flatMap(line => {
+    const match = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/.exec(line);
+    return match ? [match[1].trim()] : [];
+  });
+}
+
+function linesPatch(header: string, path: string, removed: string, added: string): string {
+  const lines = [`*** ${header}: ${path}`];
+  if (header === "Update File") lines.push("@@");
+  for (const line of removed ? removed.split("\n") : []) lines.push(`-${line}`);
+  for (const line of added ? added.split("\n") : []) lines.push(`+${line}`);
+  return lines.join("\n");
+}
+
+export function toolCell(callId: string, tool: string, startedAt = Date.now()): ToolCell {
+  return { call_id: callId, tool, name: tool, title: "", input: "", body: "text", language: "", output: "", output_language: "", status: "running", started_at: startedAt, details: [], children: [] };
+}
+
+export function describeTool(cell: ToolCell, args: unknown): ToolCell {
+  const value = decoded(args);
+  const object = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const field = (key: string) => typeof object[key] === "string" ? object[key] as string : undefined;
+  const number = (key: string) => typeof object[key] === "number" || typeof object[key] === "string" ? String(object[key]) : undefined;
+  const command = (text: string) => {
+    const { first, more } = firstLine(text);
+    cell.name = "run";
+    cell.title = first;
+    cell.input = more ? text : "";
+    cell.body = more ? "code" : "text";
+    cell.language = more ? "bash" : "";
+  };
+  cell.name = cell.tool;
+  cell.title = "";
+  cell.input = "";
+  cell.body = "text";
+  cell.language = "";
+  cell.details = [];
+  if (CODE_TOOLS.has(cell.tool)) {
+    let source = typeof value === "string" ? value : field("code") ?? field("source") ?? field("input") ?? (Object.keys(object).length ? JSON.stringify(object) : "");
+    const pragma = PRAGMA.exec(source);
+    if (pragma) source = source.slice(pragma[0].length);
+    cell.name = "code";
+    cell.input = source;
+    cell.body = "code";
+    cell.language = "js";
+    return cell;
+  }
+  switch (cell.tool) {
+    case "wait": {
+      cell.name = "code";
+      cell.title = `cell ${number("cell_id") ?? ""}${object.terminate === true ? " · terminate" : " · wait"}`;
+      break;
+    }
+    case "exec_command":
+      command(field("cmd") ?? "");
+      if (object.tty === true) cell.details.push("tty");
+      break;
+    case "Bash":
+    case "bash":
+    case "shell":
+    case "run_command":
+      command(field("command") ?? field("cmd") ?? field("script") ?? (typeof value === "string" ? value : ""));
+      if (object.run_in_background === true) cell.details.push("background");
+      break;
+    case "write_stdin": {
+      const chars = field("chars") ?? "";
+      cell.name = chars ? "stdin" : "poll";
+      cell.title = `session ${number("session_id") ?? ""}`;
+      cell.input = chars;
+      break;
+    }
+    case "apply_patch": {
+      const patch = typeof value === "string" ? value : field("input") ?? field("patch") ?? "";
+      cell.name = "patch";
+      cell.input = patch;
+      cell.title = patchFiles(patch).join(", ");
+      cell.body = "diff";
+      break;
+    }
+    case "Edit":
+    case "edit_file": {
+      const path = field("file_path") ?? field("path") ?? "";
+      cell.name = "edit";
+      cell.title = path;
+      cell.input = linesPatch("Update File", path, field("old_string") ?? "", field("new_string") ?? "");
+      cell.body = "diff";
+      if (object.replace_all === true) cell.details.push("all occurrences");
+      break;
+    }
+    case "Write":
+    case "write_file": {
+      const path = field("file_path") ?? field("path") ?? "";
+      cell.name = "write";
+      cell.title = path;
+      cell.input = linesPatch("Add File", path, "", field("content") ?? "");
+      cell.body = "diff";
+      break;
+    }
+    case "Read":
+    case "read_file":
+      cell.name = "read";
+      cell.title = field("file_path") ?? field("path") ?? "";
+      if (number("offset") || number("limit")) cell.details.push([number("offset") && `from line ${number("offset")}`, number("limit") && `${number("limit")} lines`].filter(Boolean).join(", "));
+      break;
+    case "Glob":
+    case "Grep":
+      cell.name = cell.tool.toLowerCase();
+      cell.title = [field("pattern"), field("path") && `in ${field("path")}`].filter(Boolean).join(" ");
+      break;
+    case "WebSearch":
+    case "web_search":
+      cell.name = "search";
+      cell.title = field("query") ?? "";
+      break;
+    case "WebFetch":
+    case "fetch":
+      cell.name = "fetch";
+      cell.title = field("url") ?? "";
+      break;
+    case "spawn_agent":
+      cell.name = "spawn agent";
+      cell.title = field("role") ?? "";
+      cell.input = field("task") ?? "";
+      break;
+    default: {
+      const strings = Object.entries(object).filter(([, entry]) => typeof entry === "string") as [string, string][];
+      const short = strings.find(([, entry]) => entry.length <= 80 && !entry.includes("\n"));
+      if (typeof value === "string") cell.input = value;
+      else if (Object.keys(object).length === 1 && strings.length === 1) {
+        if (short) cell.title = short[1];
+        else cell.input = strings[0][1];
+      } else if (Object.keys(object).length) {
+        if (short) cell.title = short[1];
+        cell.input = JSON.stringify(object, null, 2);
+        cell.body = "code";
+        cell.language = "json";
+      }
+    }
+  }
+  return cell;
+}
+
+function textOf(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (Array.isArray(result)) return result.map(textOf).join("");
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text;
+    if (Array.isArray(record.content)) return textOf(record.content);
+    if (Array.isArray(record.Content)) return textOf(record.Content);
+    if (typeof record.Text === "string") return record.Text;
+  }
+  return "";
+}
+
+function humanize(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return text;
+  try {
+    const value = JSON.parse(trimmed) as Record<string, unknown>;
+    if (!("stdout" in value) && !("stderr" in value)) return text;
+    const parts = ["stdout", "stderr", "output"].map(key => value[key]).filter((part): part is string => typeof part === "string" && part !== "").map(part => part.trimEnd());
+    if (typeof value.exit_code === "number" && value.exit_code !== 0) parts.push(`exit code ${value.exit_code}`);
+    return parts.join("\n");
+  } catch {
+    return text;
+  }
+}
+
+function codeStatus(header: string): ToolStatus | undefined {
+  if (header === "Script completed") return "completed";
+  if (header === "Script failed") return "failed";
+  if (header === "Script terminated") return "cancelled";
+  if (header.startsWith("Script running with cell ID ")) return "yielded";
+  return undefined;
+}
+
+function stripCodeHeader(text: string): string {
+  const lines = text.split("\n");
+  if (!lines[0]?.startsWith("Script ")) return text;
+  let index = 1;
+  while (index < lines.length && /^(Wall time|Original token count|Chunk ID)\b/.test(lines[index])) index++;
+  if (lines[index] === "Output:") index++;
+  return lines.slice(index).join("\n");
+}
+
+export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
+  const raw = textOf(event.result);
+  const structured = event.structured && typeof event.structured === "object" ? event.structured as Record<string, unknown> : {};
+  let status: ToolStatus = event.status === "completed" ? "completed" : event.status === "cancelled" ? "cancelled" : "failed";
+  if (typeof event.duration_ns === "number") cell.duration_ms = event.duration_ns / 1e6;
+  else if (cell.status === "running") cell.duration_ms = Date.now() - cell.started_at;
+  if (CODE_TOOLS.has(cell.tool) || cell.tool === "wait") {
+    const header = raw.split("\n", 1)[0] ?? "";
+    status = codeStatus(header) ?? status;
+    const yielded = /^Script running with cell ID (\S+)/.exec(header);
+    if (yielded) cell.title = `cell ${yielded[1]}`;
+    cell.output = humanize(stripCodeHeader(raw)).trimEnd();
+  } else if (cell.tool === "exec_command" || cell.tool === "write_stdin") {
+    const [header, output] = raw.includes("Output:\n") ? raw.split(/Output:\n([\s\S]*)/, 2) : ["", raw];
+    cell.output = (typeof structured.output === "string" ? structured.output : output ?? "").trimEnd();
+    const code = typeof structured.exit_code === "number" ? structured.exit_code : Number(/Process exited with code (-?\d+)/.exec(header ?? "")?.[1] ?? Number.NaN);
+    if (Number.isFinite(code)) cell.exit_code = code;
+    const session = /Process running with session ID (\d+)/.exec(header ?? "")?.[1];
+    if (session) cell.details.push(`session ${session} running`);
+  } else {
+    cell.output = (typeof structured.output === "string" ? structured.output : humanize(raw)).trimEnd();
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        if (typeof parsed.exit_code === "number") cell.exit_code = parsed.exit_code;
+      } catch {}
+    }
+  }
+  const output = cell.output.trim();
+  cell.output_language = cell.output && (output.startsWith("{") || output.startsWith("[")) && (() => { try { JSON.parse(output); return true; } catch { return false; } })() ? "json" : /^(diff --git|--- )/.test(cell.output) ? "diff" : "";
+  if (status === "completed" && cell.exit_code !== undefined && cell.exit_code !== 0) cell.details.push(`exit ${cell.exit_code}`);
+  cell.status = status;
+  return cell;
+}
+
+export function toolSummary(cell: ToolCell): string {
+  const head = [cell.name, cell.title].filter(Boolean).join(" ");
+  const meta = [cell.status === "completed" ? "" : cell.status, cell.duration_ms !== undefined ? duration(cell.duration_ms) : "", ...cell.details].filter(Boolean).join(" · ");
+  return meta ? `${head} · ${meta}` : head;
+}
+
+export function duration(milliseconds: number): string {
+  if (milliseconds < 1000) return `${Math.max(0, Math.round(milliseconds))} ms`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)} s`;
+  const minutes = Math.floor(milliseconds / 60_000);
+  return `${minutes}m ${Math.round((milliseconds - minutes * 60_000) / 1000)}s`;
 }
 
 export function describe(event: LiveEvent, limit = 160): Entry | undefined {
@@ -179,7 +469,7 @@ export async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGene
 
 export type TranscriptOptions = {
   add(entry: Entry): void;
-  live(entry: Entry | null): void;
+  live(entries: Entry[]): void;
   apply?(event: LiveEvent): void;
   revealMs?: number;
   frameMs?: number;
@@ -187,16 +477,23 @@ export type TranscriptOptions = {
   limit?: number;
 };
 
-type Stream = { kind?: "assistant" | "reasoning" | "tool"; item?: unknown; posted: number; shown: number; text: string; input?: ToolInput };
+type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string };
 
 type Queued = { event: LiveEvent } | { run: () => void };
+
+const TOOL_EVENTS = new Set(["tool_input", "tool_start", "tool_output", "tool_end"]);
 
 export class Transcript {
   private readonly options: TranscriptOptions;
   private stream: Stream = { posted: 0, shown: 0, text: "" };
+  private streaming: Entry | undefined;
   private queue: Queued[] = [];
   private frame: ReturnType<typeof setTimeout> | undefined;
   private clock = 0;
+  private running: ToolCell[] = [];
+  private readonly calls = new Map<string, ToolCell>();
+  private readonly inputs = new Map<string, ToolInput>();
+  private readonly links = new Map<string, { cell: string; latest: string }>();
 
   constructor(options: TranscriptOptions) {
     this.options = options;
@@ -215,8 +512,13 @@ export class Transcript {
     this.frame = undefined;
     this.queue = [];
     this.stream = { posted: 0, shown: 0, text: "" };
+    this.streaming = undefined;
+    this.running = [];
+    this.calls.clear();
+    this.inputs.clear();
+    this.links.clear();
     this.clock = 0;
-    this.options.live(null);
+    this.options.live([]);
   }
 
   private enqueue(item: Queued): void {
@@ -229,7 +531,7 @@ export class Transcript {
     if (kind === "assistant") for (const chunk of paragraphs(text, posted, true).chunks) this.options.add({ kind, text: chunk });
     else if (kind === "reasoning" && text.trim()) this.options.add({ kind, text: text.trim() });
     this.stream = { posted: 0, shown: 0, text: "" };
-    this.options.live(null);
+    this.streaming = undefined;
   }
 
   private reveal(): void {
@@ -241,7 +543,68 @@ export class Transcript {
       for (const chunk of chunks) this.options.add({ kind: current.kind, text: chunk });
     }
     const rest = visible.slice(current.posted).trim();
-    this.options.live(rest && current.kind ? { kind: current.kind, text: rest } : null);
+    this.streaming = rest && current.kind ? { kind: current.kind, text: rest } : undefined;
+  }
+
+  private emit(): void {
+    const entries: Entry[] = this.running.map(cell => ({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell) }));
+    if (this.streaming) entries.push(this.streaming);
+    this.options.live(entries);
+  }
+
+  private resolve(id: string): string {
+    return this.links.get(id)?.latest ?? id;
+  }
+
+  private tool(event: LiveEvent): void {
+    const id = this.resolve(String(event.call_id ?? ""));
+    let cell = this.calls.get(id);
+    if (!cell) {
+      if (event.type === "tool_output") return;
+      cell = toolCell(id, typeof event.name === "string" ? event.name : "tool");
+      this.calls.set(id, cell);
+      const parent = typeof event.parent === "string" ? this.calls.get(this.resolve(event.parent)) : undefined;
+      if (parent) parent.children.push(cell);
+      else this.running.push(cell);
+    }
+    if (event.type === "tool_input") {
+      let input = this.inputs.get(id);
+      if (!input) this.inputs.set(id, input = new ToolInput());
+      input.push(typeof event.delta === "string" ? event.delta : "");
+      describeTool(cell, input.arguments());
+    } else if (event.type === "tool_start") {
+      this.inputs.delete(id);
+      describeTool(cell, event.args);
+      if (cell.tool === "wait") {
+        const args = decoded(event.args) as Record<string, unknown>;
+        const target = args && (typeof args.cell_id === "string" || typeof args.cell_id === "number") ? String(args.cell_id) : undefined;
+        for (const link of this.links.values()) if (link.cell === target) link.latest = id;
+      }
+    } else if (event.type === "tool_output") {
+      if (cell.status === "running" && typeof event.text === "string") cell.output = event.text;
+    } else {
+      this.inputs.delete(id);
+      finishTool(cell, event);
+      const origin = String(event.call_id ?? "");
+      if (cell.status === "yielded" && cell.title.startsWith("cell ")) this.links.set(origin, { cell: cell.title.slice(5), latest: origin });
+      else for (const [key, link] of this.links) if (link.latest === id && key !== id) this.links.delete(key);
+    }
+    this.settle();
+  }
+
+  private settle(all?: ToolStatus): void {
+    while (this.running.length && (all || this.running[0].status !== "running")) {
+      const cell = this.running.shift()!;
+      finish(cell, all ?? cell.status);
+      this.forget(cell);
+      this.options.add({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell) });
+    }
+  }
+
+  private forget(cell: ToolCell): void {
+    this.calls.delete(cell.call_id);
+    this.inputs.delete(cell.call_id);
+    for (const child of cell.children) this.forget(child);
   }
 
   private step(): void {
@@ -256,13 +619,13 @@ export class Transcript {
       const current = this.stream;
       const next = this.queue[0];
       const event = next && "event" in next ? next.event : undefined;
-      const kind = event?.type === "text" ? "assistant" : event?.type === "reasoning" ? "reasoning" : event?.type === "tool_input" ? "tool" : undefined;
-      const item = event?.type === "tool_input" ? event.call_id : event?.item;
+      const kind = event?.type === "text" ? "assistant" : event?.type === "reasoning" ? "reasoning" : undefined;
+      const item = event?.item;
       if (event && kind && (!current.kind || (current.kind === kind && current.item === item))) {
         this.queue.shift();
         current.kind = kind;
         current.item = item;
-        append(current, event);
+        current.text += typeof event.delta === "string" ? event.delta : "";
         continue;
       }
       if (current.shown < current.text.length) {
@@ -281,31 +644,30 @@ export class Transcript {
         continue;
       }
       if (kind) {
-        this.stream = { kind, item, posted: 0, shown: 0, text: "" };
-        append(this.stream, next.event);
+        this.stream = { kind, item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "" };
         continue;
       }
+      if (TOOL_EVENTS.has(next.event.type)) {
+        this.tool(next.event);
+        continue;
+      }
+      if (next.event.type === "turn") this.settle(next.event.status === "completed" ? "completed" : "cancelled");
       const entry = describe(next.event, this.options.limit);
       if (entry) this.options.add(entry);
       this.options.apply?.(next.event);
     }
-    if (this.stream.kind === "tool") this.options.live({ kind: "tool", text: this.stream.text });
+    this.emit();
     if (this.queue.length || this.stream.shown < this.stream.text.length) this.frame = setTimeout(() => this.step(), this.options.frameMs ?? 16);
     else this.clock = 0;
   }
 }
 
-function append(stream: Stream, event: LiveEvent): void {
-  const delta = typeof event.delta === "string" ? event.delta : "";
-  if (stream.kind !== "tool") {
-    stream.text += delta;
-    return;
+function finish(cell: ToolCell, status: ToolStatus): void {
+  if (cell.status === "running") {
+    cell.status = status;
+    cell.duration_ms ??= Date.now() - cell.started_at;
   }
-  stream.input ??= new ToolInput();
-  stream.input.push(delta);
-  const body = stream.input.text();
-  stream.text = typeof event.name === "string" ? `${event.name} ${body}`.trimEnd() : body;
-  stream.shown = stream.text.length;
+  for (const child of cell.children) finish(child, status === "yielded" ? "running" : cell.status === "yielded" ? "completed" : cell.status);
 }
 
 export type PickerModel = Pick<ModelEntry, "id" | "name" | "efforts" | "effort">;

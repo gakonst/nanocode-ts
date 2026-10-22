@@ -30,6 +30,15 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "default": "./dist/ui.js"
+    },
+    "./ui.css": "./dist/ui.css",
+    "./highlight": {
+      "types": "./dist/highlight.d.ts",
+      "default": "./dist/highlight.js"
+    },
     "./models": {
       "types": "./dist/models.d.ts",
       "default": "./dist/models.js"
@@ -50,10 +59,14 @@
     "quickjs-emscripten-core": "0.32.0"
   },
   "peerDependencies": {
+    "@pierre/highlights": "^0.2.0",
     "@vercel/oidc": "^3.2.0",
     "durable-harness": "0.0.1-beta.6"
   },
   "peerDependenciesMeta": {
+    "@pierre/highlights": {
+      "optional": true
+    },
     "@vercel/oidc": {
       "optional": true
     },
@@ -62,6 +75,7 @@
     }
   },
   "devDependencies": {
+    "@pierre/highlights": "0.2.0",
     "@types/node": "22.20.5",
     "@vercel/oidc": "3.2.0",
     "durable-harness": "0.0.1-beta.6",
