@@ -17,6 +17,7 @@ export type NanocodeAppOptions = Omit<NanocodeHarnessOptions, "provider" | "mode
   tools?: HostTool[];
   authorize?: Authorize;
   durability?: "on" | "strict";
+  runAhead?: boolean;
   maxPromptCharacters?: number;
   chaos?: boolean;
   marks?: boolean;
@@ -35,10 +36,11 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
 type Body = { effort?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
 
 export function createNanocode(options: NanocodeAppOptions) {
-  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, defaultSelection: chosenDefault, ...harness } = options;
+  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, defaultSelection: chosenDefault, ...harness } = options;
   const first = harnesses[0]!.models[0]!;
   const defaultSelection = chosenDefault ?? { provider: harnesses[0]!.id, model: first.id, thinking: first.efforts.includes("low") ? "low" : first.effort };
   const durability = options.durability ?? "on";
+  const kernel = durability === "on" && runAhead === true ? "on" : "strict";
   const agent = durableAgent({
     harness: nanocodeHarness({
       codeMode: true,
@@ -50,7 +52,7 @@ export function createNanocode(options: NanocodeAppOptions) {
       thinking: defaultSelection.thinking,
       durability,
     }),
-    durability,
+    durability: kernel,
     marks: marks ?? false,
   });
   const chat = agent.chatRoute(authorize ? { authorize } : {});
@@ -74,7 +76,7 @@ export function createNanocode(options: NanocodeAppOptions) {
     if (!selection) return new Response(`harness, model and effort must name one of ${harnesses.map(entry => `${entry.id} (${entry.models.map(model => `${model.id}: ${model.efforts.join("|")}`).join(", ")})`).join(" or ")}`, { status: 400 });
     const refused = await admit(request);
     if (refused) return refused;
-    const config = { durability: durability === "on" ? "run-ahead" : "strict", nanocode: selection satisfies Omit<NanocodeSession, "session_id">, traceAudience: traceAudience ?? (authorize === "public" ? "public" : "unknown") };
+    const config = { durability: kernel === "on" ? "run-ahead" : "strict", nanocode: selection satisfies Omit<NanocodeSession, "session_id">, traceAudience: traceAudience ?? (authorize === "public" ? "public" : "unknown") };
     const { sessionId } = await agent.sessions.start({ config });
     return sessionId;
   };
