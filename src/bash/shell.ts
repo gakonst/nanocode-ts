@@ -728,7 +728,14 @@ export class Runner {
     if (name.includes("/")) {
       const path = this.resolve(name);
       const stat = await this.host.fs.stat(path);
-      if (stat?.kind === "file") return this.source(path, args, io, true);
+      if (stat?.kind === "file") {
+        const wasm = this.host.commands.get("wasm");
+        if (wasm && stat.size >= 8) {
+          const head = await this.host.fs.read(path);
+          if (head[0] === 0 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) return this.external(name, wasm, [name, ...args], io);
+        }
+        return this.source(path, args, io, true);
+      }
       io.stderr.write("bash: " + name + ": " + (stat ? "Is a directory" : "No such file or directory") + "\n");
       return stat ? 126 : 127;
     }
