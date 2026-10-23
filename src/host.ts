@@ -1,6 +1,5 @@
 import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type LoggedEvent, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
-import { LocalHand } from "./hand.ts";
 
 type Exports = {
   memory: WebAssembly.Memory;
@@ -92,7 +91,7 @@ export class AgentRuntime {
   static async instantiate(module: WebAssembly.Module, sql: SqlHost, options: HostOptions): Promise<AgentRuntime> {
     const runtime = new AgentRuntime(sql, options);
     const instantiateStarted = performance.now();
-    const instance = await WebAssembly.instantiate(module, { host: runtime.imports() });
+    const instance = await WebAssembly.instantiate(module, { host: runtime.imports(), wasi_snapshot_preview1: runtime.libc() });
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
     runtime.wasm = instance.exports as unknown as Exports;
     if (sql.value_limit !== undefined || options.log_logical_limit !== undefined) {
@@ -105,7 +104,6 @@ export class AgentRuntime {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
     this.options = { ...options, published: this.options.published, wake: this.options.wake };
-    if (config.code_mode && !this.options.remote) this.options.remote = new LocalHand();
     this.hands = config.hands ?? false;
     this.remote = config.remote ?? false;
     this.subscription = config.subscription;
@@ -357,6 +355,25 @@ export class AgentRuntime {
       .then(reply => this.complete(id, reply));
   }
 
+  private libc() {
+    const view = () => new DataView(this.wasm.memory.buffer);
+    return {
+      clock_time_get: (clock: number, _precision: bigint, out: number) => {
+        view().setBigUint64(out, BigInt(Math.round((clock === 0 ? Date.now() : performance.now()) * 1e6)), true);
+        return 0;
+      },
+      fd_write: (_fd: number, iovs: number, count: number, written: number) => {
+        let bytes = 0;
+        for (let index = 0; index < count; index++) bytes += view().getUint32(iovs + index * 8 + 4, true);
+        view().setUint32(written, bytes, true);
+        return 0;
+      },
+      fd_close: () => 0,
+      fd_fdstat_get: () => 8,
+      fd_seek: () => 8,
+    };
+  }
+
   private imports() {
     return {
       dispatch: (id: number, pointer: number, length: number) => this.accept(id, pointer, length),
@@ -499,7 +516,19 @@ export class AgentRuntime {
       case "shell_run": {
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        return await this.workspace().run({ command: request.command, cwd: request.cwd, timeout_ms: request.timeout_ms ?? null }, controller.signal);
+        return await this.workspace().run({ command: request.command, cwd: request.cwd, timeout_ms: request.timeout_ms ?? null, ...(typeof request.stdin === "string" ? { stdin: request.stdin } : {}) }, controller.signal);
+      }
+      case "cell_fetch": {
+        const input = request.request as { url: string; method?: string; headers?: Record<string, string>; body?: string; body_base64?: string };
+        const controller = new AbortController();
+        this.onCancel(id, () => controller.abort());
+        const body = input.body_base64 !== undefined ? Uint8Array.from(atob(input.body_base64), character => character.charCodeAt(0)) : input.body;
+        const response = await (this.options.fetch ?? globalThis.fetch)(input.url, { method: input.method ?? "GET", ...(input.headers ? { headers: input.headers } : {}), ...(body !== undefined ? { body } : {}), signal: controller.signal });
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const textual = /^(text\/|application\/(.*\+)?(json|xml|javascript|x-www-form-urlencoded))/i.test(response.headers.get("content-type") ?? "text/plain");
+        let encoded = "";
+        if (!textual) for (let index = 0; index < bytes.length; index += 0x8000) encoded += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+        return { status: response.status, status_text: response.statusText, url: response.url, headers: [...response.headers], ...(textual ? { body: this.decoder.decode(bytes) } : { body_base64: btoa(encoded) }) };
       }
       case "socket_open": {
         if (!this.options.socket) throw new Error("model sockets are not configured");

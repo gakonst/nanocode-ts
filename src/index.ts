@@ -1,6 +1,5 @@
 export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
 export { EventHub } from "./events.ts";
 export { RemoteExecutor, type RemotePolicy } from "./remote.ts";
-export { inRealm, LocalHand, type CellDefinition, type CellEvaluator, type CellHost, type CellOutcome, type LocalHandOptions } from "./hand.ts";
 export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from "./timing.ts";
 export { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type BranchBoundary, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Compacted, type Driven, type HostOptions, type HostTool, type HandToolSelection, type LoggedEvent, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelEntry, type ModelGateway, type Thinking, type ModelProvider, type ModelTiming, type ReasoningMode, type ProviderEndpoint, type MovedQueued, type RemoteRequest, type Replaced, type RuntimeOptions, type RuntimeSettings, type ServiceTier, type RuntimeTiming, type SessionRecord, type ShellOutput, type ShellRun, type SocketHandshake, type SqlHost, type SqlKind, type SqlValue, type Statement, type Submitted, type SubagentStatus, type SubagentSummary, type ToolCallContext, type TurnReport, type TurnView, type WorkspaceHost } from "./contracts.ts";

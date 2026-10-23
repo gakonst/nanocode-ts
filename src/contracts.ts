@@ -192,7 +192,7 @@ export type SocketHandshake = {
 
 export type RemoteRequest = { op: string; connection?: string | null; frames?: string[]; durable?: boolean; dispatches?: boolean; origins?: { index: number; origin: string | null }[]; refused?: number[]; reason?: string };
 
-export type ShellRun = { command: string; cwd: string; timeout_ms: number | null };
+export type ShellRun = { command: string; cwd: string; timeout_ms: number | null; stdin?: string };
 
 export type ShellOutput = { stdout: string; stderr: string; exit_code: number; truncated: boolean };
 
@@ -222,6 +222,7 @@ export type RuntimeOptions = {
     call(name: string, input: unknown, signal: AbortSignal, context: ToolCallContext): Promise<unknown>;
   };
   workspace?: WorkspaceHost;
+  fetch?(input: string, init: RequestInit): Promise<Response>;
   remote?: {
     failed?(): boolean;
     execute(request: RemoteRequest, id: number): Promise<unknown>;
