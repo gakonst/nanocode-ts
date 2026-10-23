@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
+import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
@@ -44,6 +44,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   subagents?: boolean;
   streamToolInput?: boolean;
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
+  mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch };
   instructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   valueLimit?: number;
@@ -573,11 +574,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             : undefined;
           void connecting?.catch(() => {});
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
+          const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
+          const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
           const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter } });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(shell ? { workspace: shell.cwd } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           fetch: cellFetch,
           tools: options.tools && {
@@ -624,6 +627,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
             await this.durable(scope);
             this.counts.model_dispatches++;
+            if (request.provider == null && mcpServers.length) return mcpFetch(request.endpoint, { method: request.method, headers: request.headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body as Uint8Array<ArrayBuffer>, signal });
             const dispatch: ModelDispatch = { endpoint: request.endpoint, headers: request.headers, authority, provider: request.provider ?? descriptor.provider ?? "claude", subscription: descriptor.subscription };
             const response = await options.egress(this.env).fetch(new Request("https://egress.internal/model", { method: "POST", signal, headers: { "content-type": "application/octet-stream", "x-nanocode-model": headerJson(dispatch) }, body: request.body }));
             const diagnostic = response.headers.get("x-nanocode-model-diagnostic");
