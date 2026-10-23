@@ -730,7 +730,7 @@ export type Conversation = { id: string; title: string; updated: number };
 
 export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined; conversations: readonly Conversation[]; conversation: string | undefined };
 
-export type TransportParameters = { prompt: string; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void };
+export type TransportParameters = { prompt: string; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void; signal: AbortSignal };
 
 export type Transport = {
   send(parameters: TransportParameters): Promise<void>;
@@ -802,6 +802,7 @@ export type Config = {
   resume(): Promise<void>;
   cancel(): Promise<void>;
   readonly cancellable: boolean;
+  readonly detachable: boolean;
   push(event: LiveEvent): void;
   run(callback: () => void): void;
   note(kind: EntryKind, text: string): void;
@@ -859,60 +860,117 @@ export function createConfig(options: ConfigOptions): Config {
   const saveTransport = () => {
     if (history && current && options.transport.snapshot) write(transportKey(current), options.transport.snapshot());
   };
+  type View = { transcript: Transcript; live: Entry[] };
+  const views = new Map<string | undefined, View>();
+  const drop = (id: string | undefined) => {
+    views.get(id)?.transcript.reset();
+    views.delete(id);
+  };
   const forget = (id: string) => {
+    drop(id);
     for (const key of [entriesKey(id), transportKey(id)]) try { history?.storage?.removeItem(key); } catch {}
   };
-  const add = (entry: Entry) => {
-    const entries = [...state.entries, entry].slice(-(options.keep ?? 500));
+  const add = (id: string | undefined, entry: Entry) => {
     if (!history) {
+      const entries = [...state.entries, entry].slice(-(options.keep ?? 500));
       options.persist?.save(entries);
       set({ entries });
       return;
     }
-    write(entriesKey(current!), entries);
-    const existing = conversations.find(item => item.id === current);
+    const shown = id === current;
+    const existing = conversations.find(item => item.id === id);
+    if (!existing && !shown) return;
+    const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry].slice(-(options.keep ?? 500));
+    write(entriesKey(id!), entries);
     const title = existing?.title || (entry.kind === "user" ? entry.text.replace(/\s+/g, " ").slice(0, 80) : "");
-    conversations = [{ id: current!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== current)];
+    conversations = [{ id: id!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
     for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
     conversations = conversations.slice(0, history.limit);
     saveIndex();
+    if (!shown) return set({ conversations });
     saveTransport();
     set({ entries, conversations });
   };
-  const transcript = new Transcript({
-    add,
-    live: live => set({ live }),
-    apply: event => options.apply?.(event),
-    revealMs: options.revealMs,
-    reducedMotion: () => { const media = (globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia; return typeof media === "function" && media("(prefers-reduced-motion: reduce)").matches; },
-  });
+  const view = (id = current): View => {
+    let found = views.get(id);
+    if (found) return found;
+    const created: View = {
+      live: [],
+      transcript: new Transcript({
+        add: entry => add(id, entry),
+        live: live => {
+          created.live = live;
+          if (id === current) set({ live });
+        },
+        apply: event => { if (id === current) options.apply?.(event); },
+        revealMs: options.revealMs,
+        reducedMotion: () => { const media = (globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia; return typeof media === "function" && media("(prefers-reduced-motion: reduce)").matches; },
+      }),
+    };
+    views.set(id, created);
+    return created;
+  };
   const note = (kind: EntryKind, text: string) => {
     const started_at = Date.now();
-    transcript.run(() => add({ kind, text, started_at }));
+    const target = current;
+    view().transcript.run(() => add(target, { kind, text, started_at }));
   };
   const push = (event: LiveEvent) => {
-    transcript.push(event);
+    view().transcript.push(event);
     saveTransport();
   };
-  const parameters = (prompt: string): TransportParameters => ({ prompt, push, note });
-  const settle = (work: Promise<void>) => {
+  let generation = 0;
+  let controller: AbortController | undefined;
+  const parameters = (prompt: string, id: number, signal: AbortSignal): TransportParameters => ({
+    prompt,
+    signal,
+    push: event => { if (id === generation) push(event); },
+    note: (kind, text) => { if (id === generation) note(kind, text); },
+  });
+  const detachable = () => Boolean(history && options.transport.resume);
+  const detach = () => {
+    if (state.status !== "pending") return;
+    generation += 1;
+    controller?.abort();
+    controller = undefined;
+  };
+  const settle = (start: (parameters: TransportParameters) => Promise<void>, prompt = "") => {
+    const id = ++generation;
+    controller?.abort();
+    const signal = (controller = new AbortController()).signal;
+    const transcript = view().transcript;
     set({ status: "pending", error: undefined });
+    let work: Promise<void>;
+    try {
+      work = start(parameters(prompt, id, signal));
+    } catch (error) {
+      work = Promise.reject(error);
+    }
     return work.catch((error: unknown) => {
+      if (id !== generation) return;
       const failure = error instanceof Error ? error : new Error(String(error));
       note("error", failure.message);
       set({ error: failure });
-    }).finally(() => transcript.run(() => {
-      saveTransport();
-      set({ status: "idle" });
-    }));
+    }).finally(() => {
+      if (id !== generation) return;
+      transcript.run(() => {
+        if (id !== generation) return;
+        controller = undefined;
+        saveTransport();
+        set({ status: "idle" });
+      });
+    });
   };
-  const open = (id: string, entries: Entry[]) => {
-    saveTransport();
-    transcript.reset();
+  const open = (id: string, entries: Entry[], resume = true) => {
+    const detached = state.status === "pending";
+    detach();
+    if (conversations.some(item => item.id === current)) saveTransport();
+    if (!detached) drop(current);
     current = id;
     options.transport.restore?.(read(transportKey(id), undefined));
     saveIndex();
-    set({ conversation: id, conversations: [...conversations], entries, live: [], error: undefined });
+    set({ conversation: id, conversations: [...conversations], entries, live: view(id).live, status: "idle", error: undefined });
+    if (resume) void config.resume();
   };
   const config: Config = {
     getState: () => state,
@@ -924,21 +982,23 @@ export function createConfig(options: ConfigOptions): Config {
       const text = prompt.trim();
       if (!text) return;
       if (state.status === "pending") {
+        const transcript = view().transcript;
         transcript.aside({ kind: "user", text, started_at: Date.now(), steer: true });
-        if (!options.transport.steer) return;
+        if (!options.transport.steer || !controller) return;
         try {
-          if (await options.transport.steer(parameters(text))) transcript.aside({ kind: "tool", text: "steered into the running turn", started_at: Date.now() });
+          if (await options.transport.steer(parameters(text, generation, controller.signal))) transcript.aside({ kind: "tool", text: "steered into the running turn", started_at: Date.now() });
         } catch (error) {
           note("error", error instanceof Error ? error.message : String(error));
         }
         return;
       }
       note("user", text);
-      await settle(options.transport.send(parameters(text)));
+      await settle(parameters => options.transport.send(parameters), text);
     },
     async resume() {
-      if (!options.transport.resume || state.status === "pending") return;
-      await settle(options.transport.resume({ push, note }));
+      const resume = options.transport.resume?.bind(options.transport);
+      if (!resume || state.status === "pending") return;
+      await settle(({ push, note, signal }) => resume({ push, note, signal }));
     },
     async cancel() {
       if (!options.transport.cancel || state.status !== "pending") return;
@@ -949,48 +1009,58 @@ export function createConfig(options: ConfigOptions): Config {
       }
     },
     cancellable: Boolean(options.transport.cancel),
+    get detachable() {
+      return detachable();
+    },
     push,
-    run: callback => transcript.run(callback),
+    run: callback => view().transcript.run(callback),
     note,
     clear() {
       if (history) {
         config.create();
         return;
       }
-      transcript.reset();
+      view().transcript.reset();
       options.persist?.save([]);
       set({ entries: [], live: [], error: undefined });
     },
     reset() {
-      transcript.reset();
+      view().transcript.reset();
       set({ live: [], status: "idle" });
     },
     select(id) {
-      if (!history || id === current || state.status === "pending" || !conversations.some(item => item.id === id)) return;
+      if (!history || id === current || (state.status === "pending" && !detachable()) || !conversations.some(item => item.id === id)) return;
       open(id, read<Entry[]>(entriesKey(id), []));
     },
     create() {
-      if (!history || state.status === "pending") return current;
+      if (!history || (state.status === "pending" && !detachable())) return current;
       if (!state.entries.length) return current;
       const id = conversationId();
       conversations = [{ id, title: "", updated: Date.now() }, ...conversations].slice(0, history.limit);
-      open(id, []);
+      open(id, [], false);
       return id;
     },
     remove(id) {
-      if (!history || state.status === "pending") return;
-      forget(id);
-      conversations = conversations.filter(item => item.id !== id);
+      if (!history) return;
       if (id !== current) {
+        forget(id);
+        conversations = conversations.filter(item => item.id !== id);
         saveIndex();
         set({ conversations: [...conversations] });
         return;
       }
+      if (state.status === "pending") {
+        if (!detachable()) return;
+        options.transport.cancel?.().catch(() => undefined);
+        detach();
+      }
+      forget(id);
+      conversations = conversations.filter(item => item.id !== id);
       const next = conversations[0];
       if (next) open(next.id, read<Entry[]>(entriesKey(next.id), []));
       else {
         conversations = [{ id: conversationId(), title: "", updated: Date.now() }];
-        open(conversations[0].id, []);
+        open(conversations[0].id, [], false);
       }
     },
   };

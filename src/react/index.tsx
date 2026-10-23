@@ -129,7 +129,7 @@ export function useConversations(): { conversations: readonly Conversation[]; cu
   const pending = useChatState(state => state.status === "pending");
   const empty = useChatState(state => state.entries.length === 0);
   const enabled = current !== undefined;
-  return { conversations, current, enabled, canCreate: enabled && !pending && !empty, canSelect: enabled && !pending, select: config.select, create: config.create, remove: config.remove };
+  return { conversations, current, enabled, canCreate: enabled && !empty && (!pending || config.detachable), canSelect: enabled && (!pending || config.detachable), select: config.select, create: config.create, remove: config.remove };
 }
 
 export function useNote(): (kind: EntryKind, text: string) => void {
@@ -646,7 +646,7 @@ export function Chat(props: ChatProps) {
         {(props.suggestions?.length ?? 0) > 0 && (
           <div {...part("suggestions")}>
             {props.suggestions!.map(item => typeof item === "string"
-              ? <button disabled={busy} key={item} onClick={() => submit(item)} type="button" {...part("suggestion")}>{item}</button>
+              ? <button key={item} onClick={() => submit(item)} type="button" {...part("suggestion")}>{item}</button>
               : <button disabled={item.disabled} key={item.label} onClick={item.onClick} type="button" {...part("suggestion")}>{item.label}</button>)}
           </div>
         )}
