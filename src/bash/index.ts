@@ -9,14 +9,13 @@ import { jq } from "./commands/jq.ts";
 import { curl } from "./commands/curl.ts";
 import { extraCommands } from "./commands/extra.ts";
 import { gitCommands, type GitHubOptions } from "./commands/git.ts";
-import { wasmCommands, wasmHost, type WasmOptions } from "./commands/wasm.ts";
+import { browser, wasmCommands, wasmHost } from "./commands/wasm.ts";
 import { pythonCommands, type PythonOptions } from "./commands/python.ts";
 
 export { MemoryFileSystem, FsError, normalize, resolvePath, type FileInput, type FileKind, type FileStat, type FileSystem } from "./fs.ts";
 export { SqlFileSystem } from "./sql.ts";
 export { CommandError, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
 export { codeload, githubArchives, type GitHubOptions } from "./commands/git.ts";
-export { type WasmOptions } from "./commands/wasm.ts";
 export { PYODIDE_URL, PYODIDE_VERSION, type Pyodide, type PyodideFS, type PythonOptions } from "./commands/python.ts";
 
 export type BashOptions = {
@@ -26,7 +25,7 @@ export type BashOptions = {
   cwd?: string;
   fetch?: typeof fetch;
   github?: GitHubOptions;
-  wasm?: WasmOptions;
+  wasm?: boolean;
   python?: PythonOptions;
   limits?: Partial<Limits>;
   commands?: Record<string, CommandHandler>;
@@ -55,9 +54,9 @@ export const DEFAULT_LIMITS: Limits = {
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl };
 
-export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
+export const BASH_COMMANDS = [...Object.keys(COMMANDS), ...Object.keys(wasmCommands())].sort();
 
 export class Bash {
   readonly fs: FileSystem;
@@ -67,7 +66,7 @@ export class Bash {
   readonly commands: Map<string, CommandHandler>;
   readonly fetch?: typeof fetch;
   readonly observe?: (event: BashEvent) => void;
-  readonly #wasm: (request: unknown, signal: AbortSignal) => Promise<unknown>;
+  readonly #wasm: ((request: unknown, signal: AbortSignal) => Promise<unknown>) | undefined;
   #calls = 0;
 
   private constructor(options: BashOptions) {
@@ -75,10 +74,10 @@ export class Bash {
     this.cwd = resolvePath("/", options.cwd ?? "/home/user");
     this.env = { HOME: "/home/user", USER: "user", PATH: "/usr/local/bin:/usr/bin:/bin", SHELL: "/bin/bash", LANG: "C.UTF-8", TMPDIR: "/tmp", ...options.env };
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
-    this.commands = new Map(Object.entries({ ...COMMANDS, ...(options.github ? gitCommands(options.github) : {}), ...(options.wasm ? wasmCommands(options.wasm) : {}), ...(options.python ? pythonCommands(options.python) : {}), ...options.commands }));
+    this.commands = new Map(Object.entries({ ...COMMANDS, ...(options.github ? gitCommands(options.github) : {}), ...((options.wasm ?? browser()) ? wasmCommands() : {}), ...(options.python ? pythonCommands(options.python) : {}), ...options.commands }));
     this.fetch = options.fetch;
     this.observe = options.observe;
-    this.#wasm = wasmHost(this, options.wasm);
+    this.#wasm = (options.wasm ?? browser()) ? wasmHost(this) : undefined;
   }
 
   static async create(options: BashOptions = {}): Promise<Bash> {
@@ -159,7 +158,7 @@ export class Bash {
 
   workspace(): WorkspaceHost {
     return {
-      instructions: compiles() ? BASH_CODE_MODE_INSTRUCTIONS : BASH_CODE_MODE_INSTRUCTIONS.replace(/Python 3 runs on Pyodide[^]*?for the rest of the session\./, "Python is not available on this host, because it cannot compile WebAssembly at runtime."),
+      instructions: hostInstructions(BASH_CODE_MODE_INSTRUCTIONS, this.#wasm !== undefined),
       read: async path => {
         const target = resolvePath(this.cwd, path);
         const stat = await this.fs.stat(target);
@@ -175,14 +174,14 @@ export class Bash {
         const result = await this.exec(request.command, { cwd: request.cwd, signal: AbortSignal.any(signals), ...(request.stdin !== undefined ? { stdin: request.stdin } : {}) });
         return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, truncated: result.truncated };
       },
-      wasm: (request, signal) => this.#wasm(request, signal),
+      ...(this.#wasm ? { wasm: this.#wasm } : {}),
     };
   }
 
   tool(options: BashToolOptions = {}): { definition: HostTool; call(input: unknown, signal?: AbortSignal): Promise<string> } {
     const limit = options.maxOutputLength ?? 30_000;
     return {
-      definition: bashTool(options),
+      definition: bashTool({ description: hostInstructions(BASH_TOOL_DESCRIPTION, this.#wasm !== undefined).replace(/(Commands: [^.]*?)wasm, wasmtime, /, this.#wasm ? "$1wasm, wasmtime, " : "$1"), ...options }),
       call: async (input, signal) => {
         const command = typeof input === "string" ? input : (input as { command?: unknown } | null)?.command;
         if (typeof command !== "string") {
@@ -213,6 +212,12 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     remove: path => (charge(), fs.remove(path)),
     rename: (from, to) => (charge(), fs.rename(from, to)),
   };
+}
+
+function hostInstructions(text: string, wasm: boolean): string {
+  let out = wasm ? text : text.replace(/ WebAssembly programs built for WASI[^]*?prints its result\./, " WebAssembly programs run only when this shell runs in a browser.");
+  if (!compiles()) out = out.replace(/Python 3 runs on Pyodide[^]*?for the rest of the session\./, "Python is not available on this host, because it cannot compile WebAssembly at runtime.");
+  return out;
 }
 
 export const BASH_SHELL_INSTRUCTIONS = "To get a public GitHub repository, run `git clone https://github.com/OWNER/REPO [DIR]` (or `gh repo clone OWNER/REPO [DIR]`, with `-b REF` for a branch, tag or commit): it downloads a source snapshot of the current files without history, so `git status`, `git log -1`, `git rev-parse HEAD`, `git branch`, `git remote -v` and `git ls-files` work on it, and commit, pull and push do not. WebAssembly programs built for WASI (wasm32-wasi) run directly: `./prog.wasm ARGS`, `wasm prog.wasm ARGS` or `wasmtime prog.wasm ARGS`, with stdin, stdout, exit codes, the environment and the files under the working directory (up to 64 MiB, written back when the program exits). There is no compiler, so download or write the .wasm file first. `wasm --invoke NAME FILE ARGS` calls one exported function and prints its result. Python 3 runs on Pyodide (CPython compiled to WebAssembly, loaded on first use): `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, numpy, pandas and the other packages Pyodide ships load when imported, and `pip install PKG` installs pure-Python wheels for the rest of the session.";

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { arch, platform } from "node:os";
@@ -78,13 +78,7 @@ let previous;
 try { previous = readFileSync("dist/nanocode_wasm.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previous?.equals(bytes)) writeFileSync("dist/nanocode_wasm.wasm", bytes);
 
-const interpreter = spawnSync("cargo", ["build", "--locked", "--release", "--target", "wasm32-unknown-unknown", "--target-dir", "../target/interpreter"], { cwd: "interpreter", stdio: "inherit" });
-if (interpreter.error) throw interpreter.error;
-if (interpreter.status !== 0) process.exit(interpreter.status ?? 1);
-const interpreterBytes = readFileSync("target/interpreter/wasm32-unknown-unknown/release/nanocode_interpreter.wasm");
-let previousInterpreter;
-try { previousInterpreter = readFileSync("dist/interpreter.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
-if (!previousInterpreter?.equals(interpreterBytes)) writeFileSync("dist/interpreter.wasm", interpreterBytes);
+rmSync("dist/interpreter.wasm", { force: true });
 
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });
