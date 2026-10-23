@@ -108,7 +108,7 @@ async function details(ctx: CommandContext, repository: string, ref: string, com
   if (!fetcher) return out;
   const get = async (path: string): Promise<unknown> => {
     try {
-      const response = await fetcher("https://api.github.com/repos/" + repository + path, { headers: { accept: "application/vnd.github+json" }, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(5000)]) });
+      const response = await fetcher("https://api.github.com/repos/" + repository + path, { headers: { accept: "application/vnd.github+json", "user-agent": "nanocode-ts" }, signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(5000)]) });
       return response.ok ? await response.json() : null;
     } catch {
       return null;
