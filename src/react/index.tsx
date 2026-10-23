@@ -239,6 +239,7 @@ export type ChatProps = {
   empty?: string;
   label?: string;
   expandable?: boolean;
+  defaultPrompt?: string;
 };
 
 const TYPING_DELAY_MS = 500;
@@ -247,7 +248,7 @@ export function Chat(props: ChatProps) {
   const { entries, live } = useTranscript();
   const { send, isPending: busy } = useSend();
   const picker = props.picker ?? null;
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(props.defaultPrompt ?? "");
   const [highlight, setHighlight] = useState(0);
   const [typing, setTyping] = useState(false);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
@@ -291,6 +292,11 @@ export function Chat(props: ChatProps) {
   }, [full]);
 
   useEffect(() => {
+    if (props.defaultPrompt !== undefined) setPrompt(props.defaultPrompt);
+  }, [props.defaultPrompt]);
+
+  useEffect(() => {
+    if (!picker) return;
     setPrompt("");
     const choices = picker ? picker.items("").filter(item => item.kind === "choice") : [];
     setHighlight(Math.max(0, choices.findIndex(item => item.current)));
