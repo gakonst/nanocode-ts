@@ -1,5 +1,5 @@
-const callFetch = tools.fetch;
-const callBash = tools.bash;
+const callFetch = (input) => call("fetch", input);
+const callBash = (input) => call("bash", input);
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const toBase64 = (bytes) => {
   let out = "";
