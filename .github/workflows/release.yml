@@ -23,11 +23,35 @@ jobs:
           path: nanocode-ts
           persist-credentials: false
 
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install Dependencies
+        working-directory: nanocode-ts
+        run: npm ci --ignore-scripts
+
+      - name: Find WASM Release
+        id: wasm-release
+        working-directory: nanocode-ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fingerprint="$(node scripts/wasm.mjs)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+          if gh release view "wasm-$fingerprint" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Read SDK revision
         id: sdk
         run: echo "revision=$(jq -r .revision nanocode-ts/sdk-revision.json)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout SDK
+        if: steps.wasm-release.outputs.exists != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: gakonst/nanocode
@@ -36,11 +60,13 @@ jobs:
           persist-credentials: false
 
       - name: Setup Rust
+        if: steps.wasm-release.outputs.exists != 'true'
         id: rust
         working-directory: nanocode-ts
         run: echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo
+        if: steps.wasm-release.outputs.exists != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -51,6 +77,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - name: Cache WASM Build
+        if: steps.wasm-release.outputs.exists != 'true'
         id: wasm
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -60,13 +87,8 @@ jobs:
           key: wasm-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ steps.sdk.outputs.revision }}-${{ hashFiles('nanocode-ts/Cargo.lock', 'nanocode-ts/src/**/*.rs') }}
           restore-keys: wasm-${{ runner.os }}-${{ steps.rust.outputs.version }}-
 
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-
       - name: Install libclang
-        if: steps.wasm.outputs.cache-hit != 'true'
+        if: steps.wasm-release.outputs.exists != 'true' && steps.wasm.outputs.cache-hit != 'true'
         run: |
           if ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
             echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -n 1)")" >> "$GITHUB_ENV"
@@ -74,13 +96,21 @@ jobs:
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
           fi
 
-      - name: Install Dependencies
+      - name: Build WASM
+        if: steps.wasm-release.outputs.exists != 'true'
         working-directory: nanocode-ts
-        run: npm ci
+        run: node scripts/build.mjs
+
+      - name: Publish WASM
+        if: steps.wasm-release.outputs.exists != 'true'
+        working-directory: nanocode-ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-wasm.mjs --upload
 
       - name: Build
         working-directory: nanocode-ts
-        run: npm run build
+        run: npm run prepare
 
       - name: Check Types
         working-directory: nanocode-ts
@@ -91,7 +121,7 @@ jobs:
         working-directory: nanocode-ts
         run: |
           short="${GITHUB_SHA::7}"
-          tarball="$(npm pack --silent --pack-destination "$RUNNER_TEMP")"
+          tarball="$(npm pack --ignore-scripts --silent --pack-destination "$RUNNER_TEMP")"
           mv "$RUNNER_TEMP/$tarball" "$RUNNER_TEMP/nanocode-ts-$short.tgz"
           echo "short=$short" >> "$GITHUB_OUTPUT"
           echo "path=$RUNNER_TEMP/nanocode-ts-$short.tgz" >> "$GITHUB_OUTPUT"
@@ -104,4 +134,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "nanocode-ts ${{ steps.pack.outputs.short }}" \
-            --notes "Built from $GITHUB_SHA against SDK ${{ steps.sdk.outputs.revision }}. Install with \`npm install https://github.com/$GITHUB_REPOSITORY/releases/download/build-${{ steps.pack.outputs.short }}/nanocode-ts-${{ steps.pack.outputs.short }}.tgz\`."
+            --notes "Built from $GITHUB_SHA against SDK ${{ steps.sdk.outputs.revision }} with WASM build ${{ steps.wasm-release.outputs.fingerprint }}. Install with \`npm install https://github.com/$GITHUB_REPOSITORY/releases/download/build-${{ steps.pack.outputs.short }}/nanocode-ts-${{ steps.pack.outputs.short }}.tgz\` or \`npm install github:$GITHUB_REPOSITORY#$GITHUB_SHA\`."

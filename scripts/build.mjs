@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, rmSync
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { arch, platform } from "node:os";
+import { fingerprint as wasmFingerprint, manifest, manifestName } from "./wasm.mjs";
 
 function fields(path, start, pattern) {
   const source = readFileSync(path, "utf8");
@@ -86,3 +87,4 @@ const catalog = await runtime.modelCatalog();
 await runtime.dispose();
 writeFileSync("dist/models.js", `export const models = ${JSON.stringify(catalog, null, 2)};\n`);
 writeFileSync("dist/models.d.ts", `import type { ModelCatalog } from "./contracts.js";\nexport declare const models: ModelCatalog;\n`);
+writeFileSync("dist/" + manifestName, JSON.stringify(manifest("dist", wasmFingerprint()), null, 2) + "\n");
