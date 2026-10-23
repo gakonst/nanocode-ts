@@ -45,6 +45,10 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./react/skin": {
+      "types": "./dist/react/skin.d.ts",
+      "default": "./dist/react/skin.js"
+    },
     "./react/site": {
       "types": "./dist/react/site.d.ts",
       "default": "./dist/react/site.js"

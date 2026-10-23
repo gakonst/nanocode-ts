@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
-import { Bash, SqlFileSystem } from "../bash/index.ts";
+import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
@@ -65,7 +65,6 @@ function duration(value: string, name: string): number {
 
 const handName = (value: unknown): value is string => typeof value === "string" && EXECUTOR_ID.test(value);
 const decoder = new TextDecoder();
-const offline: typeof fetch = async () => { throw new Error("this host gives Code Mode scripts no network access"); };
 
 async function bodyText(request: Request, limit: number): Promise<string | undefined> {
   if (!request.body) return "";
@@ -572,7 +571,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             ? connectExecutor(options.egress(this.env), authority, this.handLimits()).then(value => remote = value, error => { remoteFailed = true; remoteError = error; throw error; }).finally(() => this.scopeTimings(scope).record("remote.connect", performance.now() - connectStarted))
             : undefined;
           void connecting?.catch(() => {});
-          const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? offline;
+          const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
           const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {

@@ -2,11 +2,6 @@
 
 import { createContext, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell } from "../client.ts";
-import * as styles from "./styles.ts";
-
-export { styles };
-
-export { ellipsis, flicker, style, tokens, variants, vars } from "./theme.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
 
@@ -24,12 +19,55 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
+export type Part = "actions" | "body" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "entry" | "expand" | "header" | "icon" | "image" | "inline" | "input" | "key" | "log" | "marker" | "meta" | "more" | "name" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "row" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strong" | "suggestion" | "suggestions" | "title" | "tool" | "turn" | "typing";
+
+export type PartState = Record<string, string | number | boolean | undefined>;
+
+export type PartProps = { className?: string; style?: Record<string, string | number | undefined> } & Record<string, unknown>;
+
+export type Skin = {
+  parts?: Partial<Record<Part, (state: PartState) => PartProps>>;
+  icons?: Partial<Record<Cell["status"], string | readonly string[]>>;
+};
+
+const EMPTY_SKIN: Skin = {};
+
+const SkinContext = createContext<Skin>(EMPTY_SKIN);
+
+export function useSkin(): Skin {
+  return useContext(SkinContext);
+}
+
+export function usePart(): (name: Part, state?: PartState) => PartProps {
+  const skin = useSkin();
+  return useCallback((name: Part, state: PartState = {}) => {
+    const attributes: PartProps = { "data-nc": name };
+    for (const [key, value] of Object.entries(state)) if (value !== undefined) attributes["data-" + key.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase())] = String(value);
+    const skinned = skin.parts?.[name]?.(state);
+    return skinned ? { ...attributes, ...skinned } : attributes;
+  }, [skin]);
+}
+
 const ConfigContext = createContext<Config | undefined>(undefined);
+
+const ExpandedContext = createContext<{ open: ReadonlySet<string>; toggle(id: string, open?: boolean): void }>({ open: new Set(), toggle: () => {} });
+
+export function useExpanded(): { open: ReadonlySet<string>; toggle(id: string, open?: boolean): void } {
+  return useContext(ExpandedContext);
+}
 
 const HighlightContext = createContext<Highlighter | undefined>(undefined);
 
-export function NanocodeProvider(props: { config: Config; highlight?: () => Promise<Highlighter>; children: ReactNode }) {
+export function NanocodeProvider(props: { config: Config; highlight?: () => Promise<Highlighter>; skin?: Skin; children: ReactNode }) {
   const [highlighter, setHighlighter] = useState<Highlighter>();
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const toggle = useCallback((id: string, value?: boolean) => setOpen(current => {
+    const next = new Set(current);
+    if (value ?? !next.has(id)) next.add(id);
+    else next.delete(id);
+    return next;
+  }), []);
+  const expanded = useMemo(() => ({ open, toggle }), [open, toggle]);
   const { highlight } = props;
   useEffect(() => {
     if (!highlight) return;
@@ -39,7 +77,11 @@ export function NanocodeProvider(props: { config: Config; highlight?: () => Prom
   }, [highlight]);
   return (
     <ConfigContext.Provider value={props.config}>
-      <HighlightContext.Provider value={highlighter}>{props.children}</HighlightContext.Provider>
+      <SkinContext.Provider value={props.skin ?? EMPTY_SKIN}>
+        <ExpandedContext.Provider value={expanded}>
+          <HighlightContext.Provider value={highlighter}>{props.children}</HighlightContext.Provider>
+        </ExpandedContext.Provider>
+      </SkinContext.Provider>
     </ConfigContext.Provider>
   );
 }
@@ -127,21 +169,22 @@ function Tokens(props: { code: string; language: string }) {
 }
 
 export function Code(props: { code: string; language: string; framed?: boolean }) {
-  return <pre data-language={props.language} {...styles.code({ framed: props.framed ?? false })}><Tokens code={props.code} language={props.language} /></pre>;
+  const part = usePart();
+  return <pre data-language={props.language} {...part("code", { framed: props.framed ?? false })}><Tokens code={props.code} language={props.language} /></pre>;
 }
 
 const INLINE = /!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)|\[([^\]]+)\]\((https:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|`([^`\n]+)`/g;
 
-function inline(text: string): ReactNode[] {
+function inline(text: string, part: (name: Part, state?: PartState) => PartProps): ReactNode[] {
   const nodes: ReactNode[] = [];
   let offset = 0;
   for (const match of text.matchAll(INLINE)) {
     if (match.index > offset) nodes.push(text.slice(offset, match.index));
     const key = match.index;
-    if (match[2]) nodes.push(<img alt={match[1] ?? ""} key={key} loading="lazy" src={match[2]} {...styles.image()} />);
+    if (match[2]) nodes.push(<img alt={match[1] ?? ""} key={key} loading="lazy" src={match[2]} {...part("image")} />);
     else if (match[4]) nodes.push(<a href={match[4]} key={key} rel="noreferrer" target="_blank">{match[3]}</a>);
-    else if (match[5]) nodes.push(<strong key={key} {...styles.strong()}>{match[5]}</strong>);
-    else nodes.push(<code key={key} {...styles.inline()}>{match[6]}</code>);
+    else if (match[5]) nodes.push(<strong key={key} {...part("strong")}>{match[5]}</strong>);
+    else nodes.push(<code key={key} {...part("inline")}>{match[6]}</code>);
     offset = match.index + match[0].length;
   }
   if (offset < text.length) nodes.push(text.slice(offset));
@@ -149,7 +192,8 @@ function inline(text: string): ReactNode[] {
 }
 
 export function Reply(props: { text: string }) {
-  return <>{fences(props.text).map((part, index) => part.kind === "code" ? <Code code={part.text.replace(/\n$/, "")} framed key={index} language={part.language} /> : <span key={index}>{inline(part.text)}</span>)}</>;
+  const part = usePart();
+  return <>{fences(props.text).map((piece, index) => piece.kind === "code" ? <Code code={piece.text.replace(/\n$/, "")} framed key={index} language={piece.language} /> : <span key={index}>{inline(piece.text, part)}</span>)}</>;
 }
 
 const SPINNER = ["◐", "◓", "◑", "◒"];
@@ -159,8 +203,6 @@ const ICONS: Record<Cell["status"], string> = { running: SPINNER[0], completed: 
 const INPUT_LINES = 12;
 
 const OUTPUT_LINES = 10;
-
-const ExpandedContext = createContext<{ open: ReadonlySet<string>; toggle(id: string, open?: boolean): void }>({ open: new Set(), toggle: () => {} });
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -173,13 +215,14 @@ function useNow(active: boolean): number {
 }
 
 function Section(props: { text: string; language: string; part: "error" | "input" | "output"; size: "full" | "nested" | "normal"; limit: number; tail: boolean; onMore(): void }) {
+  const part = usePart();
   const lines = props.text.split("\n");
-  const body = (text: string) => <pre data-language={props.language} {...styles.body({ part: props.part, size: props.size })}><Tokens code={text} language={props.language} /></pre>;
+  const body = (text: string) => <pre data-language={props.language} {...part("body", { part: props.part, size: props.size })}><Tokens code={text} language={props.language} /></pre>;
   if (lines.length <= props.limit) return body(props.text);
   const shown = props.tail ? lines.slice(-props.limit) : lines.slice(0, props.limit);
-  const more = <button onClick={props.onMore} type="button" {...styles.more()}>{props.tail ? `… ${lines.length - props.limit} earlier lines` : `… ${lines.length - props.limit} more lines`}</button>;
+  const more = <button onClick={props.onMore} type="button" {...part("more")}>{props.tail ? `… ${lines.length - props.limit} earlier lines` : `… ${lines.length - props.limit} more lines`}</button>;
   return (
-    <div {...styles.section()}>
+    <div {...part("section")}>
       {props.tail && more}
       {body(shown.join("\n"))}
       {!props.tail && more}
@@ -188,6 +231,7 @@ function Section(props: { text: string; language: string; part: "error" | "input
 }
 
 export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean }) {
+  const part = usePart();
   const { cell, live = false, nested = false } = props;
   const expanded = useContext(ExpandedContext);
   const open = expanded.open.has(cell.call_id);
@@ -196,35 +240,38 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean }
   const unsuccessful = cell.status === "failed" || (cell.exit_code !== undefined && cell.exit_code !== 0);
   const input = cell.input.replace(/\s+$/, "");
   const output = cell.output.replace(/\s+$/, "");
-  const icon = running ? SPINNER[Math.floor(now / 120) % SPINNER.length] : ICONS[cell.status];
+  const icons = useSkin().icons;
+  const glyph = icons?.[cell.status] ?? (running ? SPINNER : ICONS[cell.status]);
+  const icon = typeof glyph === "string" ? glyph : glyph[Math.floor(now / 120) % glyph.length];
   return (
-    <div data-call={cell.call_id} {...styles.tool({ nested, open, status: cell.status })}>
-      <button aria-expanded={open} onClick={() => expanded.toggle(cell.call_id)} type="button" {...styles.header()}>
-        <span aria-label={cell.status} {...styles.icon({ status: cell.status })}>{icon}</span>
-        <span {...styles.name()}>{cell.name}</span>
-        {cell.title && <span {...styles.title()}>{cell.title}</span>}
-        <span {...styles.meta()}>
+    <div data-call={cell.call_id} {...part("tool", { nested, open, status: cell.status })}>
+      <button aria-expanded={open} onClick={() => expanded.toggle(cell.call_id)} type="button" {...part("header")}>
+        <span aria-label={cell.status} {...part("icon", { status: cell.status })}>{icon}</span>
+        <span {...part("name")}>{cell.name}</span>
+        {cell.title && <span {...part("title")}>{cell.title}</span>}
+        <span {...part("meta")}>
           {running ? ` · ${duration(now - cell.started_at)}` : cell.duration_ms !== undefined ? ` · ${duration(cell.duration_ms)}` : ""}
           {cell.status === "cancelled" || cell.status === "failed" ? ` · ${cell.status}` : ""}
           {cell.details.map(detail => ` · ${detail}`).join("")}
         </span>
       </button>
       {input && (!nested || open || cell.body === "diff") && <Section language={cell.body === "diff" ? "diff" : cell.language} limit={open ? Infinity : INPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part="input" size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={input} />}
-      {cell.children.length > 0 && <div {...styles.children()}>{cell.children.map(child => <ToolCell cell={child} key={child.call_id} live={live} nested />)}</div>}
+      {cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} key={child.call_id} live={live} nested />)}</div>}
       {output && (!nested || open || unsuccessful) && <Section language={cell.output_language} limit={open ? Infinity : OUTPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part={unsuccessful ? "error" : "output"} size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={output} />}
     </div>
   );
 }
 
 export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolean }) {
+  const part = usePart();
   const { entry, previous, live = false } = props;
   const label = entry.kind === "user" ? "you" : !previous || previous.kind === "user" ? "agent" : undefined;
   return (
-    <div {...styles.turn()}>
-      {label && <p {...styles.speaker({ who: label })}><span aria-hidden="true">●</span> {label}</p>}
-      {entry.kind === "tool" && entry.tool ? <div {...styles.entry({ kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
-        : entry.kind === "assistant" ? <div {...styles.entry({ kind: "assistant", live })}><Reply text={entry.text} /></div>
-        : <p {...styles.entry({ kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
+    <div {...part("turn")}>
+      {label && <p {...part("speaker", { who: label })}><span aria-hidden="true">●</span> {label}</p>}
+      {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
+        : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Reply text={entry.text} /></div>
+        : <p {...part("entry", { kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
     </div>
   );
 }
@@ -252,6 +299,7 @@ export type ChatProps = {
 const TYPING_DELAY_MS = 500;
 
 export function Chat(props: ChatProps) {
+  const part = usePart();
   const { entries, live } = useTranscript();
   const { send, isPending: busy } = useSend();
   const threads = useConversations();
@@ -260,20 +308,11 @@ export function Chat(props: ChatProps) {
   const [prompt, setPrompt] = useState(props.defaultPrompt ?? "");
   const [highlight, setHighlight] = useState(0);
   const [typing, setTyping] = useState(false);
-  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [recalled, setRecalled] = useState(-1);
   const [full, setFull] = useState(false);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
-
-  const toggle = useCallback((id: string, value?: boolean) => setOpen(current => {
-    const next = new Set(current);
-    if (value ?? !next.has(id)) next.add(id);
-    else next.delete(id);
-    return next;
-  }), []);
-  const expanded = useMemo(() => ({ open, toggle }), [open, toggle]);
 
   useEffect(() => {
     if (!busy) return setTyping(false);
@@ -399,51 +438,50 @@ export function Chat(props: ChatProps) {
   });
 
   return (
-    <ExpandedContext.Provider value={expanded}>
-      <section
+    <section
         aria-label={props.label ?? "Agent"}
         onClick={event => {
           const target = event.target as HTMLElement;
           if (target.closest("a, button, input, textarea, select") || getSelection()?.toString()) return;
           input.current?.focus();
         }}
-        {...styles.chat({ expanded: full })}
+        {...part("chat", { expanded: full })}
       >
-        <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...styles.log({ expanded: full })}>
-          {entries.length === 0 && live.length === 0 && props.empty && <p {...styles.entry({ kind: "tool" })}>{props.empty}</p>}
+        <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...part("log", { expanded: full })}>
+          {entries.length === 0 && live.length === 0 && props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>}
           {entries.map((entry, index) => <EntryView entry={entry} key={index} previous={entries[index - 1]} />)}
           {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} />)}
         </div>
 
-        <p aria-live="polite" {...styles.typing({ visible: showTyping || Boolean(props.activity) })}>
-          {showTyping ? <><span {...styles.speaker({ who: "agent" })}>agent</span> {doing}</> : props.activity ? <><span {...styles.speaker({ who: "agent" })}>{props.activity.who}</span> {props.activity.text}</> : null}
+        <p aria-live="polite" {...part("typing", { visible: showTyping || Boolean(props.activity) })}>
+          {showTyping ? <><span {...part("speaker", { who: "agent" })}>agent</span> {doing}</> : props.activity ? <><span {...part("speaker", { who: "agent" })}>{props.activity.who}</span> {props.activity.text}</> : null}
         </p>
 
         {props.extras}
 
         {(picker || items.length > 0) && (
-          <div aria-label={picker?.title ?? "Commands"} role="listbox" {...styles.picker()}>
-            {picker?.title && <p {...styles.pickerTitle()}>{picker.title}</p>}
-            {picker?.filter && <p {...styles.pickerMuted()}>filter: <span {...styles.pickerQuery()}>{prompt}</span><span {...styles.marker()}>▏</span></p>}
-            {picker?.filter && choices.length === 0 && <p {...styles.pickerMuted()}>  no matches</p>}
+          <div aria-label={picker?.title ?? "Commands"} role="listbox" {...part("picker")}>
+            {picker?.title && <p {...part("pickerTitle")}>{picker.title}</p>}
+            {picker?.filter && <p {...part("pickerMuted")}>filter: <span {...part("pickerQuery")}>{prompt}</span><span {...part("marker")}>▏</span></p>}
+            {picker?.filter && choices.length === 0 && <p {...part("pickerMuted")}>  no matches</p>}
             {items.map(item => {
-              if (item.kind === "header") return <p key={`header-${item.label}`} {...styles.pickerHeader()}>{item.label}</p>;
+              if (item.kind === "header") return <p key={`header-${item.label}`} {...part("pickerHeader")}>{item.label}</p>;
               const index = ++position;
               return (
-                <button aria-selected={index === highlighted} key={item.value ?? item.label} onClick={() => choose(item)} onMouseMove={() => setHighlight(index)} role="option" style={{ gridTemplateColumns: `2ch ${width}ch 2ch auto` }} type="button" {...styles.choice()}>
-                  <span {...styles.marker()}>{index === highlighted ? "›" : ""}</span>
-                  <span {...styles.choiceLabel()}>{item.label}</span>
-                  <span {...styles.marker()}>{item.current ? "✓" : ""}</span>
-                  <span {...styles.choiceDetail()}>{item.detail}</span>
+                <button aria-selected={index === highlighted} key={item.value ?? item.label} onClick={() => choose(item)} onMouseMove={() => setHighlight(index)} role="option" style={{ gridTemplateColumns: `2ch ${width}ch 2ch auto` }} type="button" {...part("choice")}>
+                  <span {...part("marker")}>{index === highlighted ? "›" : ""}</span>
+                  <span {...part("choiceLabel")}>{item.label}</span>
+                  <span {...part("marker")}>{item.current ? "✓" : ""}</span>
+                  <span {...part("choiceDetail")}>{item.detail}</span>
                 </button>
               );
             })}
-            {picker && <p {...styles.pickerMuted()}>{picker.hint ?? (picker.filter ? "type to filter · enter select · esc cancel" : "enter select · esc cancel")}</p>}
+            {picker && <p {...part("pickerMuted")}>{picker.hint ?? (picker.filter ? "type to filter · enter select · esc cancel" : "enter select · esc cancel")}</p>}
           </div>
         )}
 
-        <div {...styles.row()}>
-          <span aria-hidden="true" {...styles.chevron()}>❯</span>
+        <div {...part("row")}>
+          <span aria-hidden="true" {...part("chevron")}>❯</span>
           <textarea
             aria-label="Prompt"
             onChange={event => {
@@ -457,36 +495,35 @@ export function Chat(props: ChatProps) {
             ref={input}
             rows={Math.min(8, Math.max(1, prompt.split("\n").length))}
             value={prompt}
-            {...styles.input()}
+            {...part("input")}
           />
-          <button onClick={() => submit(prompt)} type="button" {...styles.send()}><kbd {...styles.key()}>ENTER</kbd></button>
+          <button onClick={() => submit(prompt)} type="button" {...part("send")}><kbd {...part("key")}>ENTER</kbd></button>
         </div>
 
         {(props.suggestions?.length ?? 0) > 0 && (
-          <div {...styles.suggestions()}>
+          <div {...part("suggestions")}>
             {props.suggestions!.map(item => typeof item === "string"
-              ? <button disabled={busy} key={item} onClick={() => submit(item)} type="button" {...styles.suggestion()}>{item}</button>
-              : <button disabled={item.disabled} key={item.label} onClick={item.onClick} type="button" {...styles.suggestion()}>{item.label}</button>)}
+              ? <button disabled={busy} key={item} onClick={() => submit(item)} type="button" {...part("suggestion")}>{item}</button>
+              : <button disabled={item.disabled} key={item.label} onClick={item.onClick} type="button" {...part("suggestion")}>{item.label}</button>)}
           </div>
         )}
 
-        <p {...styles.status()}>
-          <span {...styles.statusText()}>{props.status}</span>
+        <p {...part("status")}>
+          <span {...part("statusText")}>{props.status}</span>
           {(props.actions || threads.enabled) && (
-            <span {...styles.actions()}>
-              {threads.enabled && <button disabled={busy} onClick={openHistory} title="Conversations" type="button" {...styles.suggestion({ quiet: true })}>history ({threads.conversations.length})</button>}
+            <span {...part("actions")}>
+              {threads.enabled && <button disabled={busy} onClick={openHistory} title="Conversations" type="button" {...part("suggestion", { quiet: true })}>history ({threads.conversations.length})</button>}
               {props.actions}
             </span>
           )}
-          {props.link && <a href={props.link.href} rel="noreferrer" target="_blank" {...styles.site()}>{props.link.label}</a>}
+          {props.link && <a href={props.link.href} rel="noreferrer" target="_blank" {...part("site")}>{props.link.label}</a>}
           {props.expandable !== false && (
-            <button aria-label={full ? "Collapse chat" : "Expand chat"} aria-pressed={full} onClick={() => setFull(value => !value)} title={full ? "Collapse (Esc)" : "Expand"} type="button" {...styles.expand()}>
+            <button aria-label={full ? "Collapse chat" : "Expand chat"} aria-pressed={full} onClick={() => setFull(value => !value)} title={full ? "Collapse (Esc)" : "Expand"} type="button" {...part("expand")}>
               {full ? "↙ collapse" : "↗ expand"}
             </button>
           )}
         </p>
-      </section>
-    </ExpandedContext.Provider>
+    </section>
   );
 }
 

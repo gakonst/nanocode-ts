@@ -2,21 +2,13 @@ import { CommandError, type CommandContext, type CommandHandler } from "../shell
 import { baseOf, decode, encode, FsError, parentOf } from "../fs.ts";
 import { allInput, eachInput, last, options } from "./util.ts";
 import { mkdirs } from "./files.ts";
+import { gunzip, gzip, pack, unpack, type TarEntry } from "./archive.ts";
 
 const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
 async function bytesOf(ctx: CommandContext, operand: string): Promise<Uint8Array> {
   return operand === "-" ? encode(ctx.stdin.read()) : await ctx.fs.read(ctx.resolve(operand));
 }
-
-async function transform(data: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
-  const output = new Blob([data.slice()]).stream().pipeThrough(stream);
-  return new Uint8Array(await new Response(output).arrayBuffer());
-}
-
-const gzip = (data: Uint8Array) => transform(data, new CompressionStream("gzip"));
-
-const gunzip = (data: Uint8Array) => transform(data, new DecompressionStream("gzip"));
 
 function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
   return async ctx => {
@@ -47,87 +39,16 @@ function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
   };
 }
 
-function header(name: string, size: number, mode: number, mtime: number, type: "0" | "5"): Uint8Array {
-  const block = new Uint8Array(512);
-  const put = (offset: number, length: number, text: string) => block.set(encode(text).slice(0, length), offset);
-  const octal = (value: number, length: number) => value.toString(8).padStart(length - 1, "0") + "\0";
-  let prefix = "";
-  let short = name;
-  if (encode(name).length > 100) {
-    const cut = name.lastIndexOf("/", 155);
-    prefix = name.slice(0, cut);
-    short = name.slice(cut + 1);
-  }
-  put(0, 100, short);
-  put(100, 8, octal(mode & 0o7777, 8));
-  put(108, 8, octal(0, 8));
-  put(116, 8, octal(0, 8));
-  put(124, 12, octal(size, 12));
-  put(136, 12, octal(Math.floor(mtime / 1000), 12));
-  put(148, 8, "        ");
-  put(156, 1, type);
-  put(257, 6, "ustar\0");
-  put(263, 2, "00");
-  put(265, 32, "user");
-  put(297, 32, "user");
-  put(345, 155, prefix);
-  const sum = block.reduce((total, byte) => total + byte, 0);
-  put(148, 8, sum.toString(8).padStart(6, "0") + "\0 ");
-  return block;
-}
-
-type Entry = { name: string; type: "file" | "directory"; data: Uint8Array; mode: number; mtime: number };
-
-function pack(entries: Entry[]): Uint8Array {
-  const parts: Uint8Array[] = [];
-  for (const entry of entries) {
-    parts.push(header(entry.type === "directory" ? entry.name.replace(/\/?$/, "/") : entry.name, entry.type === "file" ? entry.data.length : 0, entry.mode, entry.mtime, entry.type === "file" ? "0" : "5"));
-    if (entry.type === "file") {
-      parts.push(entry.data);
-      const pad = (512 - (entry.data.length % 512)) % 512;
-      if (pad) parts.push(new Uint8Array(pad));
-    }
-  }
-  parts.push(new Uint8Array(1024));
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-function unpack(archive: Uint8Array): Entry[] {
-  const entries: Entry[] = [];
-  const text = (offset: number, length: number) => decode(archive.slice(offset, offset + length)).replace(/\0.*$/s, "");
-  for (let offset = 0; offset + 512 <= archive.length;) {
-    if (archive.slice(offset, offset + 512).every(byte => byte === 0)) break;
-    const prefix = text(offset + 345, 155);
-    const name = (prefix ? prefix + "/" : "") + text(offset, 100);
-    const size = parseInt(text(offset + 124, 12).trim() || "0", 8);
-    const mode = parseInt(text(offset + 100, 8).trim() || "644", 8);
-    const mtime = parseInt(text(offset + 136, 12).trim() || "0", 8) * 1000;
-    const type = text(offset + 156, 1);
-    offset += 512;
-    if (type === "5" || name.endsWith("/")) entries.push({ name: name.replace(/\/$/, ""), type: "directory", data: new Uint8Array(), mode, mtime });
-    else if (type === "0" || type === "") entries.push({ name, type: "file", data: archive.slice(offset, offset + size), mode, mtime });
-    offset += Math.ceil(size / 512) * 512;
-  }
-  return entries;
-}
-
-async function collect(ctx: CommandContext, root: string, operand: string, entries: Entry[]): Promise<void> {
+async function collect(ctx: CommandContext, root: string, operand: string, entries: TarEntry[]): Promise<void> {
   const path = ctx.resolve(root === "." ? operand : root + "/" + operand);
   const stat = await ctx.fs.stat(path);
   if (!stat) throw new CommandError(operand + ": Cannot stat: No such file or directory");
   const name = operand.replace(/^\.\//, "").replace(/\/+$/, "");
   if (stat.kind === "file") {
-    entries.push({ name, type: "file", data: await ctx.fs.read(path), mode: stat.mode, mtime: stat.mtime });
+    entries.push({ name, type: "file", data: await ctx.fs.read(path), mode: stat.mode, mtime: stat.mtime, linkname: "" });
     return;
   }
-  entries.push({ name, type: "directory", data: new Uint8Array(), mode: stat.mode, mtime: stat.mtime });
+  entries.push({ name, type: "directory", data: new Uint8Array(), mode: stat.mode, mtime: stat.mtime, linkname: "" });
   for (const child of await ctx.fs.list(path)) await collect(ctx, root, name + "/" + child, entries);
 }
 
@@ -143,7 +64,7 @@ const tar: CommandHandler = async ctx => {
   if (mode[0] === "c") {
     if (!file) throw new CommandError("refusing to write archive data to the output; use -f", 2);
     if (!parsed.operands.length) throw new CommandError("Cowardly refusing to create an empty archive", 2);
-    const entries: Entry[] = [];
+    const entries: TarEntry[] = [];
     for (const operand of parsed.operands) await collect(ctx, root, operand, entries);
     if (parsed.flags.has("v")) for (const entry of entries) ctx.stdout.write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
     const archive = pack(entries);
@@ -153,7 +74,7 @@ const tar: CommandHandler = async ctx => {
   const raw = file ? await ctx.fs.read(ctx.resolve(file)) : encode(ctx.stdin.read());
   const entries = unpack(zipped || (raw[0] === 0x1f && raw[1] === 0x8b) ? await gunzip(raw) : raw);
   const wanted = parsed.operands.map(operand => operand.replace(/\/+$/, ""));
-  const selected = entries.filter(entry => !wanted.length || wanted.some(name => entry.name === name || entry.name.startsWith(name + "/")));
+  const selected = entries.filter(entry => (entry.type === "file" || entry.type === "directory") && (!wanted.length || wanted.some(name => entry.name === name || entry.name.startsWith(name + "/"))));
   for (const entry of selected) {
     if (mode[0] === "t" || parsed.flags.has("v")) ctx.stdout.write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
     if (mode[0] !== "x") continue;
