@@ -14,6 +14,8 @@ type Entry = { transaction?: Transaction; resolve(): void; reject(error: unknown
 
 export type Durability = "on" | "strict";
 
+export const DEFAULT_BATCH_MS = 500;
+
 export type JournalStats = { replayed_batches: number; replayed_transactions: number; batches: number; transactions: number; reads: number; batch_wait_ms: number };
 
 export const batchKey = (n: number) => `sql:${n}`;
@@ -80,11 +82,16 @@ export class SqlJournal implements SqlHost {
   private flushing = false;
   private failure?: { error: unknown };
   private committed: number;
+  private readonly batchMs: number;
+  private lastBatch = -Infinity;
+  private hurry?: () => void;
+  private closed = false;
   readonly stats: JournalStats;
 
-  constructor(ctx: DriveContext, durability: Durability) {
+  constructor(ctx: DriveContext, durability: Durability, batchMs = DEFAULT_BATCH_MS) {
     this.ctx = ctx;
     this.durability = durability;
+    this.batchMs = durability === "on" ? batchMs : 0;
     const batches = committedBatches(ctx.state());
     this.sql = new LocalSql(batches);
     this.committed = batches.length;
@@ -119,6 +126,8 @@ export class SqlJournal implements SqlHost {
   }
 
   close(): void {
+    this.closed = true;
+    this.hurry?.();
     this.sql.close();
   }
 
@@ -127,8 +136,22 @@ export class SqlJournal implements SqlHost {
     if (!transaction && !this.flushing && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve, reject) => {
       this.queue.push({ transaction, resolve, reject });
+      if (!transaction) this.hurry?.();
       void this.flush();
     });
+  }
+
+  private pace(): Promise<void> {
+    const wait = this.queue.some(entry => !entry.transaction) ? 0 : this.lastBatch + this.batchMs - performance.now();
+    if (wait <= 0) return new Promise(resolve => setImmediate(resolve));
+    return new Promise<void>(resolve => {
+      const timer = setTimeout(done, wait);
+      this.hurry = done;
+      function done() {
+        clearTimeout(timer);
+        resolve();
+      }
+    }).finally(() => { this.hurry = undefined; });
   }
 
   private async flush(): Promise<void> {
@@ -136,7 +159,12 @@ export class SqlJournal implements SqlHost {
     this.flushing = true;
     try {
       while (this.queue.length) {
-        await new Promise(resolve => setImmediate(resolve));
+        await this.pace();
+        if (this.closed) {
+          const error = new Error("the SQL journal closed with writes that were not committed");
+          for (const entry of this.queue.splice(0)) entry.reject(error);
+          return;
+        }
         const entries = this.queue.splice(0);
         const transactions = entries.flatMap(entry => entry.transaction ? [entry.transaction] : []);
         try {
@@ -161,6 +189,7 @@ export class SqlJournal implements SqlHost {
     this.stats.batch_wait_ms += performance.now() - started;
     if (output.writer !== this.writer) throw new Restart(`SQL batch ${n} was committed by another drive`);
     this.committed = n + 1;
+    this.lastBatch = performance.now();
     this.stats.batches++;
   }
 }

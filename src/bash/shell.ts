@@ -1,4 +1,4 @@
-import { FsError, decode, encode, resolvePath, type FileSystem } from "./fs.ts";
+import { FsError, decode, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
 import { DECLARATIONS, SyntaxError as ParseError, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
 import { ArithError, evaluateArith } from "./arith.ts";
 import { escapeRegExp, globRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
@@ -89,7 +89,7 @@ export class Output {
 
   text(): string {
     if (this.#chunks.length > 1) this.#chunks = [this.#chunks.join("")];
-    return this.#chunks[0] ?? "";
+    return rejoin(this.#chunks[0] ?? "");
   }
 }
 

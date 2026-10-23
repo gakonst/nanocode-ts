@@ -104,6 +104,8 @@ export class AgentRuntime {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
     this.options = { ...options, published: this.options.published, wake: this.options.wake };
+    const extra = config.code_mode ? options.workspace?.instructions : undefined;
+    if (extra && !config.instructions?.includes(extra)) config = { ...config, instructions: config.instructions ? config.instructions + "\n\n" + extra : extra };
     this.hands = config.hands ?? false;
     this.remote = config.remote ?? false;
     this.subscription = config.subscription;
@@ -517,6 +519,13 @@ export class AgentRuntime {
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
         return await this.workspace().run({ command: request.command, cwd: request.cwd, timeout_ms: request.timeout_ms ?? null, ...(typeof request.stdin === "string" ? { stdin: request.stdin } : {}) }, controller.signal);
+      }
+      case "cell_wasm": {
+        const workspace = this.workspace();
+        if (!workspace.wasm) throw new Error("this workspace does not run WebAssembly");
+        const controller = new AbortController();
+        this.onCancel(id, () => controller.abort());
+        return await workspace.wasm(request.request, controller.signal);
       }
       case "cell_fetch": {
         const input = request.request as { url: string; method?: string; headers?: Record<string, string>; body?: string; body_base64?: string };

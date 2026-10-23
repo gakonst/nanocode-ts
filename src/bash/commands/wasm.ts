@@ -1,12 +1,15 @@
 import { CommandError, LimitError, type CommandContext, type CommandHandler } from "../shell.ts";
-import { encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
+import { decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
 import { mkdirs } from "./files.ts";
+import { load, Refused, Trap, type HostFunction, type Live, type Loaded, type WasmOptions } from "./engine.ts";
+
+export { type WasmOptions } from "./engine.ts";
 
 const SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 const SNAPSHOT_ENTRIES = 20_000;
 
-const MODULES = new Map<string, WebAssembly.Module>();
+const MODULES = new Map<string, { loaded: Loaded; interpreter: WasmOptions["interpreter"] }>();
 
 const E = { SUCCESS: 0, ACCES: 2, BADF: 8, EXIST: 20, FBIG: 22, INVAL: 28, IO: 29, ISDIR: 31, NOENT: 44, NOSYS: 52, NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, PERM: 63, SPIPE: 70, NOTCAPABLE: 76, NAMETOOLONG: 37, NOTSOCK: 57 } as const;
 
@@ -128,21 +131,26 @@ async function sha256(bytes: Uint8Array): Promise<string> {
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function compile(bytes: Uint8Array): Promise<WebAssembly.Module> {
-  const key = await sha256(bytes);
+export async function compile(bytes: Uint8Array, options: WasmOptions = {}): Promise<Loaded> {
+  const key = (await sha256(bytes)) + (options.force ? ":interpreter" : "");
   const cached = MODULES.get(key);
-  if (cached) return cached;
-  let module: WebAssembly.Module;
+  if (cached && cached.interpreter === options.interpreter) return cached.loaded;
+  let loaded: Loaded;
   try {
-    module = await (WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }).compile(bytes.slice());
+    loaded = await load(bytes, options);
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
-    if (/disallowed|not allowed|code generation|CSP|unsafe-eval/i.test(text)) throw new CommandError("this host cannot compile WebAssembly at runtime (" + text + ")", 126);
+    if (error instanceof Refused) throw new CommandError(text, 126);
     throw new CommandError("invalid WebAssembly module: " + text, 126);
   }
-  if (MODULES.size >= 16) MODULES.delete(MODULES.keys().next().value!);
-  MODULES.set(key, module);
-  return module;
+  if (cached) cached.loaded.dispose();
+  if (MODULES.size >= 16) {
+    const oldest = MODULES.keys().next().value!;
+    MODULES.get(oldest)?.loaded.dispose();
+    MODULES.delete(oldest);
+  }
+  MODULES.set(key, { loaded, interpreter: options.interpreter });
+  return loaded;
 }
 
 export function isWasm(bytes: Uint8Array): boolean {
@@ -192,7 +200,7 @@ function parse(ctx: CommandContext): Run {
   return run;
 }
 
-export const wasm: CommandHandler = async ctx => {
+const handler = (options: WasmOptions): CommandHandler => async ctx => {
   const run = parse(ctx);
   const path = ctx.resolve(run.file);
   const stat = await ctx.fs.stat(path);
@@ -200,7 +208,7 @@ export const wasm: CommandHandler = async ctx => {
   if (stat.kind !== "file") throw new CommandError(run.file + ": Is a directory", 126);
   const bytes = await ctx.fs.read(path);
   if (!isWasm(bytes)) throw new CommandError(run.file + ": not a WebAssembly module (no \\0asm header)", 126);
-  const module = await compile(bytes);
+  const module = await compile(bytes, options);
   const tree = new Tree();
   for (const arg of [...run.dirs.map(dir => dir.host), ...run.args]) {
     if (!arg || arg.startsWith("-") || arg.length > 4096) continue;
@@ -219,10 +227,9 @@ export const wasm: CommandHandler = async ctx => {
 
 type Result = { code: number; error?: unknown };
 
-function execute(ctx: CommandContext, module: WebAssembly.Module, tree: Tree, run: Run): Result {
-  const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Result {
   const deadline = Date.now() + ctx.limits.timeoutMs;
-  let memory: WebAssembly.Memory | undefined;
+  let live: Live | undefined;
   let stdin: Uint8Array | null = null;
   let stdinPosition = 0;
   const warned = new Set<string>();
@@ -240,8 +247,8 @@ function execute(ctx: CommandContext, module: WebAssembly.Module, tree: Tree, ru
   const argv = [run.file, ...run.args].map(arg => encode(arg + "\0"));
   const environ = Object.entries(run.env).map(([key, value]) => encode(key + "=" + value + "\0"));
 
-  const view = () => new DataView(memory!.buffer);
-  const bytes = () => new Uint8Array(memory!.buffer);
+  const view = () => live!.view();
+  const bytes = () => live!.bytes();
   const text = (pointer: number, length: number) => new TextDecoder().decode(bytes().subarray(pointer, pointer + length));
   const check = () => {
     if (ctx.signal.aborted || Date.now() > deadline) throw new LimitError("wasm: execution timed out after " + ctx.limits.timeoutMs + " ms", 124);
@@ -367,7 +374,7 @@ function execute(ctx: CommandContext, module: WebAssembly.Module, tree: Tree, ru
 
   const emit = (kind: "stdout" | "stderr", chunk: Uint8Array) => {
     const out = kind === "stdout" ? ctx.stdout : ctx.stderr;
-    out.write(decoders[kind].decode(chunk, { stream: true }));
+    out.write(decode(chunk));
   };
 
   const removeNode = (path: string, directory: boolean): number => {
@@ -725,43 +732,33 @@ function execute(ctx: CommandContext, module: WebAssembly.Module, tree: Tree, ru
     path_link: () => E.NOTSUP,
   };
 
-  const imports: WebAssembly.Imports = {};
-  for (const entry of WebAssembly.Module.imports(module)) {
+  const imports: HostFunction[] = [];
+  for (const entry of module.imports) {
     if (entry.kind !== "function") return { code: 126, error: new CommandError(run.file + " imports the " + entry.kind + " " + entry.module + "." + entry.name + ", which this host does not provide (only WASI preview1 functions)", 126) };
-    const space = (imports[entry.module] ??= {}) as Record<string, unknown>;
-    if (entry.module === "wasi_snapshot_preview1" || entry.module === "wasi_unstable") space[entry.name] = wasi[entry.name] ?? (() => E.NOSYS);
+    if (entry.module === "wasi_snapshot_preview1" || entry.module === "wasi_unstable") imports.push(wasi[entry.name] ?? (() => E.NOSYS));
     else
-      space[entry.name] = () => {
+      imports.push(() => {
         throw new CommandError(run.file + " called " + entry.module + "." + entry.name + ", which this host does not provide (only WASI preview1)", 126);
-      };
+      });
   }
 
   let code = 0;
   let error: unknown;
   try {
-    const instance = new WebAssembly.Instance(module, imports);
-    const exports = instance.exports;
-    const exported = exports["memory"];
-    if (exported instanceof WebAssembly.Memory) memory = exported;
-    const initialize = exports["_initialize"];
-    const start = exports["_start"];
-    if (typeof initialize === "function" && (typeof start !== "function" || run.invoke !== undefined)) initialize();
+    live = module.instantiate(imports, { check });
+    const exported = (name: string) => module.exports.some(entry => entry.name === name && entry.kind === "function");
+    const initialize = exported("_initialize");
+    const start = exported("_start");
+    if (initialize && (!start || run.invoke !== undefined)) live.call("_initialize", [], { check });
     if (run.invoke !== undefined) {
-      const fn = exports[run.invoke];
-      if (typeof fn !== "function") throw new CommandError(run.file + " does not export a function named " + run.invoke, 1);
-      let value: unknown;
-      try {
-        value = fn(...run.args.map(Number));
-      } catch (failure) {
-        if (!(failure instanceof TypeError)) throw failure;
-        value = fn(...run.args.map(arg => BigInt(arg)));
-      }
-      if (value !== undefined) ctx.stdout.write(String(value) + "\n");
-    } else if (typeof start === "function") start();
-    else if (typeof initialize !== "function") throw new CommandError(run.file + " exports neither _start nor _initialize; call one of its functions with --invoke NAME", 1);
+      if (!exported(run.invoke)) throw new CommandError(run.file + " does not export a function named " + run.invoke, 1);
+      const value = live.call(run.invoke, run.args, { check });
+      if (value !== undefined) ctx.stdout.write((Array.isArray(value) ? value.join(" ") : String(value)) + "\n");
+    } else if (start) live.call("_start", [], { check });
+    else if (!initialize) throw new CommandError(run.file + " exports neither _start nor _initialize; call one of its functions with --invoke NAME", 1);
   } catch (failure) {
     if (failure instanceof Exit) code = failure.code;
-    else if (failure instanceof WebAssembly.RuntimeError) {
+    else if (failure instanceof WebAssembly.RuntimeError || failure instanceof Trap) {
       ctx.stderr.write(run.file + ": wasm trap: " + failure.message + "\n");
       code = 134;
     } else if (failure instanceof Error && failure.name === "LinkError") error = new CommandError("cannot instantiate " + run.file + ": " + failure.message, 126);
@@ -770,12 +767,7 @@ function execute(ctx: CommandContext, module: WebAssembly.Module, tree: Tree, ru
       code = 134;
     } else error = failure;
   }
-  try {
-    ctx.stdout.write(decoders.stdout.decode());
-    ctx.stderr.write(decoders.stderr.decode());
-  } catch (failure) {
-    error ??= failure;
-  }
+  live?.dispose();
   return error === undefined ? { code } : { code, error };
 }
 
@@ -818,4 +810,145 @@ async function removeTree(fs: FileSystem, path: string): Promise<void> {
   });
 }
 
-export const wasmCommands: Record<string, CommandHandler> = { wasm, wasmtime: wasm };
+export function wasmCommands(options: WasmOptions = {}): Record<string, CommandHandler> {
+  const wasm = handler(options);
+  return { wasm, wasmtime: wasm };
+}
+
+type CellShell = { fs: FileSystem; cwd: string; limits: { timeoutMs: number }; exec(script: string, options: { stdin?: string; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number }> };
+
+type CellRequest = { op?: unknown; module?: unknown; path?: unknown; args?: unknown; stdin?: unknown; env?: unknown; id?: unknown; name?: unknown; offset?: unknown; length?: unknown; data?: unknown; pages?: unknown };
+
+const CELL_INSTANCES = 16;
+
+function fromBase64(text: string): Uint8Array {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  return btoa(binary);
+}
+
+function shellQuote(text: string): string {
+  return /^[\w@%+=:,./-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+function toWire(value: unknown): unknown {
+  if (typeof value === "bigint") return { bigint: String(value) };
+  if (Array.isArray(value)) return value.map(toWire);
+  return value;
+}
+
+function fromWire(value: unknown): number | bigint | string {
+  if (typeof value === "object" && value !== null && typeof (value as { bigint?: unknown }).bigint === "string") return BigInt((value as { bigint: string }).bigint);
+  if (typeof value === "string" || typeof value === "bigint") return value;
+  return Number(value);
+}
+
+export function wasmHost(shell: CellShell, options: WasmOptions = {}): (request: unknown, signal: AbortSignal) => Promise<unknown> {
+  const instances = new Map<number, Live>();
+  let next = 0;
+  const source = async (request: CellRequest): Promise<{ bytes: Uint8Array; path?: string }> => {
+    if (typeof request.module === "string") return { bytes: fromBase64(request.module) };
+    if (typeof request.path !== "string") throw new Error("wasm expects the module's bytes or a path");
+    const path = normalize(request.path.startsWith("/") ? request.path : shell.cwd + "/" + request.path);
+    const stat = await shell.fs.stat(path);
+    if (!stat || stat.kind !== "file") throw new Error(request.path + ": No such file");
+    return { bytes: await shell.fs.read(path), path };
+  };
+  const checker = (signal: AbortSignal) => {
+    const deadline = Date.now() + shell.limits.timeoutMs;
+    return () => {
+      if (signal.aborted || Date.now() > deadline) throw new LimitError("wasm: execution timed out after " + shell.limits.timeoutMs + " ms", 124);
+    };
+  };
+  const loaded = async (request: CellRequest) => {
+    const found = await source(request);
+    if (!isWasm(found.bytes)) throw new Error("not a WebAssembly module (no \\0asm header)");
+    return compile(found.bytes, options).catch(error => {
+      throw new Error(error instanceof Error ? error.message : String(error));
+    });
+  };
+  const instance = (request: CellRequest) => {
+    const live = instances.get(Number(request.id));
+    if (!live) throw new Error("no WebAssembly instance " + String(request.id) + " (instances last for this session's runtime)");
+    return live;
+  };
+  const args = (request: CellRequest) => (Array.isArray(request.args) ? request.args.map(fromWire) : []);
+  return async (input, signal) => {
+    const request = (input ?? {}) as CellRequest;
+    try {
+      switch (request.op) {
+        case "run": {
+          const found = await source(request);
+          let file = found.path;
+          if (file === undefined) {
+            file = "/tmp/.wasm/" + (await sha256(found.bytes)).slice(0, 16) + ".wasm";
+            await mkdirs(shell.fs, parentOf(file));
+            await shell.fs.write(file, found.bytes);
+          }
+          const env = typeof request.env === "object" && request.env !== null ? Object.entries(request.env as Record<string, unknown>).flatMap(([key, value]) => ["--env", key + "=" + String(value)]) : [];
+          const words = ["wasm", ...env, "--", file, ...(Array.isArray(request.args) ? request.args.map(String) : [])];
+          const result = await shell.exec(words.map(shellQuote).join(" "), { signal, ...(typeof request.stdin === "string" ? { stdin: request.stdin } : {}) });
+          return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode };
+        }
+        case "instantiate": {
+          const module = await loaded(request);
+          const live = module.instantiate([], { check: checker(signal) });
+          const id = ++next;
+          instances.set(id, live);
+          if (instances.size > CELL_INSTANCES) {
+            const oldest = instances.keys().next().value!;
+            instances.get(oldest)?.dispose();
+            instances.delete(oldest);
+          }
+          return { id, engine: live.engine, exports: module.exports.map(entry => ({ name: entry.name, kind: entry.kind })) };
+        }
+        case "invoke": {
+          const module = await loaded(request);
+          const check = checker(signal);
+          const live = module.instantiate([], { check });
+          try {
+            return { result: toWire(live.call(String(request.name), args(request), { check })) ?? null, engine: live.engine };
+          } finally {
+            live.dispose();
+          }
+        }
+        case "call":
+          return { result: toWire(instance(request).call(String(request.name), args(request), { check: checker(signal) })) ?? null };
+        case "read": {
+          const bytes = instance(request).bytes();
+          const offset = Number(request.offset ?? 0);
+          const length = request.length === undefined ? bytes.length - offset : Number(request.length);
+          if (offset < 0 || length < 0 || offset + length > bytes.length) throw new Error("read outside the instance's memory (" + bytes.length + " bytes)");
+          return { data: toBase64(bytes.slice(offset, offset + length)), size: bytes.length };
+        }
+        case "write": {
+          const bytes = instance(request).bytes();
+          const data = fromBase64(String(request.data ?? ""));
+          const offset = Number(request.offset ?? 0);
+          if (offset < 0 || offset + data.length > bytes.length) throw new Error("write outside the instance's memory (" + bytes.length + " bytes)");
+          bytes.set(data, offset);
+          return { size: bytes.length };
+        }
+        case "grow":
+          return { previous: instance(request).grow(Number(request.pages ?? 0)) };
+        case "drop": {
+          instances.get(Number(request.id))?.dispose();
+          instances.delete(Number(request.id));
+          return {};
+        }
+        default:
+          throw new Error("wasm op must be run, invoke, instantiate, call, read, write, grow or drop");
+      }
+    } catch (error) {
+      if (error instanceof Exit) throw new Error("the module exited with code " + error.code);
+      throw error instanceof Error ? new Error(error.message) : error;
+    }
+  };
+}

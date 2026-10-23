@@ -51,7 +51,7 @@ function directory(path) {
     else if (file.isFile()) include(child);
   }
 }
-for (const file of ["Cargo.toml", "Cargo.lock", "scripts/build.mjs", "../nanocodex/Cargo.toml", "../nanocodex/Cargo.lock"]) include(file);
+for (const file of ["Cargo.toml", "Cargo.lock", "scripts/build.mjs", "src/wasm/prelude.js", "../nanocodex/Cargo.toml", "../nanocodex/Cargo.lock"]) include(file);
 for (const root of [".", "../nanocodex"]) for (const name of ["rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "build.rs"]) if (existsSync(join(root, name))) include(join(root, name));
 for (const file of readdirSync("src", { recursive: true }).filter(file => file.endsWith(".rs")).sort()) include(join("src", file));
 directory("../nanocodex/crates");
@@ -77,6 +77,14 @@ const bytes = readFileSync(artifact);
 let previous;
 try { previous = readFileSync("dist/nanocode_wasm.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previous?.equals(bytes)) writeFileSync("dist/nanocode_wasm.wasm", bytes);
+
+const interpreter = spawnSync("cargo", ["build", "--locked", "--release", "--target", "wasm32-unknown-unknown", "--target-dir", "../target/interpreter"], { cwd: "interpreter", stdio: "inherit" });
+if (interpreter.error) throw interpreter.error;
+if (interpreter.status !== 0) process.exit(interpreter.status ?? 1);
+const interpreterBytes = readFileSync("target/interpreter/wasm32-unknown-unknown/release/nanocode_interpreter.wasm");
+let previousInterpreter;
+try { previousInterpreter = readFileSync("dist/interpreter.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+if (!previousInterpreter?.equals(interpreterBytes)) writeFileSync("dist/interpreter.wasm", interpreterBytes);
 
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });

@@ -1,3 +1,5 @@
+import { byte } from "./fs.ts";
+
 const CLASSES: Record<string, string> = {
   alpha: "a-zA-Z",
   digit: "0-9",
@@ -124,15 +126,16 @@ export function joinLines(parts: string[]): string {
 }
 
 const ESCAPE = /^\\(0[0-7]{0,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[\s\S])/;
+const OCTAL = /^\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[\s\S])/;
 const SIMPLE: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v", "\\": "\\" };
 
-function escape(text: string): [string, number, boolean] {
-  const match = text.match(ESCAPE);
+function escape(text: string, octal = false): [string, number, boolean] {
+  const match = text.match(octal ? OCTAL : ESCAPE);
   if (!match) return ["\\", 1, false];
   const body = match[1];
   if (body === "c") return ["", 2, true];
-  if (body[0] === "0") return [String.fromCharCode(parseInt(body.slice(1) || "0", 8)), match[0].length, false];
-  if (body.length > 1 && body[0] === "x") return [String.fromCharCode(parseInt(body.slice(1), 16)), match[0].length, false];
+  if (octal ? /^[0-7]/.test(body) : body[0] === "0") return [byte(parseInt((octal ? body : body.slice(1)) || "0", 8)), match[0].length, false];
+  if (body.length > 1 && body[0] === "x") return [byte(parseInt(body.slice(1), 16)), match[0].length, false];
   if (body.length > 1 && (body[0] === "u" || body[0] === "U")) return [String.fromCodePoint(parseInt(body.slice(1), 16)), match[0].length, false];
   return [body in SIMPLE ? SIMPLE[body] : "\\" + body, match[0].length, false];
 }
@@ -204,7 +207,7 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
   for (let i = 0; i < spec.length; i++) {
     const c = spec[i];
     if (c === "\\" && shell) {
-      const [value, length, stop] = escape(spec.slice(i));
+      const [value, length, stop] = escape(spec.slice(i), true);
       if (stop) return { text: out, used, stop: true };
       out += value;
       i += length - 1;

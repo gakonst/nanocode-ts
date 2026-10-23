@@ -197,10 +197,12 @@ export type ShellRun = { command: string; cwd: string; timeout_ms: number | null
 export type ShellOutput = { stdout: string; stderr: string; exit_code: number; truncated: boolean };
 
 export interface WorkspaceHost {
+  instructions?: string;
   read(path: string): Promise<string | null>;
   write(path: string, contents: string): Promise<void>;
   remove(path: string): Promise<void>;
   run(request: ShellRun, signal: AbortSignal): Promise<ShellOutput>;
+  wasm?(request: unknown, signal: AbortSignal): Promise<unknown>;
 }
 
 export type LogPageOptions = { request_id?: string; max_bytes?: number };

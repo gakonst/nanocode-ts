@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
+import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
 import { DEFAULT_EXECUTOR, EXECUTOR_ID, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
@@ -572,7 +573,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             : undefined;
           void connecting?.catch(() => {});
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
-          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch });
+          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter } });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
