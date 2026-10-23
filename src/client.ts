@@ -24,7 +24,7 @@ export type ToolCell = {
   children: ToolCell[];
 };
 
-export type Entry = { kind: EntryKind; text: string; tool?: ToolCell };
+export type Entry = { kind: EntryKind; text: string; tool?: ToolCell; started_at?: number; ended_at?: number; steer?: boolean };
 
 export type LiveEvent = { type: string; [field: string]: unknown };
 
@@ -43,7 +43,7 @@ function parentOf(payload: Record<string, unknown>): string | undefined {
 
 export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
   const body = logged.event as LoggedBody;
-  const base = { seq: logged.seq, request_id: logged.request_id };
+  const base = { seq: logged.seq, request_id: logged.request_id, ...(typeof logged.created_at === "number" ? { at: logged.created_at } : {}) };
   if (body.source === "agent" && body.event) {
     const { type, payload } = body.event;
     switch (type) {
@@ -384,8 +384,9 @@ export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
   const raw = textOf(event.result);
   const structured = event.structured && typeof event.structured === "object" ? event.structured as Record<string, unknown> : {};
   let status: ToolStatus = event.status === "completed" ? "completed" : event.status === "cancelled" ? "cancelled" : "failed";
-  if (typeof event.duration_ns === "number") cell.duration_ms = event.duration_ns / 1e6;
-  else if (cell.status === "running") cell.duration_ms = Date.now() - cell.started_at;
+  if (typeof event.duration_ns === "number") {
+    if (event.duration_ns > 0) cell.duration_ms = event.duration_ns / 1e6;
+  } else if (cell.status === "running") cell.duration_ms = at(event) - cell.started_at;
   if (CODE_TOOLS.has(cell.tool) || cell.tool === "wait") {
     const header = raw.split("\n", 1)[0] ?? "";
     status = codeStatus(header) ?? status;
@@ -416,6 +417,10 @@ export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
   return cell;
 }
 
+export function at(event: LiveEvent): number {
+  return typeof event.at === "number" ? event.at : Date.now();
+}
+
 export function toolSummary(cell: ToolCell): string {
   const head = [cell.name, cell.title].filter(Boolean).join(" ");
   const meta = [cell.status === "completed" ? "" : cell.status, cell.duration_ms !== undefined ? duration(cell.duration_ms) : "", ...cell.details].filter(Boolean).join(" · ");
@@ -435,7 +440,7 @@ export function describe(event: LiveEvent, limit = 160): Entry | undefined {
     case "tool_start": return { kind: "tool", text: `${event.name} ${JSON.stringify(event.args)}` };
     case "tool_end": return { kind: "tool", text: `${event.name} ${event.status}: ${clip(typeof result === "string" ? result : result?.text ?? "", limit)}` };
     case "retrying": return { kind: "tool", text: `Retrying: ${typeof event.error === "string" ? event.error : JSON.stringify(event.error ?? event.message ?? "")}` };
-    case "turn": return event.status === "completed" ? undefined : { kind: "error", text: `The turn ${event.status}: ${JSON.stringify(event.error ?? "")}` };
+    case "turn": return event.status === "completed" ? undefined : event.status === "cancelled" ? { kind: "error", text: "The turn was cancelled." } : { kind: "error", text: `The turn ${event.status}: ${JSON.stringify(event.error ?? "")}` };
     case "error": return { kind: "error", text: typeof event.message === "string" ? event.message : JSON.stringify(event) };
     case "steered": return { kind: "tool", text: "steered into the running turn" };
     default: return undefined;
@@ -479,9 +484,9 @@ export type TranscriptOptions = {
   limit?: number;
 };
 
-type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string };
+type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string; started?: number; ended?: number };
 
-type Queued = { event: LiveEvent } | { run: () => void };
+type Queued = { event: LiveEvent } | { run: () => void } | { aside: Entry };
 
 const TOOL_EVENTS = new Set(["tool_input", "tool_start", "tool_output", "tool_end"]);
 
@@ -496,6 +501,7 @@ export class Transcript {
   private readonly calls = new Map<string, ToolCell>();
   private readonly inputs = new Map<string, ToolInput>();
   private readonly links = new Map<string, { cell: string; latest: string }>();
+  private held: Entry[] = [];
 
   constructor(options: TranscriptOptions) {
     this.options = options;
@@ -509,6 +515,10 @@ export class Transcript {
     this.enqueue({ run: callback });
   }
 
+  aside(entry: Entry): void {
+    this.enqueue({ aside: entry });
+  }
+
   reset(): void {
     if (this.frame !== undefined) clearTimeout(this.frame);
     this.frame = undefined;
@@ -519,6 +529,7 @@ export class Transcript {
     this.calls.clear();
     this.inputs.clear();
     this.links.clear();
+    this.held = [];
     this.clock = 0;
     this.options.live([]);
   }
@@ -528,12 +539,22 @@ export class Transcript {
     if (this.frame === undefined) this.frame = setTimeout(() => this.step());
   }
 
+  private timing(): Pick<Entry, "started_at" | "ended_at"> {
+    const { started, ended } = this.stream;
+    return { ...(started !== undefined ? { started_at: started } : {}), ...(ended !== undefined ? { ended_at: ended } : {}) };
+  }
+
+  private release(): void {
+    for (const entry of this.held.splice(0)) this.options.add(entry);
+  }
+
   private flush(): void {
     const { kind, posted, text } = this.stream;
-    if (kind === "assistant") for (const chunk of paragraphs(text, posted, true).chunks) this.options.add({ kind, text: chunk });
-    else if (kind === "reasoning" && text.trim()) this.options.add({ kind, text: text.trim() });
+    if (kind === "assistant") for (const chunk of paragraphs(text, posted, true).chunks) this.options.add({ kind, text: chunk, ...this.timing() });
+    else if (kind === "reasoning" && text.trim()) this.options.add({ kind, text: text.trim(), ...this.timing() });
     this.stream = { posted: 0, shown: 0, text: "" };
     this.streaming = undefined;
+    this.release();
   }
 
   private reveal(): void {
@@ -542,14 +563,15 @@ export class Transcript {
     if (current.kind === "assistant") {
       const { chunks, next } = paragraphs(visible, current.posted);
       current.posted = next;
-      for (const chunk of chunks) this.options.add({ kind: current.kind, text: chunk });
+      for (const chunk of chunks) this.options.add({ kind: current.kind, text: chunk, ...this.timing() });
+      if (chunks.length) this.release();
     }
     const rest = visible.slice(current.posted).trim();
-    this.streaming = rest && current.kind ? { kind: current.kind, text: rest } : undefined;
+    this.streaming = rest && current.kind ? { kind: current.kind, text: rest, ...(current.started !== undefined ? { started_at: current.started } : {}) } : undefined;
   }
 
   private emit(): void {
-    const entries: Entry[] = this.running.map(cell => ({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell) }));
+    const entries: Entry[] = this.running.map(cell => ({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell), started_at: cell.started_at }));
     if (this.streaming) entries.push(this.streaming);
     this.options.live(entries);
   }
@@ -563,7 +585,7 @@ export class Transcript {
     let cell = this.calls.get(id);
     if (!cell) {
       if (event.type === "tool_output") return;
-      cell = toolCell(id, typeof event.name === "string" ? event.name : "tool");
+      cell = toolCell(id, typeof event.name === "string" ? event.name : "tool", at(event));
       this.calls.set(id, cell);
       const parent = typeof event.parent === "string" ? this.calls.get(this.resolve(event.parent)) : undefined;
       if (parent) parent.children.push(cell);
@@ -599,7 +621,7 @@ export class Transcript {
       const cell = this.running.shift()!;
       finish(cell, all ?? cell.status);
       this.forget(cell);
-      this.options.add({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell) });
+      this.options.add({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell), started_at: cell.started_at, ...(cell.duration_ms !== undefined ? { ended_at: cell.started_at + cell.duration_ms } : {}) });
     }
   }
 
@@ -628,6 +650,13 @@ export class Transcript {
         current.kind = kind;
         current.item = item;
         current.text += typeof event.delta === "string" ? event.delta : "";
+        current.started ??= at(event);
+        current.ended = at(event);
+        continue;
+      }
+      if (next && "aside" in next && current.kind === "assistant" && current.text.slice(current.posted).trim()) {
+        this.queue.shift();
+        this.held.push(next.aside);
         continue;
       }
       if (current.shown < current.text.length) {
@@ -645,8 +674,12 @@ export class Transcript {
         next.run();
         continue;
       }
+      if ("aside" in next) {
+        this.options.add(next.aside);
+        continue;
+      }
       if (kind) {
-        this.stream = { kind, item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "" };
+        this.stream = { kind, item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "", started: at(next.event), ended: at(next.event) };
         continue;
       }
       if (TOOL_EVENTS.has(next.event.type)) {
@@ -703,9 +736,51 @@ export type Transport = {
   send(parameters: TransportParameters): Promise<void>;
   steer?(parameters: TransportParameters): Promise<boolean>;
   resume?(parameters: Omit<TransportParameters, "prompt">): Promise<void>;
+  cancel?(): Promise<void>;
   snapshot?(): unknown;
   restore?(state: unknown): void;
 };
+
+export type TurnBlock = Entry & { live: boolean };
+
+export type Turn = { id: string; prompt: Entry | undefined; blocks: TurnBlock[]; live: boolean; started_at?: number; ended_at?: number };
+
+export function turns(entries: readonly Entry[], live: readonly Entry[] = [], pending = false): Turn[] {
+  const result: Turn[] = [];
+  const all = [...entries.map(entry => ({ entry, live: false })), ...live.map(entry => ({ entry, live: true }))];
+  for (const [index, item] of all.entries()) {
+    const entry = item.entry;
+    if (entry.kind === "user" || !result.length) result.push({ id: String(index), prompt: entry.kind === "user" ? entry : undefined, blocks: [], live: false, ...(entry.started_at !== undefined ? { started_at: entry.started_at } : {}) });
+    const turn = result[result.length - 1];
+    turn.live ||= item.live;
+    const ended = entry.ended_at ?? entry.started_at;
+    if (ended !== undefined && !item.live) turn.ended_at = ended;
+    if (entry.kind === "user") continue;
+    const last = turn.blocks[turn.blocks.length - 1];
+    if (last && last.kind === entry.kind && (entry.kind === "assistant" || entry.kind === "reasoning")) {
+      const merged: TurnBlock = { ...last, text: last.text + "\n\n" + entry.text, live: last.live || item.live };
+      if (entry.ended_at !== undefined && !item.live) merged.ended_at = entry.ended_at;
+      else delete merged.ended_at;
+      turn.blocks[turn.blocks.length - 1] = merged;
+    } else turn.blocks.push({ ...entry, live: item.live });
+  }
+  if (pending && result.length) result[result.length - 1].live = true;
+  for (const turn of result) if (turn.live) delete turn.ended_at;
+  return result;
+}
+
+export type ActivityPhase = "idle" | "waiting" | "thinking" | "writing" | "running";
+
+export type Activity = { busy: boolean; phase: ActivityPhase; tool?: string };
+
+export function activity(live: readonly Entry[], pending: boolean): Activity {
+  if (!pending) return { busy: false, phase: "idle" };
+  const last = live[live.length - 1];
+  if (last?.kind === "reasoning") return { busy: true, phase: "thinking" };
+  if (last?.kind === "assistant") return { busy: true, phase: "writing" };
+  if (last?.tool?.status === "running") return { busy: true, phase: "running", tool: last.tool.name };
+  return { busy: true, phase: "waiting" };
+}
 
 export type HistoryStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void; removeItem(key: string): void };
 
@@ -725,6 +800,8 @@ export type Config = {
   subscribe(listener: () => void): () => void;
   send(prompt: string): Promise<void>;
   resume(): Promise<void>;
+  cancel(): Promise<void>;
+  readonly cancellable: boolean;
   push(event: LiveEvent): void;
   run(callback: () => void): void;
   note(kind: EntryKind, text: string): void;
@@ -809,7 +886,10 @@ export function createConfig(options: ConfigOptions): Config {
     revealMs: options.revealMs,
     reducedMotion: () => { const media = (globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia; return typeof media === "function" && media("(prefers-reduced-motion: reduce)").matches; },
   });
-  const note = (kind: EntryKind, text: string) => transcript.run(() => add({ kind, text }));
+  const note = (kind: EntryKind, text: string) => {
+    const started_at = Date.now();
+    transcript.run(() => add({ kind, text, started_at }));
+  };
   const push = (event: LiveEvent) => {
     transcript.push(event);
     saveTransport();
@@ -843,22 +923,32 @@ export function createConfig(options: ConfigOptions): Config {
     async send(prompt) {
       const text = prompt.trim();
       if (!text) return;
-      note("user", text);
       if (state.status === "pending") {
+        transcript.aside({ kind: "user", text, started_at: Date.now(), steer: true });
         if (!options.transport.steer) return;
         try {
-          if (await options.transport.steer(parameters(text))) note("tool", "steered into the running turn");
+          if (await options.transport.steer(parameters(text))) transcript.aside({ kind: "tool", text: "steered into the running turn", started_at: Date.now() });
         } catch (error) {
           note("error", error instanceof Error ? error.message : String(error));
         }
         return;
       }
+      note("user", text);
       await settle(options.transport.send(parameters(text)));
     },
     async resume() {
       if (!options.transport.resume || state.status === "pending") return;
       await settle(options.transport.resume({ push, note }));
     },
+    async cancel() {
+      if (!options.transport.cancel || state.status !== "pending") return;
+      try {
+        await options.transport.cancel();
+      } catch (error) {
+        note("error", error instanceof Error ? error.message : String(error));
+      }
+    },
+    cancellable: Boolean(options.transport.cancel),
     push,
     run: callback => transcript.run(callback),
     note,
