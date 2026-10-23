@@ -2,6 +2,7 @@ mod branch;
 mod bridge;
 mod cells;
 mod events;
+mod hand;
 mod mcp;
 mod remote;
 mod store;
@@ -282,6 +283,18 @@ struct Annotation {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Command {
+    HandOpen {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(default)]
+        max_frame_bytes: Option<usize>,
+    },
+    HandFrame {
+        text: String,
+    },
+    HandClosed {},
     Configure {
         #[serde(default)]
         value_limit: Option<usize>,
@@ -1192,6 +1205,12 @@ fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'sta
 
 fn execute(command: Command) -> Executed {
     match command {
+        Command::HandOpen { name, workspace, max_frame_bytes } => executed(async move { hand::open(name, workspace, max_frame_bytes) }),
+        Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
+        Command::HandClosed {} => executed(async move {
+            hand::closed();
+            Ok(Value::Null)
+        }),
         Command::Configure {
             value_limit,
             logical_limit,
