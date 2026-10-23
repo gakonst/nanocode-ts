@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const root = fileURLToPath(new URL("..", import.meta.url));
-export const outputs = ["nanocode_wasm.wasm", "interpreter.wasm", "models.js", "models.d.ts"];
+export const outputs = ["nanocode_wasm.wasm", "models.js", "models.d.ts"];
 export const manifestName = "nanocode-wasm.json";
 export const repository = "gakonst/nanocode-ts";
 
 function sources() {
-  const files = ["sdk-revision.json", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/build.mjs", "scripts/wasm.mjs", "src/wasm/prelude.js", "interpreter/Cargo.toml", "interpreter/Cargo.lock"];
-  for (const directory of ["src", "interpreter/src"]) {
+  const files = ["sdk-revision.json", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/build.mjs", "scripts/wasm.mjs", "src/wasm/prelude.js"];
+  for (const directory of ["src"]) {
     for (const file of readdirSync(join(root, directory), { recursive: true })) {
       const path = directory + "/" + String(file).split("\\").join("/");
       if (path.endsWith(".rs")) files.push(path);
