@@ -76,7 +76,7 @@ export class AgentRuntime {
   private failure?: Error;
   private disposal?: Promise<void>;
   private readonly attached = new Set<string>();
-  private options: Partial<RuntimeOptions> & HostOptions;
+  private options: Partial<RuntimeOptions> & HostOptions & { handSend?(text: string): void };
   private readonly sql: SqlHost;
   hands = false;
   remote = false;
@@ -98,6 +98,18 @@ export class AgentRuntime {
       await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit });
     }
     return runtime;
+  }
+
+  async serveHand(options: { workspace: WorkspaceHost; cwd: string; fetch?: RuntimeOptions["fetch"]; name?: string; max_frame_bytes?: number; send(text: string): void }): Promise<{ catalog: string; receive(text: string): Promise<void>; closed(): Promise<void> }> {
+    if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
+    this.opened = true;
+    this.options = { ...this.options, workspace: options.workspace, ...(options.fetch ? { fetch: options.fetch } : {}), handSend: options.send };
+    const catalog = await this.command("hand_open", { name: options.name ?? null, workspace: options.cwd, max_frame_bytes: options.max_frame_bytes ?? null }) as string;
+    return {
+      catalog,
+      receive: async text => { await this.command("hand_frame", { text }); },
+      closed: async () => { await this.command("hand_closed", {}); },
+    };
   }
 
   async open(config: AgentConfiguration, options: RuntimeOptions): Promise<void> {
@@ -427,6 +439,10 @@ export class AgentRuntime {
       return this.options.remote.execute(request, id);
     }
     switch (request.op) {
+      case "hand_send": {
+        this.options.handSend?.(request.text);
+        return null;
+      }
       case "wake":
         this.notify();
         this.options.wake?.();
