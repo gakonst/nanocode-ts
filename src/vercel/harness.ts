@@ -5,6 +5,7 @@ import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule, quickjsModule } from "./module.ts";
 import { quickjs } from "../quickjs/index.ts";
+import { Bash, SqlFileSystem } from "../bash/index.ts";
 
 export const SCOPE = "session";
 
@@ -44,6 +45,7 @@ export interface NanocodeHarnessOptions {
   subagents?: boolean;
   streamToolInput?: boolean;
   codeMode?: boolean;
+  workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
 }
 
@@ -72,6 +74,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         publish(ctx, events);
       },
     });
+    const shell = options.workspace === false ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     const stop = () => void runtime.dispose().catch(() => undefined);
     ctx.signal.addEventListener("abort", stop, { once: true });
     try {
@@ -93,8 +96,10 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           stream_tool_input: options.streamToolInput,
           code_mode: options.codeMode,
           tools: definitions,
+          ...(shell ? { workspace: shell.cwd } : {}),
         }, {
-          remote: options.codeMode ? new LocalHand({ evaluate: quickjs({ wasm: await quickjsModule() }), fetch: options.fetch }) : undefined,
+          ...(shell ? { workspace: shell.workspace() } : {}),
+          remote: options.codeMode ? new LocalHand({ evaluate: quickjs({ wasm: await quickjsModule() }), fetch: options.fetch, ...(shell ? { bash: shell } : {}) }) : undefined,
           dispatch: (request, signal) => {
             counts.model_requests++;
             return dispatch(request, signal);

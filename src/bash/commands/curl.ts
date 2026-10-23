@@ -141,7 +141,7 @@ export const curl: CommandHandler = async ctx => {
   try {
     response = await ctx.fetch(url, { method, headers, body, redirect: flags.has("--location") ? "follow" : "manual", signal: controller.signal });
   } catch (error) {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     ctx.signal.removeEventListener("abort", abort);
     if (controller.signal.reason === "timeout") return fail(28, "Operation timed out after " + (Date.now() - started) + " milliseconds");
     if (ctx.signal.aborted) throw error;
@@ -152,7 +152,7 @@ export const curl: CommandHandler = async ctx => {
   try {
     bytes = new Uint8Array(await response.arrayBuffer());
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     ctx.signal.removeEventListener("abort", abort);
   }
   if (bytes.length > ctx.limits.maxBufferLength) throw new CommandError("response exceeded " + ctx.limits.maxBufferLength + " bytes", 63);

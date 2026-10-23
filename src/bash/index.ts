@@ -7,8 +7,10 @@ import { sed } from "./commands/sed.ts";
 import { awk } from "./commands/awk.ts";
 import { jq } from "./commands/jq.ts";
 import { curl } from "./commands/curl.ts";
+import { extraCommands } from "./commands/extra.ts";
 
 export { MemoryFileSystem, FsError, normalize, resolvePath, type FileInput, type FileKind, type FileStat, type FileSystem } from "./fs.ts";
+export { SqlFileSystem } from "./sql.ts";
 export { CommandError, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
 
 export type BashOptions = {
@@ -44,7 +46,7 @@ export const DEFAULT_LIMITS: Limits = {
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, sed, awk, gawk: awk, jq, curl };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, sed, awk, gawk: awk, jq, curl };
 
 export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
 
@@ -200,9 +202,9 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
   };
 }
 
-export const BASH_CODE_MODE_INSTRUCTIONS = "Code Mode cells also have `bash`, a simulated bash over an in-memory filesystem that keeps its files for this session: `await bash(\"ls -la | wc -l\")`, or as a tagged template, await bash`grep -rn ${pattern} src`, which quotes each interpolated value, resolves to { stdout, stderr, exitCode }, and `bash.readFile(path)` and `bash.writeFile(path, text)` reach the same files from JavaScript. It has the usual file and text tools (cat, ls, find, grep, sed, awk, jq, sort, uniq, cut, tr, xargs, head, tail, wc, diff, base64, sha256sum, ...), and its curl goes through the same paying fetch as `fetch`, so curl can call MPP services. Variables and the working directory reset between calls; files persist.";
+export const BASH_CODE_MODE_INSTRUCTIONS = "Code Mode cells also have `bash`, a simulated bash over a filesystem that keeps its files for this session: `await bash(\"ls -la | wc -l\")`, or as a tagged template, await bash`grep -rn ${pattern} src`, which quotes each interpolated value, resolves to { stdout, stderr, exitCode }, and `bash.readFile(path)` and `bash.writeFile(path, text)` reach the same files from JavaScript. It has the usual file and text tools (cat, ls, find, tree, grep, rg, sed, awk, jq, sort, uniq, cut, tr, xargs, head, tail, wc, diff, tar, gzip, base64, sha256sum, ...), and its curl goes through the same paying fetch as `fetch`, so curl can call MPP services. Variables and the working directory reset between calls; files persist.";
 
-export const BASH_TOOL_DESCRIPTION = "Run a bash script in a sandboxed, simulated shell (no real processes) over a persistent in-memory filesystem shared by every call; variables, functions and the working directory reset between calls. Supports pipes, redirections (> >> < 2> 2>&1 &> heredocs, here-strings), && || ;, if/for/while/until/case, functions, $(...), $((...)), globbing, brace expansion, arrays and set -euo pipefail. Commands: " + BASH_COMMANDS.join(", ") + ", plus builtins (cd, pwd, export, read, test/[ ], [[ ]], source, eval, printf -v, ...). jq covers paths, filters, map/select, reduce, assignment and -r/-c/-n/-s/--arg; curl supports -X -H -d --json -o -i -s -f -w -L and pays MPP (HTTP 402) services automatically when the host provides a paying fetch. Output is truncated when very long.";
+export const BASH_TOOL_DESCRIPTION = "Run a bash script in a sandboxed, simulated shell (no real processes) over a persistent filesystem shared by every call; variables, functions and the working directory reset between calls. Supports pipes, redirections (> >> < 2> 2>&1 &> heredocs, here-strings), && || ;, if/for/while/until/case, functions, $(...), $((...)), globbing, brace expansion, arrays and set -euo pipefail. Commands: " + BASH_COMMANDS.join(", ") + ", plus builtins (cd, pwd, export, read, test/[ ], [[ ]], source, eval, printf -v, ...). jq covers paths, filters, map/select, reduce, assignment and -r/-c/-n/-s/--arg; curl supports -X -H -d --json -o -i -s -f -w -L and pays MPP (HTTP 402) services automatically when the host provides a paying fetch. Output is truncated when very long.";
 
 export function bashTool(options: BashToolOptions = {}): HostTool {
   return {
