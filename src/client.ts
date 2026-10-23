@@ -675,7 +675,7 @@ export type PickerModel = Pick<ModelEntry, "id" | "name" | "efforts" | "effort">
 
 export type PickerHarness = { id: ModelProvider; label: string; models: PickerModel[] };
 
-export type PickerItem = { kind: "choice" | "header"; label: string; detail?: string; current?: boolean };
+export type PickerItem = { kind: "choice" | "header"; label: string; detail?: string; current?: boolean; value?: string };
 
 export function modelItems(harnesses: PickerHarness[], model: string, query: string): PickerItem[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -692,7 +692,9 @@ export function thinkingItems(model: PickerModel | undefined, thinking: string |
 
 export type ChatStatus = "idle" | "pending";
 
-export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined };
+export type Conversation = { id: string; title: string; updated: number };
+
+export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined; conversations: readonly Conversation[]; conversation: string | undefined };
 
 export type TransportParameters = { prompt: string; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void };
 
@@ -700,11 +702,18 @@ export type Transport = {
   send(parameters: TransportParameters): Promise<void>;
   steer?(parameters: TransportParameters): Promise<boolean>;
   resume?(parameters: Omit<TransportParameters, "prompt">): Promise<void>;
+  snapshot?(): unknown;
+  restore?(state: unknown): void;
 };
+
+export type HistoryStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void; removeItem(key: string): void };
+
+export type HistoryOptions = { key: string; storage?: HistoryStorage; limit?: number };
 
 export type ConfigOptions = {
   transport: Transport;
   persist?: { load(): readonly Entry[]; save(entries: readonly Entry[]): void };
+  history?: HistoryOptions;
   apply?(event: LiveEvent): void;
   revealMs?: number;
   keep?: number;
@@ -720,19 +729,77 @@ export type Config = {
   note(kind: EntryKind, text: string): void;
   clear(): void;
   reset(): void;
+  select(id: string): void;
+  create(): string | undefined;
+  remove(id: string): void;
 };
+
+function conversationId(): string {
+  const random = (globalThis as { crypto?: { randomUUID?(): string } }).crypto?.randomUUID?.();
+  return random ?? Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
 
 export function createConfig(options: ConfigOptions): Config {
   const listeners = new Set<() => void>();
-  let state: ChatState = { entries: options.persist?.load() ?? [], live: [], status: "idle", error: undefined };
+  const history = options.history && { key: options.history.key, storage: options.history.storage ?? (globalThis as { localStorage?: HistoryStorage }).localStorage, limit: options.history.limit ?? 50 };
+  const read = <T,>(key: string, fallback: T): T => {
+    try {
+      const value = history?.storage?.getItem(key);
+      return value ? JSON.parse(value) as T : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  const write = (key: string, value: unknown) => {
+    try {
+      history?.storage?.setItem(key, JSON.stringify(value));
+    } catch {}
+  };
+  const indexKey = () => `${history!.key}:history`;
+  const entriesKey = (id: string) => `${history!.key}:entries:${id}`;
+  const transportKey = (id: string) => `${history!.key}:transport:${id}`;
+  let conversations: Conversation[] = [];
+  let current: string | undefined;
+  if (history) {
+    const saved = read<{ current?: string; conversations?: Conversation[] }>(indexKey(), {});
+    conversations = (saved.conversations ?? []).filter(item => item && typeof item.id === "string");
+    current = saved.current && conversations.some(item => item.id === saved.current) ? saved.current : conversations[0]?.id;
+    if (!current) {
+      current = conversationId();
+      conversations = [{ id: current, title: "", updated: Date.now() }];
+    }
+    options.transport.restore?.(read(transportKey(current), undefined));
+  }
+  let state: ChatState = { entries: history ? read<Entry[]>(entriesKey(current!), []) : options.persist?.load() ?? [], live: [], status: "idle", error: undefined, conversations, conversation: current };
   const set = (next: Partial<ChatState>) => {
     state = { ...state, ...next };
     for (const listener of [...listeners]) listener();
   };
+  const saveIndex = () => {
+    if (history) write(indexKey(), { current, conversations });
+  };
+  const saveTransport = () => {
+    if (history && current && options.transport.snapshot) write(transportKey(current), options.transport.snapshot());
+  };
+  const forget = (id: string) => {
+    for (const key of [entriesKey(id), transportKey(id)]) try { history?.storage?.removeItem(key); } catch {}
+  };
   const add = (entry: Entry) => {
     const entries = [...state.entries, entry].slice(-(options.keep ?? 500));
-    options.persist?.save(entries);
-    set({ entries });
+    if (!history) {
+      options.persist?.save(entries);
+      set({ entries });
+      return;
+    }
+    write(entriesKey(current!), entries);
+    const existing = conversations.find(item => item.id === current);
+    const title = existing?.title || (entry.kind === "user" ? entry.text.replace(/\s+/g, " ").slice(0, 80) : "");
+    conversations = [{ id: current!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== current)];
+    for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
+    conversations = conversations.slice(0, history.limit);
+    saveIndex();
+    saveTransport();
+    set({ entries, conversations });
   };
   const transcript = new Transcript({
     add,
@@ -742,16 +809,31 @@ export function createConfig(options: ConfigOptions): Config {
     reducedMotion: () => { const media = (globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia; return typeof media === "function" && media("(prefers-reduced-motion: reduce)").matches; },
   });
   const note = (kind: EntryKind, text: string) => transcript.run(() => add({ kind, text }));
-  const parameters = (prompt: string): TransportParameters => ({ prompt, push: event => transcript.push(event), note });
+  const push = (event: LiveEvent) => {
+    transcript.push(event);
+    saveTransport();
+  };
+  const parameters = (prompt: string): TransportParameters => ({ prompt, push, note });
   const settle = (work: Promise<void>) => {
     set({ status: "pending", error: undefined });
     return work.catch((error: unknown) => {
       const failure = error instanceof Error ? error : new Error(String(error));
       note("error", failure.message);
       set({ error: failure });
-    }).finally(() => transcript.run(() => set({ status: "idle" })));
+    }).finally(() => transcript.run(() => {
+      saveTransport();
+      set({ status: "idle" });
+    }));
   };
-  return {
+  const open = (id: string, entries: Entry[]) => {
+    saveTransport();
+    transcript.reset();
+    current = id;
+    options.transport.restore?.(read(transportKey(id), undefined));
+    saveIndex();
+    set({ conversation: id, conversations: [...conversations], entries, live: [], error: undefined });
+  };
+  const config: Config = {
     getState: () => state,
     subscribe(listener) {
       listeners.add(listener);
@@ -774,12 +856,16 @@ export function createConfig(options: ConfigOptions): Config {
     },
     async resume() {
       if (!options.transport.resume || state.status === "pending") return;
-      await settle(options.transport.resume({ push: event => transcript.push(event), note }));
+      await settle(options.transport.resume({ push, note }));
     },
-    push: event => transcript.push(event),
+    push,
     run: callback => transcript.run(callback),
     note,
     clear() {
+      if (history) {
+        config.create();
+        return;
+      }
       transcript.reset();
       options.persist?.save([]);
       set({ entries: [], live: [], error: undefined });
@@ -788,5 +874,34 @@ export function createConfig(options: ConfigOptions): Config {
       transcript.reset();
       set({ live: [], status: "idle" });
     },
+    select(id) {
+      if (!history || id === current || state.status === "pending" || !conversations.some(item => item.id === id)) return;
+      open(id, read<Entry[]>(entriesKey(id), []));
+    },
+    create() {
+      if (!history || state.status === "pending") return current;
+      if (!state.entries.length) return current;
+      const id = conversationId();
+      conversations = [{ id, title: "", updated: Date.now() }, ...conversations].slice(0, history.limit);
+      open(id, []);
+      return id;
+    },
+    remove(id) {
+      if (!history || state.status === "pending") return;
+      forget(id);
+      conversations = conversations.filter(item => item.id !== id);
+      if (id !== current) {
+        saveIndex();
+        set({ conversations: [...conversations] });
+        return;
+      }
+      const next = conversations[0];
+      if (next) open(next.id, read<Entry[]>(entriesKey(next.id), []));
+      else {
+        conversations = [{ id: conversationId(), title: "", updated: Date.now() }];
+        open(conversations[0].id, []);
+      }
+    },
   };
+  return config;
 }

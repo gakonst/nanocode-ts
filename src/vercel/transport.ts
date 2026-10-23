@@ -104,6 +104,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       }
     },
     session: () => state,
+    snapshot: () => ({ ...state }),
+    restore(saved) {
+      state = saved && typeof saved === "object" ? { ...(saved as VercelSession) } : {};
+      warmed = undefined;
+    },
     warm() {
       if (state.id || warmed?.key === key()) return;
       const session = fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), warm: true }) }).then(async response => response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined, () => undefined);

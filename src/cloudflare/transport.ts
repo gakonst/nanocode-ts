@@ -133,6 +133,13 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       }
     },
     session: () => state,
+    snapshot: () => ({ ...state }),
+    restore(saved) {
+      state = saved && typeof saved === "object" ? { ...(saved as CloudflareSession) } : {};
+      warmed = undefined;
+      used = 0;
+      queued.length = 0;
+    },
     warm() {
       if (used && performance.now() - used < warmMs) return;
       used = performance.now();

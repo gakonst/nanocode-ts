@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { type ChatState, type Config, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell } from "../client.ts";
+import { type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell } from "../client.ts";
 import * as styles from "./styles.ts";
 
 export { styles };
@@ -66,6 +66,13 @@ export function useSend(): { send(prompt: string): Promise<void>; isPending: boo
   const status = useChatState(state => state.status);
   const error = useChatState(state => state.error);
   return { send: config.send, isPending: status === "pending", isIdle: status === "idle", error };
+}
+
+export function useConversations(): { conversations: readonly Conversation[]; current: string | undefined; enabled: boolean; select(id: string): void; create(): string | undefined; remove(id: string): void } {
+  const config = useConfig();
+  const conversations = useChatState(state => state.conversations);
+  const current = useChatState(state => state.conversation);
+  return { conversations, current, enabled: current !== undefined, select: config.select, create: config.create, remove: config.remove };
 }
 
 export function useNote(): (kind: EntryKind, text: string) => void {
@@ -247,7 +254,9 @@ const TYPING_DELAY_MS = 500;
 export function Chat(props: ChatProps) {
   const { entries, live } = useTranscript();
   const { send, isPending: busy } = useSend();
-  const picker = props.picker ?? null;
+  const threads = useConversations();
+  const [own, setOwn] = useState<Picker | null>(null);
+  const picker = props.picker ?? own;
   const [prompt, setPrompt] = useState(props.defaultPrompt ?? "");
   const [highlight, setHighlight] = useState(0);
   const [typing, setTyping] = useState(false);
@@ -323,6 +332,7 @@ export function Chat(props: ChatProps) {
   const choose = (item: PickerItem) => {
     if (!picker) return submit(item.label);
     setPrompt("");
+    if (picker === own) setOwn(null);
     picker.onChoose(item);
   };
 
@@ -337,7 +347,8 @@ export function Chat(props: ChatProps) {
       if (event.key === "Escape") {
         event.preventDefault();
         setPrompt("");
-        props.onPickerClose?.();
+        if (own) setOwn(null);
+        else props.onPickerClose?.();
         return;
       }
       if (event.key === "Tab" && !picker && choices[highlighted]) {
@@ -369,6 +380,23 @@ export function Chat(props: ChatProps) {
   const doing = last?.kind === "reasoning" ? "is thinking" : last?.tool?.status === "running" ? last.tool.name === "code" ? "is running code" : `is running ${last.tool.name}` : "is typing";
   const placeholder = picker?.filter ? "type to filter" : busy ? props.steering ?? "Steer the running turn" : props.placeholder ?? "Ask the agent, or type / for commands";
   let position = -1;
+
+  const openHistory = () => setOwn({
+    title: "Conversations",
+    filter: true,
+    hint: "type to filter · enter open · esc cancel",
+    items: query => {
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const listed = threads.conversations
+        .map((item): PickerItem => ({ kind: "choice", label: item.title || "New conversation", detail: ago(item.updated), current: item.id === threads.current, value: item.id }))
+        .filter(item => words.every(word => item.label.toLowerCase().includes(word)));
+      return [{ kind: "choice", label: "+ New conversation", detail: "start fresh", value: "" }, ...listed];
+    },
+    onChoose: item => {
+      if (item.value) threads.select(item.value);
+      else threads.create();
+    },
+  });
 
   return (
     <ExpandedContext.Provider value={expanded}>
@@ -402,7 +430,7 @@ export function Chat(props: ChatProps) {
               if (item.kind === "header") return <p key={`header-${item.label}`} {...styles.pickerHeader()}>{item.label}</p>;
               const index = ++position;
               return (
-                <button aria-selected={index === highlighted} key={item.label} onClick={() => choose(item)} onMouseMove={() => setHighlight(index)} role="option" style={{ gridTemplateColumns: `2ch ${width}ch 2ch auto` }} type="button" {...styles.choice()}>
+                <button aria-selected={index === highlighted} key={item.value ?? item.label} onClick={() => choose(item)} onMouseMove={() => setHighlight(index)} role="option" style={{ gridTemplateColumns: `2ch ${width}ch 2ch auto` }} type="button" {...styles.choice()}>
                   <span {...styles.marker()}>{index === highlighted ? "›" : ""}</span>
                   <span {...styles.choiceLabel()}>{item.label}</span>
                   <span {...styles.marker()}>{item.current ? "✓" : ""}</span>
@@ -444,7 +472,12 @@ export function Chat(props: ChatProps) {
 
         <p {...styles.status()}>
           <span {...styles.statusText()}>{props.status}</span>
-          {props.actions && <span {...styles.actions()}>{props.actions}</span>}
+          {(props.actions || threads.enabled) && (
+            <span {...styles.actions()}>
+              {threads.enabled && <button disabled={busy} onClick={openHistory} title="Conversations" type="button" {...styles.suggestion({ quiet: true })}>history ({threads.conversations.length})</button>}
+              {props.actions}
+            </span>
+          )}
           {props.link && <a href={props.link.href} rel="noreferrer" target="_blank" {...styles.site()}>{props.link.label}</a>}
           {props.expandable !== false && (
             <button aria-label={full ? "Collapse chat" : "Expand chat"} aria-pressed={full} onClick={() => setFull(value => !value)} title={full ? "Collapse (Esc)" : "Expand"} type="button" {...styles.expand()}>
@@ -455,4 +488,12 @@ export function Chat(props: ChatProps) {
       </section>
     </ExpandedContext.Provider>
   );
+}
+
+function ago(time: number): string {
+  const seconds = Math.max(0, (Date.now() - time) / 1000);
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)} h ago`;
+  return new Date(time).toLocaleDateString();
 }
