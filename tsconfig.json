@@ -25,6 +25,7 @@
     "src/vercel/transport.ts",
     "src/bash/*.ts",
     "src/bash/commands/*.ts",
+    "src/react/*.ts",
     "src/react/*.tsx"
   ]
 }

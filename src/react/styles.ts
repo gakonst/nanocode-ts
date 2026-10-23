@@ -100,6 +100,41 @@ export const strong = style({ fontVariationSettings: '"wght" 700', fontWeight: "
 
 export const image = style({ border: "1px solid", borderColor: "rule", display: "block", marginBlock: "sm", maxWidth: "min(100%, 24rem) !custom" });
 
+export const paragraph = style({ margin: "0", selectors: { '[data-live="true"] > &:last-child': { display: "inline" } } });
+
+export const heading = style({
+  fontSize: "inherit !custom",
+  fontVariationSettings: '"wght" 700',
+  lineHeight: "inherit !custom",
+  margin: "0",
+  "::before": { color: "accent", content: '"# "' },
+});
+
+export const list = style({ marginBlock: "0", paddingLeft: "3ch !custom" });
+
+export const item = style({ "::marker": { color: "middle" } });
+
+export const quote = style({ borderLeft: "1px solid", borderLeftColor: "rule", color: "middle", marginBlock: "0", marginInline: "0", paddingLeft: "1.5ch !custom" });
+
+export const table = style({ borderCollapse: "collapse", display: "block", marginBlock: "xs", maxWidth: "100% !custom", overflowX: "auto", whiteSpace: "normal" });
+
+export const cell = variants({
+  base: { border: "1px solid", borderColor: "rule", paddingBlock: "0", paddingInline: "cell", textAlign: "left", verticalAlign: "top" },
+  variants: {
+    align: { center: { textAlign: "center" }, left: {}, right: { textAlign: "right" } },
+    header: { false: {}, true: { fontVariationSettings: '"wght" 700', fontWeight: "normal" } },
+  },
+  defaultVariants: { header: false },
+});
+
+export const rule = style({ border: "none", borderTop: "1px solid", borderTopColor: "rule", marginBlock: "xs", marginInline: "0" });
+
+export const em = style({ fontStyle: "italic" });
+
+export const strike = style({ textDecorationLine: "line-through" });
+
+export const link = style({ color: "text", textDecorationColor: "accent", textDecorationLine: "underline", textUnderlineOffset: "0.24ch !custom" });
+
 export const tool = variants({
   base: { display: "flex", flexDirection: "column", minWidth: "0" },
   variants: {

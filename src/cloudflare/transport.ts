@@ -123,6 +123,12 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       }
       throw new Error(`${response.status} ${await response.text()}`);
     },
+    async cancel() {
+      if (!state.open || !state.id) return;
+      queued.length = 0;
+      const response = await fetch(path(`turns/${encodeURIComponent(state.open)}/cancel`), { method: "POST", headers: headers() });
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    },
     async resume({ push, note }) {
       if (!state.open || !state.id) return;
       try {

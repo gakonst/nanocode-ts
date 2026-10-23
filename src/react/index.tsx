@@ -1,7 +1,7 @@
 "use client";
 
-import { createContext, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell } from "../client.ts";
+import { createContext, Fragment, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type Activity, activity, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type Turn, turns } from "../client.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
 
@@ -19,7 +19,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "actions" | "body" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "entry" | "expand" | "header" | "icon" | "image" | "inline" | "input" | "key" | "log" | "marker" | "meta" | "more" | "name" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "row" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strong" | "suggestion" | "suggestions" | "title" | "tool" | "turn" | "typing";
+export type Part = "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "header" | "heading" | "icon" | "image" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -103,18 +103,33 @@ export function useTranscript(): { entries: readonly Entry[]; live: readonly Ent
   return useMemo(() => ({ entries, live }), [entries, live]);
 }
 
-export function useSend(): { send(prompt: string): Promise<void>; isPending: boolean; isIdle: boolean; error: Error | undefined } {
+export function useSend(): { send(prompt: string): Promise<void>; cancel(): Promise<void>; canCancel: boolean; isPending: boolean; isIdle: boolean; error: Error | undefined } {
   const config = useConfig();
   const status = useChatState(state => state.status);
   const error = useChatState(state => state.error);
-  return { send: config.send, isPending: status === "pending", isIdle: status === "idle", error };
+  return { send: config.send, cancel: config.cancel, canCancel: status === "pending" && config.cancellable, isPending: status === "pending", isIdle: status === "idle", error };
 }
 
-export function useConversations(): { conversations: readonly Conversation[]; current: string | undefined; enabled: boolean; select(id: string): void; create(): string | undefined; remove(id: string): void } {
+export function useTurns(): Turn[] {
+  const { entries, live } = useTranscript();
+  const pending = useChatState(state => state.status === "pending");
+  return useMemo(() => turns(entries, live, pending), [entries, live, pending]);
+}
+
+export function useActivity(): Activity {
+  const live = useChatState(state => state.live);
+  const pending = useChatState(state => state.status === "pending");
+  return useMemo(() => activity(live, pending), [live, pending]);
+}
+
+export function useConversations(): { conversations: readonly Conversation[]; current: string | undefined; enabled: boolean; canCreate: boolean; canSelect: boolean; select(id: string): void; create(): string | undefined; remove(id: string): void } {
   const config = useConfig();
   const conversations = useChatState(state => state.conversations);
   const current = useChatState(state => state.conversation);
-  return { conversations, current, enabled: current !== undefined, select: config.select, create: config.create, remove: config.remove };
+  const pending = useChatState(state => state.status === "pending");
+  const empty = useChatState(state => state.entries.length === 0);
+  const enabled = current !== undefined;
+  return { conversations, current, enabled, canCreate: enabled && !pending && !empty, canSelect: enabled && !pending, select: config.select, create: config.create, remove: config.remove };
 }
 
 export function useNote(): (kind: EntryKind, text: string) => void {
@@ -173,27 +188,154 @@ export function Code(props: { code: string; language: string; framed?: boolean }
   return <pre data-language={props.language} {...part("code", { framed: props.framed ?? false })}><Tokens code={props.code} language={props.language} /></pre>;
 }
 
-const INLINE = /!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)|\[([^\]]+)\]\((https:\/\/[^\s)]+)\)|\*\*([^*\n]+)\*\*|`([^`\n]+)`/g;
+type PartOf = (name: Part, state?: PartState) => PartProps;
 
-function inline(text: string, part: (name: Part, state?: PartState) => PartProps): ReactNode[] {
+const INLINE = /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\n]+)`|\*\*(?=\S)(.+?)\*\*|__(?=\S)(.+?)__|~~(?=\S)(.+?)~~|(?<![*\w])\*(?![\s*])([^*\n]+?)\*(?![*\w])|(?<![_\w])_(?![\s_])([^_\n]+?)_(?![_\w])/g;
+
+function inline(text: string, part: PartOf, key = ""): ReactNode[] {
   const nodes: ReactNode[] = [];
   let offset = 0;
   for (const match of text.matchAll(INLINE)) {
     if (match.index > offset) nodes.push(text.slice(offset, match.index));
-    const key = match.index;
-    if (match[2]) nodes.push(<img alt={match[1] ?? ""} key={key} loading="lazy" src={match[2]} {...part("image")} />);
-    else if (match[4]) nodes.push(<a href={match[4]} key={key} rel="noreferrer" target="_blank">{match[3]}</a>);
-    else if (match[5]) nodes.push(<strong key={key} {...part("strong")}>{match[5]}</strong>);
-    else nodes.push(<code key={key} {...part("inline")}>{match[6]}</code>);
+    const id = key + match.index;
+    const strong = match[6] ?? match[7];
+    const em = match[9] ?? match[10];
+    if (match[2] !== undefined) nodes.push(<img alt={match[1] ?? ""} key={id} loading="lazy" src={match[2]} {...part("image")} />);
+    else if (match[4] !== undefined) nodes.push(<a href={match[4]} key={id} rel="noreferrer" target="_blank" {...part("link")}>{inline(match[3] ?? "", part, id + ".")}</a>);
+    else if (match[5] !== undefined) nodes.push(<code key={id} {...part("inline")}>{match[5]}</code>);
+    else if (strong !== undefined) nodes.push(<strong key={id} {...part("strong")}>{inline(strong, part, id + ".")}</strong>);
+    else if (match[8] !== undefined) nodes.push(<del key={id} {...part("strike")}>{inline(match[8], part, id + ".")}</del>);
+    else nodes.push(<em key={id} {...part("em")}>{inline(em ?? "", part, id + ".")}</em>);
     offset = match.index + match[0].length;
   }
   if (offset < text.length) nodes.push(text.slice(offset));
   return nodes;
 }
 
-export function Reply(props: { text: string }) {
+const LIST = /^( *)([-*+]|\d{1,9}[.)])(?: +|$)/;
+
+const RULE = /^ {0,3}([-*_])( *\1){2,} *$/;
+
+const HEADING = /^ {0,3}(#{1,6})(?: +(.*?))?(?: +#+)? *$/;
+
+const ROW = /^ *\|.*\| *$/;
+
+const DIVIDER = /^ *\|? *:?-+:? *(\| *:?-+:? *)*\|? *$/;
+
+const QUOTE = /^ {0,3}>/;
+
+function cells(row: string): string[] {
+  return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+}
+
+function starts(line: string): boolean {
+  return HEADING.test(line) || RULE.test(line) || LIST.test(line) || QUOTE.test(line) || ROW.test(line) || /^ {0,3}(```|~~~)/.test(line);
+}
+
+type Render = { part: PartOf; code: MarkdownProps["code"] };
+
+function render(text: string, context: Render, key: string, tight = false): ReactNode[] {
+  return fences(text).flatMap((piece, index) => piece.kind === "code"
+    ? [<Fragment key={key + index}>{context.code?.(piece.language, piece.text) ?? <Code code={piece.text.replace(/\n$/, "")} framed language={piece.language} />}</Fragment>]
+    : blocks(piece.text, context, key + index + ":", tight));
+}
+
+function blocks(text: string, context: Render, key: string, tight: boolean): ReactNode[] {
+  const { part } = context;
+  const nodes: ReactNode[] = [];
+  const lines = text.split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const id = key + nodes.length;
+    const heading = HEADING.exec(line);
+    const list = LIST.exec(line);
+    if (!line.trim()) index++;
+    else if (heading) {
+      index++;
+      if (!heading[2]) continue;
+      const level = heading[1].length;
+      const Tag = ("h" + level) as "h1";
+      nodes.push(<Tag key={id} {...part("heading", { level })}>{inline(heading[2], part)}</Tag>);
+    } else if (RULE.test(line)) {
+      index++;
+      nodes.push(<hr key={id} {...part("rule")} />);
+    } else if (ROW.test(line) && (DIVIDER.test(lines[index + 1] ?? "") || (index + 1 >= lines.length - 1 && /^ *\|[ :|-]*$/.test(lines[index + 1] ?? "|")))) {
+      const head = cells(line);
+      const align = cells(lines[index + 1] ?? "").map(cell => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : undefined);
+      index += 2;
+      const rows: string[][] = [];
+      while (index < lines.length && ROW.test(lines[index])) rows.push(cells(lines[index++]));
+      nodes.push(
+        <table key={id} {...part("table")}>
+          <thead><tr>{head.map((cell, column) => <th key={column} {...part("cell", { align: align[column], header: true })}>{inline(cell, part)}</th>)}</tr></thead>
+          {rows.length > 0 && <tbody>{rows.map((row, number) => <tr key={number}>{head.map((_, column) => <td key={column} {...part("cell", { align: align[column], header: false })}>{inline(row[column] ?? "", part)}</td>)}</tr>)}</tbody>}
+        </table>,
+      );
+    } else if (QUOTE.test(line)) {
+      const quoted: string[] = [];
+      while (index < lines.length && QUOTE.test(lines[index])) quoted.push(lines[index++].replace(/^ {0,3}> ?/, ""));
+      nodes.push(<blockquote key={id} {...part("quote")}>{render(quoted.join("\n"), context, id + ":")}</blockquote>);
+    } else if (list) {
+      const indent = list[1].length;
+      const ordered = /\d/.test(list[2]);
+      const items: { lines: string[]; width: number }[] = [];
+      let loose = false;
+      while (index < lines.length) {
+        const current = lines[index];
+        const marker = LIST.exec(current);
+        const leading = current.length - current.trimStart().length;
+        if (marker && marker[1].length <= indent + 1 && /\d/.test(marker[2]) === ordered) {
+          items.push({ lines: [current.slice(marker[0].length)], width: marker[0].length });
+          index++;
+        } else if (marker && marker[1].length <= indent + 1) break;
+        else if (!current.trim()) {
+          let next = index + 1;
+          while (next < lines.length && !lines[next].trim()) next++;
+          const following = lines[next];
+          const nested = following !== undefined && following.length - following.trimStart().length > indent;
+          const after = following === undefined ? null : LIST.exec(following);
+          const sibling = after !== null && after[1].length <= indent + 1 && /\d/.test(after[2]) === ordered;
+          if (!nested && !sibling) break;
+          loose = true;
+          items[items.length - 1].lines.push("");
+          index++;
+        } else if (leading > indent) {
+          const item = items[items.length - 1];
+          item.lines.push(current.slice(Math.min(leading, item.width)));
+          index++;
+        } else if (!starts(current)) {
+          items[items.length - 1].lines.push(current.trim());
+          index++;
+        } else break;
+      }
+      const List = ordered ? "ol" : "ul";
+      const first = ordered ? Number.parseInt(list[2], 10) : 1;
+      nodes.push(
+        <List key={id} start={ordered && first !== 1 ? first : undefined} {...part("list", { ordered })}>
+          {items.map((item, number) => <li key={number} {...part("item")}>{render(item.lines.join("\n").replace(/\n+$/, ""), context, id + "." + number + ":", !loose)}</li>)}
+        </List>,
+      );
+    } else {
+      const paragraph: string[] = [line];
+      index++;
+      while (index < lines.length && lines[index].trim() && !starts(lines[index])) paragraph.push(lines[index++]);
+      const content = inline(paragraph.join("\n"), part, id + ".");
+      nodes.push(tight ? <Fragment key={id}>{content}</Fragment> : <p key={id} {...part("paragraph")}>{content}</p>);
+    }
+  }
+  return nodes;
+}
+
+export type MarkdownProps = { text: string; code?(language: string, code: string): ReactNode };
+
+export function Markdown(props: MarkdownProps) {
   const part = usePart();
-  return <>{fences(props.text).map((piece, index) => piece.kind === "code" ? <Code code={piece.text.replace(/\n$/, "")} framed key={index} language={piece.language} /> : <span key={index}>{inline(piece.text, part)}</span>)}</>;
+  return <>{render(props.text, { part, code: props.code }, "")}</>;
+}
+
+export function Reply(props: MarkdownProps) {
+  return <Markdown {...props} />;
 }
 
 const SPINNER = ["◐", "◓", "◑", "◒"];
@@ -230,9 +372,9 @@ function Section(props: { text: string; language: string; part: "error" | "input
   );
 }
 
-export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean }) {
+export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; collapsed?: boolean }) {
   const part = usePart();
-  const { cell, live = false, nested = false } = props;
+  const { cell, live = false, nested = false, collapsed = false } = props;
   const expanded = useContext(ExpandedContext);
   const open = expanded.open.has(cell.call_id);
   const running = cell.status === "running";
@@ -243,8 +385,9 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean }
   const icons = useSkin().icons;
   const glyph = icons?.[cell.status] ?? (running ? SPINNER : ICONS[cell.status]);
   const icon = typeof glyph === "string" ? glyph : glyph[Math.floor(now / 120) % glyph.length];
+  const shown = open || !collapsed;
   return (
-    <div data-call={cell.call_id} {...part("tool", { nested, open, status: cell.status })}>
+    <div data-call={cell.call_id} {...part("tool", { collapsed, nested, open, status: cell.status })}>
       <button aria-expanded={open} onClick={() => expanded.toggle(cell.call_id)} type="button" {...part("header")}>
         <span aria-label={cell.status} {...part("icon", { status: cell.status })}>{icon}</span>
         <span {...part("name")}>{cell.name}</span>
@@ -255,9 +398,9 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean }
           {cell.details.map(detail => ` · ${detail}`).join("")}
         </span>
       </button>
-      {input && (!nested || open || cell.body === "diff") && <Section language={cell.body === "diff" ? "diff" : cell.language} limit={open ? Infinity : INPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part="input" size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={input} />}
-      {cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} key={child.call_id} live={live} nested />)}</div>}
-      {output && (!nested || open || unsuccessful) && <Section language={cell.output_language} limit={open ? Infinity : OUTPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part={unsuccessful ? "error" : "output"} size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={output} />}
+      {shown && input && (!nested || open || cell.body === "diff") && <Section language={cell.body === "diff" ? "diff" : cell.language} limit={open ? Infinity : INPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part="input" size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={input} />}
+      {shown && cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} collapsed={collapsed} key={child.call_id} live={live} nested />)}</div>}
+      {shown && output && (!nested || open || unsuccessful) && <Section language={cell.output_language} limit={open ? Infinity : OUTPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part={unsuccessful ? "error" : "output"} size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={output} />}
     </div>
   );
 }
@@ -268,9 +411,9 @@ export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolea
   const label = entry.kind === "user" ? "you" : !previous || previous.kind === "user" ? "agent" : undefined;
   return (
     <div {...part("turn")}>
-      {label && <p {...part("speaker", { who: label })}><span aria-hidden="true">●</span> {label}</p>}
+      {label && <p {...part("speaker", { steer: entry.steer, who: label })}><span aria-hidden="true">●</span> {label}</p>}
       {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
-        : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Reply text={entry.text} /></div>
+        : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Markdown text={entry.text} /></div>
         : <p {...part("entry", { kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
     </div>
   );
@@ -302,6 +445,7 @@ export function Chat(props: ChatProps) {
   const part = usePart();
   const { entries, live } = useTranscript();
   const { send, isPending: busy } = useSend();
+  const doing = useActivity();
   const threads = useConversations();
   const [own, setOwn] = useState<Picker | null>(null);
   const picker = props.picker ?? own;
@@ -414,9 +558,8 @@ export function Chat(props: ChatProps) {
     submit(prompt);
   };
 
-  const last = live[live.length - 1];
   const showTyping = busy && (typing || live.length > 0);
-  const doing = last?.kind === "reasoning" ? "is thinking" : last?.tool?.status === "running" ? last.tool.name === "code" ? "is running code" : `is running ${last.tool.name}` : "is typing";
+  const phrase = doing.phase === "thinking" ? "is thinking" : doing.phase === "running" ? doing.tool === "code" ? "is running code" : `is running ${doing.tool}` : "is typing";
   const placeholder = picker?.filter ? "type to filter" : busy ? props.steering ?? "Steer the running turn" : props.placeholder ?? "Ask the agent, or type / for commands";
   let position = -1;
 
@@ -454,7 +597,7 @@ export function Chat(props: ChatProps) {
         </div>
 
         <p aria-live="polite" {...part("typing", { visible: showTyping || Boolean(props.activity) })}>
-          {showTyping ? <><span {...part("speaker", { who: "agent" })}>agent</span> {doing}</> : props.activity ? <><span {...part("speaker", { who: "agent" })}>{props.activity.who}</span> {props.activity.text}</> : null}
+          {showTyping ? <><span {...part("speaker", { who: "agent" })}>agent</span> {phrase}</> : props.activity ? <><span {...part("speaker", { who: "agent" })}>{props.activity.who}</span> {props.activity.text}</> : null}
         </p>
 
         {props.extras}
@@ -512,7 +655,7 @@ export function Chat(props: ChatProps) {
           <span {...part("statusText")}>{props.status}</span>
           {(props.actions || threads.enabled) && (
             <span {...part("actions")}>
-              {threads.enabled && <button disabled={busy} onClick={openHistory} title="Conversations" type="button" {...part("suggestion", { quiet: true })}>history ({threads.conversations.length})</button>}
+              {threads.enabled && <button disabled={!threads.canSelect} onClick={openHistory} title="Conversations" type="button" {...part("suggestion", { quiet: true })}>history ({threads.conversations.length})</button>}
               {props.actions}
             </span>
           )}
