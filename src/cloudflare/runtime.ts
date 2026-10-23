@@ -2,7 +2,6 @@ import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
-import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
 import { DEFAULT_EXECUTOR, EXECUTOR_ID, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
@@ -576,7 +575,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
           const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
           const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
-          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter } });
+          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);

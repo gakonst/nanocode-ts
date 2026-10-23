@@ -70,8 +70,7 @@
       "types": "./dist/bash/index.d.ts",
       "default": "./dist/bash/index.js"
     },
-    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
-    "./interpreter.wasm": "./dist/interpreter.wasm"
+    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
   },
   "dependencies": {
     "zyzz": "0.0.40"
