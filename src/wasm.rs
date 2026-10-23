@@ -1,5 +1,6 @@
 mod branch;
 mod bridge;
+mod cells;
 mod events;
 mod mcp;
 mod remote;
@@ -41,7 +42,7 @@ use nanocode::{
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
 
-const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run inside this host's own JavaScript runtime, not on a separate machine: they have no file system or shell, but the global fetch makes HTTP requests from the host, which may pay for them.";
+const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run in QuickJS inside this host, not on a separate machine. The global fetch makes HTTP requests from the host, which may pay for them, and when the session has a workspace the global bash runs its simulated shell over the session's files.";
 use serde_json::{Map, Value, json, value::RawValue};
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -706,6 +707,13 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
+    if local {
+        shared.extend(
+            cells::tools(config.workspace.as_deref())
+                .into_iter()
+                .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
+        );
+    }
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let selected = |family: Provider| -> Result<Tools, Opening> {
         let base = match config.workspace.as_deref() {
@@ -757,12 +765,16 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .as_deref()
             .unwrap_or(if local { "local" } else { "default" })
             .into();
-        let host = remote::host(None).await?;
-        let host = match &hand_tools {
-            Some(policy) => host.with_tool_selection(policy.clone()),
-            None => host,
+        let host: Arc<dyn CodeModeHost> = if local {
+            Arc::new(cells::host())
+        } else {
+            let host = remote::host(None).await?;
+            Arc::new(match &hand_tools {
+                Some(policy) => host.with_tool_selection(policy.clone()),
+                None => host,
+            })
         };
-        executors.insert(Arc::clone(&name), Arc::new(host));
+        executors.insert(Arc::clone(&name), host);
         executors.set_default(Some(name));
     }
     let session_instructions = instructions(config.instructions.as_deref());

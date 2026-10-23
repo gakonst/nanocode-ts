@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { arch, platform } from "node:os";
 
 function fields(path, start, pattern) {
   const source = readFileSync(path, "utf8");
@@ -17,6 +17,26 @@ if (differing.length > 0 || rust.size === 0) {
   console.error(`AgentConfiguration in src/contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(", ") || "no fields found"}`);
   process.exit(1);
 }
+
+const WASI_SDK = "25.0";
+let wasiSdk = process.env.WASI_SDK_PATH;
+if (!wasiSdk) {
+  wasiSdk = join(process.cwd(), "target", "wasi-sdk-" + WASI_SDK);
+  if (!existsSync(join(wasiSdk, "bin", "clang"))) {
+    const host = (arch() === "arm64" ? "arm64" : "x86_64") + "-" + (platform() === "darwin" ? "macos" : "linux");
+    const url = "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-" + WASI_SDK.split(".")[0] + "/wasi-sdk-" + WASI_SDK + "-" + host + ".tar.gz";
+    mkdirSync(wasiSdk, { recursive: true });
+    const fetched = spawnSync("sh", ["-c", 'curl -sSfL "$0" | tar xz --strip-components 1 -C "$1"', url, wasiSdk], { stdio: "inherit" });
+    if (fetched.status !== 0) process.exit(fetched.status ?? 1);
+  }
+}
+const sysroot = join(wasiSdk, "share", "wasi-sysroot");
+const cflags = "--target=wasm32-wasip1 --sysroot=" + sysroot;
+process.env.CC_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "clang");
+process.env.AR_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "ar");
+process.env.CFLAGS_wasm32_unknown_unknown ??= cflags + " -DEMSCRIPTEN=1 -DFE_DOWNWARD=0 -DFE_UPWARD=0";
+process.env.BINDGEN_EXTRA_CLANG_ARGS_wasm32_unknown_unknown ??= cflags + " -fvisibility=default";
+process.env.WASI_SYSROOT ??= sysroot;
 
 const digest = createHash("sha256");
 function include(path) {
@@ -57,10 +77,6 @@ const bytes = readFileSync(artifact);
 let previous;
 try { previous = readFileSync("dist/nanocode_wasm.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previous?.equals(bytes)) writeFileSync("dist/nanocode_wasm.wasm", bytes);
-const quickjsBytes = readFileSync(fileURLToPath(import.meta.resolve("@jitl/quickjs-wasmfile-release-sync/wasm")));
-let quickjsPrevious;
-try { quickjsPrevious = readFileSync("dist/quickjs.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
-if (!quickjsPrevious?.equals(quickjsBytes)) writeFileSync("dist/quickjs.wasm", quickjsBytes);
 
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });

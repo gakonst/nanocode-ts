@@ -1,10 +1,9 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
 import { liveEvent } from "../client.ts";
-import { AgentRuntime, type AgentConfiguration, HostFailure, LocalHand, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
+import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
-import { nanocodeModule, quickjsModule } from "./module.ts";
-import { quickjs } from "../quickjs/index.ts";
+import { nanocodeModule } from "./module.ts";
 import { Bash, SqlFileSystem } from "../bash/index.ts";
 
 export const SCOPE = "session";
@@ -97,7 +96,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           ...(shell ? { workspace: shell.cwd } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
-          remote: options.codeMode ? new LocalHand({ evaluate: quickjs({ wasm: await quickjsModule() }), fetch: options.fetch, ...(shell ? { bash: shell } : {}) }) : undefined,
+          ...(options.fetch ? { fetch: options.fetch } : {}),
           dispatch: (request, signal) => {
             counts.model_requests++;
             return dispatch(request, signal);

@@ -160,7 +160,7 @@ export class Bash {
       run: async (request, signal) => {
         const signals = [signal];
         if (request.timeout_ms !== null) signals.push(AbortSignal.timeout(request.timeout_ms));
-        const result = await this.exec(request.command, { cwd: request.cwd, signal: AbortSignal.any(signals) });
+        const result = await this.exec(request.command, { cwd: request.cwd, signal: AbortSignal.any(signals), ...(request.stdin !== undefined ? { stdin: request.stdin } : {}) });
         return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, truncated: result.truncated };
       },
     };

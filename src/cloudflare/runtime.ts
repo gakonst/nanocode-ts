@@ -1,8 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { AgentRuntime, EventHub, HostFailure, LocalHand, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
-import { quickjs } from "../quickjs/index.ts";
+import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem } from "../bash/index.ts";
-import quickjsWasm from "nanocode-ts/quickjs.wasm";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
@@ -67,7 +65,6 @@ function duration(value: string, name: string): number {
 
 const handName = (value: unknown): value is string => typeof value === "string" && EXECUTOR_ID.test(value);
 const decoder = new TextDecoder();
-const cells = quickjs({ wasm: quickjsWasm });
 const offline: typeof fetch = async () => { throw new Error("this host gives Code Mode scripts no network access"); };
 
 async function bodyText(request: Request, limit: number): Promise<string | undefined> {
@@ -577,11 +574,12 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           void connecting?.catch(() => {});
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? offline;
           const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch });
-          const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor) ? new LocalHand({ evaluate: cells, fetch: cellFetch, ...(shell ? { bash: shell } : {}) }) : undefined;
+          const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local !== undefined, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(shell ? { workspace: shell.cwd } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(shell ? { workspace: shell.cwd } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
+          fetch: cellFetch,
           tools: options.tools && {
             call: async (name, input, signal, context) => {
               if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
@@ -596,10 +594,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           remote: {
             failed: () => remoteFailed || remote?.failure !== undefined,
             execute: async (request: any, id: number) => {
-              const executor = request.connection != null ? this.connections.get(request.connection) : local ?? await connecting;
+              const executor = request.connection != null ? this.connections.get(request.connection) : await connecting;
               if (!executor) throw new RemoteRefusal(request.connection != null ? "hand is not connected" : "remote executor is not configured");
-              if (executor instanceof LocalHand) {}
-              else if (request.connection != null && request.op === "remote_catalog") executor.claim(owner);
+              if (request.connection != null && request.op === "remote_catalog") executor.claim(owner);
               else if (request.connection != null && !executor.owns(owner)) {
                 if (request.op === "remote_send") throw new RemoteRefusal("hand connection moved to a newer runtime");
                 return request.op === "remote_poll" ? { closed: "connection moved to a newer runtime" } : null;
@@ -619,10 +616,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             },
             cancel: id => {
               remote?.cancel(id);
-              local?.cancel(id);
               for (const executor of this.connections.values()) executor.cancel(id);
             },
-            dispose: async () => { await local?.dispose(); await connecting?.then(value => value.dispose(), () => {}); },
+            dispose: async () => { await connecting?.then(value => value.dispose(), () => {}); },
           },
           dispatch: async (request, signal, timing) => {
             if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
