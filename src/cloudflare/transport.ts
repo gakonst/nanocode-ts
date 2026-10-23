@@ -12,6 +12,7 @@ export type CloudflareTransportOptions = {
   session?: { load(): CloudflareSession; save(session: CloudflareSession): void };
   reconnectMs?: number;
   warmMs?: number;
+  hand?(session: string, signal?: AbortSignal): Promise<string | undefined>;
 };
 
 export type CloudflareTransport = Transport & {
@@ -113,7 +114,8 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     save(session);
     const model = options.model();
     try {
-      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt, provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}) }), signal }).catch((error: unknown) => {
+      const hand = await options.hand?.(session.id!, signal);
+      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt, provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
         if (signal?.aborted) return undefined;
         throw error;
       });

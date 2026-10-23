@@ -290,6 +290,10 @@ enum Command {
         workspace: Option<String>,
         #[serde(default)]
         max_frame_bytes: Option<usize>,
+        #[serde(default)]
+        tools: Vec<tools::HostTool>,
+        #[serde(default)]
+        mcp_servers: Vec<mcp::Server>,
     },
     HandFrame {
         text: String,
@@ -1205,7 +1209,7 @@ fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'sta
 
 fn execute(command: Command) -> Executed {
     match command {
-        Command::HandOpen { name, workspace, max_frame_bytes } => executed(async move { hand::open(name, workspace, max_frame_bytes) }),
+        Command::HandOpen { name, workspace, max_frame_bytes, tools, mcp_servers } => executed(async move { hand::open(name, workspace, max_frame_bytes, tools, mcp_servers).await }),
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
         Command::HandClosed {} => executed(async move {
             hand::closed();
