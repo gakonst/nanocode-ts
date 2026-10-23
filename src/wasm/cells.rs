@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nanocode::{FunctionHandler, FunctionTool, tool_contract::ToolContext};
+use nanocode::{FunctionHandler, FunctionTool, Tool, tool_contract::ToolContext};
 use nanocode_code_mode::{code_mode::LocalCells, embedded::HostFuture};
 use serde_json::{Value, json};
 
@@ -8,8 +8,12 @@ use super::bridge::call;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
-pub fn host() -> LocalCells {
-    LocalCells::new().prelude(PRELUDE)
+pub fn host(workspace: Option<&str>) -> LocalCells {
+    LocalCells::new().prelude(PRELUDE).host_tools(
+        tools(workspace)
+            .into_iter()
+            .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
+    )
 }
 
 struct Fetch;
@@ -63,10 +67,10 @@ impl FunctionHandler for Shell {
     }
 }
 
-pub fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
+fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
     let fetch = FunctionTool::new(
         "fetch",
-        "Make an HTTP request from this host, which may pay for it. Scripts should call the global fetch(url, init) instead: it wraps this tool and returns a Response-like object with ok, status, headers.get, text(), json() and arrayBuffer().",
+        "Make an HTTP request from this host, which may pay for it.",
         json!({
             "type": "object",
             "properties": {
@@ -85,7 +89,7 @@ pub fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
     let shell = workspace.map(|root| {
         FunctionTool::new(
             "bash",
-            "Run a bash script in this session's simulated shell over its files (no real processes). Returns { stdout, stderr, exit_code }. Scripts should call the global bash instead: bash(script) or a tagged template such as bash`ls ${dir}` resolve to { stdout, stderr, exitCode }, and bash.readFile(path) and bash.writeFile(path, text) read and write files.",
+            "Run a bash script in this session's simulated shell over its files.",
             json!({
                 "type": "object",
                 "properties": {

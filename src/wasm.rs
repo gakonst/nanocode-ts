@@ -42,7 +42,7 @@ use nanocode::{
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
 
-const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run in QuickJS inside this host, not on a separate machine. The global fetch makes HTTP requests from the host, which may pay for them, and when the session has a workspace the global bash runs its simulated shell over the session's files.";
+const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run in QuickJS inside this host, not on a separate machine. The global `fetch` makes HTTP requests from the host, which may pay for them, and returns a Response-like object (`ok`, `status`, `headers.get`, `text()`, `json()`, `arrayBuffer()`). When the session has a workspace, the global `bash` runs its simulated shell over the session's files: `await bash(script)` or a tagged template such as `await bash\x60ls\x60` resolves to `{ stdout, stderr, exitCode }`, and `await bash.readFile(path)` and `await bash.writeFile(path, text)` read and write files. These are globals, not `tools.*` entries.";
 use serde_json::{Map, Value, json, value::RawValue};
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -707,13 +707,6 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
-    if local {
-        shared.extend(
-            cells::tools(config.workspace.as_deref())
-                .into_iter()
-                .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
-        );
-    }
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let selected = |family: Provider| -> Result<Tools, Opening> {
         let base = match config.workspace.as_deref() {
@@ -766,7 +759,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .unwrap_or(if local { "local" } else { "default" })
             .into();
         let host: Arc<dyn CodeModeHost> = if local {
-            Arc::new(cells::host())
+            Arc::new(cells::host(config.workspace.as_deref()))
         } else {
             let host = remote::host(None).await?;
             Arc::new(match &hand_tools {
