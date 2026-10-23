@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type Driven, type HostEvent, type HostOptions, type LoggedEvent, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type LoggedEvent, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 import { LocalHand } from "./hand.ts";
 
@@ -189,6 +189,30 @@ export class AgentRuntime {
 
   async import(scope: string, turns: unknown[]): Promise<number> {
     return await this.command("import", { scope, turns }) as number;
+  }
+
+  async exportBranch(session_id: string, at: BranchPoint): Promise<BranchExport> {
+    return await this.command("export_branch", { session_id, at }) as BranchExport;
+  }
+
+  async exportPage(session_id: string, exported: BranchExport, cursor: BranchCursor, max_bytes: number): Promise<BranchPage> {
+    return await this.command("export_page", { session_id, export: exported, cursor, max_bytes }) as BranchPage;
+  }
+
+  async importBranch(session_id: string, exported: BranchExport): Promise<BranchCursor | null> {
+    return (await this.command("import_branch", { session_id, export: exported }) as { next: BranchCursor | null }).next;
+  }
+
+  async importPage(session_id: string, exported: BranchExport, page: BranchPage): Promise<BranchCursor | null> {
+    return (await this.command("import_page", { session_id, export: exported, page }) as { next: BranchCursor | null }).next;
+  }
+
+  async publishBranch(session_id: string, exported: BranchExport): Promise<BranchSummary> {
+    return await this.command("publish_branch", { session_id, export: exported }) as BranchSummary;
+  }
+
+  async importEvents(scope: string, after: number, events: LoggedEvent[]): Promise<number> {
+    return await this.command("import_events", { scope, after, events }) as number;
   }
 
   async cancel(scope: string, request_id: string, fields: Record<string, unknown>): Promise<{ turn: TurnView | null; dequeued?: boolean }> {

@@ -1,3 +1,4 @@
+mod branch;
 mod bridge;
 mod events;
 mod mcp;
@@ -28,10 +29,12 @@ use nanocode::{
         CONTEXT_WINDOW_TOKENS, OpenAiAuth, auto_compact_token_limit,
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
-    durability::{InitialSettings, SessionRecord, SqlStore},
+    durability::{
+        BranchCursor, BranchExport, BranchPage, InitialSettings, SessionRecord, SqlStore,
+    },
     session_host::{
-        Driven, ImportedTurn, InboxError, LogEntry, MovedQueued, Replaced, SessionLog, Submission,
-        Submitted, TurnInbox, TurnRecord, TurnState,
+        Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, SessionLog,
+        Submission, Submitted, TurnInbox, TurnRecord, TurnState,
     },
     tool_contract::{Tool, ToolCollection},
 };
@@ -402,6 +405,34 @@ enum Command {
         requested: Provider,
     },
     Models {},
+    ExportBranch {
+        session_id: String,
+        at: branch::At,
+    },
+    ExportPage {
+        session_id: String,
+        export: BranchExport,
+        cursor: BranchCursor,
+        max_bytes: usize,
+    },
+    ImportBranch {
+        session_id: String,
+        export: BranchExport,
+    },
+    ImportPage {
+        session_id: String,
+        export: BranchExport,
+        page: BranchPage,
+    },
+    PublishBranch {
+        session_id: String,
+        export: BranchExport,
+    },
+    ImportEvents {
+        scope: String,
+        after: u64,
+        events: Vec<LoggedEvent>,
+    },
 }
 
 type Log = SessionLog<store::WorkerStore>;
@@ -1357,6 +1388,41 @@ fn execute(command: Command) -> Executed {
                     }
                 },
             )
+        }),
+        Command::ExportBranch { session_id, at } => {
+            executed(async move { branch::export(&session_id, at).await })
+        }
+        Command::ExportPage {
+            session_id,
+            export,
+            cursor,
+            max_bytes,
+        } => executed(async move { branch::page(&session_id, &export, cursor, max_bytes).await }),
+        Command::ImportBranch { session_id, export } => executed(async move {
+            let next = branch::import(&session_id, export, None).await?;
+            Ok(json!({"next": next}))
+        }),
+        Command::ImportPage {
+            session_id,
+            export,
+            page,
+        } => executed(async move {
+            let next = branch::import(&session_id, export, Some(&page)).await?;
+            Ok(json!({"next": next}))
+        }),
+        Command::PublishBranch { session_id, export } => {
+            executed(async move { branch::publish(&session_id, &export).await })
+        }
+        Command::ImportEvents {
+            scope,
+            after,
+            events,
+        } => executed(async move {
+            log(&scope)
+                .import_events(after, &events)
+                .await
+                .map(Value::from)
+                .map_err(text)
         }),
     }
 }
