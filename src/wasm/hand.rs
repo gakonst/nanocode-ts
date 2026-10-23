@@ -19,13 +19,14 @@ use serde_json::{Value, json};
 
 use super::{
     bridge::{call, spawn},
-    cells,
+    cells, mcp, tools,
 };
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 thread_local! {
     static CELLS: RefCell<Option<Arc<LocalCells>>> = const { RefCell::new(None) };
+    static OWN: RefCell<Vec<Arc<dyn Tool>>> = const { RefCell::new(Vec::new()) };
     static LIMIT: Cell<usize> = const { Cell::new(DEFAULT_MAX_FRAME_BYTES) };
     static NEXT: Cell<u64> = const { Cell::new(0) };
     static PENDING: RefCell<HashMap<u64, oneshot::Sender<Result<Value, String>>>> = RefCell::new(HashMap::new());
@@ -45,12 +46,32 @@ fn cells() -> Result<Arc<LocalCells>, String> {
     CELLS.with_borrow(|cells| cells.clone().ok_or_else(|| "the hand is not open".to_owned()))
 }
 
-pub fn open(name: Option<String>, workspace: Option<String>, max_frame_bytes: Option<usize>) -> Result<Value, String> {
+pub async fn open(
+    name: Option<String>,
+    workspace: Option<String>,
+    max_frame_bytes: Option<usize>,
+    host_tools: Vec<tools::HostTool>,
+    mcp_servers: Vec<mcp::Server>,
+) -> Result<Value, String> {
     let limit = max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES);
     LIMIT.set(limit);
+    let mut own: Vec<Arc<dyn Tool>> = tools::tools(host_tools)
+        .map(|tool| Arc::new(tool) as Arc<dyn Tool>)
+        .collect();
+    own.extend(
+        mcp::tools(mcp_servers)
+            .await
+            .map_err(|failure| match failure {
+                mcp::Failure::Configuration(error) | mcp::Failure::Unavailable(error) => error,
+            })?
+            .into_iter()
+            .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
+    );
+    let definitions = own.iter().map(|tool| tool.definition()).collect();
+    OWN.set(own);
     CELLS.set(Some(Arc::new(cells::host(workspace.as_deref()))));
     let catalog = Frame::Catalog {
-        definitions: Vec::new(),
+        definitions,
         name,
         workspace,
         runtime_id: None,
@@ -193,10 +214,14 @@ async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: b
     let mut observer = Observer { id, calls: SentCalls::new(compact) };
     match operation {
         RemoteOperation::Execute { source, context, local_tools, .. } => {
-            let tools = local_tools
-                .into_iter()
-                .map(|definition| Arc::new(Callback { definition }) as Arc<dyn Tool>)
-                .collect();
+            let mut tools: Vec<Arc<dyn Tool>> = OWN.with_borrow(Clone::clone);
+            tools.extend(
+                local_tools
+                    .into_iter()
+                    .filter(|definition| !tools.iter().any(|own| own.definition().name() == definition.name()))
+                    .map(|definition| Arc::new(Callback { definition }) as Arc<dyn Tool>)
+                    .collect::<Vec<_>>(),
+            );
             let owned = context.owned();
             let execution = cells
                 .execute_with_local_tools(&source, owned.as_context(), tools, Some(&mut observer))
@@ -212,7 +237,21 @@ async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: b
                 .map_err(|error| error.to_string())?;
             Ok(Some(wire(execution, observer)))
         }
-        RemoteOperation::Call { name, .. } => Err(format!("this browser hand cannot run `{name}` for another hand")),
+        RemoteOperation::Call { name, input, context, .. } => {
+            let tool = OWN.with_borrow(|own| own.iter().find(|tool| tool.definition().name() == name).cloned());
+            let Some(tool) = tool else {
+                return Err(format!("this browser hand has no tool `{name}`"));
+            };
+            let owned = context.owned();
+            let raw = serde_json::value::to_raw_value(&input).map_err(|error| error.to_string())?;
+            let output = tool
+                .execute(ToolInput::Function(raw), owned.as_context())
+                .await
+                .unwrap_or_else(|error| nanocode_code_mode::ToolOutput::error(error.to_string()));
+            nanocode_code_mode::remote::output_to_wire(output, compact)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        }
         RemoteOperation::Cancel { session_id } => {
             cells.cancel_with_updates(&session_id, &mut observer).await.map_err(|error| error.to_string())?;
             Ok(None)
