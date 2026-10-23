@@ -61,8 +61,9 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
     }
     if (byteSpec !== undefined) {
       const n = count(byteSpec, 0);
-      if (tail) ctx.stdout.write(byteSpec.startsWith("+") ? text.slice(Math.max(0, n - 1)) : n === 0 ? "" : text.slice(-n));
-      else ctx.stdout.write(n < 0 ? text.slice(0, n) : text.slice(0, n));
+      const bytes = encode(text);
+      if (tail) ctx.stdout.write(byteSpec.startsWith("+") ? decode(bytes.subarray(Math.max(0, n - 1))) : n === 0 ? "" : decode(bytes.subarray(-n)));
+      else ctx.stdout.write(decode(bytes.subarray(0, n)));
       return;
     }
     const n = count(lineSpec, 10);
@@ -915,7 +916,13 @@ const diff: CommandHandler = async ctx => {
   const [left, right] = parsed.operands;
   if (left === undefined || right === undefined) throw new CommandError("missing operand", 2);
   const read = async (name: string) => (name === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(name))));
-  const [a, b] = [lines(await read(left)), lines(await read(right))];
+  const [first, second] = [await read(left), await read(right)];
+  if (first.includes("\0") || second.includes("\0")) {
+    if (first === second) return 0;
+    ctx.stdout.write((parsed.flags.has("q") ? "Files " : "Binary files ") + left + " and " + right + " differ\n");
+    return 1;
+  }
+  const [a, b] = [lines(first), lines(second)];
   const normal = (line: string) => {
     let value = line;
     if (parsed.flags.has("i")) value = value.toLowerCase();

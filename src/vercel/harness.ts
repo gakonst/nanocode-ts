@@ -32,6 +32,7 @@ export interface NanocodeHarnessOptions {
   instructions?: string;
   tools?: HostTool[];
   durability?: Durability;
+  batchMs?: number;
   dispatch?: Dispatch;
   endpoint?: string;
   gateway?: "vercel";
@@ -155,7 +156,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     modelCalls: "self",
     async drive(ctx) {
       const started = performance.now();
-      const journal = new SqlJournal(ctx, durability);
+      const journal = new SqlJournal(ctx, durability, options.batchMs);
       const replay_ms = performance.now() - started;
       const counts = { model_requests: 0, tool_calls: 0, models: [] as ModelCall[], open_ms: 0 };
       let outcome: DriveReport["outcome"] = "idle";

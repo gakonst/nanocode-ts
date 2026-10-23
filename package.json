@@ -70,7 +70,8 @@
       "types": "./dist/bash/index.d.ts",
       "default": "./dist/bash/index.js"
     },
-    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
+    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
+    "./interpreter.wasm": "./dist/interpreter.wasm"
   },
   "dependencies": {
     "zyzz": "0.0.40"
@@ -79,6 +80,7 @@
     "@pierre/highlights": "^0.2.0",
     "@vercel/oidc": "^3.2.0",
     "durable-harness": "0.0.1-beta.6",
+    "pyodide": ">=0.28.0",
     "react": "^19.0.0"
   },
   "peerDependenciesMeta": {
@@ -89,6 +91,9 @@
       "optional": true
     },
     "durable-harness": {
+      "optional": true
+    },
+    "pyodide": {
       "optional": true
     },
     "react": {

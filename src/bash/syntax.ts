@@ -1,3 +1,5 @@
+import { byte } from "./fs.ts";
+
 export type Part =
   | { type: "text"; value: string; quoted: boolean }
   | { type: "param"; name: string; index?: Word; op: string; arg?: Word; arg2?: Word; quoted: boolean }
@@ -682,7 +684,7 @@ export function ansiEscape(src: string, pos: number): [string, number] {
   const simple: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?", "0": "\0" };
   if (c === "x") {
     const hex = src.slice(pos + 1).match(/^[0-9a-fA-F]{1,2}/)?.[0];
-    if (hex) return [String.fromCharCode(parseInt(hex, 16)), 1 + hex.length];
+    if (hex) return [byte(parseInt(hex, 16)), 1 + hex.length];
   }
   if (c === "u" || c === "U") {
     const hex = src.slice(pos + 1).match(c === "u" ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/)?.[0];
@@ -690,7 +692,7 @@ export function ansiEscape(src: string, pos: number): [string, number] {
   }
   if (c !== undefined && /[0-7]/.test(c)) {
     const oct = src.slice(pos).match(/^[0-7]{1,3}/)![0];
-    return [String.fromCharCode(parseInt(oct, 8)), oct.length];
+    return [byte(parseInt(oct, 8)), oct.length];
   }
   if (c !== undefined && c in simple) return [simple[c], 1];
   return ["\\" + (c ?? ""), c === undefined ? 0 : 1];

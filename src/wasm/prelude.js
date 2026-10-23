@@ -108,4 +108,65 @@ bash.writeFile = async (path, content) => {
   const result = await run("mkdir -p -- \"$(dirname -- " + quote(path) + ")\" && cat > " + quote(path), String(content));
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "write exited with " + result.exitCode);
 };
-return { fetch, bash, Headers, Response };
+const callWasm = (input) => call("wasm", input).catch((error) => { throw new Error(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
+const toWire = (value) => typeof value === "bigint" ? { bigint: String(value) } : value;
+const fromWire = (value) => Array.isArray(value) ? value.map(fromWire) : value !== null && typeof value === "object" && typeof value.bigint === "string" ? BigInt(value.bigint) : value;
+const wasmSource = (source) => {
+  if (typeof source === "string") return { path: source };
+  if (source instanceof Module) return source.input;
+  if (source instanceof ArrayBuffer) return { module: toBase64(new Uint8Array(source)) };
+  if (ArrayBuffer.isView(source)) return { module: toBase64(new Uint8Array(source.buffer, source.byteOffset, source.byteLength)) };
+  if (Array.isArray(source)) return { module: toBase64(Uint8Array.from(source)) };
+  throw new TypeError("expected WebAssembly bytes (Uint8Array or ArrayBuffer) or a file path");
+};
+class Module {
+  constructor(source) { this.input = wasmSource(source); }
+}
+class Memory {
+  constructor(id) { this.id = id; }
+  get buffer() { throw new Error("memory lives in the host: use await memory.read(offset, length) and await memory.write(offset, bytes)"); }
+  async read(offset = 0, length) { const reply = await callWasm({ op: "read", id: this.id, offset, ...(length === undefined ? {} : { length }) }); return fromBase64(reply.data); }
+  async write(offset, bytes) { await callWasm({ op: "write", id: this.id, offset, data: toBase64(bytes instanceof Uint8Array ? bytes : typeof bytes === "string" ? utf8(bytes) : new Uint8Array(bytes)) }); }
+  async grow(pages) { return (await callWasm({ op: "grow", id: this.id, pages })).previous; }
+}
+const exportsOf = (id, list) => {
+  const exports = {};
+  for (const entry of list) {
+    if (entry.kind === "function") exports[entry.name] = async (...args) => fromWire((await callWasm({ op: "call", id, name: entry.name, args: args.map(toWire) })).result);
+    else if (entry.kind === "memory") exports[entry.name] = new Memory(id);
+  }
+  return Object.freeze(exports);
+};
+class Instance {
+  constructor(module) {
+    const ready = callWasm({ op: "instantiate", ...wasmSource(module) });
+    this.ready = ready.then((reply) => { this.id = reply.id; this.engine = reply.engine; this.exports = exportsOf(reply.id, reply.exports); return this; });
+    this.ready.catch(() => {});
+    this.exports = new Proxy({}, { get: (_, name) => typeof name !== "string" || name === "then" ? undefined : async (...args) => (await this.ready).exports[name](...args) });
+  }
+  async close() { await this.ready; await callWasm({ op: "drop", id: this.id }); }
+}
+const instantiate = async (source, imports) => {
+  const instance = new Instance(source instanceof Module ? source : new Module(source));
+  await instance.ready;
+  return source instanceof Module ? instance : { module: source instanceof Module ? source : new Module(source), instance };
+};
+const WebAssembly = {
+  Module,
+  Instance,
+  Memory,
+  compile: async (source) => new Module(source),
+  instantiate,
+  compileStreaming: async (response) => new Module(new Uint8Array(await (await response).arrayBuffer())),
+  instantiateStreaming: async (response, imports) => instantiate(new Uint8Array(await (await response).arrayBuffer()), imports),
+  validate: (source) => { const input = wasmSource(source); const bytes = input.module ? fromBase64(input.module) : null; return !bytes || (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d); },
+};
+const wasm = {
+  run: async (source, args = [], options = {}) => {
+    const reply = await callWasm({ op: "run", ...wasmSource(source), args: args.map(String), ...(options.stdin === undefined ? {} : { stdin: String(options.stdin) }), ...(options.env ? { env: options.env } : {}) });
+    return { stdout: reply.stdout, stderr: reply.stderr, exitCode: reply.exit_code };
+  },
+  invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wasmSource(source), name, args: args.map(toWire) })).result),
+  instantiate: async (source) => (await instantiate(source instanceof Module ? source : new Module(source))),
+};
+return { fetch, bash, Headers, Response, wasm, WebAssembly };

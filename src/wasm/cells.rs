@@ -20,6 +20,8 @@ struct Fetch;
 
 struct Shell(String);
 
+struct Wasm;
+
 fn failure(error: Value) -> String {
     error
         .get("detail")
@@ -67,6 +69,21 @@ impl FunctionHandler for Shell {
     }
 }
 
+impl FunctionHandler for Wasm {
+    fn call<'a>(
+        &'a self,
+        _name: &'a str,
+        input: Value,
+        _context: ToolContext<'a>,
+    ) -> HostFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            call(json!({"op": "cell_wasm", "request": input}))
+                .await
+                .map_err(failure)
+        })
+    }
+}
+
 fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
     let fetch = FunctionTool::new(
         "fetch",
@@ -102,5 +119,31 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
             Arc::new(Shell(root.to_owned())),
         )
     });
-    [Some(fetch), shell].into_iter().flatten().collect()
+    let wasm = workspace.map(|_| {
+        FunctionTool::new(
+            "wasm",
+            "Run, instantiate or call WebAssembly modules in this host.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string"},
+                    "module": {"type": "string"},
+                    "path": {"type": "string"},
+                    "args": {"type": "array"},
+                    "stdin": {"type": "string"},
+                    "env": {"type": "object"},
+                    "id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "length": {"type": "integer"},
+                    "data": {"type": "string"},
+                    "pages": {"type": "integer"}
+                },
+                "required": ["op"],
+                "additionalProperties": false
+            }),
+            Arc::new(Wasm),
+        )
+    });
+    [Some(fetch), shell, wasm].into_iter().flatten().collect()
 }

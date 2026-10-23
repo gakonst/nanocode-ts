@@ -21,7 +21,6 @@ function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
         const input = await bytesOf(ctx, operand);
         const output = decompress ? await gunzip(input) : await gzip(input);
         if (stdout || operand === "-") {
-          if (!decompress) throw new CommandError("compressed data not written to a terminal; write it to a file instead");
           ctx.stdout.write(decode(output));
           continue;
         }
@@ -52,6 +51,46 @@ async function collect(ctx: CommandContext, root: string, operand: string, entri
   for (const child of await ctx.fs.list(path)) await collect(ctx, root, name + "/" + child, entries);
 }
 
+const cmp: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "bls", long: { "print-bytes": "b", quiet: "s", silent: "s", verbose: "l" } });
+  const [left, right = "-"] = parsed.operands;
+  if (left === undefined) throw new CommandError("missing operand after 'cmp'", 2);
+  const read = async (operand: string) => {
+    try {
+      return await bytesOf(ctx, operand);
+    } catch (error) {
+      if (error instanceof FsError) throw new CommandError(operand + ": " + (error.code === "ENOENT" ? "No such file or directory" : error.message), 2);
+      throw error;
+    }
+  };
+  const a = await read(left);
+  const b = await read(right);
+  const length = Math.min(a.length, b.length);
+  const quiet = parsed.flags.has("s");
+  let line = 1;
+  let differ = false;
+  for (let i = 0; i < length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x !== y) {
+      differ = true;
+      if (parsed.flags.has("l")) {
+        ctx.stdout.write(String(i + 1).padStart(String(length).length) + " " + x.toString(8).padStart(3) + " " + y.toString(8).padStart(3) + "\n");
+        continue;
+      }
+      if (!quiet) ctx.stdout.write(left + " " + right + " differ: byte " + (i + 1) + ", line " + line + "\n");
+      return 1;
+    }
+    if (x === 10) line++;
+  }
+  if (a.length !== b.length) {
+    const shorter = a.length < b.length ? left : right;
+    if (!quiet) ctx.stderr.write("cmp: EOF on " + shorter + (length ? " after byte " + length + ", line " + line : " which is empty") + "\n");
+    return 1;
+  }
+  return differ ? 1 : 0;
+};
+
 const tar: CommandHandler = async ctx => {
   const args = ctx.args.slice();
   if (args[0] && !args[0].startsWith("-")) args[0] = "-" + args[0];
@@ -66,12 +105,13 @@ const tar: CommandHandler = async ctx => {
     if (!parsed.operands.length) throw new CommandError("Cowardly refusing to create an empty archive", 2);
     const entries: TarEntry[] = [];
     for (const operand of parsed.operands) await collect(ctx, root, operand, entries);
-    if (parsed.flags.has("v")) for (const entry of entries) ctx.stdout.write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
-    const archive = pack(entries);
-    await ctx.fs.write(ctx.resolve(file), zipped ? await gzip(archive) : archive);
+    if (parsed.flags.has("v")) for (const entry of entries) (file === "-" ? ctx.stderr : ctx.stdout).write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
+    const archive = zipped ? await gzip(pack(entries)) : pack(entries);
+    if (file === "-") ctx.stdout.write(decode(archive));
+    else await ctx.fs.write(ctx.resolve(file), archive);
     return 0;
   }
-  const raw = file ? await ctx.fs.read(ctx.resolve(file)) : encode(ctx.stdin.read());
+  const raw = file && file !== "-" ? await ctx.fs.read(ctx.resolve(file)) : encode(ctx.stdin.read());
   const entries = unpack(zipped || (raw[0] === 0x1f && raw[1] === 0x8b) ? await gunzip(raw) : raw);
   const wanted = parsed.operands.map(operand => operand.replace(/\/+$/, ""));
   const selected = entries.filter(entry => (entry.type === "file" || entry.type === "directory") && (!wanted.length || wanted.some(name => entry.name === name || entry.name.startsWith(name + "/"))));
@@ -265,8 +305,29 @@ const strings: CommandHandler = async ctx => {
 };
 
 const xxd: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "p", values: "lc" });
+  const parsed = options(ctx.args, { flags: "pr", values: "lc", long: { plain: "p", ps: "p", postscript: "p", revert: "r" } });
   const data = await bytesOf(ctx, parsed.operands[0] ?? "-");
+  if (parsed.flags.has("r")) {
+    const text = decode(data);
+    const chunks: { offset: number; hex: string }[] = [];
+    if (parsed.flags.has("p")) chunks.push({ offset: 0, hex: text.replace(/[^0-9a-fA-F]/g, "") });
+    else
+      for (const line of text.split("\n")) {
+        const match = /^\s*([0-9a-fA-F]+):\s?(.*)$/.exec(line);
+        if (!match) continue;
+        const end = match[2].indexOf("  ");
+        chunks.push({ offset: parseInt(match[1], 16), hex: (end < 0 ? match[2] : match[2].slice(0, end)).replace(/[^0-9a-fA-F]/g, "") });
+      }
+    let size = 0;
+    for (const chunk of chunks) size = Math.max(size, chunk.offset + (chunk.hex.length >> 1));
+    if (parsed.flags.has("p")) size = chunks[0]!.hex.length >> 1;
+    const out = new Uint8Array(size);
+    for (const chunk of chunks) for (let i = 0; i + 1 < chunk.hex.length; i += 2) out[chunk.offset + (i >> 1)] = parseInt(chunk.hex.slice(i, i + 2), 16);
+    const target = parsed.operands[1];
+    if (target !== undefined) await ctx.fs.write(ctx.resolve(target), out);
+    else ctx.stdout.write(decode(out));
+    return;
+  }
   const limit = Math.min(data.length, Number(last(parsed, "l") ?? data.length));
   if (parsed.flags.has("p")) {
     let hex = "";
@@ -438,6 +499,7 @@ const ln: CommandHandler = async ctx => {
 };
 
 export const extraCommands: Record<string, CommandHandler> = {
+  cmp,
   env,
   expand,
   file,
