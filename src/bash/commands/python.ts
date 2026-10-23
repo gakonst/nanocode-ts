@@ -283,6 +283,12 @@ function requireFromCwd(specifier: string): { loadPyodide?: (config: Record<stri
   }
 }
 
+function packageCacheDir(): string {
+  const process = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process;
+  const os = process?.getBuiltinModule?.("node:os") as { tmpdir?: () => string } | undefined;
+  return (os?.tmpdir?.() ?? "/tmp") + "/nanocode-pyodide-" + PYODIDE_VERSION;
+}
+
 async function loadDefault(options: PythonOptions): Promise<Pyodide> {
   const index = options.indexURL ?? PYODIDE_URL;
   const candidates = inNode() && !options.indexURL ? ["pyodide"] : [index + "pyodide.mjs"];
@@ -303,7 +309,7 @@ async function loadDefault(options: PythonOptions): Promise<Pyodide> {
       errors.push(specifier + " has no loadPyodide export");
       continue;
     }
-    return module.loadPyodide(specifier === "pyodide" ? { stdout: () => {}, stderr: () => {} } : { indexURL: index, stdout: () => {}, stderr: () => {} });
+    return module.loadPyodide(specifier === "pyodide" ? { packageCacheDir: packageCacheDir(), stdout: () => {}, stderr: () => {} } : { indexURL: index, stdout: () => {}, stderr: () => {} });
   }
   throw new CommandError("cannot load Pyodide" + (inNode() ? " (install the pyodide npm package or set BashOptions.python.load)" : "") + ": " + errors.join("; "), 127);
 }
