@@ -10,6 +10,7 @@
     ]
   },
   "include": [
-    "src/cloudflare/*.ts"
+    "src/cloudflare/*.ts",
+    "src/machines/cloudflare/*.ts"
   ]
 }
