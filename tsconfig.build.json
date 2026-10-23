@@ -22,6 +22,7 @@
     "src/cloudflare/remote.ts",
     "src/cloudflare/runtime.ts",
     "src/cloudflare/store.ts",
-    "src/cloudflare/wasm.d.ts"
+    "src/cloudflare/wasm.d.ts",
+    "src/machines/cloudflare/*.ts"
   ]
 }

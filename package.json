@@ -72,9 +72,29 @@
       "types": "./dist/bash/index.d.ts",
       "default": "./dist/bash/index.js"
     },
+    "./machines": {
+      "types": "./dist/machines/index.d.ts",
+      "default": "./dist/machines/index.js"
+    },
+    "./machines/local": {
+      "types": "./dist/machines/local.d.ts",
+      "default": "./dist/machines/local.js"
+    },
+    "./machines/react": {
+      "types": "./dist/react/machines.d.ts",
+      "default": "./dist/react/machines.js"
+    },
+    "./machines/cloudflare": {
+      "types": "./dist/machines/cloudflare/index.d.ts",
+      "default": "./dist/machines/cloudflare/index.js"
+    },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
   },
   "dependencies": {
+    "accounts": "0.21.0",
+    "mppx": "0.13.6",
+    "ox": "0.14.56",
+    "viem": "2.57.7",
     "zyzz": "0.0.40"
   },
   "peerDependencies": {

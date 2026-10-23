@@ -20,6 +20,7 @@
   },
   "include": [
     "src/*.ts",
+    "src/machines/*.ts",
     "src/cloudflare/sql.ts",
     "src/cloudflare/transport.ts",
     "src/vercel/transport.ts",
