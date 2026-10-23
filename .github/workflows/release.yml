@@ -51,6 +51,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - name: Cache WASM Build
+        id: wasm
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -65,7 +66,13 @@ jobs:
           node-version: 24
 
       - name: Install libclang
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+        if: steps.wasm.outputs.cache-hit != 'true'
+        run: |
+          if ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "LIBCLANG_PATH=$(dirname "$(ls /usr/lib/llvm-*/lib/libclang.so* | sort -V | tail -n 1)")" >> "$GITHUB_ENV"
+          else
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
+          fi
 
       - name: Install Dependencies
         working-directory: nanocode-ts
