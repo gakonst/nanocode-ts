@@ -26,7 +26,9 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
   let state: VercelSession = options.session?.load() ?? {};
   let warmed: { key: string; session: Promise<string | undefined> } | undefined;
 
-  const save = () => options.session?.save(state);
+  const save = (session = state) => {
+    if (session === state) options.session?.save(state);
+  };
   const headers = (extra: Record<string, string> = {}) => ({ ...extra, ...options.headers?.() });
   const key = () => {
     const selection = options.selection();
@@ -36,54 +38,80 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     const selection = options.selection();
     return { harness: selection.harness, model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) };
   };
+  const pause = (signal: AbortSignal | undefined) => new Promise<void>(resolve => {
+    const timer = setTimeout(done, reconnectMs);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done);
+  });
 
-  const follow = async (response: Response, parameters: Omit<TransportParameters, "prompt">): Promise<boolean> => {
+  const follow = async (response: Response, parameters: Omit<TransportParameters, "prompt">, session: VercelSession): Promise<boolean> => {
+    const { signal } = parameters;
     if (!response.ok || !response.body) {
+      if (signal?.aborted) return true;
       parameters.note("error", `${response.status} ${await response.text()}`);
       return true;
     }
     try {
       for await (const message of serverEvents(response.body)) {
+        if (signal?.aborted) break;
         if (message.id) {
-          state.cursor = message.id;
-          save();
+          session.cursor = message.id;
+          save(session);
         }
         if (message.event === "end") return true;
         if (message.data) parameters.push(JSON.parse(message.data) as LiveEvent);
       }
     } catch {
+      if (signal?.aborted) return true;
       parameters.note("tool", "The stream dropped. Reconnecting from the last event.");
       return false;
+    }
+    if (signal?.aborted) {
+      void response.body.cancel().catch(() => undefined);
+      return true;
     }
     return false;
   };
 
-  const reconnect = async (id: string, parameters: Omit<TransportParameters, "prompt">) => {
-    while (state.cursor) {
-      const settled = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(state.cursor)}`, { headers: headers() }).then(response => follow(response, parameters), () => false);
+  const reconnect = async (id: string, parameters: Omit<TransportParameters, "prompt">, session: VercelSession) => {
+    const { signal } = parameters;
+    while (session.cursor && !signal?.aborted) {
+      const settled = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(session.cursor)}`, { headers: headers(), signal }).then(response => follow(response, parameters, session), () => false);
       if (settled) return;
-      await new Promise(resolve => setTimeout(resolve, reconnectMs));
+      await pause(signal);
     }
   };
 
   return {
-    async send({ prompt, push, note }: TransportParameters) {
-      state.open = true;
-      save();
-      const started = !state.id && warmed?.key === key() ? await warmed.session : undefined;
+    async send({ prompt, push, note, signal }: TransportParameters) {
+      const session = state;
+      session.open = true;
+      save(session);
+      const started = !session.id && warmed?.key === key() ? await warmed.session : undefined;
       warmed = undefined;
-      const existing = state.id ?? started;
+      const existing = session.id ?? started;
       try {
-        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), text: prompt }) });
+        if (signal?.aborted) return;
+        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), text: prompt }), signal }).catch((error: unknown) => {
+          if (signal?.aborted) return undefined;
+          throw error;
+        });
+        if (!response) return;
         const id = response.headers.get("x-session-id") ?? existing;
-        if (id && id !== state.id) {
-          state.id = id;
-          save();
+        if (id && id !== session.id) {
+          session.id = id;
+          save(session);
         }
-        if (!(await follow(response, { push, note })) && id) await reconnect(id, { push, note });
+        if (!(await follow(response, { push, note, signal }, session)) && id) await reconnect(id, { push, note, signal }, session);
       } finally {
-        state.open = false;
-        save();
+        if (!signal?.aborted) {
+          session.open = false;
+          save(session);
+        }
       }
     },
     async steer({ prompt }: TransportParameters) {
@@ -94,13 +122,16 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       void response.body?.cancel();
       return false;
     },
-    async resume({ push, note }) {
-      if (!state.open || !state.id) return;
+    async resume({ push, note, signal }) {
+      const session = state;
+      if (!session.open || !session.id) return;
       try {
-        await reconnect(state.id, { push, note });
+        await reconnect(session.id, { push, note, signal }, session);
       } finally {
-        state.open = false;
-        save();
+        if (!signal?.aborted) {
+          session.open = false;
+          save(session);
+        }
       }
     },
     session: () => state,

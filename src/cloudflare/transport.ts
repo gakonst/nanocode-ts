@@ -38,9 +38,20 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   let used = 0;
   const queued: string[] = [];
 
-  const save = () => options.session?.save(state);
+  const save = (session = state) => {
+    if (session === state) options.session?.save(state);
+  };
   const headers = (extra: Record<string, string> = {}) => ({ ...extra, ...options.headers?.() });
-  const path = (suffix: string) => `${base}sessions/${encodeURIComponent(state.id!)}/${suffix}`;
+  const path = (suffix: string, session = state) => `${base}sessions/${encodeURIComponent(session.id!)}/${suffix}`;
+  const pause = (signal: AbortSignal | undefined) => new Promise<void>(resolve => {
+    const timer = setTimeout(done, reconnectMs);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done);
+  });
 
   const receive = (logged: LoggedEvent, requestId: string, sink: Sink): boolean => {
     const body = (logged.event ?? {}) as { source?: string; type?: string };
@@ -57,17 +68,19 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     return body.type === "result";
   };
 
-  const follow = async (response: Response, requestId: string, sink: Sink): Promise<boolean> => {
+  const follow = async (response: Response, requestId: string, sink: Sink, session: CloudflareSession, signal?: AbortSignal): Promise<boolean> => {
     if (!response.ok || !response.body) {
+      if (signal?.aborted) return true;
       sink.note("error", `${response.status} ${await response.text()}`);
       return true;
     }
     let settled = false;
     try {
       for await (const message of serverEvents(response.body)) {
+        if (signal?.aborted) break;
         if (message.id) {
-          state.cursor = Number(message.id);
-          save();
+          session.cursor = Number(message.id);
+          save(session);
         }
         if (message.data && receive(JSON.parse(message.data) as LoggedEvent, requestId, sink)) {
           settled = true;
@@ -75,42 +88,49 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
         }
       }
     } catch {
+      if (signal?.aborted) return true;
       sink.note("tool", "The stream dropped. Reconnecting from the last event.");
       return false;
     }
-    if (settled) void response.body.cancel().catch(() => undefined);
-    return settled;
+    if (settled || signal?.aborted) void response.body.cancel().catch(() => undefined);
+    return settled || Boolean(signal?.aborted);
   };
 
-  const reconnect = async (requestId: string, sink: Sink) => {
-    for (;;) {
-      const response = await fetch(path(`events?after=${state.cursor ?? 0}`), { headers: headers({ accept: "text/event-stream" }) }).catch(() => undefined);
-      if (response && await follow(response, requestId, sink)) return;
-      await new Promise(resolve => setTimeout(resolve, reconnectMs));
+  const reconnect = async (requestId: string, sink: Sink, session: CloudflareSession, signal?: AbortSignal) => {
+    while (!signal?.aborted) {
+      const response = await fetch(path(`events?after=${session.cursor ?? 0}`, session), { headers: headers({ accept: "text/event-stream" }), signal }).catch(() => undefined);
+      if (response && await follow(response, requestId, sink, session, signal)) return;
+      await pause(signal);
     }
   };
 
-  const turn = async (prompt: string, sink: Sink) => {
+  const turn = async (prompt: string, sink: Sink, signal?: AbortSignal) => {
     state.id ??= warmed ?? identifier("web");
+    const session = state;
     used = performance.now();
     const requestId = identifier("turn");
-    state.open = requestId;
-    save();
+    session.open = requestId;
+    save(session);
     const model = options.model();
     try {
-      const response = await fetch(path(`turns?after=${state.cursor ?? 0}`), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt, provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}) }) });
-      if (!(await follow(response, requestId, sink))) await reconnect(requestId, sink);
+      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt, provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}) }), signal }).catch((error: unknown) => {
+        if (signal?.aborted) return undefined;
+        throw error;
+      });
+      if (response && !(await follow(response, requestId, sink, session, signal))) await reconnect(requestId, sink, session, signal);
     } finally {
-      state.open = undefined;
-      used = performance.now();
-      save();
+      if (!signal?.aborted) {
+        session.open = undefined;
+        used = performance.now();
+        save(session);
+      }
     }
   };
 
   return {
-    async send({ prompt, push, note }: TransportParameters) {
-      await turn(prompt, { push, note });
-      for (let next = queued.shift(); next; next = queued.shift()) await turn(next, { push, note });
+    async send({ prompt, push, note, signal }: TransportParameters) {
+      await turn(prompt, { push, note }, signal);
+      for (let next = queued.shift(); next && !signal?.aborted; next = queued.shift()) await turn(next, { push, note }, signal);
     },
     async steer({ prompt }: TransportParameters) {
       if (!state.id) return false;
@@ -129,13 +149,17 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       const response = await fetch(path(`turns/${encodeURIComponent(state.open)}/cancel`), { method: "POST", headers: headers() });
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     },
-    async resume({ push, note }) {
-      if (!state.open || !state.id) return;
+    async resume({ push, note, signal }) {
+      const session = state;
+      const open = session.open;
+      if (!open || !session.id) return;
       try {
-        await reconnect(state.open, { push, note });
+        await reconnect(open, { push, note }, session, signal);
       } finally {
-        state.open = undefined;
-        save();
+        if (!signal?.aborted) {
+          session.open = undefined;
+          save(session);
+        }
       }
     },
     session: () => state,
