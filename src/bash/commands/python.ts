@@ -272,6 +272,17 @@ function inNode(): boolean {
   return typeof (globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node === "string";
 }
 
+function requireFromCwd(specifier: string): { loadPyodide?: (config: Record<string, unknown>) => Promise<Pyodide> } | undefined {
+  const process = (globalThis as { process?: { cwd?: () => string; getBuiltinModule?: (id: string) => unknown } }).process;
+  const builtin = process?.getBuiltinModule?.("node:module") as { createRequire?: (path: string) => (id: string) => unknown } | undefined;
+  if (!builtin?.createRequire || !process?.cwd) return undefined;
+  try {
+    return builtin.createRequire(process.cwd() + "/package.json")(specifier) as { loadPyodide?: (config: Record<string, unknown>) => Promise<Pyodide> };
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadDefault(options: PythonOptions): Promise<Pyodide> {
   const index = options.indexURL ?? PYODIDE_URL;
   const candidates = inNode() && !options.indexURL ? ["pyodide"] : [index + "pyodide.mjs"];
@@ -281,8 +292,12 @@ async function loadDefault(options: PythonOptions): Promise<Pyodide> {
     try {
       module = await import(specifier);
     } catch (error) {
-      errors.push(specifier + ": " + (error instanceof Error ? error.message : String(error)));
-      continue;
+      const required = specifier === "pyodide" ? requireFromCwd(specifier) : undefined;
+      if (!required) {
+        errors.push(specifier + ": " + (error instanceof Error ? error.message : String(error)));
+        continue;
+      }
+      module = required;
     }
     if (typeof module.loadPyodide !== "function") {
       errors.push(specifier + " has no loadPyodide export");
