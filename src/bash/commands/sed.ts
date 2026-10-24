@@ -297,8 +297,19 @@ function substitute(template: string, match: string[]): string {
 }
 
 export const sed: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "nErsuzi", values: "efl", long: { quiet: "n", silent: "n", "regexp-extended": "E", expression: "e", file: "f", separate: "s", "in-place": "i", posix: "", debug: "", "null-data": "z", "line-length": "l" } });
-  const inPlace = parsed.flags.has("i") || ctx.args.some(arg => /^-i.+/.test(arg) || arg.startsWith("--in-place"));
+  let suffix = "";
+  const args = ctx.args.map(arg => {
+    const match = arg.match(/^(?:-([nErsuz]*)i|--in-place=)(.*)$/);
+    if (!match) return arg;
+    suffix = match[2];
+    return "-" + (match[1] ?? "") + "i";
+  });
+  const parsed = options(args, { flags: "nErsuziV", values: "efl", long: { quiet: "n", silent: "n", "regexp-extended": "E", expression: "e", file: "f", separate: "s", "in-place": "i", posix: "", debug: "", "null-data": "z", "line-length": "l", version: "V", help: "V", sandbox: "", "follow-symlinks": "" } });
+  if (parsed.flags.has("V")) {
+    ctx.stdout.write("sed (GNU sed) 4.9\n");
+    return 0;
+  }
+  const inPlace = parsed.flags.has("i");
   const scripts = [...(parsed.values.get("e") ?? [])];
   for (const file of parsed.values.get("f") ?? []) scripts.push(decode(await ctx.fs.read(ctx.resolve(file))));
   const operands = [...parsed.operands];
@@ -327,7 +338,7 @@ export const sed: CommandHandler = async ctx => {
     let index = 0;
     let lineNumber = 0;
     let hold = "";
-    for (const command of commands) if (command.range) command.range = { active: false, end: 0 };
+    for (const command of commands) if (command.range) command.range = { active: command.from?.kind === "line" && command.from.line === 0 && command.to?.kind === "regex", end: 0 };
     const isLast = () => index >= input.length;
     const emit = (value: string) => {
       out += value + separator;
@@ -403,17 +414,27 @@ export const sed: CommandHandler = async ctx => {
             const target = command.occurrence ?? 1;
             let count = 0;
             let changed = false;
-            const result = space.replace(global, (...args: unknown[]) => {
-              let end = args.length - 2;
-              if (typeof args[args.length - 1] === "object") end--;
-              const match = args.slice(0, end) as string[];
-              count++;
-              if (count === target || (command.global && count > target)) {
-                changed = true;
-                return substitute(command.replacement!, match);
+            let result = "";
+            let last = 0;
+            let previous = -1;
+            for (let position = 0; position <= space.length; ) {
+              global.lastIndex = position;
+              const match = global.exec(space);
+              if (!match) break;
+              if (match[0] === "" && match.index === previous) {
+                position = match.index + 1;
+                continue;
               }
-              return match[0];
-            });
+              count++;
+              const replace = count === target || (command.global && count > target);
+              if (replace) changed = true;
+              result += space.slice(last, match.index) + (replace ? substitute(command.replacement!, [...match].map(group => group ?? "")) : match[0]);
+              last = match.index + match[0].length;
+              previous = last;
+              position = match[0] === "" ? last + 1 : last;
+              if (count >= target && !command.global) break;
+            }
+            result += space.slice(last);
             if (changed) {
               substituted = true;
               space = result;
@@ -555,8 +576,10 @@ export const sed: CommandHandler = async ctx => {
     for (const operand of operands) {
       const path = ctx.resolve(operand);
       try {
-        const result = await run(decode(await ctx.fs.read(path)));
+        const original = decode(await ctx.fs.read(path));
+        const result = await run(original);
         quit = false;
+        if (suffix) await ctx.fs.write(suffix.includes("*") ? ctx.resolve(suffix.replace(/\*/g, operand.split("/").pop()!)) : path + suffix, encode(original));
         await ctx.fs.write(path, encode(result));
       } catch (error) {
         if (!(error instanceof FsError)) throw error;

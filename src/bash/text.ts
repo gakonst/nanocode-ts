@@ -97,6 +97,9 @@ export function posixRegExp(pattern: string, extended: boolean, flags = ""): Reg
       else if (/[wWsSbBdD1-9]/.test(n)) out += "\\" + n;
       else if (n === "n") out += "\\n";
       else if (n === "t") out += "\\t";
+      else if (n === "r") out += "\\r";
+      else if (n === "f") out += "\\f";
+      else if (n === "v") out += "\\v";
       else out += escapeRegExp(n);
     } else if (c === "[") {
       const result = bracket(pattern, i, false);
