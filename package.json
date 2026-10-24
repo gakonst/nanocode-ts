@@ -96,7 +96,8 @@
       "types": "./dist/machines/vercel.d.ts",
       "default": "./dist/machines/vercel.js"
     },
-    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
+    "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
+    "./interpreter.wasm": "./dist/interpreter.wasm"
   },
   "dependencies": {
     "accounts": "0.21.0",

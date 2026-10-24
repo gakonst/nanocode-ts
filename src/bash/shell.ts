@@ -729,14 +729,10 @@ export class Runner {
       const path = this.resolve(name);
       const stat = await this.host.fs.stat(path);
       if (stat?.kind === "file") {
-        if (stat.size >= 8) {
+        const wasm = this.host.commands.get("wasm");
+        if (wasm && stat.size >= 8) {
           const head = await this.host.fs.read(path);
-          if (head[0] === 0 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) {
-            const wasm = this.host.commands.get("wasm");
-            if (wasm) return this.external(name, wasm, [name, ...args], io);
-            io.stderr.write("bash: " + name + ": cannot execute WebAssembly here: programs run only when this shell runs in a browser\n");
-            return 126;
-          }
+          if (head[0] === 0 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) return this.external(name, wasm, [name, ...args], io);
         }
         return this.source(path, args, io, true);
       }
