@@ -302,6 +302,7 @@ export class Runner {
   flushes: (() => Promise<void>)[] = [];
   #deferred: { path: string; body: Script }[] = [];
   #processes = 0;
+  #ignored = false;
   #started = Date.now();
   #steps = 0;
   #depth = 0;
@@ -399,7 +400,14 @@ export class Runner {
       if (guarded) this.#condition--;
     }
     this.state.status = status;
-    if (status !== 0 && !guarded && !pipeline.negate && this.#condition === 0) {
+    if (guarded || this.#condition > 0) {
+      this.#ignored = status !== 0;
+      return status;
+    }
+    const compound = pipeline.commands.length === 1 && pipeline.commands[0].type !== "simple" && !(pipeline.commands[0].type === "group" && pipeline.commands[0].subshell);
+    if (compound && this.#ignored && status !== 0) return status;
+    this.#ignored = false;
+    if (status !== 0 && !pipeline.negate) {
       const trap = this.state.traps.get("ERR");
       if (trap) {
         this.state.traps.delete("ERR");
@@ -1107,7 +1115,7 @@ export class Runner {
       case "0":
         return [state.arg0];
       case "-":
-        return [(state.options.errexit ? "e" : "") + (state.options.nounset ? "u" : "") + (state.options.xtrace ? "x" : "") + "hB"];
+        return [(state.options.errexit ? "e" : "") + (state.options.nounset ? "u" : "") + (state.options.xtrace ? "x" : "") + "hBc"];
       case "RANDOM":
         return [String(Math.floor(Math.random() * 32768))];
       case "SECONDS":
@@ -1498,6 +1506,7 @@ export const BUILTINS: Record<string, Builtin> = {
   true: noop,
   false: async () => 1,
   wait: noop,
+  jobs: noop,
   alias: noop,
   unalias: noop,
   hash: noop,
