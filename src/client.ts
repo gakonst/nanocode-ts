@@ -455,8 +455,9 @@ export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
     const header = raw.split("\n", 1)[0] ?? "";
     status = codeStatus(header) ?? status;
     const yielded = /^Script running with cell ID (\S+)/.exec(header);
-    if (yielded) cell.title = `cell ${yielded[1]}`;
-    cell.output = humanize(stripCodeHeader(raw)).trimEnd();
+    if (yielded && cell.tool !== "wait") cell.title = `cell ${yielded[1]}`;
+    const output = humanize(stripCodeHeader(raw)).trimEnd();
+    cell.output = status === "cancelled" && cell.output && !output.includes(cell.output) ? `${cell.output}\n${output}`.trimEnd() : output;
   } else if (cell.tool === "exec_command" || cell.tool === "write_stdin") {
     const [header, output] = raw.includes("Output:\n") ? raw.split(/Output:\n([\s\S]*)/, 2) : ["", raw];
     cell.output = (typeof structured.output === "string" ? structured.output : output ?? "").trimEnd();
@@ -731,7 +732,8 @@ export class Transcript {
       this.inputs.delete(id);
       finishTool(cell, event);
       const origin = String(event.call_id ?? "");
-      if (cell.status === "yielded" && cell.title.startsWith("cell ")) this.links.set(origin, { cell: cell.title.slice(5), latest: origin });
+      const yieldedCell = cell.status === "yielded" ? /^cell (\S+)/.exec(cell.title)?.[1] : undefined;
+      if (yieldedCell !== undefined) this.links.set(origin, { cell: yieldedCell, latest: origin });
       else for (const [key, link] of this.links) if (link.latest === id && key !== id) this.links.delete(key);
     }
     this.settle();
