@@ -1,4 +1,5 @@
 import { defineDoc, type DurableSessions } from "durable-harness";
+import { egress } from "../vercel/egress.ts";
 import * as Mcp from "./mcp.ts";
 import * as Payment from "./payment.ts";
 import { account, type Account, device, json, keys, paying, type Store } from "./account.ts";
@@ -55,7 +56,7 @@ export function createWallets(options: WalletsOptions) {
   const holder = (sessionId: string) => {
     let found = holders.get(sessionId);
     if (!found) {
-      found = account({ store: docStore(options.sessions, sessionId), secret: options.secret, servers, scripts: options.scripts ?? false, ...(options.rpc ? { rpc: options.rpc } : {}) });
+      found = account({ store: docStore(options.sessions, sessionId), secret: options.secret, servers, scripts: options.scripts ?? false, fetch: egress(), ...(options.rpc ? { rpc: options.rpc } : {}) });
       holders.set(sessionId, found);
     }
     return found;

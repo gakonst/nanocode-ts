@@ -2,6 +2,7 @@ import { createJsonChannelStore, Mppx, tempo as payments } from "mppx/client";
 import { type Address, type Hex, isAddressEqual, isHex } from "viem";
 import { Account, Actions, createClient, http } from "viem/tempo";
 import { tempo } from "viem/tempo/chains";
+import { guard, mark } from "../egress.ts";
 import * as Mcp from "./mcp.ts";
 import * as Payment from "./payment.ts";
 
@@ -36,7 +37,7 @@ export type Holder = {
   logout(): Promise<boolean>;
 };
 
-export type AccountOptions = { store: Store; secret: string | undefined; servers?: readonly Mcp.Server[]; rpc?: string; scripts?: boolean };
+export type AccountOptions = { store: Store; secret: string | undefined; servers?: readonly Mcp.Server[]; rpc?: string; scripts?: boolean; fetch?: typeof fetch };
 
 type Payer = { fetch: (input: string, init: RequestInit & { context?: unknown }) => Promise<Response> };
 
@@ -76,6 +77,7 @@ export function account(options: AccountOptions) {
   const { store } = options;
   const servers = options.servers ?? Mcp.servers;
   const rpc = options.rpc ?? RPC;
+  const network = guard(options.fetch ?? ((input, init) => globalThis.fetch(input, init)));
   const sealing = sealer(options.secret);
   let payer: { sealed: string; payer: Payer } | undefined;
 
@@ -233,11 +235,11 @@ export function account(options: AccountOptions) {
         const url = String(input instanceof Request ? input.url : input);
         if (Mcp.server(url, servers)) {
           const call = await Mcp.call(input, init);
-          const response = await fetch(input, init);
+          const response = await network(input, init);
           await tool(call, response);
           return response;
         }
-        const response = await fetch(input, init);
+        const response = await network(input, init);
         if (response.status === 402) {
           await describe(url, response.headers.get("www-authenticate")?.match(/description="([^"]*)"/)?.[1]);
           return response;
@@ -291,9 +293,8 @@ export function account(options: AccountOptions) {
   }
 
   async function send(kind: "model" | "pay", target: string, init: Init): Promise<Response> {
-    if (kind === "pay" && !publicTarget(target)) return json({ error: "fetch reaches only public http(s) hosts" }, 403);
     if (kind === "pay" && !new Headers(init.headers).has("user-agent")) init = { ...init, headers: [...new Headers(init.headers), ["user-agent", "nanocode-ts"]] };
-    if (kind === "pay" && !(await record())) return Payment.locked(servers, undefined, options.scripts)(target, { method: init.method, headers: init.headers, body: init.body, signal: init.signal });
+    if (kind === "pay" && !(await record())) return Payment.locked(servers, network, options.scripts)(target, { method: init.method, headers: init.headers, body: init.body, signal: init.signal });
     try {
       const current = await pay();
       return await current.fetch(target, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, context: { depositRaw: OPENING } });
@@ -308,25 +309,7 @@ export function account(options: AccountOptions) {
 
 export type Account = ReturnType<typeof account>;
 
-const LOCAL_HOST = /(^|\.)(localhost|local|internal)$/;
-
-export function publicTarget(target: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(target);
-  } catch {
-    return false;
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host || LOCAL_HOST.test(host)) return false;
-  if (/^[\d.]+$/.test(host)) {
-    const [a = 0, b = 0] = host.split(".").map(Number);
-    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)));
-  }
-  if (host.includes(":")) return !(host === "::" || host === "::1" || host.startsWith("::ffff:") || /^f[cd]/.test(host) || /^fe[89ab]/.test(host));
-  return true;
-}
+export { publicTarget } from "../egress.ts";
 
 export async function envelope(request: Request, servers: readonly Mcp.Server[] = Mcp.servers): Promise<{ kind: "model" | "pay"; target: string; init: Init } | undefined> {
   const { pathname } = new URL(request.url);
@@ -345,12 +328,12 @@ export async function forward(send: (request: Request) => Promise<Response>, inp
 }
 
 export function paying(holder: () => Pick<Account, "send">, servers: readonly Mcp.Server[] = Mcp.servers): typeof fetch {
-  return async (input, init) => {
+  return mark(async (input, init) => {
     const request = new Request(input, init);
     const method = request.method;
     const body = method === "GET" || method === "HEAD" ? undefined : Mcp.server(request.url, servers) ? await request.text() : await request.arrayBuffer();
     return holder().send("pay", request.url, { method, headers: [...request.headers], ...(body === undefined ? {} : { body }), signal: request.signal });
-  };
+  });
 }
 
 export async function verify(body: { address?: string; key_type?: string; private_key?: string } | undefined, rpc = RPC): Promise<KeyRecord & { spendPolicy: string } | Response> {

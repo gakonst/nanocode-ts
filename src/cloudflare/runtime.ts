@@ -2,6 +2,7 @@ import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives, type Limits, type PythonRemote } from "../bash/index.ts";
+import { guard } from "../egress.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
@@ -592,7 +593,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             ? connectExecutor(options.egress(this.env), authority, this.handLimits()).then(value => remote = value, error => { remoteFailed = true; remoteError = error; throw error; }).finally(() => this.scopeTimings(scope).record("remote.connect", performance.now() - connectStarted))
             : undefined;
           void connecting?.catch(() => {});
-          const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
+          const cellFetch = guard((options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives());
           const pythonRemote = options.workspace ? options.workspace.python?.(authority, this.env) : undefined;
           const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
           const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));

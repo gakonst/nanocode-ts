@@ -7,6 +7,8 @@
   },
   "include": [
     "src/vercel/*.ts",
-    "src/sandbox/vercel.ts"
-  ]
+    "src/sandbox/vercel.ts",
+    "src/machines/vercel.ts"
+  ],
+  "exclude": []
 }
