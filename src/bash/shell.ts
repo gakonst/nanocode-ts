@@ -1009,8 +1009,10 @@ export class Runner {
     const run = async () => {
       this.enter();
       const positional = this.state.positional;
+      const sources = this.state.vars.get("BASH_SOURCE");
       if (args.length || isolated) this.state.positional = args;
       if (arg0 !== undefined) this.state.arg0 = arg0;
+      this.state.vars.set("BASH_SOURCE", [arg0 ?? path, ...(sources ?? [])]);
       try {
         return await this.script(script, io);
       } catch (error) {
@@ -1018,10 +1020,12 @@ export class Runner {
         throw error;
       } finally {
         if (!isolated) this.state.positional = positional;
+        if (sources) this.state.vars.set("BASH_SOURCE", sources);
+        else this.state.vars.delete("BASH_SOURCE");
         this.leave();
       }
     };
-    return isolated ? this.subshell(run) : run();
+    return isolated ? this.subshell(run, io) : run();
   }
 
   async redirect(redirects: Redirect[], io: IO): Promise<{ io: IO; flush(): Promise<void> }> {
@@ -1990,7 +1994,7 @@ export const BUILTINS: Record<string, Builtin> = {
         }
       }
       return this.source(this.resolve(args[i]), args.slice(i + 1), io, false, args[i]);
-    });
+    }, io);
   },
   async timeout(args, io) {
     let i = 0;
