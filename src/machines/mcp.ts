@@ -9,7 +9,7 @@ export const servers: readonly Server[] = [
 
 export const core: Record<string, readonly string[]> = {
   mercator: ["search_services", "describe_service", "quote_plan", "create_job", "get_job"],
-  gateway: ["capabilities", "kv_get", "kv_set", "kv_list", "kv_delete", "bucket_put", "bucket_get", "bucket_list", "ai_chat", "compute_create", "compute_exec"],
+  gateway: ["capabilities", "kv_get", "kv_set", "kv_list", "kv_delete", "bucket_put", "bucket_get", "bucket_list", "ai_chat", "compute_create", "compute_exec", "compute_terminate"],
 };
 
 type Challenge = { description?: string; intent?: string; request?: { amount?: string } };

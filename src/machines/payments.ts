@@ -130,6 +130,7 @@ export function create(connected: Wallet.Wallet, options: { servers?: readonly M
     });
 
     mppx.onPaymentResponse(payment => {
+      void payment.response.body?.cancel().catch(() => undefined);
       const origin = String(payment.input instanceof Request ? payment.input.url : payment.input);
       if (payment.challenge.intent !== "charge" || Mcp.server(origin, servers)) return;
       const request = payment.challenge.request as { amount?: string };

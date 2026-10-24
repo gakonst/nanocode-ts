@@ -96,6 +96,8 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
   async function logout() {
     const saved = connected ?? Wallet.restore();
     if (!saved) return note("tool", "Not logged in.");
+    const current = cloud ?? Cloud.restore();
+    if (current) await Cloud.logout(current).catch((error: unknown) => note("error", `The Worker did not forget the key (${message(error)}).`));
     note("tool", "Opening Tempo Wallet to revoke the key.");
     try {
       await Wallet.revoke(saved);
