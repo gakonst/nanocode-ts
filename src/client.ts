@@ -551,9 +551,10 @@ export type TranscriptOptions = {
   reducedMotion?(): boolean;
   limit?: number;
   checkpoint?(event: LiveEvent): void;
+  end?(status: ToolStatus): void;
 };
 
-export type TranscriptState = { running: ToolCell[]; stream: Omit<Stream, "shown">; links: [string, { cell: string; latest: string }][]; orphans: [string, ToolCell[]][] };
+export type TranscriptState = { running: ToolCell[]; stream: Omit<Stream, "shown">; links: [string, { cell: string; latest: string }][]; orphans: [string, ToolCell[]][]; ended?: string[]; seen?: [number, string][] };
 
 type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string; started?: number; ended?: number };
 
@@ -562,6 +563,16 @@ type Queued = { event: LiveEvent } | { run: () => void } | { aside: Entry };
 const TOOL_EVENTS = new Set(["tool_input", "tool_start", "tool_output", "tool_end"]);
 
 const ENDED_LIMIT = 1024;
+
+const SEEN_LIMIT = 4096;
+
+const SAVED_SEEN = 256;
+
+const OUTPUT_LIMIT = 65_536;
+
+function fingerprint(event: LiveEvent): string {
+  return [event.type, event.call_id ?? event.item ?? "", typeof event.delta === "string" ? event.delta.length : typeof event.text === "string" ? event.text.length : ""].join("|");
+}
 
 export class Transcript {
   private readonly options: TranscriptOptions;
@@ -577,12 +588,20 @@ export class Transcript {
   private held: Entry[] = [];
   private readonly orphans = new Map<string, ToolCell[]>();
   private readonly ended = new Set<string>();
+  private readonly seen = new Map<number, string>();
 
   constructor(options: TranscriptOptions) {
     this.options = options;
   }
 
   push(event: LiveEvent): void {
+    if (typeof event.seq === "number") {
+      const key = fingerprint(event);
+      if (this.seen.get(event.seq) === key) return;
+      this.seen.delete(event.seq);
+      this.seen.set(event.seq, key);
+      if (this.seen.size > SEEN_LIMIT) this.seen.delete(this.seen.keys().next().value!);
+    }
     this.enqueue({ event });
   }
 
@@ -606,6 +625,7 @@ export class Transcript {
     this.links.clear();
     this.orphans.clear();
     this.ended.clear();
+    this.seen.clear();
     this.held = [];
     this.clock = 0;
     this.options.live([]);
@@ -618,7 +638,7 @@ export class Transcript {
   state(limit = 65_536): TranscriptState {
     const clip = (cell: ToolCell) => clipCell(cell, limit, true);
     const { shown: _shown, ...stream } = this.stream;
-    return { running: this.running.map(clip), stream, links: [...this.links], orphans: [...this.orphans].map(([key, cells]) => [key, cells.map(clip)]) };
+    return { running: this.running.map(clip), stream, links: [...this.links], orphans: [...this.orphans].map(([key, cells]) => [key, cells.map(clip)]), ended: [...this.ended].slice(-256), seen: [...this.seen].slice(-SAVED_SEEN) };
   }
 
   restore(state: TranscriptState | undefined): void {
@@ -634,6 +654,8 @@ export class Transcript {
       for (const cell of cells) index(cell);
     }
     for (const [key, link] of state.links ?? []) this.links.set(key, link);
+    for (const id of Array.isArray(state.ended) ? state.ended : []) this.ended.add(id);
+    for (const [seq, key] of Array.isArray(state.seen) ? state.seen : []) this.seen.set(seq, key);
     if (state.stream && typeof state.stream.text === "string") {
       this.stream = { ...state.stream, shown: state.stream.text.length };
       this.reveal();
@@ -642,10 +664,14 @@ export class Transcript {
   }
 
   close(): void {
-    this.enqueue({ run: () => {
-      this.settle("cancelled");
-      this.orphans.clear();
-    } });
+    this.enqueue({ run: () => this.end("cancelled") });
+  }
+
+  private end(status: ToolStatus): void {
+    this.settle(status);
+    this.orphans.clear();
+    this.links.clear();
+    this.options.end?.(status);
   }
 
   private enqueue(item: Queued): void {
@@ -727,7 +753,10 @@ export class Transcript {
         }
       }
     } else if (event.type === "tool_output") {
-      if (cell.status === "running" && typeof event.text === "string") cell.output = plain(event.text);
+      if (cell.status === "running" && typeof event.text === "string") {
+        const output = cell.output ? cell.output + "\n" + plain(event.text) : plain(event.text);
+        cell.output = output.length > OUTPUT_LIMIT ? output.slice(-OUTPUT_LIMIT) : output;
+      }
     } else {
       this.inputs.delete(id);
       finishTool(cell, event);
@@ -821,10 +850,7 @@ export class Transcript {
         this.options.checkpoint?.(next.event);
         continue;
       }
-      if (next.event.type === "turn") {
-        this.settle(next.event.status === "completed" ? "completed" : "cancelled");
-        this.orphans.clear();
-      }
+      if (next.event.type === "turn") this.end(next.event.status === "completed" ? "completed" : "cancelled");
       const entry = describe(next.event, this.options.limit);
       if (entry) this.options.add(entry);
       this.options.apply?.(next.event);
@@ -1016,21 +1042,35 @@ export function createConfig(options: ConfigOptions): Config {
   const saveTransport = () => {
     if (history && current && options.transport.snapshot) write(transportKey(current), options.transport.snapshot());
   };
-  type View = { transcript: Transcript; live: Entry[]; pushed?: unknown; processed?: unknown; dirty: boolean; saved: number; timer?: ReturnType<typeof setTimeout> };
+  type View = { transcript: Transcript; live: Entry[]; entries?: Entry[]; pushed?: unknown; processed?: unknown; dirty: boolean; saved: number; timer?: ReturnType<typeof setTimeout> };
   const views = new Map<string | undefined, View>();
   const snapshots = new WeakMap<LiveEvent, unknown>();
+  const evict = (id: string, key: string, value: unknown): boolean => {
+    while (!write(key, value)) {
+      const oldest = [...conversations].reverse().find(item => item.id !== id && item.id !== current);
+      if (!oldest) return false;
+      forget(oldest.id);
+      conversations = conversations.filter(item => item.id !== oldest.id);
+      saveIndex();
+    }
+    return true;
+  };
   const persist = (id: string | undefined, view: View) => {
     if (view.timer !== undefined) clearTimeout(view.timer);
     view.timer = undefined;
-    if (!history || !id || !options.transport.snapshot || !conversations.some(item => item.id === id)) return;
-    const snapshot = view.transcript.pending() ? view.processed : id === current ? options.transport.snapshot() : view.pushed;
+    if (!history || !id || !conversations.some(item => item.id === id)) return;
+    const entries = view.entries;
+    view.entries = undefined;
+    if (entries) evict(id, entriesKey(id), entries);
+    const snapshot = !options.transport.snapshot ? undefined : view.transcript.pending() ? view.processed : id === current ? options.transport.snapshot() : view.pushed;
     if (snapshot === undefined) return;
     view.dirty = false;
     view.saved = Date.now();
     const live = view.transcript.state();
-    if (!live.running.length && !live.stream.text && !live.orphans.length) {
+    const idle = !live.running.length && !live.stream.text && !live.orphans.length;
+    if (!evict(id, liveKey(id), idle ? { running: [], stream: { posted: 0, text: "" }, links: [], orphans: [], ended: live.ended?.slice(-64), seen: live.seen } : live)) {
       try { history.storage?.removeItem(liveKey(id)); } catch {}
-    } else if (!write(liveKey(id), live)) return;
+    }
     write(transportKey(id), snapshot);
   };
   const schedule = (id: string | undefined, view: View) => {
@@ -1054,19 +1094,21 @@ export function createConfig(options: ConfigOptions): Config {
     const shown = id === current;
     const existing = conversations.find(item => item.id === id);
     if (!existing && !shown) return;
-    const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry.tool ? { ...entry, tool: clipCell(entry.tool, 65_536) } : entry].slice(-(options.keep ?? 500));
-    while (!write(entriesKey(id!), entries)) {
-      const oldest = [...conversations].reverse().find(item => item.id !== id && item.id !== current);
-      if (!oldest) break;
-      forget(oldest.id);
-      conversations = conversations.filter(item => item.id !== oldest.id);
-    }
-    const title = existing?.title || (entry.kind === "user" ? (entry.text || entry.attachments?.map(item => item.name).join(", ") || "").replace(/\s+/g, " ").slice(0, 80) : "");
-    conversations = [{ id: id!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
-    for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
-    conversations = conversations.slice(0, history.limit);
-    saveIndex();
     const target = views.get(id);
+    const entries = [...(shown ? state.entries : target?.entries ?? read<Entry[]>(entriesKey(id!), [])), entry.tool ? { ...entry, tool: clipCell(entry.tool, 65_536) } : entry].slice(-(options.keep ?? 500));
+    store(id!, entries, target);
+  };
+  const store = (id: string, entries: Entry[], target: View | undefined) => {
+    const shown = id === current;
+    const existing = conversations.find(item => item.id === id);
+    const entry = entries[entries.length - 1];
+    if (target) target.entries = entries;
+    else evict(id, entriesKey(id), entries);
+    const title = existing?.title || (entry?.kind === "user" ? (entry.text || entry.attachments?.map(item => item.name).join(", ") || "").replace(/\s+/g, " ").slice(0, 80) : "");
+    conversations = [{ id, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
+    for (const dropped of conversations.slice(history!.limit)) forget(dropped.id);
+    conversations = conversations.slice(0, history!.limit);
+    saveIndex();
     if (target) {
       target.dirty = true;
       schedule(id, target);
@@ -1074,6 +1116,29 @@ export function createConfig(options: ConfigOptions): Config {
     if (!shown) return set({ conversations });
     if (!target) saveTransport();
     set({ entries, conversations });
+  };
+  const end = (id: string | undefined, status: ToolStatus) => {
+    const target = views.get(id);
+    const entries = id === current ? state.entries : target?.entries ?? (history && id ? read<Entry[]>(entriesKey(id), []) : []);
+    let start = entries.length;
+    while (start > 0 && !(entries[start - 1]!.kind === "user" && !entries[start - 1]!.steer)) start--;
+    const final = status === "completed" ? "completed" : "cancelled";
+    const settle = (cell: ToolCell): ToolCell => cell.status === "yielded" || cell.status === "running" || cell.children.some(child => settle(child) !== child) ? { ...cell, status: cell.status === "yielded" || cell.status === "running" ? final : cell.status, children: cell.children.map(settle) } : cell;
+    let changed = false;
+    const next = entries.map((entry, index) => {
+      if (index < start || !entry.tool) return entry;
+      const tool = settle(entry.tool);
+      if (tool === entry.tool) return entry;
+      changed = true;
+      return { ...entry, tool, text: toolSummary(tool) };
+    });
+    if (!changed) return;
+    if (!history) {
+      options.persist?.save(next);
+      return set({ entries: next });
+    }
+    if (!id) return;
+    store(id, next, target);
   };
   const view = (id = current): View => {
     let found = views.get(id);
@@ -1084,6 +1149,7 @@ export function createConfig(options: ConfigOptions): Config {
       saved: 0,
       transcript: new Transcript({
         add: entry => add(id, entry),
+        end: status => end(id, status),
         checkpoint: event => {
           created.processed = snapshots.has(event) ? snapshots.get(event) : created.processed;
           if (created.dirty || Date.now() - created.saved >= 250) persist(id, created);
@@ -1240,7 +1306,7 @@ export function createConfig(options: ConfigOptions): Config {
     },
     select(id) {
       if (!history || id === current || (state.status === "pending" && !detachable()) || !conversations.some(item => item.id === id)) return;
-      open(id, read<Entry[]>(entriesKey(id), []));
+      open(id, views.get(id)?.entries ?? read<Entry[]>(entriesKey(id), []));
     },
     create() {
       if (!history || (state.status === "pending" && !detachable())) return current;
