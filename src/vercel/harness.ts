@@ -5,6 +5,7 @@ import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
 import { Bash, SqlFileSystem } from "../bash/index.ts";
+import { dialHand } from "./hands.ts";
 
 export const SCOPE = "session";
 
@@ -45,9 +46,11 @@ export interface NanocodeHarnessOptions {
   codeMode?: boolean;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
-  hands?: { relay(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number };
+  hands?: false | NanocodeHands;
   mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch };
 }
+
+export type NanocodeHands = { relay?(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
 
 export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -87,9 +90,9 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       },
     });
     const channel = (ctx.config as { hand?: unknown } | undefined)?.hand;
-    const hands = options.hands;
+    const hands = options.hands || undefined;
     const executor = hands && typeof channel === "string" && HAND_CHANNEL.test(channel)
-      ? await RemoteExecutor.connect(signal => openSocket(hands.relay(channel), signal), { max_frame_bytes: hands.maxFrameBytes ?? 1_048_576, timeout_ms: hands.timeoutMs ?? 30_000 }).catch(() => undefined)
+      ? await RemoteExecutor.connect(signal => hands.relay ? openSocket(hands.relay(channel), signal) : dialHand(ctx.world, ctx.runId, signal), { max_frame_bytes: hands.maxFrameBytes ?? 1_048_576, timeout_ms: hands.timeoutMs ?? 30_000 }).catch(() => undefined)
       : undefined;
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;

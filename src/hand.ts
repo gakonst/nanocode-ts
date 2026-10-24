@@ -1,3 +1,4 @@
+import { serverEvents } from "./client.ts";
 import { AgentRuntime } from "./host.ts";
 import type { HostTool, McpServer, RuntimeOptions, WorkspaceHost } from "./contracts.ts";
 
@@ -12,6 +13,8 @@ export type HandOptions = {
   protocols?: string | string[];
   maxFrameBytes?: number;
   WebSocket?: typeof WebSocket;
+  transport?: "websocket" | "stream";
+  reconnectMs?: number;
   onStatus?(status: HandStatus): void;
 };
 
@@ -30,7 +33,7 @@ export async function connectHand(module: WebAssembly.Module, options: HandOptio
   let done!: (status: HandStatus) => void;
   const closed = new Promise<HandStatus>(resolve => { done = resolve; });
   let finished = false;
-  let socket: WebSocket | undefined;
+  let link: { send(text: string): void; close(): void } | undefined;
   const finish = (reason: string) => {
     if (finished) return;
     finished = true;
@@ -48,7 +51,7 @@ export async function connectHand(module: WebAssembly.Module, options: HandOptio
     ...(options.mcpServers?.length ? { mcp_servers: options.mcpServers } : {}),
     ...(options.name ? { name: options.name } : {}),
     ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
-    send: text => { if (socket?.readyState === 1) socket.send(text); },
+    send: text => link?.send(text),
   });
   let hand: Awaited<typeof serving>;
   try {
@@ -57,27 +60,102 @@ export async function connectHand(module: WebAssembly.Module, options: HandOptio
     finish(error instanceof Error ? error.message : String(error));
     throw error;
   }
-  socket = new Socket(options.url, options.protocols);
   let queue = Promise.resolve();
+  const receive = (text: string) => {
+    queue = queue.then(() => hand.receive(text)).catch(() => {});
+  };
+  const gone = (reason: string) => {
+    void hand.closed().catch(() => {});
+    finish(reason);
+  };
+  if (options.transport === "stream") {
+    link = await streamLink(options, hand.catalog, receive, gone, closed);
+    options.onStatus?.({ state: "attached" });
+    return { closed, close: () => link!.close() };
+  }
+  const socket = new Socket(options.url, options.protocols);
+  link = { send: text => { if (socket.readyState === 1) socket.send(text); }, close: () => socket.close(1000, "the hand closed") };
   const opened = new Promise<void>((resolve, reject) => {
-    socket!.addEventListener("open", () => {
-      socket!.send(hand.catalog);
+    socket.addEventListener("open", () => {
+      socket.send(hand.catalog);
       options.onStatus?.({ state: "attached" });
       resolve();
     });
     void closed.then(status => reject(new Error(status.reason ?? "the hand closed")));
   });
-  socket.addEventListener("message", event => {
-    const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
-    queue = queue.then(() => hand.receive(text)).catch(() => {});
-  });
-  socket.addEventListener("close", event => {
-    void hand.closed().catch(() => {});
-    finish(event.reason || "closed with code " + event.code);
-  });
+  socket.addEventListener("message", event => receive(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)));
+  socket.addEventListener("close", event => gone(event.reason || "closed with code " + event.code));
   socket.addEventListener("error", () => finish("the connection failed"));
   await opened;
-  return { closed, close: () => socket!.close(1000, "the hand closed") };
+  return { closed, close: () => link!.close() };
+}
+
+async function streamLink(options: HandOptions, catalog: string, receive: (text: string) => void, gone: (reason: string) => void, closed: Promise<HandStatus>) {
+  const connection = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+  const reconnectMs = options.reconnectMs ?? 500;
+  const stop = new AbortController();
+  let ended = false;
+  void closed.then(() => { ended = true; stop.abort(); });
+  const post = (body: Record<string, unknown>, keepalive = false) => globalThis.fetch(options.url, Object.assign({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, connection }) }, keepalive ? { keepalive } : { signal: stop.signal }));
+  const attached = await post({ catalog });
+  if (!attached.ok) {
+    const reason = attached.status + " " + await attached.text();
+    gone(reason);
+    throw new Error(reason);
+  }
+  let brain: string | undefined;
+  let cursor = 0;
+  let pending: string[] = [];
+  let sending = Promise.resolve();
+  const flush = () => {
+    const frames = pending;
+    pending = [];
+    if (!frames.length || ended) return;
+    sending = sending.then(async () => {
+      const response = await post({ brain, frames });
+      if (!response.ok) throw new Error(response.status + " " + await response.text());
+    }).catch((error: unknown) => {
+      if (!ended) gone(error instanceof Error ? error.message : String(error));
+    });
+  };
+  const close = () => {
+    if (ended) return;
+    ended = true;
+    stop.abort();
+    void post({ close: true }, true).catch(() => {});
+    gone("the hand closed");
+  };
+  const target = globalThis as { addEventListener?(type: string, listener: () => void): void };
+  target.addEventListener?.("pagehide", close);
+  void (async () => {
+    while (!ended) {
+      try {
+        const separator = options.url.includes("?") ? "&" : "?";
+        const response = await globalThis.fetch(options.url + separator + new URLSearchParams({ connection, cursor: String(cursor) }), { headers: { accept: "text/event-stream" }, signal: stop.signal });
+        if (response.status >= 400 && response.status < 500) {
+          gone(response.status + " " + await response.text());
+          return;
+        }
+        if (response.ok && response.body) {
+          for await (const message of serverEvents(response.body)) {
+            if (message.id) cursor = Number(message.id);
+            if (!message.data) continue;
+            const line = JSON.parse(message.data) as { brain?: string; frames?: string[] };
+            if (line.brain) brain = line.brain;
+            for (const frame of line.frames ?? []) receive(frame);
+          }
+        }
+      } catch {}
+      if (!ended) await new Promise(resolve => setTimeout(resolve, reconnectMs));
+    }
+  })();
+  return {
+    send(text: string) {
+      if (!pending.length) queueMicrotask(flush);
+      pending.push(text);
+    },
+    close,
+  };
 }
 
 export type HandKeeperOptions = Omit<HandOptions, "url" | "workspace" | "cwd"> & {

@@ -1,4 +1,5 @@
-import { durableAgent, type HostTool } from "durable-harness";
+import { durableAgent, getWorld, type HostTool } from "durable-harness";
+import { handRoute } from "./hands.ts";
 import { HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, type ServiceTier, type Thinking } from "./harness.ts";
 import { nanocodeModule } from "./module.ts";
 import type { ModelProvider } from "../index.ts";
@@ -36,7 +37,9 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
 type Body = { effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
 
 export function createNanocode(options: NanocodeAppOptions) {
-  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, defaultSelection: chosenDefault, ...harness } = options;
+  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, defaultSelection: chosenDefault, hands: chosenHands, ...rest } = options;
+  const hands = chosenHands ?? {};
+  const harness = { ...rest, hands };
   const first = harnesses[0]!.models[0]!;
   const defaultSelection = chosenDefault ?? { provider: harnesses[0]!.id, model: first.id, thinking: first.efforts.includes("low") ? "low" : first.effort };
   const durability = options.durability ?? "on";
@@ -56,6 +59,12 @@ export function createNanocode(options: NanocodeAppOptions) {
     marks: marks ?? false,
   });
   const chat = agent.chatRoute(authorize ? { authorize } : {});
+  const handRoutes = handRoute({
+    world: getWorld,
+    owns: async (sessionId, channel) => ((await agent.sessions.inspect(sessionId)).config as { hand?: unknown } | undefined)?.hand === channel,
+    ...(hands && hands.holdMs ? { holdMs: hands.holdMs } : {}),
+  });
+  const streamsHands = hands !== false && !hands.relay;
 
   const admit = async (request: Request): Promise<Response | undefined> => {
     if (typeof authorize === "function") {
@@ -83,12 +92,15 @@ export function createNanocode(options: NanocodeAppOptions) {
   };
 
   async function GET(request: Request): Promise<Response> {
-    if (!new URL(request.url).searchParams.has("keepwarm")) return chat.GET(request);
+    const params = new URL(request.url).searchParams;
+    if (streamsHands && params.has("hand")) return handRoutes.GET(request);
+    if (!params.has("keepwarm")) return chat.GET(request);
     await nanocodeModule();
     return new Response(null, { status: 204 });
   }
 
   async function POST(request: Request): Promise<Response> {
+    if (streamsHands && new URL(request.url).searchParams.has("hand")) return handRoutes.POST(request);
     const body = await request.clone().json().catch(() => undefined) as Body | undefined;
     if (!body || typeof body !== "object") return chat.POST(request);
     if (maxPromptCharacters && typeof body.text === "string" && body.text.length > maxPromptCharacters) return new Response(`A prompt is at most ${maxPromptCharacters} characters.`, { status: 413 });
