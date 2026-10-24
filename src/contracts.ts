@@ -57,7 +57,7 @@ export type AgentConfiguration = {
   stream_tool_input?: boolean;
   environment?: { cwd?: string; shell?: string; timezone?: string };
   tools?: HostTool[];
-  web_search?: boolean;
+  web_search?: boolean | Partial<Record<ModelProvider, boolean>>;
   workspace?: string;
   mcp_servers?: McpServer[];
   hand_tools?: Partial<Record<ModelProvider, HandToolSelection>>;

@@ -140,8 +140,8 @@ struct Configuration {
     environment: Option<Environment>,
     #[serde(default)]
     tools: Vec<tools::HostTool>,
-    #[serde(default = "enabled")]
-    web_search: bool,
+    #[serde(default)]
+    web_search: WebSearch,
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
@@ -492,6 +492,34 @@ thread_local! {
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WebSearch {
+    All(bool),
+    Providers {
+        #[serde(default = "enabled")]
+        claude: bool,
+        #[serde(default = "enabled")]
+        codex: bool,
+    },
+}
+
+impl Default for WebSearch {
+    fn default() -> Self {
+        Self::All(true)
+    }
+}
+
+impl WebSearch {
+    const fn enabled(&self, provider: Provider) -> bool {
+        match (self, provider) {
+            (Self::All(enabled), _) => *enabled,
+            (Self::Providers { claude, .. }, Provider::Claude) => *claude,
+            (Self::Providers { codex, .. }, Provider::Codex) => *codex,
+        }
+    }
+}
+
 const fn enabled() -> bool {
     true
 }
@@ -740,7 +768,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let host_search = config.tools.iter().any(|tool| tool.name() == "web_search");
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let search = |family: Provider| -> Option<Arc<dyn Tool>> {
-        if !config.web_search || host_search {
+        if !config.web_search.enabled(family) || host_search {
             return None;
         }
         match family {
