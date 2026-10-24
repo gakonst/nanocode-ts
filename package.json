@@ -96,6 +96,14 @@
       "types": "./dist/machines/vercel.d.ts",
       "default": "./dist/machines/vercel.js"
     },
+    "./sandbox/cloudflare": {
+      "types": "./dist/sandbox/cloudflare.d.ts",
+      "default": "./dist/sandbox/cloudflare.js"
+    },
+    "./sandbox/vercel": {
+      "types": "./dist/sandbox/vercel.d.ts",
+      "default": "./dist/sandbox/vercel.js"
+    },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
     "./interpreter.wasm": "./dist/interpreter.wasm"
   },
@@ -109,6 +117,7 @@
   "peerDependencies": {
     "@pierre/highlights": "^0.2.0",
     "@vercel/oidc": "^3.2.0",
+    "@vercel/sandbox": "^3.9.0",
     "durable-harness": "0.0.1-beta.6",
     "pyodide": ">=0.28.0",
     "react": "^19.0.0"
@@ -118,6 +127,9 @@
       "optional": true
     },
     "@vercel/oidc": {
+      "optional": true
+    },
+    "@vercel/sandbox": {
       "optional": true
     },
     "durable-harness": {
@@ -136,6 +148,7 @@
     "@types/node": "22.20.5",
     "@types/react": "19.3.0",
     "@vercel/oidc": "3.2.0",
+    "@vercel/sandbox": "3.9.0",
     "durable-harness": "0.0.1-beta.6",
     "typescript": "6.0.2"
   }
