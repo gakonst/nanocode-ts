@@ -1,62 +1,5 @@
-const { callWasm, errorString, fromBase64, fromUtf8, host, setTimeoutWithArgs, show, toBase64, utf8 } = core;
-const consoleState = { depth: 0, counts: new Map(), timers: new Map() };
-const printArgs = (args) => {
-  if (typeof args[0] === "string" && args.length > 1 && /%[sdifoOjc%]/.test(args[0])) {
-    const rest = args.slice(1);
-    const head = args[0].replace(/%([sdifoOjc%])/g, (match, kind) => {
-      if (kind === "%") return "%";
-      if (!rest.length) return match;
-      const value = rest.shift();
-      if (kind === "s") return typeof value === "string" ? value : show(value);
-      if (kind === "d" || kind === "i") return typeof value === "bigint" ? value + "n" : String(kind === "i" ? Math.trunc(Number(value)) : Number(value));
-      if (kind === "f") return String(Number(value));
-      if (kind === "c") return "";
-      return show(value);
-    });
-    return [head, ...rest.map(show)].join(" ");
-  }
-  return args.map(show).join(" ");
-};
-const out = (line) => host.text(consoleState.depth ? String(line).replace(/^/gm, "  ".repeat(consoleState.depth)) : String(line));
-const tableCell = (value) => typeof value === "string" ? value : show(value);
-const consoleTable = (data, columns) => {
-  if (data === null || typeof data !== "object") return out(printArgs([data]));
-  const rows = data instanceof Map ? [...data.entries()] : data instanceof Set ? [...data].map((value, index) => [index, value]) : Object.entries(data);
-  const keys = [];
-  let values = false;
-  for (const [, row] of rows) {
-    if (row !== null && typeof row === "object") { for (const key of Object.keys(row)) if (!keys.includes(key)) keys.push(key); }
-    else values = true;
-  }
-  const chosen = Array.isArray(columns) ? columns.map(String) : keys;
-  const header = ["(index)", ...chosen, ...(values ? ["Values"] : [])];
-  const body = rows.map(([index, row]) => {
-    const object = row !== null && typeof row === "object";
-    return [String(index), ...chosen.map((key) => object && key in row ? tableCell(row[key]) : ""), ...(values ? [object ? "" : tableCell(row)] : [])];
-  });
-  const widths = header.map((title, index) => Math.max(title.length, ...body.map((cells) => cells[index].length)));
-  const rule = (left, middle, right) => left + widths.map((width) => "─".repeat(width + 2)).join(middle) + right;
-  const line = (cells) => "│" + cells.map((cell, index) => " " + cell.padEnd(widths[index]) + " ").join("│") + "│";
-  out([rule("┌", "┬", "┐"), line(header), rule("├", "┼", "┤"), ...body.map(line), rule("└", "┴", "┘")].join("\n"));
-};
-const log = (...args) => out(printArgs(args));
-const console = Object.freeze({
-  log, info: log, debug: log, warn: log, error: log,
-  dir: (value) => out(show(value)),
-  dirxml: log,
-  table: consoleTable,
-  assert: (condition, ...args) => { if (!condition) out("Assertion failed" + (args.length ? ": " + printArgs(args) : "")); },
-  count: (label = "default") => { const count = (consoleState.counts.get(label) ?? 0) + 1; consoleState.counts.set(label, count); out(label + ": " + count); },
-  countReset: (label = "default") => { consoleState.counts.delete(label); },
-  group: (...args) => { if (args.length) log(...args); consoleState.depth++; },
-  groupCollapsed: (...args) => { if (args.length) log(...args); consoleState.depth++; },
-  groupEnd: () => { consoleState.depth = Math.max(0, consoleState.depth - 1); },
-  time: (label = "default") => { consoleState.timers.set(label, performance.now()); },
-  timeLog: (label = "default", ...args) => { const start = consoleState.timers.get(label); out(start === undefined ? "Timer '" + label + "' does not exist" : label + ": " + (performance.now() - start).toFixed(3) + "ms" + (args.length ? " " + printArgs(args) : "")); },
-  timeEnd: (label = "default") => { const start = consoleState.timers.get(label); consoleState.timers.delete(label); out(start === undefined ? "Timer '" + label + "' does not exist" : label + ": " + (performance.now() - start).toFixed(3) + "ms"); },
-  trace: (...args) => out("Trace" + (args.length ? ": " + printArgs(args) : "") + "\n" + String(new Error().stack ?? "").split("\n").filter((line) => /^\s+at /.test(line)).slice(1).join("\n")),
-  clear: () => {},
-});
+const { callWasm, fromBase64, fromUtf8, hostFunction, setTimeoutWithArgs, toBase64, utf8 } = core;
+const log = (...args) => globalThis.console.log(...args);
 const moduleHint = (name) => {
   const bare = String(name).replace(/^node:/, "").split("/")[0];
   if (bare === "fs" || bare === "path" || bare === "os") return "Use bash(...) for shell commands and bash.readFile(path) / bash.writeFile(path, data) for files.";
@@ -70,7 +13,7 @@ const moduleHint = (name) => {
 };
 const require = (name) => { throw new Error("require(" + JSON.stringify(String(name)) + ") is not available: Code Mode cells run in QuickJS, not Node.js, and cannot load modules or npm packages. " + moduleHint(name)); };
 require.resolve = require;
-const stdio = { write: (chunk) => { const line = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? fromUtf8(chunk) : String(chunk); if (line) out(line.replace(/\n$/, "")); return true; }, isTTY: false, columns: 80 };
+const stdio = { write: (chunk) => { const line = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? fromUtf8(chunk) : String(chunk); if (line) log(line.replace(/\n$/, "")); return true; }, isTTY: false, columns: 80 };
 const hrtime = (previous) => {
   const now = performance.now();
   let seconds = Math.floor(now / 1000), nanos = Math.floor((now % 1000) * 1e6);
@@ -92,7 +35,7 @@ const process = {
   stdout: stdio,
   stderr: stdio,
   cwd: () => { throw new Error("process.cwd() is not available in a Code Mode cell (QuickJS, not Node.js): run (await bash('pwd')).stdout for the shell's directory"); },
-  exit: () => host.exit(),
+  exit: () => hostFunction("exit")(),
   nextTick: (callback, ...args) => queueMicrotask(() => callback(...args)),
   hrtime,
   uptime: () => performance.now() / 1000,
@@ -145,7 +88,7 @@ class EventTarget {
       try {
         if (typeof entry.listener === "function") entry.listener.call(this, event);
         else entry.listener.handleEvent?.(event);
-      } catch (error) { out("Uncaught " + show(error)); }
+      } catch (error) { globalThis.console.error("Uncaught", error); }
       if (event.stopped) break;
     }
     return !event.defaultPrevented;
@@ -241,4 +184,4 @@ const wasm = {
   invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wasmSource(source), name, args: args.map(toWire) })).result),
   instantiate: async (source) => (await instantiate(source instanceof Module ? source : new Module(source))),
 };
-return { AbortController, AbortSignal, CustomEvent, Event, EventTarget, WebAssembly, console, process, require, wasm };
+return { AbortController, AbortSignal, CustomEvent, Event, EventTarget, WebAssembly, process, require, wasm };

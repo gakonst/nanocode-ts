@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use nanocode::{FunctionHandler, FunctionTool, Tool, tool_contract::ToolContext};
-use nanocode_code_mode::{code_mode::LocalCells, embedded::HostFuture};
+use nanocode_code_mode::{
+    code_mode::{LocalCells, bytes},
+    embedded::HostFuture,
+};
 use serde_json::{Value, json};
 
-use super::bridge::call;
+use super::bridge::{call, call_bytes_with, call_framed, call_with_body};
 
 const PRELUDE: &str = include_str!("prelude.js");
 
@@ -41,6 +44,8 @@ struct Fetch;
 
 struct Shell(String);
 
+struct File(String);
+
 struct Wasm;
 
 fn failure(error: Value) -> String {
@@ -58,9 +63,26 @@ impl FunctionHandler for Fetch {
         _context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<Value, String>> {
         Box::pin(async move {
-            call(json!({"op": "cell_fetch", "request": input}))
-                .await
-                .map_err(failure)
+            let mut input = input;
+            let body = match input
+                .as_object_mut()
+                .and_then(|fields| fields.remove("body_ref"))
+            {
+                Some(id) => Some(
+                    id.as_u64()
+                        .and_then(bytes::take)
+                        .ok_or("the fetch body is gone")?,
+                ),
+                None => None,
+            };
+            let (mut head, body) = call_framed(
+                json!({"op": "cell_fetch", "request": input}),
+                body.as_deref(),
+            )
+            .await
+            .map_err(failure)?;
+            head["body_ref"] = bytes::put(body).into();
+            Ok(head)
         })
     }
 }
@@ -86,6 +108,45 @@ impl FunctionHandler for Shell {
             }))
             .await
             .map_err(failure)
+        })
+    }
+}
+
+impl FunctionHandler for File {
+    fn call<'a>(
+        &'a self,
+        _name: &'a str,
+        input: Value,
+        _context: ToolContext<'a>,
+    ) -> HostFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            let path = input
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("file expects { op, path }")?;
+            match input.get("op").and_then(Value::as_str) {
+                Some("read") => {
+                    let data =
+                        call_bytes_with(&json!({"op": "cell_read", "path": path, "cwd": self.0}))
+                            .await
+                            .map_err(failure)?;
+                    Ok(json!({"bytes_ref": bytes::put(data)}))
+                }
+                Some(op @ ("write" | "append")) => {
+                    let data = input
+                        .get("bytes_ref")
+                        .and_then(Value::as_u64)
+                        .and_then(bytes::take)
+                        .ok_or("the file data is gone")?;
+                    call_with_body(
+                        json!({"op": "cell_write", "path": path, "cwd": self.0, "append": op == "append"}),
+                        &data,
+                    )
+                    .await
+                    .map_err(failure)
+                }
+                _ => Err("file expects op read, write or append".to_owned()),
+            }
         })
     }
 }
@@ -116,7 +177,7 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
                 "method": {"type": "string"},
                 "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                 "body": {"type": "string"},
-                "body_base64": {"type": "string"}
+                "body_ref": {"type": "integer"}
             },
             "required": ["url"],
             "additionalProperties": false
@@ -139,6 +200,23 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
                 "additionalProperties": false
             }),
             Arc::new(Shell(root.to_owned())),
+        )
+    });
+    let file = workspace.map(|root| {
+        FunctionTool::new(
+            "file",
+            "Read, write or append one file of this session's workspace as bytes.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["read", "write", "append"]},
+                    "path": {"type": "string"},
+                    "bytes_ref": {"type": "integer"}
+                },
+                "required": ["op", "path"],
+                "additionalProperties": false
+            }),
+            Arc::new(File(root.to_owned())),
         )
     });
     let wasm = workspace.map(|_| {
@@ -167,5 +245,8 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
             Arc::new(Wasm),
         )
     });
-    [Some(fetch), shell, wasm].into_iter().flatten().collect()
+    [Some(fetch), shell, file, wasm]
+        .into_iter()
+        .flatten()
+        .collect()
 }

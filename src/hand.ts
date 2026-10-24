@@ -1,5 +1,5 @@
 import { serverEvents } from "./client.ts";
-import { AgentRuntime } from "./host.ts";
+import { AgentRuntime, readBytes, writeBytes } from "./host.ts";
 import type { HostTool, McpServer, RuntimeOptions, WorkspaceHost } from "./contracts.ts";
 
 export type HandOptions = {
@@ -248,6 +248,8 @@ function deferred(slot: Spare["slot"]): WorkspaceHost {
   return {
     read: path => target().read(path),
     write: (path, contents) => target().write(path, contents),
+    readBytes: path => readBytes(target(), path),
+    writeBytes: (path, data, append) => writeBytes(target(), path, data, append),
     remove: path => target().remove(path),
     run: (request, signal) => target().run(request, signal),
     wasm: (request, signal) => {

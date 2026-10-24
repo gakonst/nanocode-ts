@@ -115,6 +115,25 @@ pub async fn call_with_body(request: Value, body: &[u8]) -> Result<Value, Value>
     settle(send(encode(&request), Some(body)).await)
 }
 
+pub async fn call_framed(request: Value, body: Option<&[u8]>) -> Result<(Value, Vec<u8>), Value> {
+    let mut bytes = match send(encode(&request), body).await {
+        Reply::Bytes(bytes) => bytes,
+        reply => return settle(reply).and(Err(Value::from("expected a framed host reply"))),
+    };
+    let start = bytes
+        .len()
+        .checked_sub(4)
+        .and_then(|end| {
+            let length = u32::from_le_bytes(bytes[end..].try_into().ok()?) as usize;
+            end.checked_sub(length)
+        })
+        .ok_or_else(|| Value::from("malformed framed host reply"))?;
+    let head = serde_json::from_slice(&bytes[start..bytes.len() - 4])
+        .map_err(|error| Value::from(format!("malformed framed host reply: {error}")))?;
+    bytes.truncate(start);
+    Ok((head, bytes))
+}
+
 pub fn monotonic_ms() -> f64 {
     unsafe { clock(1) }
 }
