@@ -659,12 +659,8 @@ const TYPING_DELAY_MS = 500;
 export function Chat(props: ChatProps) {
   const part = usePart();
   const { entries, live } = useTranscript();
-<<<<<<< HEAD
   const { cancel, canCancel, send, isPending: busy } = useSend();
-=======
-  const { send, isPending: busy } = useSend();
   const attachments = useAttachments();
->>>>>>> origin/main
   const doing = useActivity();
   const threads = useConversations();
   const [own, setOwn] = useState<Picker | null>(null);
