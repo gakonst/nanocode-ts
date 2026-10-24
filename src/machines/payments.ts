@@ -1,5 +1,4 @@
-import { createJsonChannelStore, Mppx, tempo as payments } from "mppx/client";
-import { type Address, isAddressEqual } from "viem";
+import type { Address } from "viem";
 import * as Mcp from "./mcp.ts";
 import * as Wallet from "./wallet.ts";
 
@@ -17,8 +16,6 @@ export type Ledger = { calls: number; services: readonly Service[]; total: bigin
 
 export function create(connected: Wallet.Wallet, options: { servers?: readonly Mcp.Server[] } = {}) {
   const servers = options.servers ?? Mcp.servers;
-  const account = Wallet.signer(connected);
-  const client = Wallet.reader();
   const prefix = `nanocode.machines.${connected.keyAddress.toLowerCase()}.`;
   let ledger: Ledger = { calls: 0, services: [], total: 0n };
   const listeners = new Set<() => void>();
@@ -96,62 +93,68 @@ export function create(connected: Wallet.Wallet, options: { servers?: readonly M
     }));
   }
 
-  const mppx = Mppx.create({
-    fetch: async (input, init) => {
-      const origin = String(input instanceof Request ? input.url : input);
-      if (Mcp.server(origin, servers)) {
-        const call = await Mcp.call(input, init);
-        const response = await send(input, Mcp.crossOrigin(init));
-        await tool(call, response);
-        return response;
-      }
-      const response = await send(input, init);
-      const description = response.status === 402 ? response.headers.get("www-authenticate")?.match(/description="([^"]*)"/)?.[1] : undefined;
-      if (description) labels.set(route(origin), description.slice(0, 80));
-      const header = response.headers.get("payment-receipt");
-      if (header) receipt(origin, atob(header.replace(/-/g, "+").replace(/_/g, "/")), true);
-      if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) return response;
-      const wrapped = new Response(metered(origin, response.body), { headers: response.headers, status: response.status, statusText: response.statusText });
-      return Object.defineProperty(wrapped, "url", { value: response.url });
-    },
-    methods: [
-      payments.session({
-        account,
-        allowedChainIds: [Wallet.mach.chainId],
-        channelStore: createJsonChannelStore({
-          delete: key => localStorage.removeItem(prefix + key),
-          get: key => localStorage.getItem(prefix + key) ?? undefined,
-          set: (key, value) => localStorage.setItem(prefix + key, value),
+  const build = async () => {
+    const [{ createJsonChannelStore, Mppx, tempo: payments }, account, client] = await Promise.all([import("mppx/client"), Wallet.signer(connected), Wallet.reader()]);
+    const mppx = Mppx.create({
+      fetch: async (input, init) => {
+        const origin = String(input instanceof Request ? input.url : input);
+        if (Mcp.server(origin, servers)) {
+          const call = await Mcp.call(input, init);
+          const response = await send(input, Mcp.crossOrigin(init));
+          await tool(call, response);
+          return response;
+        }
+        const response = await send(input, init);
+        const description = response.status === 402 ? response.headers.get("www-authenticate")?.match(/description="([^"]*)"/)?.[1] : undefined;
+        if (description) labels.set(route(origin), description.slice(0, 80));
+        const header = response.headers.get("payment-receipt");
+        if (header) receipt(origin, atob(header.replace(/-/g, "+").replace(/_/g, "/")), true);
+        if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) return response;
+        const wrapped = new Response(metered(origin, response.body), { headers: response.headers, status: response.status, statusText: response.statusText });
+        return Object.defineProperty(wrapped, "url", { value: response.url });
+      },
+      methods: [
+        payments.session({
+          account,
+          allowedChainIds: [Wallet.mach.chainId],
+          channelStore: createJsonChannelStore({
+            delete: key => localStorage.removeItem(prefix + key),
+            get: key => localStorage.getItem(prefix + key) ?? undefined,
+            set: (key, value) => localStorage.setItem(prefix + key, value),
+          }),
+          getClient: () => client,
+          maxDeposit,
+          topUpAmount: topUp,
         }),
-        getClient: () => client,
-        maxDeposit,
-        topUpAmount: topUp,
-      }),
-      payments.charge({ account, allowedChainIds: [Wallet.mach.chainId], getClient: () => client }),
-    ],
-    orderChallenges: candidates => {
-      const rank = (candidate: (typeof candidates)[number]) => {
-        const request = candidate.challenge.request as { currency?: Address; methodDetails?: { machineTokenEnabled?: boolean } };
-        const isMach = !!request.currency && isAddressEqual(request.currency, Wallet.mach.address);
-        if (candidate.challenge.intent === "session") return isMach ? 0 : -1;
-        if (candidate.challenge.intent !== "charge") return -1;
-        if (request.methodDetails?.machineTokenEnabled === true) return 1;
-        return isMach ? 2 : -1;
-      };
-      return candidates.filter(candidate => rank(candidate) >= 0).sort((a, b) => rank(a) - rank(b)).slice(0, 1);
-    },
-    polyfill: false,
-  });
+        payments.charge({ account, allowedChainIds: [Wallet.mach.chainId], getClient: () => client }),
+      ],
+      orderChallenges: candidates => {
+        const rank = (candidate: (typeof candidates)[number]) => {
+          const request = candidate.challenge.request as { currency?: Address; methodDetails?: { machineTokenEnabled?: boolean } };
+          const isMach = !!request.currency && request.currency.toLowerCase() === Wallet.mach.address;
+          if (candidate.challenge.intent === "session") return isMach ? 0 : -1;
+          if (candidate.challenge.intent !== "charge") return -1;
+          if (request.methodDetails?.machineTokenEnabled === true) return 1;
+          return isMach ? 2 : -1;
+        };
+        return candidates.filter(candidate => rank(candidate) >= 0).sort((a, b) => rank(a) - rank(b)).slice(0, 1);
+      },
+      polyfill: false,
+    });
 
-  mppx.onPaymentResponse(payment => {
-    const origin = String(payment.input instanceof Request ? payment.input.url : payment.input);
-    if (payment.challenge.intent !== "charge" || Mcp.server(origin, servers)) return;
-    const request = payment.challenge.request as { amount?: string };
-    charge(origin, BigInt(request.amount ?? "0"), true);
-  });
+    mppx.onPaymentResponse(payment => {
+      const origin = String(payment.input instanceof Request ? payment.input.url : payment.input);
+      if (payment.challenge.intent !== "charge" || Mcp.server(origin, servers)) return;
+      const request = payment.challenge.request as { amount?: string };
+      charge(origin, BigInt(request.amount ?? "0"), true);
+    });
+    return mppx;
+  };
+
+  let ready: ReturnType<typeof build> | undefined;
 
   return {
-    fetch: ((input: RequestInfo | URL, init?: RequestInit) => mppx.fetch(input, { ...init, context: { depositRaw: opening } })) as typeof fetch,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => (await (ready ??= build())).fetch(input, { ...init, context: { depositRaw: opening } })) as typeof fetch,
     ledger: () => ledger,
     subscribe(listener: () => void) {
       listeners.add(listener);
