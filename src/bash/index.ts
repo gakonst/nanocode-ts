@@ -7,6 +7,7 @@ import { sed } from "./commands/sed.ts";
 import { awk } from "./commands/awk.ts";
 import { jq } from "./commands/jq.ts";
 import { curl } from "./commands/curl.ts";
+import { patch } from "./commands/patch.ts";
 import { extraCommands } from "./commands/extra.ts";
 import { gitCommands, type GitHubOptions } from "./commands/git.ts";
 import { wasmCommands, wasmHost, type WasmOptions } from "./commands/wasm.ts";
@@ -46,8 +47,8 @@ export type BashEvent =
 export type BashToolOptions = { name?: string; description?: string; maxOutputLength?: number };
 
 export const DEFAULT_LIMITS: Limits = {
-  maxCommands: 100_000,
-  maxLoopIterations: 10_000,
+  maxCommands: 1_000_000,
+  maxLoopIterations: 1_000_000,
   maxCallDepth: 64,
   maxOutputLength: 1_000_000,
   maxBufferLength: 16_000_000,
@@ -55,7 +56,7 @@ export const DEFAULT_LIMITS: Limits = {
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, patch };
 
 export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
 
@@ -109,6 +110,7 @@ export class Bash {
       state.vars.set(name, [value]);
       state.exported.add(name);
     }
+    for (const [name, value] of Object.entries({ BASH: "/bin/bash", BASH_VERSION: "5.2.21(1)-release", HOSTNAME: "localhost", SHLVL: "1", IFS: " \t\n", OPTIND: "1", OSTYPE: "linux-gnu", PPID: "1", UID: "1000", EUID: "1000" })) if (!state.vars.has(name)) state.vars.set(name, [value]);
     const budget = { used: 0, refused: false };
     const runner = new Runner({ fs: budgeted(this.fs, this.limits.maxFileOperations, budget), commands: this.commands, fetch: this.fetch, limits: this.limits }, state, controller.signal);
     const stdout = new Output(this.limits.maxOutputLength, false);
@@ -205,14 +207,23 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     throw new LimitError("too many file operations (limit " + limit + "); search a narrower path");
   };
   return {
-    stat: path => (charge(), fs.stat(path)),
-    read: path => (charge(), fs.read(path)),
-    write: (path, data, append) => (charge(), fs.write(path, data, append)),
-    list: path => (charge(), fs.list(path)),
+    stat: path => (charge(), DEVICES.has(path) ? Promise.resolve({ kind: "file", size: 0, mtime: 0, mode: 0o666 }) : fs.stat(path)),
+    read: path => (charge(), DEVICES.has(path) ? Promise.resolve(device(path)) : fs.read(path)),
+    write: (path, data, append) => (charge(), DEVICES.has(path) ? Promise.resolve() : fs.write(path, data, append)),
+    list: path => (charge(), path === "/dev" ? fs.list(path).catch(() => []).then(names => [...new Set([...names, ...[...DEVICES].map(name => name.slice(5))])].sort()) : fs.list(path)),
     mkdir: path => (charge(), fs.mkdir(path)),
     remove: path => (charge(), fs.remove(path)),
     rename: (from, to) => (charge(), fs.rename(from, to)),
   };
+}
+
+const DEVICES = new Set(["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"]);
+
+function device(path: string): Uint8Array {
+  if (path === "/dev/null") return new Uint8Array(0);
+  const bytes = new Uint8Array(1 << 20);
+  if (path !== "/dev/zero") for (let i = 0; i < bytes.length; i += 65536) crypto.getRandomValues(bytes.subarray(i, i + 65536));
+  return bytes;
 }
 
 export const BASH_SHELL_INSTRUCTIONS = "To get a public GitHub repository, run `git clone https://github.com/OWNER/REPO [DIR]` (or `gh repo clone OWNER/REPO [DIR]`, with `-b REF` for a branch, tag or commit): it downloads a source snapshot of the current files without history, so `git status`, `git log -1`, `git rev-parse HEAD`, `git branch`, `git remote -v` and `git ls-files` work on it, and commit, pull and push do not. WebAssembly programs built for WASI (wasm32-wasi) run directly: `./prog.wasm ARGS`, `wasm prog.wasm ARGS` or `wasmtime prog.wasm ARGS`, with stdin, stdout, exit codes, the environment and the files under the working directory (up to 64 MiB, written back when the program exits). There is no compiler, so download or write the .wasm file first. `wasm --invoke NAME FILE ARGS` calls one exported function and prints its result. Python 3 runs on Pyodide (CPython compiled to WebAssembly, loaded on first use): `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, numpy, pandas and the other packages Pyodide ships load when imported, and `pip install PKG` installs pure-Python wheels for the rest of the session.";

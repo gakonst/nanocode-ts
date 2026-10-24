@@ -726,6 +726,7 @@ class Interpreter {
   outputs = new Map<string, { kind: "file" | "pipe"; text: string; append: boolean }>();
   readers = new Map<string, { lines: string[]; pos: number }>();
   records: string[] = [];
+  preload?: () => Promise<void>;
   recordIndex = 0;
   steps = 0;
   depth = 0;
@@ -770,15 +771,15 @@ class Interpreter {
     return fmt === "%.6g" ? formatNumber(value) : format(fmt, [value], false).text;
   }
 
-  lookup(name: string): { scope: Map<string, Cell> } {
+  lookup(name: string): Map<string, Cell> {
     const frame = this.frames[this.frames.length - 1];
-    if (frame && frame.has(name)) return { scope: frame };
-    return { scope: this.globals };
+    if (frame && frame.has(name)) return frame;
+    return this.globals;
   }
 
   scalar(name: string): Value {
     if (name === "NF") return this.nf;
-    const cell = this.lookup(name).scope.get(name);
+    const cell = this.lookup(name).get(name);
     if (cell instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
     return cell;
   }
@@ -788,13 +789,13 @@ class Interpreter {
       this.setNF(Math.max(0, Math.trunc(toNum(value))));
       return;
     }
-    const { scope } = this.lookup(name);
+    const scope = this.lookup(name);
     if (scope.get(name) instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
     scope.set(name, value);
   }
 
   array(name: string): Map<string, Value> {
-    const { scope } = this.lookup(name);
+    const scope = this.lookup(name);
     let cell = scope.get(name);
     if (cell === undefined) {
       cell = new Map();
@@ -993,12 +994,12 @@ class Interpreter {
         continue;
       }
       if (arg.k === "var") {
-        const cell = this.lookup(arg.name).scope.get(arg.name);
+        const cell = this.lookup(arg.name).get(arg.name);
         if (cell instanceof Map) {
           frame.set(fn.params[i], cell);
           continue;
         }
-        if (cell === undefined && !this.lookup(arg.name).scope.has(arg.name)) {
+        if (cell === undefined && !this.lookup(arg.name).has(arg.name)) {
           const fresh = new Map<string, Value>();
           bindings.push([arg.name, fresh]);
           frame.set(fn.params[i], fresh);
@@ -1017,7 +1018,7 @@ class Interpreter {
     } finally {
       this.frames.pop();
       this.depth--;
-      for (const [name, map] of bindings) if (map.size) this.lookup(name).scope.set(name, map);
+      for (const [name, map] of bindings) if (map.size) this.lookup(name).set(name, map);
     }
   }
 
@@ -1053,7 +1054,7 @@ class Interpreter {
         if (!args.length) return [...(this.fields[0] ?? "")].length;
         const arg = args[0];
         if (arg.k === "var") {
-          const cell = this.lookup(arg.name).scope.get(arg.name);
+          const cell = this.lookup(arg.name).get(arg.name);
           if (cell instanceof Map) return cell.size;
         }
         return [...(await text(0))].length;
@@ -1235,6 +1236,11 @@ class Interpreter {
       }
       line = reader.lines[reader.pos++];
     } else {
+      if (this.preload && this.recordIndex >= this.records.length) {
+        const preload = this.preload;
+        this.preload = undefined;
+        await preload();
+      }
       line = this.records[this.recordIndex];
       if (line !== undefined) {
         this.recordIndex++;
@@ -1448,6 +1454,20 @@ export const awk: CommandHandler = async ctx => {
   interp.globals.set("ARGC", operands.length + 1);
   let exitCode = 0;
   let exiting = false;
+  let preloaded: string | undefined;
+  interp.preload = async () => {
+    const operand = operands.find(operand => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(operand)) ?? "-";
+    let text = "";
+    try {
+      text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
+    } catch (error) {
+      if (!(error instanceof FsError)) throw error;
+    }
+    preloaded = operand;
+    interp.globals.set("FILENAME", operand === "-" ? "" : operand);
+    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
+    interp.recordIndex = 0;
+  };
   try {
     try {
       for (const block of program.begin) await interp.statements(block);
@@ -1466,6 +1486,15 @@ export const awk: CommandHandler = async ctx => {
           continue;
         }
         consumed = true;
+        if (preloaded === operand) {
+          preloaded = undefined;
+          if (await runFile(interp, program, undefined, operand)) {
+            exiting = true;
+            exitCode = interp.exitCode;
+            break;
+          }
+          continue;
+        }
         let text: string;
         try {
           text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
@@ -1481,7 +1510,7 @@ export const awk: CommandHandler = async ctx => {
           break;
         }
       }
-      if (!consumed && !exiting && await runFile(interp, program, ctx.stdin.read(), "")) {
+      if (!consumed && !exiting && await runFile(interp, program, preloaded === "-" ? undefined : ctx.stdin.read(), "")) {
         exiting = true;
         exitCode = interp.exitCode;
       }
@@ -1504,11 +1533,14 @@ export const awk: CommandHandler = async ctx => {
   return exitCode;
 };
 
-async function runFile(interp: Interpreter, program: Program, text: string, name: string): Promise<boolean> {
-  interp.globals.set("FILENAME", name);
-  interp.globals.set("FNR", 0);
-  interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
-  interp.recordIndex = 0;
+async function runFile(interp: Interpreter, program: Program, text: string | undefined, name: string): Promise<boolean> {
+  interp.preload = undefined;
+  interp.globals.set("FILENAME", name === "-" ? "" : name);
+  if (text !== undefined) {
+    interp.globals.set("FNR", 0);
+    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
+    interp.recordIndex = 0;
+  }
   while (interp.recordIndex < interp.records.length) {
     const record = interp.records[interp.recordIndex++];
     interp.globals.set("NR", toNum(interp.scalar("NR")) + 1);

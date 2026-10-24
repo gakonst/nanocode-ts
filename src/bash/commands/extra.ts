@@ -1,6 +1,8 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
-import { baseOf, decode, encode, FsError, parentOf } from "../fs.ts";
-import { allInput, eachInput, last, options } from "./util.ts";
+import { baseOf, byte, decode, encode, FsError, parentOf } from "../fs.ts";
+import { escapeRegExp, format, globRegExp, globSource, lines } from "../text.ts";
+import { checksum, perlSource, scan } from "./text.ts";
+import { allInput, device, eachInput, last, options, readInput } from "./util.ts";
 import { mkdirs } from "./files.ts";
 import { gunzip, gzip, pack, unpack, type TarEntry } from "./archive.ts";
 
@@ -12,10 +14,28 @@ async function bytesOf(ctx: CommandContext, operand: string): Promise<Uint8Array
 
 function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
   return async ctx => {
-    const parsed = options(ctx.args, { flags: "cdfkqv123456789", long: { stdout: "c", decompress: "d", force: "f", keep: "k" } });
+    const parsed = options(ctx.args, { flags: "cdfklnqrtv123456789", long: { stdout: "c", decompress: "d", force: "f", keep: "k", list: "l", test: "t", best: "9", fast: "1", quiet: "q", "no-name": "n", recursive: "r", verbose: "v" } });
     const decompress = mode !== "gzip" || parsed.flags.has("d");
     const stdout = mode === "zcat" || parsed.flags.has("c");
     let status = 0;
+    if (parsed.flags.has("l") || parsed.flags.has("t")) {
+      let header = false;
+      for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+        try {
+          const input = await bytesOf(ctx, operand);
+          const output = await gunzip(input);
+          if (parsed.flags.has("t")) continue;
+          if (!header) ctx.stdout.write("         compressed        uncompressed  ratio uncompressed_name\n");
+          header = true;
+          const ratio = output.length ? ((output.length - input.length) / output.length) * 100 : 0;
+          ctx.stdout.write(String(input.length).padStart(19) + " " + String(output.length).padStart(19) + " " + (ratio.toFixed(1) + "%").padStart(6) + " " + (operand === "-" ? "" : operand.replace(/\.gz$/, "")) + "\n");
+        } catch (error) {
+          ctx.stderr.write("gzip: " + operand + ": " + (error instanceof FsError && error.code === "ENOENT" ? "No such file or directory" : "not in gzip format") + "\n");
+          status = 1;
+        }
+      }
+      return status;
+    }
     for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
       try {
         const input = await bytesOf(ctx, operand);
@@ -42,13 +62,13 @@ async function collect(ctx: CommandContext, root: string, operand: string, entri
   const path = ctx.resolve(root === "." ? operand : root + "/" + operand);
   const stat = await ctx.fs.stat(path);
   if (!stat) throw new CommandError(operand + ": Cannot stat: No such file or directory");
-  const name = operand.replace(/^\.\//, "").replace(/\/+$/, "");
+  const name = operand.replace(/(.)\/+$/, "$1");
   if (stat.kind === "file") {
     entries.push({ name, type: "file", data: await ctx.fs.read(path), mode: stat.mode, mtime: stat.mtime, linkname: "" });
     return;
   }
   entries.push({ name, type: "directory", data: new Uint8Array(), mode: stat.mode, mtime: stat.mtime, linkname: "" });
-  for (const child of await ctx.fs.list(path)) await collect(ctx, root, name + "/" + child, entries);
+  for (const child of await ctx.fs.list(path)) await collect(ctx, root, (name === "/" ? "" : name) + "/" + child, entries);
 }
 
 const cmp: CommandHandler = async ctx => {
@@ -163,39 +183,38 @@ function md5(data: Uint8Array): string {
   return [a0, b0, c0, d0].map(word => [0, 8, 16, 24].map(shift => ((word >>> shift) & 0xff).toString(16).padStart(2, "0")).join("")).join("");
 }
 
-const md5sum: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "bt" });
-  let status = 0;
-  for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
-    try {
-      ctx.stdout.write(md5(await bytesOf(ctx, operand)) + "  " + operand + "\n");
-    } catch {
-      ctx.stderr.write("md5sum: " + operand + ": No such file or directory\n");
-      status = 1;
-    }
-  }
-  return status;
-};
+const md5sum: CommandHandler = checksum(md5, "MD5");
 
 const tree: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "adf", values: "L" });
+  const parsed = options(ctx.args, { flags: "adfFsC", values: "LIP", long: { noreport: "R", dirsfirst: "D", gitignore: "", charset: "charset", "filelimit": "filelimit", prune: "U" } });
+  const f = parsed.flags;
   const depth = Number(last(parsed, "L") ?? Infinity);
+  const ignore = (parsed.values.get("I") ?? []).flatMap(spec => spec.split("|")).map(glob => globRegExp(glob));
+  const pattern = (parsed.values.get("P") ?? []).flatMap(spec => spec.split("|")).map(glob => globRegExp(glob));
   let directories = 0;
   let files = 0;
-  const walk = async (path: string, prefix: string, level: number) => {
+  let status = 0;
+  const walk = async (path: string, display: string, prefix: string, level: number) => {
     if (level > depth) return;
-    const names = (await ctx.fs.list(path)).filter(name => parsed.flags.has("a") || !name.startsWith("."));
-    const children: { name: string; directory: boolean }[] = [];
+    const names = (await ctx.fs.list(path)).filter(name => (f.has("a") || !name.startsWith(".")) && !ignore.some(glob => glob.test(name)));
+    const children: { name: string; directory: boolean; size: number }[] = [];
     for (const name of names) {
       const stat = await ctx.fs.stat(path === "/" ? "/" + name : path + "/" + name);
-      if (stat && (stat.kind === "directory" || !parsed.flags.has("d"))) children.push({ name, directory: stat.kind === "directory" });
+      if (!stat) continue;
+      const directory = stat.kind === "directory";
+      if (!directory && f.has("d")) continue;
+      if (!directory && pattern.length && !pattern.some(glob => glob.test(name))) continue;
+      children.push({ name, directory, size: stat.size });
     }
+    if (f.has("D")) children.sort((a, b) => Number(b.directory) - Number(a.directory));
     for (const [index, child] of children.entries()) {
       const end = index === children.length - 1;
-      ctx.stdout.write(prefix + (end ? "└── " : "├── ") + child.name + "\n");
+      const childDisplay = display.endsWith("/") ? display + child.name : display + "/" + child.name;
+      const label = (f.has("f") ? childDisplay : child.name) + (f.has("F") && child.directory ? "/" : "");
+      ctx.stdout.write(prefix + (end ? "└── " : "├── ") + (f.has("s") ? "[" + String(child.directory ? 4096 : child.size).padStart(11) + "]  " : "") + label + "\n");
       if (child.directory) {
         directories++;
-        await walk(path === "/" ? "/" + child.name : path + "/" + child.name, prefix + (end ? "    " : "│   "), level + 1);
+        await walk(path === "/" ? "/" + child.name : path + "/" + child.name, childDisplay, prefix + (end ? "    " : "│\u00a0\u00a0 "), level + 1);
       } else files++;
     }
   };
@@ -203,13 +222,16 @@ const tree: CommandHandler = async ctx => {
     const path = ctx.resolve(operand);
     const stat = await ctx.fs.stat(path);
     if (!stat || stat.kind !== "directory") {
-      ctx.stderr.write(operand + " [error opening dir]\n");
+      ctx.stdout.write(operand + (stat ? "  [error opening dir]" : "  [error opening dir]") + "\n");
+      status = 2;
       continue;
     }
-    ctx.stdout.write(operand + "\n");
-    await walk(path, "", 1);
+    directories++;
+    ctx.stdout.write(operand + (f.has("F") && !operand.endsWith("/") ? "/" : "") + "\n");
+    await walk(path, operand, "", 1);
   }
-  ctx.stdout.write("\n" + directories + " director" + (directories === 1 ? "y" : "ies") + (parsed.flags.has("d") ? "" : ", " + files + " file" + (files === 1 ? "" : "s")) + "\n");
+  if (!f.has("R")) ctx.stdout.write("\n" + directories + " director" + (directories === 1 ? "y" : "ies") + (f.has("d") ? "" : ", " + files + " file" + (files === 1 ? "" : "s")) + "\n");
+  return status;
 };
 
 const which: CommandHandler = async ctx => {
@@ -371,14 +393,25 @@ const od: CommandHandler = async ctx => {
 };
 
 const split: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "d", values: "lba", numeric: true });
+  const parsed = options(ctx.args.map(arg => (/^-\d+$/.test(arg) ? "-l" + arg.slice(1) : arg)), { flags: "dx", values: "lban", long: { lines: "l", bytes: "b", "suffix-length": "a", number: "n", "numeric-suffixes": "d", "hex-suffixes": "x", "additional-suffix": "additional-suffix" } });
   const [input = "-", prefix = "x"] = parsed.operands;
-  const lines = Number(last(parsed, "l") ?? last(parsed, "n") ?? 1000);
+  const lines = Number(last(parsed, "l") ?? 1000);
   const size = last(parsed, "b");
+  const parts = last(parsed, "n");
   const width = Number(last(parsed, "a") ?? 2);
   const data = await bytesOf(ctx, input);
   const chunks: Uint8Array[] = [];
-  if (size) {
+  if (parts !== undefined) {
+    const count = Number(parts.replace(/^[lr]\//, ""));
+    if (!Number.isInteger(count) || count < 1) throw new CommandError("invalid number of chunks: '" + parts + "'");
+    const base = Math.floor(data.length / count);
+    let offset = 0;
+    for (let i = 0; i < count; i++) {
+      const length = i === count - 1 ? data.length - offset : base;
+      chunks.push(data.slice(offset, offset + length));
+      offset += length;
+    }
+  } else if (size) {
     const bytes = Number(size.replace(/[kKmM]$/, "")) * (/[kK]$/.test(size) ? 1024 : /[mM]$/.test(size) ? 1024 * 1024 : 1);
     for (let offset = 0; offset < data.length; offset += bytes) chunks.push(data.slice(offset, offset + bytes));
   } else {
@@ -439,49 +472,357 @@ const expand: CommandHandler = async ctx => {
 };
 
 const file: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "bi" });
+  const parsed = options(ctx.args, { flags: "biLz", long: { brief: "b", mime: "i", "mime-type": "M", dereference: "L" } });
+  const width = Math.max(0, ...parsed.operands.map(operand => operand.length + 1));
   for (const operand of parsed.operands) {
     const path = ctx.resolve(operand);
     const stat = await ctx.fs.stat(path);
     let kind: string;
-    if (!stat) kind = "cannot open (No such file or directory)";
-    else if (stat.kind === "directory") kind = parsed.flags.has("i") ? "inode/directory" : "directory";
+    const mime = parsed.flags.has("i") || parsed.flags.has("M");
+    if (!stat) kind = "cannot open \x60" + operand + "' (No such file or directory)";
+    else if (stat.kind === "directory") kind = mime ? "inode/directory" : "directory";
     else {
       const data = await ctx.fs.read(path);
       const starts = (...bytes: number[]) => bytes.every((byte, index) => data[index] === byte);
-      const text = decode(data.slice(0, 4096));
-      if (!data.length) kind = parsed.flags.has("i") ? "inode/x-empty" : "empty";
-      else if (starts(0x1f, 0x8b)) kind = parsed.flags.has("i") ? "application/gzip" : "gzip compressed data";
-      else if (starts(0x89, 0x50, 0x4e, 0x47)) kind = parsed.flags.has("i") ? "image/png" : "PNG image data";
-      else if (starts(0xff, 0xd8, 0xff)) kind = parsed.flags.has("i") ? "image/jpeg" : "JPEG image data";
-      else if (starts(0x25, 0x50, 0x44, 0x46)) kind = parsed.flags.has("i") ? "application/pdf" : "PDF document";
-      else if (starts(0x50, 0x4b, 0x03, 0x04)) kind = parsed.flags.has("i") ? "application/zip" : "Zip archive data";
-      else if (data.length > 262 && decode(data.slice(257, 262)) === "ustar") kind = parsed.flags.has("i") ? "application/x-tar" : "POSIX tar archive";
-      else if (data.includes(0)) kind = parsed.flags.has("i") ? "application/octet-stream" : "data";
-      else if (/^\s*[[{]/.test(text) && (() => { try { JSON.parse(decode(data)); return true; } catch { return false; } })()) kind = parsed.flags.has("i") ? "application/json" : "JSON text data";
-      else if (/^#!.*\b(bash|sh)\b/.test(text)) kind = parsed.flags.has("i") ? "text/x-shellscript" : "Bourne-Again shell script, ASCII text executable";
-      else kind = parsed.flags.has("i") ? "text/plain" : /[^\x00-\x7f]/.test(text) ? "Unicode text, UTF-8 text" : "ASCII text";
+      const text = decode(data.slice(0, 65536));
+      const textLines = lines(text);
+      const csv = textLines.length > 1 && (() => {
+        const counts = textLines.slice(0, 50).map(line => (line.match(/,/g) ?? []).length);
+        return counts[0]! > 0 && counts.every(count => count === counts[0]);
+      })();
+      const ascii = !/[^\x00-\x7f]/.test(text);
+      const encoding = ascii ? "ASCII text" : "Unicode text, UTF-8 text";
+      if (!data.length) kind = mime ? "inode/x-empty" : "empty";
+      else if (starts(0x1f, 0x8b)) kind = mime ? "application/gzip" : "gzip compressed data";
+      else if (starts(0x89, 0x50, 0x4e, 0x47)) kind = mime ? "image/png" : "PNG image data";
+      else if (starts(0xff, 0xd8, 0xff)) kind = mime ? "image/jpeg" : "JPEG image data";
+      else if (starts(0x47, 0x49, 0x46, 0x38)) kind = mime ? "image/gif" : "GIF image data";
+      else if (starts(0x25, 0x50, 0x44, 0x46)) kind = mime ? "application/pdf" : "PDF document";
+      else if (starts(0x50, 0x4b, 0x03, 0x04)) kind = mime ? "application/zip" : "Zip archive data";
+      else if (starts(0x7f, 0x45, 0x4c, 0x46)) kind = mime ? "application/x-executable" : "ELF executable";
+      else if (starts(0x00, 0x61, 0x73, 0x6d)) kind = mime ? "application/wasm" : "WebAssembly (wasm) binary module";
+      else if (data.length > 262 && decode(data.slice(257, 262)) === "ustar") kind = mime ? "application/x-tar" : "POSIX tar archive";
+      else if (data.includes(0)) kind = mime ? "application/octet-stream" : "data";
+      else if (/^\s*[[{]/.test(text) && (() => { try { JSON.parse(decode(data)); return true; } catch { return false; } })()) kind = mime ? "application/json" : "JSON text data";
+      else if (/^#!.*\b(bash|sh)\b/.test(text)) kind = mime ? "text/x-shellscript" : "Bourne-Again shell script, " + encoding + " executable";
+      else if (/^#!.*\bpython/.test(text)) kind = mime ? "text/x-script.python" : "Python script, " + encoding + " executable";
+      else if (/^#!.*\bnode/.test(text)) kind = mime ? "application/javascript" : "Node.js script, " + encoding + " executable";
+      else if (/^\s*<\?xml/.test(text)) kind = mime ? "text/xml" : "XML 1.0 document, " + encoding;
+      else if (/^\s*<!doctype html|^\s*<html/i.test(text)) kind = mime ? "text/html" : "HTML document, " + encoding;
+      else if (csv) kind = mime ? "text/csv" : "CSV " + encoding;
+      else kind = mime ? "text/plain" : encoding;
+      if (parsed.flags.has("i") && !parsed.flags.has("M")) kind += "; charset=" + (kind.startsWith("text/") || kind === "application/json" || kind === "application/javascript" ? (ascii ? "us-ascii" : "utf-8") : "binary");
     }
-    ctx.stdout.write((parsed.flags.has("b") ? "" : operand + ": ") + kind + "\n");
+    if (stat?.kind === "directory" && parsed.flags.has("i") && !parsed.flags.has("M")) kind += "; charset=binary";
+    ctx.stdout.write((parsed.flags.has("b") ? "" : (operand + ":").padEnd(width) + " ") + kind + "\n");
   }
 };
 
-const rg: CommandHandler = ctx => {
-  const parsed = options(ctx.args, { flags: "ilcwFvnNHUSo", values: "eAgCBtm", long: { "ignore-case": "i", "files-with-matches": "l", count: "c", "word-regexp": "w", "fixed-strings": "F", "invert-match": "v", "line-number": "n", "no-line-number": "N", "only-matching": "o", glob: "g", context: "C", "max-count": "m", type: "t", hidden: "", "no-heading": "" } });
-  const args = ["-r", "-E"];
-  if (!parsed.flags.has("N") && !parsed.flags.has("l") && !parsed.flags.has("c")) args.push("-n");
-  for (const flag of "ilcwFvo") if (parsed.flags.has(flag)) args.push("-" + flag);
-  for (const key of ["A", "B", "C", "m"]) for (const value of parsed.values.get(key) ?? []) args.push("-" + key, value);
-  for (const glob of parsed.values.get("g") ?? []) args.push(glob.startsWith("!") ? "--exclude=" + glob.slice(1) : "--include=" + glob);
-  const patterns = parsed.values.get("e") ?? [];
+type IgnoreRule = { base: string; negate: boolean; directory: boolean; regex: RegExp };
+
+function ignoreRegExp(pattern: string): { regex: RegExp; anchored: boolean } {
+  const anchored = pattern.includes("/");
+  const groups: string[][] = [];
+  const braced = pattern.replace(/\{([^{}]*,[^{}]*)\}/g, (_, inner: string) => String.fromCharCode(0xe000 + groups.push(inner.split(",")) - 1));
+  const body = braced.replace(/^\//, "").replace(/(^|\/)\*\*\//g, "$1\u0001").replace(/\/\*\*$/, "\u0002").replace(/\*\*/g, "\u0003");
+  const source = globSource(body, true).replace(/\u0001/g, "(?:.*/)?").replace(/\u0002/g, "/.*").replace(/\u0003/g, ".*").replace(/[\ue000-\ue0ff]/g, c => "(?:" + groups[c.charCodeAt(0) - 0xe000]!.map(item => globSource(item, true)).join("|") + ")");
+  return { regex: new RegExp("^" + source + "$"), anchored };
+}
+
+function ignoreRules(text: string, base: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = [];
+  for (const raw of text.split("\n")) {
+    let line = raw.replace(/\r$/, "").replace(/(?<!\\)\s+$/, "");
+    if (!line || line.startsWith("#")) continue;
+    const negate = line.startsWith("!");
+    if (negate) line = line.slice(1);
+    if (line.startsWith("\\")) line = line.slice(1);
+    const directory = line.endsWith("/");
+    if (directory) line = line.slice(0, -1);
+    if (!line) continue;
+    const { regex, anchored } = ignoreRegExp(line);
+    rules.push({ base, negate, directory, regex: anchored ? regex : new RegExp("(?:^|/)" + regex.source.slice(1)) });
+  }
+  return rules;
+}
+
+function ignoredBy(rules: IgnoreRule[], path: string, directory: boolean): boolean | undefined {
+  let result: boolean | undefined;
+  for (const rule of rules) {
+    if (rule.directory && !directory) continue;
+    if (!path.startsWith(rule.base === "/" ? "/" : rule.base + "/")) continue;
+    const relative = path.slice(rule.base === "/" ? 1 : rule.base.length + 1);
+    if (rule.regex.test(relative)) result = !rule.negate;
+  }
+  return result;
+}
+
+const RG_TYPES: Record<string, string[]> = {
+  c: ["*.c", "*.h", "*.H"],
+  cpp: ["*.C", "*.cc", "*.cpp", "*.cxx", "*.h", "*.H", "*.hh", "*.hpp", "*.hxx", "*.inl"],
+  cs: ["*.cs"],
+  css: ["*.css", "*.scss"],
+  go: ["*.go"],
+  html: ["*.ejs", "*.htm", "*.html"],
+  java: ["*.java", "*.jsp", "*.jspx", "*.properties"],
+  js: ["*.cjs", "*.js", "*.jsx", "*.mjs", "*.vue"],
+  json: ["*.json", "*.jsonl", "*.sarif", "composer.lock"],
+  kotlin: ["*.kt", "*.kts"],
+  lua: ["*.lua"],
+  make: ["*.mak", "*.mk", "GNUmakefile", "Makefile", "makefile"],
+  markdown: ["*.markdown", "*.md", "*.mdown", "*.mdwn", "*.mdx", "*.mkd", "*.mkdn"],
+  md: ["*.markdown", "*.md", "*.mdown", "*.mdwn", "*.mdx", "*.mkd", "*.mkdn"],
+  php: ["*.php", "*.php3", "*.php4", "*.php5", "*.phtml"],
+  py: ["*.py", "*.pyi"],
+  python: ["*.py", "*.pyi"],
+  rb: ["*.gemspec", "*.rb", ".irbrc", "Gemfile", "Rakefile"],
+  ruby: ["*.gemspec", "*.rb", ".irbrc", "Gemfile", "Rakefile"],
+  rust: ["*.rs"],
+  sh: ["*.bash", "*.bashrc", "*.csh", "*.ksh", "*.sh", "*.tcsh", "*.zsh", ".bash_login", ".bash_logout", ".bash_profile", ".bashrc", ".profile", ".zshrc"],
+  sol: ["*.sol"],
+  sql: ["*.psql", "*.sql"],
+  svelte: ["*.svelte"],
+  swift: ["*.swift"],
+  toml: ["*.toml", "Cargo.lock"],
+  ts: ["*.cts", "*.mts", "*.ts", "*.tsx"],
+  tsx: ["*.tsx"],
+  txt: ["*.txt"],
+  typescript: ["*.cts", "*.mts", "*.ts", "*.tsx"],
+  xml: ["*.dtd", "*.xml", "*.xsd", "*.xsl", "*.xslt"],
+  yaml: ["*.yaml", "*.yml"],
+  zig: ["*.zig"],
+};
+
+const rg: CommandHandler = async ctx => {
+  const args: string[] = [];
+  let unrestricted = 0;
+  for (const arg of ctx.args) {
+    if (/^-u+$/.test(arg)) unrestricted += arg.length - 1;
+    else if (arg === "--unrestricted") unrestricted++;
+    else args.push(arg);
+  }
+  const parsed = options(args, {
+    flags: "ilcwFvnNHIUSsoqxaLp0.zP",
+    values: "eAgCBtTmfrdjM",
+    long: { "ignore-case": "i", "files-with-matches": "l", "files-without-match": "9", count: "c", "count-matches": "8", "word-regexp": "w", "fixed-strings": "F", "invert-match": "v", "line-number": "n", "no-line-number": "N", "with-filename": "H", "no-filename": "I", "only-matching": "o", glob: "g", iglob: "iglob", context: "C", "after-context": "A", "before-context": "B", "max-count": "m", type: "t", "type-not": "T", hidden: ".", "no-heading": "", heading: "2", "smart-case": "S", "case-sensitive": "s", quiet: "q", "line-regexp": "x", text: "a", follow: "L", regexp: "e", file: "f", replace: "r", "max-depth": "d", maxdepth: "d", "no-ignore": "3", "no-ignore-vcs": "4", "no-ignore-dot": "", "no-ignore-parent": "", "no-require-git": "5", files: "1", sort: "sort", sortr: "sort", color: "", colour: "", colors: "", "no-messages": "", column: "6", vimgrep: "7", pcre2: "P", "no-config": "", "line-buffered": "", "block-buffered": "", null: "0", pretty: "p", trim: "", threads: "j", "max-columns": "M", "max-filesize": "", "one-file-system": "", binary: "", "search-zip": "z", "no-unicode": "", multiline: "U", crlf: "", engine: "engine" },
+  });
+  const f = parsed.flags;
+  const longFlags: Record<string, string> = { "count-matches": "8", "files-without-match": "9", "no-ignore": "3", "no-ignore-vcs": "4", column: "6", files: "1", heading: "2", vimgrep: "7" };
+  const has = (key: string) => f.has(longFlags[key] ?? key);
+  const listFiles = has("files");
+  const patterns = [...(parsed.values.get("e") ?? [])];
+  for (const file of parsed.values.get("f") ?? []) {
+    try {
+      const text = await readInput(ctx, file);
+      if (text !== "") patterns.push(...text.split("\n").filter((line, index, all) => line !== "" || index < all.length - 1));
+    } catch {
+      throw new CommandError(file + ": No such file or directory (os error 2)", 2);
+    }
+  }
   const operands = parsed.operands.slice();
-  if (!patterns.length) {
+  if (!listFiles && !parsed.values.has("e") && !parsed.values.has("f")) {
     const pattern = operands.shift();
-    if (pattern === undefined) throw new CommandError("no pattern given", 2);
+    if (pattern === undefined) throw new CommandError("ripgrep requires at least one pattern to execute a search", 2);
     patterns.push(pattern);
   }
-  for (const pattern of patterns) args.push("-e", pattern);
-  return ctx.run(["grep", ...args, ...(operands.length ? operands : ["."])]);
+  const hidden = f.has(".") || unrestricted >= 2;
+  const noIgnore = has("no-ignore") || unrestricted >= 1;
+  const noVcs = noIgnore || has("no-ignore-vcs");
+  const binaryText = f.has("a") || unrestricted >= 3;
+  const smart = f.has("S") && !f.has("s") && !f.has("i");
+  const insensitive = (f.has("i") && !f.has("s")) || (smart && !patterns.some(pattern => /[A-Z]/.test(pattern.replace(/\\[a-zA-Z]/g, ""))));
+  let extraFlags = "";
+  const sources = patterns.map(pattern => {
+    let source: string;
+    if (f.has("F")) source = escapeRegExp(pattern);
+    else {
+      const perl = perlSource(pattern);
+      source = perl.source;
+      extraFlags += perl.flags;
+    }
+    if (f.has("w")) source = "(?<![\\w])(?:" + source + ")(?![\\w])";
+    if (f.has("x")) source = "^(?:" + source + ")$";
+    return source;
+  });
+  let regex: RegExp;
+  try {
+    const flags = new Set(("g" + (insensitive ? "i" : "") + extraFlags).split(""));
+    regex = new RegExp(sources.length ? sources.map(source => "(?:" + source + ")").join("|") : "(?!)", [...flags].join(""));
+  } catch (error) {
+    throw new CommandError("regex parse error:\n    " + patterns.join("|") + "\nerror: " + (error as Error).message, 2);
+  }
+  const types = parsed.values.get("t") ?? [];
+  const notTypes = parsed.values.get("T") ?? [];
+  for (const type of [...types, ...notTypes]) if (!(type in RG_TYPES) && type !== "all") throw new CommandError("unrecognized file type: " + type, 2);
+  const typeMatch = (list: string[], name: string) => list.some(type => (RG_TYPES[type] ?? []).some(glob => globRegExp(glob).test(name)));
+  const globs = [...(parsed.values.get("g") ?? []).map(glob => ({ glob, insensitive: false })), ...(parsed.values.get("iglob") ?? []).map(glob => ({ glob, insensitive: true }))].map(item => {
+    const negate = item.glob.startsWith("!");
+    const body = negate ? item.glob.slice(1) : item.glob;
+    const directory = body.endsWith("/");
+    const { regex: match, anchored } = ignoreRegExp(directory ? body.slice(0, -1) : body);
+    return { negate, directory, regex: new RegExp(anchored ? match.source : "(?:^|/)" + match.source.slice(1), item.insensitive ? "i" : "") };
+  });
+  const positive = globs.some(glob => !glob.negate);
+  const override = (relative: string, directory: boolean): "include" | "exclude" | undefined => {
+    let result: "include" | "exclude" | undefined;
+    for (const glob of globs) {
+      if (glob.directory && !directory) continue;
+      if (glob.regex.test(relative)) result = glob.negate ? "exclude" : "include";
+    }
+    if (result === undefined && positive && !directory) return "exclude";
+    return result;
+  };
+  const maxDepth = last(parsed, "d") === undefined ? Infinity : Number(last(parsed, "d"));
+  const stdinText = !listFiles && !operands.length ? ctx.stdin.read() : "";
+  const useStdin = stdinText !== "";
+  const roots = operands.length ? operands : useStdin ? [] : ["."];
+  const implicit = !operands.length;
+  let errors = false;
+  let directories = false;
+  const targets: { path: string; display: string; explicit: boolean }[] = [];
+  const gitRoot = async (path: string): Promise<boolean> => {
+    for (let dir = path; ; dir = parentOf(dir)) {
+      if (await ctx.fs.stat((dir === "/" ? "" : dir) + "/.git")) return true;
+      if (dir === "/") return false;
+    }
+  };
+  const loadRules = async (dir: string, git: boolean): Promise<IgnoreRule[]> => {
+    const rules: IgnoreRule[] = [];
+    const names = [...(git && !noVcs ? [".gitignore"] : []), ...(noIgnore ? [] : [".ignore", ".rgignore"])];
+    for (const name of names) {
+      const path = (dir === "/" ? "" : dir) + "/" + name;
+      const stat = await ctx.fs.stat(path);
+      if (stat?.kind === "file") rules.push(...ignoreRules(decode(await ctx.fs.read(path)), dir));
+    }
+    return rules;
+  };
+  const walk = async (path: string, display: string, depth: number, rules: IgnoreRule[], git: boolean, root: string) => {
+    if (depth > maxDepth) return;
+    const local = rules.concat(await loadRules(path, git));
+    for (const name of await ctx.fs.list(path)) {
+      const child = (path === "/" ? "" : path) + "/" + name;
+      const stat = await ctx.fs.stat(child);
+      if (!stat) continue;
+      const directory = stat.kind === "directory";
+      if (depth + 1 > maxDepth) continue;
+      const relative = child.slice(root === "/" ? 1 : root.length + 1);
+      const decision = override(relative, directory);
+      if (decision === "exclude") continue;
+      if (decision !== "include") {
+        if (!hidden && name.startsWith(".")) continue;
+        if (name === ".git" && directory && !hidden) continue;
+        if (ignoredBy(local, child, directory)) continue;
+      }
+      const shown = display === "" ? name : display.endsWith("/") ? display + name : display + "/" + name;
+      if (directory) {
+        await walk(child, shown, depth + 1, local, git, root);
+        continue;
+      }
+      if (types.length && !types.includes("all") && !typeMatch(types, name)) continue;
+      if (notTypes.length && typeMatch(notTypes, name)) continue;
+      targets.push({ path: child, display: shown, explicit: false });
+    }
+  };
+  for (const root of roots) {
+    const path = ctx.resolve(root);
+    const stat = await ctx.fs.stat(path);
+    if (!stat) {
+      ctx.stderr.write("rg: " + root + ": No such file or directory (os error 2)\n");
+      errors = true;
+      continue;
+    }
+    if (stat.kind === "file") {
+      targets.push({ path, display: root, explicit: true });
+      continue;
+    }
+    directories = true;
+    const git = await gitRoot(path);
+    const inherited: IgnoreRule[] = [];
+    const ancestors: string[] = [];
+    for (let dir = parentOf(path); ; dir = parentOf(dir)) {
+      ancestors.unshift(dir);
+      if (dir === "/") break;
+    }
+    for (const dir of ancestors) inherited.push(...(await loadRules(dir, git)));
+    await walk(path, implicit ? "" : root, 0, inherited, git, path);
+  }
+  if (listFiles) {
+    for (const target of targets) ctx.stdout.write(target.display + (f.has("0") ? "\0" : "\n"));
+    return errors ? 2 : targets.length ? 0 : 1;
+  }
+  const named = f.has("H") || has("vimgrep") || (!f.has("I") && (roots.length > 1 || directories));
+  const heading = has("heading") && !has("vimgrep");
+  const numbers = (f.has("n") || has("vimgrep") || has("column")) && !f.has("N");
+  const context = Number(last(parsed, "C") ?? 0);
+  const after = Number(last(parsed, "A") ?? context);
+  const before = Number(last(parsed, "B") ?? context);
+  const max = last(parsed, "m") === undefined ? Infinity : Number(last(parsed, "m"));
+  const replace = last(parsed, "r")?.replace(/\$\{(\d+)\}/g, "$$$1").replace(/\$\{(\w+)\}/g, "$$<$1>").replace(/\$([A-Za-z_]\w*)/g, "$$<$1>");
+  const state = { printed: false };
+  let found = false;
+  let firstHeading = true;
+  const search = (text: string, display: string | undefined, explicit: boolean) => {
+    if (!binaryText && text.includes("\0")) {
+      if (!explicit) return;
+      const offset = text.indexOf("\0");
+      const head = text.slice(0, offset);
+      regex.lastIndex = 0;
+      const hits = scan(head, { regex, invert: f.has("v"), max, before: 0, after: 0, only: false, numbers: false, terminator: "\n", silent: true, state, write: () => {} });
+      if (!hits) return;
+      found = true;
+      if (f.has("q")) return;
+      if (f.has("l")) ctx.stdout.write((display ?? "<stdin>") + "\n");
+      else if (f.has("c")) ctx.stdout.write((named && display !== undefined ? display + ":" : "") + hits + "\n");
+      else ctx.stdout.write((display !== undefined && named ? display + ": " : "") + "binary file matches (found \"\\0\" byte around offset " + offset + ")\n");
+      return;
+    }
+    const counting = f.has("c") || has("count-matches");
+    const silent = f.has("q") || f.has("l") || has("files-without-match") || counting;
+    let output = "";
+    const prefix = named && !heading ? display ?? "<stdin>" : undefined;
+    const matches = scan(text, { regex, invert: f.has("v"), max, before, after, only: f.has("o"), numbers, column: has("column") || has("vimgrep"), name: prefix, terminator: "\n", replace, silent, state, write: chunk => void (output += chunk) });
+    if (matches) found = true;
+    if (f.has("q")) return;
+    if (f.has("l") && matches) ctx.stdout.write((display ?? "<stdin>") + (f.has("0") ? "\0" : "\n"));
+    if (has("files-without-match") && !matches) ctx.stdout.write((display ?? "<stdin>") + "\n");
+    if (counting && matches) {
+      let total = matches;
+      if (has("count-matches")) {
+        total = 0;
+        for (const line of text.split("\n")) {
+          regex.lastIndex = 0;
+          total += [...line.matchAll(regex)].length;
+        }
+      }
+      ctx.stdout.write((named ? (display ?? "<stdin>") + ":" : "") + total + "\n");
+    }
+    if (!silent && output) {
+      if (heading && named) {
+        ctx.stdout.write((firstHeading ? "" : "\n") + (display ?? "<stdin>") + "\n");
+        firstHeading = false;
+      }
+      ctx.stdout.write(output);
+    }
+  };
+  if (!useStdin && !targets.length && !errors) {
+    ctx.stderr.write("rg: No files were searched, which means ripgrep probably applied a filter you didn't expect.\nRunning with --debug will show why files are being skipped.\n");
+    return 2;
+  }
+  if (useStdin) search(stdinText, f.has("H") ? "<stdin>" : undefined, true);
+  for (const target of targets) {
+    let text: string;
+    try {
+      text = decode(await ctx.fs.read(target.path));
+    } catch {
+      ctx.stderr.write("rg: " + target.display + ": failed to read\n");
+      errors = true;
+      continue;
+    }
+    search(text, target.display, target.explicit);
+    if (found && f.has("q")) return 0;
+  }
+  if (errors) return 2;
+  return found ? 0 : 1;
 };
 
 const ln: CommandHandler = async ctx => {
@@ -498,24 +839,1336 @@ const ln: CommandHandler = async ctx => {
   ctx.stderr.write("ln: this filesystem has no links; copied '" + source + "' instead\n");
 };
 
+const truncate: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "co", values: "sr", long: { "no-create": "c", "io-blocks": "o", size: "s", reference: "r" } });
+  const spec = last(parsed, "s");
+  const reference = last(parsed, "r");
+  if (spec === undefined && reference === undefined) throw new CommandError("you must specify either '--size' or '--reference'");
+  if (!parsed.operands.length) throw new CommandError("missing file operand");
+  const match = spec?.match(/^([-+<>\/%]?)(\d+)([KMGT]?)(i?B?)$/i);
+  if (spec !== undefined && !match) throw new CommandError("Invalid number: '" + spec + "'");
+  const unit = match ? (match[4]?.toUpperCase() === "B" && !match[4].toLowerCase().startsWith("i") ? 1000 : 1024) ** " KMGT".indexOf((match[3] || " ").toUpperCase()) : 1;
+  const amount = match ? Number(match[2]) * unit : 0;
+  const refSize = reference === undefined ? 0 : (await ctx.fs.stat(ctx.resolve(reference)))?.size;
+  if (refSize === undefined) throw new CommandError("cannot stat '" + reference + "': No such file or directory");
+  let status = 0;
+  for (const operand of parsed.operands) {
+    const path = ctx.resolve(operand);
+    const stat = await ctx.fs.stat(path);
+    if (!stat && parsed.flags.has("c")) continue;
+    if (stat?.kind === "directory") {
+      ctx.stderr.write("truncate: cannot open '" + operand + "' for writing: Is a directory\n");
+      status = 1;
+      continue;
+    }
+    const data = stat ? await ctx.fs.read(path) : new Uint8Array(0);
+    const current = data.length;
+    const op = match?.[1] ?? "";
+    let size = spec === undefined ? refSize : amount;
+    if (op === "+") size = current + amount;
+    else if (op === "-") size = Math.max(0, current - amount);
+    else if (op === "<") size = Math.min(current, amount);
+    else if (op === ">") size = Math.max(current, amount);
+    else if (op === "/") size = amount ? Math.floor(current / amount) * amount : current;
+    else if (op === "%") size = amount ? Math.ceil(current / amount) * amount : current;
+    const out = new Uint8Array(size);
+    out.set(data.subarray(0, Math.min(size, current)));
+    try {
+      await ctx.fs.write(path, out);
+    } catch (error) {
+      ctx.stderr.write("truncate: cannot open '" + operand + "' for writing: " + (error instanceof FsError && error.code === "ENOENT" ? "No such file or directory" : (error as Error).message) + "\n");
+      status = 1;
+    }
+  }
+  return status;
+};
+
+const shuf: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "erz", values: "nio", long: { echo: "e", repeat: "r", "zero-terminated": "z", "head-count": "n", "input-range": "i", output: "o", "random-source": "random-source" } });
+  const separator = parsed.flags.has("z") ? "\0" : "\n";
+  let items: string[];
+  let status = 0;
+  const range = last(parsed, "i");
+  if (range !== undefined) {
+    const match = range.match(/^(\d+)-(\d+)$/);
+    if (!match || Number(match[1]) > Number(match[2]) + 1) throw new CommandError("invalid input range: '" + range + "'");
+    const from = Number(match[1]);
+    const to = Number(match[2]);
+    if (to - from > 10_000_000) throw new CommandError("input range too large");
+    items = Array.from({ length: to - from + 1 }, (_, index) => String(from + index));
+  } else if (parsed.flags.has("e")) items = parsed.operands.slice();
+  else {
+    const result = await allInput(ctx, parsed.operands.slice(0, 1));
+    status = result.status;
+    items = result.text.split(separator);
+    if (items[items.length - 1] === "") items.pop();
+  }
+  const count = last(parsed, "n") === undefined ? undefined : Number(last(parsed, "n"));
+  if (count !== undefined && (!Number.isInteger(count) || count < 0)) throw new CommandError("invalid line count: '" + last(parsed, "n") + "'");
+  const out: string[] = [];
+  if (parsed.flags.has("r")) {
+    if (items.length) for (let i = 0; i < (count ?? 1000); i++) out.push(items[Math.floor(Math.random() * items.length)]!);
+    else if (count) throw new CommandError("no lines to repeat");
+  } else {
+    const pool = items.slice();
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+    }
+    out.push(...pool.slice(0, count ?? pool.length));
+  }
+  const text = out.map(item => item + separator).join("");
+  const target = last(parsed, "o");
+  if (target !== undefined) await ctx.fs.write(ctx.resolve(target), encode(text));
+  else ctx.stdout.write(text);
+  return status;
+};
+
+type FmtWord = { text: string; length: number; space: number; gap: string; period: boolean; punct: boolean; final: boolean; paren: boolean };
+
+function fmtWidth(indent: string): number {
+  let width = 0;
+  for (const c of indent) width = c === "\t" ? (Math.floor(width / 8) + 1) * 8 : width + 1;
+  return width;
+}
+
+function fmtParagraph(words: FmtWord[], indent: number, maxWidth: number, goal: number, lastLength: number): { next: number[]; best: number[]; lineLength: number[] } {
+  const n = words.length;
+  const best = new Array<number>(n + 1).fill(0);
+  const next = new Array<number>(n + 1).fill(n);
+  const lineLength = new Array<number>(n + 1).fill(0);
+  const square = (x: number) => x * x;
+  const short = (x: number) => square(x * 10);
+  const ragged = (x: number) => short(x) / 2;
+  const lineCost = (w: number, len: number) => {
+    if (w === n) return 0;
+    let cost = short(goal - len);
+    if (next[w] !== n) cost += ragged(len - lineLength[w]!);
+    return cost;
+  };
+  const baseCost = (index: number) => {
+    let cost = square(70);
+    const word = words[index]!;
+    if (index > 0) {
+      const previous = words[index - 1]!;
+      if (previous.period) cost += previous.final ? -square(50) : square(600);
+      else if (previous.punct) cost -= square(40);
+      else if (index > 1 && words[index - 2]!.final) cost += square(200) / (previous.length + 2);
+    }
+    if (word.paren) cost -= square(40);
+    else if (word.final) cost += square(150) / (word.length + 2);
+    return cost;
+  };
+  for (let start = n - 1; start >= 0; start--) {
+    let bestCost = Infinity;
+    let len = indent + words[start]!.length;
+    let w = start;
+    for (;;) {
+      w++;
+      const cost = lineCost(w, len) + best[w]! + (start === 0 && lastLength > 0 ? ragged(len - lastLength) : 0);
+      if (cost < bestCost) {
+        bestCost = cost;
+        next[start] = w;
+        lineLength[start] = len;
+      }
+      if (w === n) break;
+      len += words[w - 1]!.space + words[w]!.length;
+      if (len >= maxWidth) break;
+    }
+    best[start] = bestCost + baseCost(start);
+  }
+  return { next, best, lineLength };
+}
+
+const fmt: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "cstu", values: "wgp", numeric: true, long: { width: "w", goal: "g", "split-only": "s", "uniform-spacing": "u", "crown-margin": "c", "tagged-paragraph": "t", prefix: "p" } });
+  const width = Number(last(parsed, "w") ?? last(parsed, "n") ?? 75);
+  const goal = Number(last(parsed, "g") ?? Math.floor((width * 187) / 200));
+  const splitOnly = parsed.flags.has("s");
+  const { text, status } = await allInput(ctx, parsed.operands);
+  const out: string[] = [];
+  const all = text.split("\n");
+  if (all[all.length - 1] === "") all.pop();
+  const wordsOf = (line: string): FmtWord[] => {
+    const words: FmtWord[] = [];
+    const pattern = /(\S+)(\s*)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(line))) {
+      const text = match[1]!;
+      const gap = match[2]!;
+      const end = match.index + text.length;
+      const atEnd = end + gap.length >= line.length;
+      const space = atEnd ? 1 : fmtWidth(line.slice(0, end + gap.length)) - fmtWidth(line.slice(0, end));
+      const period = /[.?!][)\]'"]*$/.test(text);
+      const final = period && (atEnd || space > 1);
+      words.push({ text, length: encode(text).length, space: atEnd || parsed.flags.has("u") ? (final ? 2 : 1) : space, gap: atEnd || parsed.flags.has("u") ? (final ? "  " : " ") : gap, period, punct: /[!-\/:-@\[-\x60{-~]$/.test(text), final, paren: /^[(\['\x60"]/.test(text) });
+    }
+    return words;
+  };
+  let i = 0;
+  const emit = (indent: string, words: FmtWord[], next: number[], end: number) => {
+    for (let start = 0; start < end; start = next[start]!) {
+      let text = indent;
+      for (let k = start; k < next[start]!; k++) text += words[k]!.text + (k < next[start]! - 1 ? words[k]!.gap : "");
+      out.push(text);
+    }
+  };
+  while (i < all.length) {
+    const line = all[i]!;
+    if (line.trim() === "") {
+      out.push("");
+      i++;
+      continue;
+    }
+    const indent = line.match(/^\s*/)![0];
+    const indentWidth = fmtWidth(indent);
+    let words: FmtWord[] = [];
+    let chars = 0;
+    let lastLength = 0;
+    const add = (word: FmtWord) => {
+      if (words.length >= 1000 || chars + word.length > 5000) {
+        const result = fmtParagraph(words, indentWidth, width, goal, lastLength);
+        let split = words.length;
+        let bestBreak = Infinity;
+        for (let w = result.next[0]!; w !== words.length; w = result.next[w]!) {
+          const cost = result.best[w]! - result.best[result.next[w]!]!;
+          if (cost < bestBreak) {
+            split = w;
+            bestBreak = cost;
+          }
+          bestBreak += 4900;
+        }
+        emit(indent, words, result.next, split);
+        for (let start = 0; start < split; start = result.next[start]!) lastLength = result.lineLength[start]!;
+        words = words.slice(split);
+        chars = words.reduce((sum, item) => sum + item.length, 0);
+      }
+      words.push(word);
+      chars += word.length;
+    };
+    if (splitOnly) {
+      wordsOf(line).forEach(add);
+      i++;
+    } else
+      while (i < all.length && all[i]!.trim() !== "" && all[i]!.match(/^\s*/)![0] === indent) {
+        wordsOf(all[i]!).forEach(add);
+        i++;
+      }
+    emit(indent, words, fmtParagraph(words, indentWidth, width, goal, lastLength).next, words.length);
+  }
+  ctx.stdout.write(out.map(line => line + "\n").join(""));
+  return status;
+};
+
+const hexdump: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "Cbcdovx", values: "nse", long: { canonical: "C", length: "n", skip: "s" } });
+  const chunks: Uint8Array[] = [];
+  let status = 0;
+  for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+    try {
+      if (operand === "-") chunks.push(encode(ctx.stdin.read()));
+      else {
+        const path = ctx.resolve(operand);
+        const special = (await ctx.fs.stat(path)) ? undefined : device(path, Number(last(parsed, "n") ?? 65536) + Number(last(parsed, "s") ?? 0));
+        chunks.push(special !== undefined ? encode(special) : await ctx.fs.read(path));
+      }
+    } catch {
+      ctx.stderr.write("hexdump: " + operand + ": No such file or directory\n");
+      status = 1;
+    }
+  }
+  let data = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let at = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, at);
+    at += chunk.length;
+  }
+  const skip = Number(last(parsed, "s") ?? 0);
+  const length = last(parsed, "n") === undefined ? data.length : Number(last(parsed, "n"));
+  data = data.subarray(Math.min(skip, data.length), Math.min(data.length, skip + length));
+  const canonical = parsed.flags.has("C");
+  let previous: string | undefined;
+  let starred = false;
+  for (let offset = 0; offset < data.length; offset += 16) {
+    const row = data.subarray(offset, offset + 16);
+    const key = Array.from(row).join(",");
+    if (row.length === 16 && key === previous && !parsed.flags.has("v")) {
+      if (!starred) ctx.stdout.write("*\n");
+      starred = true;
+      continue;
+    }
+    starred = false;
+    previous = row.length === 16 ? key : undefined;
+    const address = skip + offset;
+    if (canonical) {
+      let hex = "";
+      for (let i = 0; i < 16; i++) hex += (i < row.length ? row[i]!.toString(16).padStart(2, "0") : "  ") + " " + (i === 7 ? " " : "");
+      const ascii = Array.from(row, byte => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : ".")).join("");
+      ctx.stdout.write(address.toString(16).padStart(8, "0") + "  " + hex + " |" + ascii + "|\n");
+    } else {
+      let line = address.toString(16).padStart(7, "0");
+      for (let i = 0; i < row.length; i += 2) line += " " + ((row[i + 1] ?? 0) * 256 + row[i]!).toString(16).padStart(4, "0");
+      ctx.stdout.write(line.padEnd(47) + "\n");
+    }
+  }
+  if (data.length || skip) ctx.stdout.write((skip + data.length).toString(16).padStart(canonical ? 8 : 7, "0") + "\n");
+  return status;
+};
+
+const NUMFMT_UNITS = ["", "K", "M", "G", "T", "P", "E", "Z", "Y"];
+
+const numfmt: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "z", values: "d", long: { to: "to", from: "from", "to-unit": "to-unit", "from-unit": "from-unit", suffix: "suffix", field: "field", format: "format", padding: "padding", round: "round", header: "header", invalid: "invalid", delimiter: "d", grouping: "", "zero-terminated": "z" } });
+  const to = last(parsed, "to");
+  const from = last(parsed, "from");
+  const suffix = last(parsed, "suffix") ?? "";
+  const round = last(parsed, "round") ?? "from-zero";
+  const formatSpec = last(parsed, "format");
+  const padding = last(parsed, "padding") === undefined ? 0 : Number(last(parsed, "padding"));
+  const fieldSpec = last(parsed, "field") ?? "1";
+  const delimiter = last(parsed, "d");
+  const fromUnit = Number(last(parsed, "from-unit") ?? 1);
+  const toUnit = Number(last(parsed, "to-unit") ?? 1);
+  const rounder = (value: number) => (round === "up" ? Math.ceil(value) : round === "down" ? Math.floor(value) : round === "towards-zero" ? Math.trunc(value) : round === "nearest" ? Math.round(value) : value < 0 ? -Math.ceil(-value) : Math.ceil(value));
+  const parse = (text: string): number => {
+    const match = text.trim().match(/^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)([KMGTPEZY]?)(i?)$/i);
+    if (!match) throw new CommandError("invalid number: '" + text + "'", 2);
+    const unit = NUMFMT_UNITS.indexOf((match[2] ?? "").toUpperCase());
+    if (unit > 0 && (from === undefined || from === "none")) throw new CommandError("rejecting suffix in input: '" + text + "' (consider using --from)", 2);
+    const base = from === "si" ? 1000 : from === "iec" || from === "iec-i" ? 1024 : from === "auto" ? (match[3] ? 1024 : 1000) : 1;
+    return Number(match[1]) * base ** Math.max(0, unit) * fromUnit;
+  };
+  const render = (raw: number): string => {
+    const value = raw / toUnit;
+    let text: string;
+    if (to === undefined || to === "none") {
+      if (formatSpec !== undefined) {
+        const precision = formatSpec.match(/\.(\d+)/);
+        const digits = precision ? Number(precision[1]) : 0;
+        const scaled = rounder(value * 10 ** digits) / 10 ** digits;
+        text = format(formatSpec.replace(/%([-0'#]*\d*)(?:\.\d+)?f/, "%$1." + digits + "f"), [scaled], false).text;
+        return text;
+      }
+      text = String(Number.isInteger(value) ? value : rounder(value));
+    } else {
+      const base = to === "si" ? 1000 : 1024;
+      let scaled = Math.abs(value);
+      let unit = 0;
+      while (scaled >= base && unit < NUMFMT_UNITS.length - 1) {
+        scaled /= base;
+        unit++;
+      }
+      const precision = formatSpec?.match(/\.(\d+)/);
+      let body: string;
+      if (unit === 0) body = String(rounder(scaled));
+      else if (precision) {
+        const digits = Number(precision[1]);
+        body = (rounder(scaled * 10 ** digits) / 10 ** digits).toFixed(digits);
+      } else if (scaled < 10) {
+        let tenths = rounder(scaled * 10) / 10;
+        if (tenths >= 10) body = "10";
+        else body = tenths.toFixed(1);
+        if (tenths >= base) {
+          tenths = 1;
+          unit++;
+          body = "1.0";
+        }
+      } else {
+        let whole = rounder(scaled);
+        if (whole >= base) {
+          whole = 1;
+          unit++;
+          body = "1.0";
+        } else body = String(whole);
+      }
+      text = (value < 0 ? "-" : "") + body + NUMFMT_UNITS[unit] + (unit && to === "iec-i" ? "i" : "");
+    }
+    text += suffix;
+    if (formatSpec !== undefined && to !== undefined) {
+      const width = formatSpec.match(/%(-?)(\d+)/);
+      if (width) text = width[1] ? text.padEnd(Number(width[2])) : text.padStart(Number(width[2]));
+    }
+    if (padding) text = padding < 0 ? text.padEnd(-padding) : text.padStart(padding);
+    return text;
+  };
+  const fields = (count: number): Set<number> => {
+    const set = new Set<number>();
+    for (const part of fieldSpec.split(",")) {
+      const match = part.match(/^(\d*)(-?)(\d*)$/);
+      if (!match) throw new CommandError("invalid field value '" + fieldSpec + "'");
+      const start = match[1] ? Number(match[1]) : 1;
+      const end = match[2] ? (match[3] ? Number(match[3]) : count) : start;
+      for (let n = start; n <= end; n++) set.add(n);
+    }
+    return set;
+  };
+  const convert = (line: string): string => {
+    if (delimiter !== undefined) {
+      const parts = line.split(delimiter);
+      const wanted = fields(parts.length);
+      return parts.map((part, index) => (wanted.has(index + 1) ? render(parse(part)) : part)).join(delimiter);
+    }
+    const lead = line.match(/^\s*/)![0];
+    const parts = line.trim().split(/\s+/);
+    const wanted = fields(parts.length);
+    return lead + parts.map((part, index) => (wanted.has(index + 1) ? render(parse(part)) : part)).join(" ");
+  };
+  let status = 0;
+  const handle = (line: string) => {
+    try {
+      ctx.stdout.write(convert(line) + "\n");
+    } catch (error) {
+      if (!(error instanceof CommandError)) throw error;
+      ctx.stderr.write("numfmt: " + error.message + "\n");
+      status = 2;
+    }
+  };
+  if (parsed.operands.length) for (const operand of parsed.operands) handle(operand);
+  else {
+    const all = lines(ctx.stdin.read());
+    const header = Number(last(parsed, "header") ?? 0);
+    all.slice(0, header).forEach(line => ctx.stdout.write(line + "\n"));
+    for (const line of all.slice(header)) handle(line);
+  }
+  return status;
+};
+
+const iconv: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "cls", values: "fto", long: { "from-code": "f", "to-code": "t", output: "o", list: "l", silent: "s" } });
+  if (parsed.flags.has("l")) {
+    ctx.stdout.write("ASCII//\nISO-8859-1//\nLATIN1//\nUS-ASCII//\nUTF-8//\nUTF-16//\nUTF-16BE//\nUTF-16LE//\n");
+    return 0;
+  }
+  const normalize = (name: string | undefined) => (name ?? "UTF-8").toUpperCase().replace(/[_-]/g, "");
+  const fromSpec = normalize(last(parsed, "f"));
+  const toSpec = normalize(last(parsed, "t"));
+  const [toName, ...modifiers] = toSpec.split("//");
+  const fromName = fromSpec.split("//")[0]!;
+  const known = (name: string) => ["UTF8", "ASCII", "USASCII", "ANSIX3.41968", "LATIN1", "ISO88591", "UTF16", "UTF16LE", "UTF16BE", "CP1252", "WINDOWS1252"].includes(name);
+  if (!known(fromName) || !known(toName!)) throw new CommandError("conversion " + (known(fromName) ? "to '" + last(parsed, "t") : "from '" + last(parsed, "f")) + "' is not supported", 1);
+  const chunks: Uint8Array[] = [];
+  let status = 0;
+  for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+    try {
+      chunks.push(await bytesOf(ctx, operand));
+    } catch {
+      ctx.stderr.write("iconv: cannot open input file '" + operand + "': No such file or directory\n");
+      status = 1;
+    }
+  }
+  const bytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  let text: string;
+  if (fromName === "LATIN1" || fromName === "ISO88591" || fromName === "CP1252" || fromName === "WINDOWS1252") text = Array.from(bytes, byte => String.fromCharCode(byte)).join("");
+  else if (fromName.startsWith("UTF16")) {
+    const little = fromName !== "UTF16BE" && !(bytes[0] === 0xfe && bytes[1] === 0xff);
+    const start = (bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff) ? 2 : 0;
+    text = "";
+    for (let i = start; i + 1 < bytes.length; i += 2) text += String.fromCharCode(little ? bytes[i]! | (bytes[i + 1]! << 8) : (bytes[i]! << 8) | bytes[i + 1]!);
+  } else text = decode(bytes);
+  const discard = parsed.flags.has("c") || modifiers.includes("IGNORE");
+  const translit = modifiers.includes("TRANSLIT");
+  const limit = toName === "UTF8" || toName!.startsWith("UTF16") ? Infinity : toName === "LATIN1" || toName === "ISO88591" || toName === "CP1252" || toName === "WINDOWS1252" ? 0xff : 0x7f;
+  let out = "";
+  let position = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if ((code >= 0xdc80 && code <= 0xdcff) || code > limit) {
+      if (translit) {
+        const plain = char.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        out += [...plain].every(c => c.codePointAt(0)! <= limit) && plain !== "" ? plain : "?";
+      } else if (!discard) {
+        writeIconv(ctx, out, toName!);
+        ctx.stderr.write("iconv: " + (code >= 0xdc80 && code <= 0xdcff ? "illegal input sequence" : "cannot convert") + " at position " + position + "\n");
+        return 1;
+      }
+    } else out += char;
+    position += encode(char).length;
+  }
+  writeIconv(ctx, out, toName!);
+  return status;
+};
+
+function writeIconv(ctx: CommandContext, text: string, target: string) {
+  if (target === "LATIN1" || target === "ISO88591" || target === "CP1252" || target === "WINDOWS1252") ctx.stdout.write(Array.from(text, char => byte(char.codePointAt(0)!)).join(""));
+  else if (target.startsWith("UTF16")) {
+    let out = target === "UTF16" ? byte(0xff) + byte(0xfe) : "";
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      out += target === "UTF16BE" ? byte(code >> 8) + byte(code & 0xff) : byte(code & 0xff) + byte(code >> 8);
+    }
+    ctx.stdout.write(out);
+  } else ctx.stdout.write(text);
+}
+
+type BcNumber = { v: bigint; s: number };
+
+type BcNode =
+  | { kind: "num"; text: string }
+  | { kind: "str"; text: string }
+  | { kind: "var"; name: string; index?: BcNode }
+  | { kind: "unary"; op: string; arg: BcNode }
+  | { kind: "binary"; op: string; left: BcNode; right: BcNode }
+  | { kind: "assign"; op: string; target: BcNode; value: BcNode }
+  | { kind: "incr"; op: string; prefix: boolean; target: BcNode }
+  | { kind: "call"; name: string; args: BcNode[] };
+
+type BcStatement =
+  | { kind: "expr"; expr: BcNode }
+  | { kind: "print"; items: BcNode[] }
+  | { kind: "block"; body: BcStatement[] }
+  | { kind: "if"; test: BcNode; then: BcStatement; otherwise?: BcStatement }
+  | { kind: "while"; test: BcNode; body: BcStatement }
+  | { kind: "for"; init?: BcNode; test?: BcNode; step?: BcNode; body: BcStatement }
+  | { kind: "return"; value?: BcNode }
+  | { kind: "break" }
+  | { kind: "continue" }
+  | { kind: "quit" }
+  | { kind: "define"; name: string; params: string[]; autos: string[]; body: BcStatement[] }
+  | { kind: "empty" };
+
+class BcError extends Error {}
+
+class BcControl {
+  kind: "break" | "continue" | "return" | "quit";
+  value: BcNumber | undefined;
+  constructor(kind: "break" | "continue" | "return" | "quit", value?: BcNumber) {
+    this.kind = kind;
+    this.value = value;
+  }
+}
+
+const TEN = 10n;
+
+function pow10(n: number): bigint {
+  return TEN ** BigInt(Math.max(0, n));
+}
+
+function rescale(x: BcNumber, s: number): BcNumber {
+  if (s === x.s) return x;
+  if (s > x.s) return { v: x.v * pow10(s - x.s), s };
+  return { v: x.v / pow10(x.s - s), s };
+}
+
+function bcSqrtInt(n: bigint): bigint {
+  if (n < 2n) return n;
+  let x = BigInt(Math.floor(Math.sqrt(Number(n))));
+  if (x === 0n) x = 1n;
+  for (;;) {
+    const y = (x + n / x) >> 1n;
+    if (y >= x && y - x <= 1n) {
+      let r = x < y ? x : y;
+      while (r * r > n) r--;
+      while ((r + 1n) * (r + 1n) <= n) r++;
+      return r;
+    }
+    x = y;
+  }
+}
+
+function bcTokens(source: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i]!;
+    if (c === "\\" && source[i + 1] === "\n") {
+      i += 2;
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\r") {
+      i++;
+      continue;
+    }
+    if (c === "#") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (source.startsWith("/*", i)) {
+      const end = source.indexOf("*/", i + 2);
+      i = end < 0 ? source.length : end + 2;
+      continue;
+    }
+    if (c === "\n" || c === ";") {
+      tokens.push(c === "\n" ? "\n" : ";");
+      i++;
+      continue;
+    }
+    if (c === "\"") {
+      const end = source.indexOf("\"", i + 1);
+      if (end < 0) throw new BcError("unterminated string");
+      tokens.push(source.slice(i, end + 1));
+      i = end + 1;
+      continue;
+    }
+    const number = source.slice(i).match(/^(?:[0-9A-F]+(?:\.[0-9A-F]*)?|\.[0-9A-F]+)/);
+    if (number) {
+      tokens.push(number[0]);
+      i += number[0].length;
+      continue;
+    }
+    const word = source.slice(i).match(/^[a-z_][a-z0-9_]*/);
+    if (word) {
+      tokens.push(word[0]);
+      i += word[0].length;
+      continue;
+    }
+    const op = source.slice(i).match(/^(?:\+\+|--|\+=|-=|\*=|\/=|%=|\^=|==|<=|>=|!=|&&|\|\||[-+*\/%^=<>!(){}\[\],])/);
+    if (!op) throw new BcError("illegal character: " + c);
+    tokens.push(op[0]);
+    i += op[0].length;
+  }
+  return tokens;
+}
+
+function bcParse(tokens: string[]): BcStatement[] {
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const next = () => tokens[pos++];
+  const expect = (token: string) => {
+    if (tokens[pos] !== token) throw new BcError("syntax error");
+    pos++;
+  };
+  const skipNewlines = () => {
+    while (tokens[pos] === "\n") pos++;
+  };
+  const isName = (token: string | undefined) => token !== undefined && /^[a-z_][a-z0-9_]*$/.test(token);
+  const primary = (): BcNode => {
+    const token = next();
+    if (token === undefined) throw new BcError("syntax error");
+    if (token === "(") {
+      const node = expression();
+      expect(")");
+      return node;
+    }
+    if (token === "-" || token === "!" || token === "+") return { kind: "unary", op: token, arg: unaryLevel() };
+    if (token === "++" || token === "--") return { kind: "incr", op: token, prefix: true, target: primary() };
+    if (/^[0-9A-F.]/.test(token)) return { kind: "num", text: token };
+    if (token.startsWith("\"")) return { kind: "str", text: token.slice(1, -1) };
+    if (isName(token)) {
+      if (peek() === "(") {
+        pos++;
+        const args: BcNode[] = [];
+        if (peek() !== ")") {
+          args.push(expression());
+          while (peek() === ",") {
+            pos++;
+            args.push(expression());
+          }
+        }
+        expect(")");
+        return { kind: "call", name: token, args };
+      }
+      let node: BcNode = { kind: "var", name: token };
+      if (peek() === "[") {
+        pos++;
+        node = { kind: "var", name: token, index: expression() };
+        expect("]");
+      }
+      if (peek() === "++" || peek() === "--") return { kind: "incr", op: next()!, prefix: false, target: node };
+      return node;
+    }
+    throw new BcError("syntax error");
+  };
+  const power = (): BcNode => {
+    const base = primary();
+    if (peek() === "^") {
+      pos++;
+      return { kind: "binary", op: "^", left: base, right: unaryLevel() };
+    }
+    return base;
+  };
+  const unaryLevel = (): BcNode => power();
+  const multiplicative = (): BcNode => {
+    let node = unaryLevel();
+    while (peek() === "*" || peek() === "/" || peek() === "%") node = { kind: "binary", op: next()!, left: node, right: unaryLevel() };
+    return node;
+  };
+  const additive = (): BcNode => {
+    let node = multiplicative();
+    while (peek() === "+" || peek() === "-") node = { kind: "binary", op: next()!, left: node, right: multiplicative() };
+    return node;
+  };
+  const relational = (): BcNode => {
+    let node = additive();
+    while (["<", ">", "<=", ">=", "==", "!="].includes(peek() ?? "")) node = { kind: "binary", op: next()!, left: node, right: additive() };
+    return node;
+  };
+  const not = (): BcNode => {
+    if (peek() === "!") {
+      pos++;
+      return { kind: "unary", op: "!", arg: not() };
+    }
+    return relational();
+  };
+  const and = (): BcNode => {
+    let node = not();
+    while (peek() === "&&") {
+      pos++;
+      node = { kind: "binary", op: "&&", left: node, right: not() };
+    }
+    return node;
+  };
+  const or = (): BcNode => {
+    let node = and();
+    while (peek() === "||") {
+      pos++;
+      node = { kind: "binary", op: "||", left: node, right: and() };
+    }
+    return node;
+  };
+  const expression = (): BcNode => {
+    const start = pos;
+    if (isName(peek())) {
+      const target = primary();
+      if (target.kind === "var" && ["=", "+=", "-=", "*=", "/=", "%=", "^="].includes(peek() ?? "")) {
+        const op = next()!;
+        return { kind: "assign", op, target, value: expression() };
+      }
+      pos = start;
+    }
+    return or();
+  };
+  const statement = (): BcStatement => {
+    const token = peek();
+    if (token === "\n" || token === ";") {
+      pos++;
+      return { kind: "empty" };
+    }
+    if (token === "{") {
+      pos++;
+      const body: BcStatement[] = [];
+      skipNewlines();
+      while (peek() !== "}" && peek() !== undefined) {
+        body.push(statement());
+        skipNewlines();
+      }
+      expect("}");
+      return { kind: "block", body };
+    }
+    if (token === "if") {
+      pos++;
+      expect("(");
+      const test = expression();
+      expect(")");
+      skipNewlines();
+      const then = statement();
+      const save = pos;
+      while (tokens[pos] === "\n" || tokens[pos] === ";") pos++;
+      if (peek() === "else") {
+        pos++;
+        skipNewlines();
+        return { kind: "if", test, then, otherwise: statement() };
+      }
+      pos = save;
+      return { kind: "if", test, then };
+    }
+    if (token === "while") {
+      pos++;
+      expect("(");
+      const test = expression();
+      expect(")");
+      skipNewlines();
+      return { kind: "while", test, body: statement() };
+    }
+    if (token === "for") {
+      pos++;
+      expect("(");
+      const init = peek() === ";" ? undefined : expression();
+      expect(";");
+      const test = peek() === ";" ? undefined : expression();
+      expect(";");
+      const step = peek() === ")" ? undefined : expression();
+      expect(")");
+      skipNewlines();
+      return { kind: "for", ...(init ? { init } : {}), ...(test ? { test } : {}), ...(step ? { step } : {}), body: statement() };
+    }
+    if (token === "break" || token === "continue" || token === "quit" || token === "halt") {
+      pos++;
+      return { kind: token === "halt" ? "quit" : token };
+    }
+    if (token === "return") {
+      pos++;
+      if (peek() === "(") {
+        pos++;
+        if (peek() === ")") {
+          pos++;
+          return { kind: "return" };
+        }
+        const value = expression();
+        expect(")");
+        return { kind: "return", value };
+      }
+      if (peek() === undefined || peek() === "\n" || peek() === ";" || peek() === "}") return { kind: "return" };
+      return { kind: "return", value: expression() };
+    }
+    if (token === "print") {
+      pos++;
+      const items = [expression()];
+      while (peek() === ",") {
+        pos++;
+        items.push(expression());
+      }
+      return { kind: "print", items };
+    }
+    if (token === "define") {
+      pos++;
+      const name = next()!;
+      expect("(");
+      const params: string[] = [];
+      while (peek() !== ")") {
+        params.push(next()!);
+        if (peek() === "[") {
+          pos += 2;
+        }
+        if (peek() === ",") pos++;
+      }
+      expect(")");
+      skipNewlines();
+      expect("{");
+      skipNewlines();
+      const autos: string[] = [];
+      if (peek() === "auto") {
+        pos++;
+        while (peek() !== "\n" && peek() !== ";" && peek() !== undefined) {
+          const word = next()!;
+          if (word !== ",") autos.push(word);
+        }
+      }
+      const body: BcStatement[] = [];
+      skipNewlines();
+      while (peek() !== "}" && peek() !== undefined) {
+        body.push(statement());
+        skipNewlines();
+      }
+      expect("}");
+      return { kind: "define", name, params, autos, body };
+    }
+    return { kind: "expr", expr: expression() };
+  };
+  const program: BcStatement[] = [];
+  while (pos < tokens.length) program.push(statement());
+  return program;
+}
+
+const bc: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "lqswi", long: { mathlib: "l", quiet: "q", standard: "s", warn: "w", interactive: "i" } });
+  let source = "";
+  let status = 0;
+  for (const operand of parsed.operands) {
+    try {
+      source += (await readInput(ctx, operand)) + "\n";
+    } catch {
+      ctx.stderr.write("bc: File " + operand + " is unavailable.\n");
+      status = 1;
+    }
+  }
+  source += ctx.stdin.read();
+  const vars = new Map<string, BcNumber>();
+  const arrays = new Map<string, Map<string, BcNumber>>();
+  const functions = new Map<string, Extract<BcStatement, { kind: "define" }>>();
+  let scale = parsed.flags.has("l") ? 20 : 0;
+  let ibase = 10;
+  let obase = 10;
+  let last: BcNumber = { v: 0n, s: 0 };
+  let steps = 0;
+  const zero: BcNumber = { v: 0n, s: 0 };
+  const int = (n: bigint | number): BcNumber => ({ v: BigInt(n), s: 0 });
+  const truthy = (x: BcNumber) => x.v !== 0n;
+  const parseNumber = (text: string): BcNumber => {
+    if (ibase === 10 && /^[0-9]*\.?[0-9]*$/.test(text)) {
+      const [whole = "", fraction = ""] = text.split(".");
+      return { v: BigInt((whole || "0") + fraction), s: fraction.length };
+    }
+    const [whole = "", fraction = ""] = text.split(".");
+    let v = 0n;
+    for (const digit of whole) v = v * BigInt(ibase) + BigInt(Math.min(parseInt(digit, 16), ibase - 1));
+    let result: BcNumber = { v, s: 0 };
+    if (fraction) {
+      let num = 0n;
+      let den = 1n;
+      for (const digit of fraction) {
+        num = num * BigInt(ibase) + BigInt(parseInt(digit, 16));
+        den *= BigInt(ibase);
+      }
+      const s = Math.max(fraction.length, scale);
+      result = { v: v * pow10(s) + (num * pow10(s)) / den, s };
+    }
+    return result;
+  };
+  const add = (a: BcNumber, b: BcNumber, sign = 1n): BcNumber => {
+    const s = Math.max(a.s, b.s);
+    return { v: rescale(a, s).v + sign * rescale(b, s).v, s };
+  };
+  const multiply = (a: BcNumber, b: BcNumber, target?: number): BcNumber => {
+    const full = { v: a.v * b.v, s: a.s + b.s };
+    return rescale(full, target ?? Math.min(a.s + b.s, Math.max(scale, a.s, b.s)));
+  };
+  const divide = (a: BcNumber, b: BcNumber, s = scale): BcNumber => {
+    if (b.v === 0n) throw new BcError("Divide by zero");
+    return { v: (a.v * pow10(s + b.s)) / (b.v * pow10(a.s)), s };
+  };
+  const modulo = (a: BcNumber, b: BcNumber): BcNumber => {
+    if (b.v === 0n) throw new BcError("Modulo by zero");
+    const q = divide(a, b);
+    const product = { v: q.v * b.v, s: q.s + b.s };
+    return rescale(add(a, product, -1n), Math.max(scale + b.s, a.s));
+  };
+  const power = (a: BcNumber, b: BcNumber): BcNumber => {
+    if (b.s && b.v % pow10(b.s) !== 0n) ctx.stderr.write("bc: warning: non-zero scale in exponent\n");
+    let e = b.v / pow10(b.s);
+    if (e > 100000n) throw new BcError("exponent too large");
+    const negative = e < 0n;
+    if (negative) e = -e;
+    let result: BcNumber = { v: 1n, s: 0 };
+    let base = a;
+    const exact = (x: BcNumber, y: BcNumber): BcNumber => ({ v: x.v * y.v, s: x.s + y.s });
+    let k = e;
+    while (k > 0n) {
+      if (k & 1n) result = exact(result, base);
+      k >>= 1n;
+      if (k > 0n) base = exact(base, base);
+      if (result.s > 2000) result = rescale(result, Math.max(scale, a.s) + 50);
+      if (base.s > 2000) base = rescale(base, Math.max(scale, a.s) + 50);
+    }
+    if (negative) return divide({ v: 1n, s: 0 }, result);
+    return rescale(result, Math.min(a.s * Number(e), Math.max(scale, a.s)));
+  };
+  const compare = (a: BcNumber, b: BcNumber): number => {
+    const d = add(a, b, -1n).v;
+    return d < 0n ? -1 : d > 0n ? 1 : 0;
+  };
+  const sqrt = (a: BcNumber): BcNumber => {
+    if (a.v < 0n) throw new BcError("Square root of a negative number");
+    const s = Math.max(scale, a.s);
+    return { v: bcSqrtInt(rescale(a, 2 * s).v), s };
+  };
+  const fixed = (x: BcNumber, w: number) => rescale(x, w).v;
+  const mathScale = () => scale + 10;
+  const fromFixed = (v: bigint, w: number): BcNumber => rescale({ v, s: w }, scale);
+  const fmul = (a: bigint, b: bigint, one: bigint) => (a * b) / one;
+  const fdiv = (a: bigint, b: bigint, one: bigint) => (a * one) / b;
+  const expFixed = (x: bigint, w: number): bigint => {
+    const one = pow10(w);
+    if (x < 0n) return fdiv(one, expFixed(-x, w), one);
+    let k = 0;
+    let y = x;
+    while (y > one) {
+      y /= 2n;
+      k++;
+    }
+    let term = one;
+    let sum = one;
+    for (let n = 1n; term !== 0n; n++) {
+      term = fmul(term, y, one) / n;
+      sum += term;
+    }
+    for (let i = 0; i < k; i++) sum = fmul(sum, sum, one);
+    return sum;
+  };
+  const lnFixed = (x: bigint, w: number): bigint => {
+    const one = pow10(w);
+    if (x <= 0n) throw new BcError("logarithm of a non-positive number");
+    let k = 0n;
+    let y = x;
+    while (y > 2n * one) {
+      y = bcSqrtInt(y * one);
+      k++;
+    }
+    while (y < one / 2n) {
+      y = bcSqrtInt(y * one);
+      k++;
+    }
+    const z = fdiv(y - one, y + one, one);
+    const z2 = fmul(z, z, one);
+    let term = z;
+    let sum = 0n;
+    for (let n = 1n; term !== 0n; n += 2n) {
+      sum += term / n;
+      term = fmul(term, z2, one);
+    }
+    return 2n * sum * (1n << k);
+  };
+  const atanFixed = (x: bigint, w: number): bigint => {
+    const one = pow10(w);
+    if (x < 0n) return -atanFixed(-x, w);
+    if (x > one) return piFixed(w) / 2n - atanFixed(fdiv(one, x, one), w);
+    let y = x;
+    let doubled = 0;
+    while (y > one / 5n) {
+      y = fdiv(y, one + bcSqrtInt(one * one + y * y), one);
+      doubled++;
+    }
+    const y2 = fmul(y, y, one);
+    let term = y;
+    let sum = 0n;
+    for (let n = 1n, sign = 1n; term !== 0n; n += 2n, sign = -sign) {
+      sum += (sign * term) / n;
+      term = fmul(term, y2, one);
+    }
+    return sum << BigInt(doubled);
+  };
+  const piFixed = (w: number): bigint => {
+    const one = pow10(w + 5);
+    const series = (inverse: bigint) => {
+      let term = one / inverse;
+      let sum = 0n;
+      const square = inverse * inverse;
+      for (let n = 1n, sign = 1n; term !== 0n; n += 2n, sign = -sign) {
+        sum += (sign * term) / n;
+        term /= square;
+      }
+      return sum;
+    };
+    return (16n * series(5n) - 4n * series(239n)) / pow10(5);
+  };
+  const sinFixed = (x: bigint, w: number): bigint => {
+    const one = pow10(w);
+    const pi = piFixed(w);
+    let y = x % (2n * pi);
+    if (y > pi) y -= 2n * pi;
+    if (y < -pi) y += 2n * pi;
+    const y2 = fmul(y, y, one);
+    let term = y;
+    let sum = 0n;
+    for (let n = 1n; term !== 0n; n += 2n) {
+      sum += term;
+      term = -fmul(term, y2, one) / ((n + 1n) * (n + 2n));
+    }
+    return sum;
+  };
+  const builtin = (name: string, args: BcNumber[]): BcNumber | undefined => {
+    const arg = args[0] ?? zero;
+    const w = mathScale();
+    switch (name) {
+      case "sqrt": return sqrt(arg);
+      case "length": {
+        const digits = (arg.v < 0n ? -arg.v : arg.v).toString().replace(/^0+/, "");
+        return int(arg.v === 0n ? (arg.s ? arg.s : 1) : Math.max(digits.length, arg.s));
+      }
+      case "scale": return int(arg.s);
+    }
+    if (!parsed.flags.has("l")) return undefined;
+    switch (name) {
+      case "e": return fromFixed(expFixed(fixed(arg, w), w), w);
+      case "l": return fromFixed(lnFixed(fixed(arg, w), w), w);
+      case "a": return fromFixed(atanFixed(fixed(arg, w), w), w);
+      case "s": return fromFixed(sinFixed(fixed(arg, w), w), w);
+      case "c": return fromFixed(sinFixed(fixed(arg, w) + piFixed(w) / 2n, w), w);
+    }
+    return undefined;
+  };
+  const frames: Map<string, BcNumber>[] = [];
+  const lookup = (name: string): BcNumber => {
+    if (name === "scale") return int(scale);
+    if (name === "ibase") return int(ibase);
+    if (name === "obase") return int(obase);
+    if (name === "last") return last;
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const value = frames[i]!.get(name);
+      if (value !== undefined) return value;
+    }
+    return vars.get(name) ?? zero;
+  };
+  const store = (node: BcNode, value: BcNumber, index?: BcNumber) => {
+    if (node.kind !== "var") throw new BcError("assignment to a non-variable");
+    if (index !== undefined) {
+      const array = arrays.get(node.name) ?? new Map<string, BcNumber>();
+      arrays.set(node.name, array);
+      array.set(String(index.v / pow10(index.s)), value);
+      return;
+    }
+    const whole = Number(value.v / pow10(value.s));
+    if (node.name === "scale") scale = Math.max(0, whole);
+    else if (node.name === "ibase") ibase = Math.min(16, Math.max(2, whole));
+    else if (node.name === "obase") obase = Math.max(2, whole);
+    else if (node.name === "last") last = value;
+    else {
+      for (let i = frames.length - 1; i >= 0; i--) {
+        if (frames[i]!.has(node.name)) {
+          frames[i]!.set(node.name, value);
+          return;
+        }
+      }
+      vars.set(node.name, value);
+    }
+  };
+  const read = (node: BcNode, index?: BcNumber): BcNumber => {
+    if (node.kind !== "var") throw new BcError("not a variable");
+    if (index !== undefined) return arrays.get(node.name)?.get(String(index.v / pow10(index.s))) ?? zero;
+    return lookup(node.name);
+  };
+  const call = (name: string, args: BcNumber[]): BcNumber => {
+    const fn = functions.get(name);
+    if (!fn) {
+      const value = builtin(name, args);
+      if (value === undefined) throw new BcError("Function " + name + " not defined.");
+      return value;
+    }
+    const frame = new Map<string, BcNumber>();
+    fn.params.forEach((param, index) => frame.set(param, args[index] ?? zero));
+    for (const auto of fn.autos) frame.set(auto, zero);
+    frames.push(frame);
+    try {
+      for (const statement of fn.body) run(statement, true);
+      return zero;
+    } catch (error) {
+      if (error instanceof BcControl && error.kind === "return") return error.value ?? zero;
+      throw error;
+    } finally {
+      frames.pop();
+    }
+  };
+  const evaluate = (node: BcNode): BcNumber => {
+    if (++steps > 10_000_000) throw new BcError("too many steps");
+    switch (node.kind) {
+      case "num": return parseNumber(node.text);
+      case "str": return zero;
+      case "var": return read(node, node.index ? evaluate(node.index) : undefined);
+      case "unary": {
+        const value = evaluate(node.arg);
+        if (node.op === "-") return { v: -value.v, s: value.s };
+        if (node.op === "!") return int(truthy(value) ? 0 : 1);
+        return value;
+      }
+      case "binary": {
+        if (node.op === "&&") return int(truthy(evaluate(node.left)) && truthy(evaluate(node.right)) ? 1 : 0);
+        if (node.op === "||") return int(truthy(evaluate(node.left)) || truthy(evaluate(node.right)) ? 1 : 0);
+        const a = evaluate(node.left);
+        const b = evaluate(node.right);
+        switch (node.op) {
+          case "+": return add(a, b);
+          case "-": return add(a, b, -1n);
+          case "*": return multiply(a, b);
+          case "/": return divide(a, b);
+          case "%": return modulo(a, b);
+          case "^": return power(a, b);
+          case "<": return int(compare(a, b) < 0 ? 1 : 0);
+          case ">": return int(compare(a, b) > 0 ? 1 : 0);
+          case "<=": return int(compare(a, b) <= 0 ? 1 : 0);
+          case ">=": return int(compare(a, b) >= 0 ? 1 : 0);
+          case "==": return int(compare(a, b) === 0 ? 1 : 0);
+          case "!=": return int(compare(a, b) !== 0 ? 1 : 0);
+        }
+        throw new BcError("unknown operator " + node.op);
+      }
+      case "assign": {
+        const index = node.target.kind === "var" && node.target.index ? evaluate(node.target.index) : undefined;
+        let value = evaluate(node.value);
+        if (node.op !== "=") {
+          const current = read(node.target, index);
+          const op = node.op[0]!;
+          value = op === "+" ? add(current, value) : op === "-" ? add(current, value, -1n) : op === "*" ? multiply(current, value) : op === "/" ? divide(current, value) : op === "%" ? modulo(current, value) : power(current, value);
+        }
+        store(node.target, value, index);
+        return value;
+      }
+      case "incr": {
+        const index = node.target.kind === "var" && node.target.index ? evaluate(node.target.index) : undefined;
+        const current = read(node.target, index);
+        const updated = add(current, { v: 1n, s: 0 }, node.op === "++" ? 1n : -1n);
+        store(node.target, updated, index);
+        return node.prefix ? updated : current;
+      }
+      case "call": return call(node.name, node.args.map(evaluate));
+    }
+  };
+  const render = (x: BcNumber): string => {
+    if (obase !== 10) {
+      const negative = x.v < 0n;
+      let whole = (negative ? -x.v : x.v) / pow10(x.s);
+      if (whole === 0n) return (negative ? "-" : "") + "0";
+      const digits: string[] = [];
+      const base = BigInt(obase);
+      while (whole > 0n) {
+        const digit = Number(whole % base);
+        digits.unshift(obase <= 16 ? "0123456789ABCDEF"[digit]! : " " + String(digit).padStart(String(obase - 1).length, "0"));
+        whole /= base;
+      }
+      return (negative ? "-" : "") + digits.join("");
+    }
+    if (x.v === 0n) return "0";
+    const negative = x.v < 0n;
+    const text = (negative ? -x.v : x.v).toString().padStart(x.s + 1, "0");
+    const whole = text.slice(0, text.length - x.s).replace(/^0+(?=.)/, "");
+    const body = x.s ? (whole === "0" ? "" : whole) + "." + text.slice(text.length - x.s) : whole;
+    return (negative ? "-" : "") + body;
+  };
+  const wrap = (text: string): string => {
+    const out: string[] = [];
+    let rest = text;
+    while (rest.length > 69) {
+      out.push(rest.slice(0, 68) + "\\");
+      rest = rest.slice(68);
+    }
+    out.push(rest);
+    return out.join("\n");
+  };
+  const escapesBc = (text: string) => text.replace(/\\([abfnrtq\\e])/g, (_, c: string) => ({ a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", q: "\"", "\\": "\\", e: "\\" })[c] ?? c);
+  const run = (statement: BcStatement, inFunction = false): void => {
+    switch (statement.kind) {
+      case "empty": return;
+      case "expr": {
+        const expr = statement.expr;
+        if (expr.kind === "str") {
+          ctx.stdout.write(expr.text);
+          return;
+        }
+        const value = evaluate(expr);
+        if (expr.kind !== "assign") {
+          last = value;
+          ctx.stdout.write(wrap(render(value)) + "\n");
+        }
+        return;
+      }
+      case "print":
+        for (const item of statement.items) ctx.stdout.write(item.kind === "str" ? escapesBc(item.text) : wrap(render(evaluate(item))));
+        return;
+      case "block":
+        for (const inner of statement.body) run(inner, inFunction);
+        return;
+      case "if":
+        if (truthy(evaluate(statement.test))) run(statement.then, inFunction);
+        else if (statement.otherwise) run(statement.otherwise, inFunction);
+        return;
+      case "while":
+      case "for":
+        if (statement.kind === "for" && statement.init) evaluate(statement.init);
+        for (;;) {
+          if (++steps > 10_000_000) throw new BcError("too many steps");
+          if (statement.test && !truthy(evaluate(statement.test))) break;
+          try {
+            run(statement.body, inFunction);
+          } catch (error) {
+            if (!(error instanceof BcControl)) throw error;
+            if (error.kind === "break") break;
+            if (error.kind !== "continue") throw error;
+          }
+          if (statement.kind === "for" && statement.step) evaluate(statement.step);
+        }
+        return;
+      case "return":
+        if (!inFunction) throw new BcError("return outside a function");
+        throw new BcControl("return", statement.value ? evaluate(statement.value) : zero);
+      case "break":
+        throw new BcControl("break");
+      case "continue":
+        throw new BcControl("continue");
+      case "quit":
+        throw new BcControl("quit");
+      case "define":
+        functions.set(statement.name, statement);
+        return;
+    }
+  };
+  let program: BcStatement[];
+  try {
+    program = bcParse(bcTokens(source));
+  } catch (error) {
+    if (!(error instanceof BcError)) throw error;
+    ctx.stderr.write("(standard_in) 1: " + (error.message === "syntax error" ? "syntax error" : error.message) + "\n");
+    return 1;
+  }
+  for (const statement of program) {
+    try {
+      run(statement);
+    } catch (error) {
+      if (error instanceof BcControl) {
+        if (error.kind === "quit") break;
+        continue;
+      }
+      if (!(error instanceof BcError)) throw error;
+      ctx.stderr.write("Runtime error (func=(main), adr=0): " + error.message + "\n");
+      break;
+    }
+  }
+  return status;
+};
+
+const unexpand: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "a", values: "t", long: { all: "a", tabs: "t", "first-only": "F" } });
+  const tab = Number(last(parsed, "t") ?? 8);
+  const all = parsed.flags.has("a") || (parsed.values.has("t") && !parsed.flags.has("F"));
+  return eachInput(ctx, parsed.operands, text => {
+    ctx.stdout.write(text.split("\n").map(line => {
+      let out = "";
+      let column = 0;
+      let pending = "";
+      let pendingStart = 0;
+      let leading = true;
+      for (const char of line) {
+        if ((char === " " || char === "\t") && (leading || all)) {
+          if (!pending) pendingStart = column;
+          pending += char;
+          column = char === "\t" ? (Math.floor(column / tab) + 1) * tab : column + 1;
+          if (column % tab === 0) {
+            out += pending.length > 1 || pending === "\t" ? "\t" : pending;
+            pending = "";
+            pendingStart = column;
+          }
+          continue;
+        }
+        out += pending + char;
+        pending = "";
+        leading = false;
+        column++;
+      }
+      void pendingStart;
+      return out + pending;
+    }).join("\n"));
+  });
+};
+
+const id: CommandHandler = ctx => {
+  const parsed = options(ctx.args, { flags: "ugGnr", long: { user: "u", group: "g", groups: "G", name: "n", real: "r" } });
+  const user = ctx.env.USER ?? "user";
+  const f = parsed.flags;
+  if (f.has("u")) ctx.stdout.write((f.has("n") ? user : "1000") + "\n");
+  else if (f.has("g") || f.has("G")) ctx.stdout.write((f.has("n") ? user : "1000") + "\n");
+  else ctx.stdout.write("uid=1000(" + user + ") gid=1000(" + user + ") groups=1000(" + user + ")\n");
+  return 0;
+};
+
+const kill: CommandHandler = ctx => {
+  if (ctx.args[0] === "-l" || ctx.args[0] === "-L") {
+    ctx.stdout.write("HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM\n");
+    return 0;
+  }
+  if (!ctx.args.some(arg => !arg.startsWith("-"))) throw new CommandError("usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", 2);
+  return 0;
+};
+
 export const extraCommands: Record<string, CommandHandler> = {
+  bc,
   cmp,
   env,
   expand,
   file,
+  fmt,
   gunzip: compressor("gunzip"),
   gzip: compressor("gzip"),
+  hexdump,
+  iconv,
+  id,
   join,
+  kill,
   ln,
   md5sum,
+  numfmt,
   od,
   rg,
+  shuf,
   split,
   strings,
   tar,
   time,
   timeout,
   tree,
+  truncate,
+  unexpand,
   which,
   xxd,
   yes,

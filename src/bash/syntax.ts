@@ -5,18 +5,19 @@ export type Part =
   | { type: "param"; name: string; index?: Word; op: string; arg?: Word; arg2?: Word; quoted: boolean }
   | { type: "command"; body: Script; quoted: boolean }
   | { type: "arith"; expr: Word; quoted: boolean }
-  | { type: "tilde"; user: string };
+  | { type: "tilde"; user: string }
+  | { type: "process"; body: Script; output: boolean };
 
 export type Word = Part[];
 
 export type Redirect = { fd: number | null; op: string; target: Word; body?: Word };
 
-export type Assign = { name: string; index?: Word; value?: Word; items?: Word[]; append: boolean };
+export type Assign = { name: string; index?: Word; value?: Word; items?: Word[]; keys?: (Word | undefined)[]; append: boolean };
 
 export type TestToken = { op: string } | { word: Word };
 
 export type Command =
-  | { type: "simple"; assigns: Assign[]; words: (Word | Assign)[]; redirects: Redirect[] }
+  | { type: "simple"; assigns: Assign[]; words: (Word | Assign)[]; redirects: Redirect[]; line?: number }
   | { type: "if"; clauses: { cond: Script; body: Script }[]; otherwise?: Script; redirects: Redirect[] }
   | { type: "for"; name: string; items?: Word[]; body: Script; redirects: Redirect[] }
   | { type: "cfor"; init: Word; cond: Word; step: Word; body: Script; redirects: Redirect[] }
@@ -29,7 +30,7 @@ export type Command =
 
 export type Pipeline = { negate: boolean; commands: Command[] };
 
-export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[] };
+export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[]; background?: boolean };
 
 export type Script = AndOr[];
 
@@ -58,9 +59,21 @@ class Parser {
   src: string;
   pos = 0;
   pending: Pending[] = [];
+  #linePos = 0;
+  #line = 1;
 
   constructor(src: string) {
     this.src = src;
+  }
+
+  line(): number {
+    if (this.pos < this.#linePos) {
+      this.#linePos = 0;
+      this.#line = 1;
+    }
+    for (let i = this.#linePos; i < this.pos; i++) if (this.src[i] === "\n") this.#line++;
+    this.#linePos = this.pos;
+    return this.#line;
   }
 
   done() {
@@ -142,6 +155,7 @@ class Parser {
       this.blanks();
       if (this.starts(";;") || this.starts(";&")) break;
       const c = this.src[this.pos];
+      if (c === "&" && !this.starts("&&")) script[script.length - 1].background = true;
       if (c === ";" || (c === "&" && !this.starts("&&"))) this.pos++;
       else if (c === "\n") this.newline();
       else break;
@@ -176,7 +190,10 @@ class Parser {
       this.blanks();
       if (!this.starts("|") || this.starts("||")) break;
       this.pos++;
-      if (this.starts("&")) this.pos++;
+      if (this.starts("&")) {
+        this.pos++;
+        commands[commands.length - 1].redirects.push({ fd: 2, op: ">&", target: [{ type: "text", value: "1", quoted: false }] });
+      }
       this.separators();
       commands.push(this.command());
     }
@@ -389,11 +406,15 @@ class Parser {
   }
 
   simple(): Command {
-    const command: Command & { type: "simple" } = { type: "simple", assigns: [], words: [], redirects: [] };
+    const command: Command & { type: "simple" } = { type: "simple", assigns: [], words: [], redirects: [], line: this.line() };
     for (;;) {
       this.blanks();
       if (this.done()) break;
       const c = this.src[this.pos];
+      if ((c === "<" || c === ">") && this.src[this.pos + 1] === "(") {
+        command.words.push(this.word());
+        continue;
+      }
       if (this.redirect(command.redirects)) continue;
       if (c === "\n" || c === ";" || c === "|" || c === "&" || c === ")" || c === "(") break;
       const declaring = command.words.length > 0 && isDeclaration(command.words[0]);
@@ -413,6 +434,16 @@ class Parser {
                 break;
               }
               if (this.done()) this.fail();
+              const key = this.src.slice(this.pos, this.pos + 4096).match(/^\[([^\]\n]*)\]=/);
+              if (key) {
+                entry.keys ??= [];
+                entry.keys[entry.items.length] = new Parser(key[1]).text();
+                this.pos += key[0].length;
+                if (this.done() || " \t\n)".includes(this.src[this.pos])) {
+                  entry.items.push([{ type: "text", value: "", quoted: true }]);
+                  continue;
+                }
+              }
               entry.items.push(this.word());
             }
           } else entry.value = this.word();
@@ -441,7 +472,8 @@ class Parser {
       const expand = !/['"\\]/.test(raw);
       this.pending.push({ redirect, delimiter: raw.replace(/['"\\]/g, ""), strip: match[2] === "<<-", expand });
     } else {
-      if (this.done() || META.includes(this.src[this.pos])) this.fail();
+      const process = this.starts("<(") || this.starts(">(");
+      if (!process && (this.done() || META.includes(this.src[this.pos]))) this.fail();
       redirect.target = this.word();
     }
     redirects.push(redirect);
@@ -451,6 +483,18 @@ class Parser {
   word(regex = false): Word {
     const meta = regex ? " \t\n" : META;
     const parts: Part[] = [];
+    if ((this.src[this.pos] === "<" || this.src[this.pos] === ">") && this.src[this.pos + 1] === "(") {
+      const output = this.src[this.pos] === ">";
+      this.pos += 2;
+      const outer = this.pending;
+      this.pending = [];
+      const body = this.list(new Set());
+      this.separators();
+      this.pending = outer;
+      if (!this.starts(")")) this.fail();
+      this.pos++;
+      parts.push({ type: "process", body, output });
+    }
     if (this.src[this.pos] === "~") {
       const user = this.src.slice(this.pos + 1).match(/^[A-Za-z0-9_-]*(?=[\/\s;&|()<>]|$)/);
       if (user) {
@@ -474,6 +518,7 @@ class Parser {
         this.pos = end + 1;
       } else if (c === '"') {
         this.pos++;
+        push(parts, "", true);
         this.double(parts, '"');
         if (this.src[this.pos] !== '"') throw new SyntaxError("unexpected EOF while looking for matching `\"'");
         this.pos++;
@@ -565,6 +610,10 @@ class Parser {
       this.pos++;
       return this.braced(quoted);
     }
+    if (this.starts("[")) {
+      this.pos++;
+      return { type: "arith", expr: new Parser(this.until("]")).text(), quoted };
+    }
     const name = this.src.slice(this.pos).match(NAME)?.[0];
     if (name) {
       this.pos += name.length;
@@ -599,7 +648,17 @@ class Parser {
       this.pos++;
       return part;
     }
+    if (op === "indirect" && (this.starts("*}") || this.starts("@}"))) {
+      this.pos += 2;
+      part.op = "names";
+      return part;
+    }
     if (op) this.fail();
+    if (this.starts("@") && /^@[QEPAaULuK]}/.test(this.src.slice(this.pos, this.pos + 3))) {
+      part.op = "@" + this.src[this.pos + 1];
+      this.pos += 3;
+      return part;
+    }
     const operator = ["//", "/#", "/%", "/", ":-", ":=", ":+", ":?", "-", "=", "+", "?", "##", "#", "%%", "%", "^^", "^", ",,", ","].find(op => this.starts(op));
     if (operator) {
       this.pos += operator.length;
@@ -641,6 +700,18 @@ class Parser {
         this.pos++;
         this.double(parts, '"');
         this.pos++;
+      } else if (c === "$" && this.src[this.pos + 1] === "'") {
+        this.pos += 2;
+        let value = "";
+        while (!this.done() && this.src[this.pos] !== "'") {
+          if (this.src[this.pos] === "\\") {
+            const [text, length] = ansiEscape(this.src, this.pos + 1);
+            value += text;
+            this.pos += 1 + length;
+          } else value += this.src[this.pos++];
+        }
+        this.pos++;
+        push(parts, value, true);
       } else if (c === "$" || c === "`") parts.push(this.dollar(true));
       else {
         push(parts, c, false);

@@ -97,6 +97,9 @@ export function posixRegExp(pattern: string, extended: boolean, flags = ""): Reg
       else if (/[wWsSbBdD1-9]/.test(n)) out += "\\" + n;
       else if (n === "n") out += "\\n";
       else if (n === "t") out += "\\t";
+      else if (n === "r") out += "\\r";
+      else if (n === "f") out += "\\f";
+      else if (n === "v") out += "\\v";
       else out += escapeRegExp(n);
     } else if (c === "[") {
       const result = bracket(pattern, i, false);
@@ -200,9 +203,16 @@ export function formatNumber(n: number, precision = 6): string {
   return (n < 0 ? "-" : "") + general(n, precision, false);
 }
 
-export function format(spec: string, args: FormatValue[], shell: boolean): { text: string; used: number; stop: boolean } {
+function shellQuote(text: string): string {
+  if (text === "") return "''";
+  if (/[\x00-\x1f\x7f]/.test(text)) return "$'" + text.replace(/[\\']/g, "\\$&").replace(/[\x00-\x1f\x7f]/g, c => ({ "\n": "\\n", "\t": "\\t", "\r": "\\r", "\x1b": "\\E", "\x07": "\\a", "\b": "\\b", "\f": "\\f", "\v": "\\v" })[c] ?? "\\" + c.charCodeAt(0).toString(8).padStart(3, "0")) + "'";
+  return text.replace(/[^\w@%+=:,.\/~-]|^~/g, "\\$&");
+}
+
+export function format(spec: string, args: FormatValue[], shell: boolean, time?: (spec: string, seconds: number) => string): { text: string; used: number; stop: boolean; errors?: string[] } {
   let out = "";
   let used = 0;
+  const errors: string[] = [];
   const next = () => (used < args.length ? args[used++] : undefined);
   for (let i = 0; i < spec.length; i++) {
     const c = spec[i];
@@ -217,7 +227,16 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
       out += c;
       continue;
     }
-    const match = spec.slice(i).match(/^%([-+ 0#]*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/);
+    const clock = time ? spec.slice(i).match(/^%(-?)(\d*)\(([^)]*)\)T/) : null;
+    if (clock && time) {
+      i += clock[0].length - 1;
+      const arg = next();
+      const value = arg === undefined || arg === "" ? -1 : toNumber(arg);
+      const text = time(clock[3]!, value < 0 ? Math.floor(Date.now() / 1000) : value);
+      out += pad(text, Number(clock[2] || 0), clock[1] === "-", false);
+      continue;
+    }
+    const match = spec.slice(i).match(/^%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/);
     if (!match) {
       out += c;
       continue;
@@ -240,7 +259,7 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
     const sign = (n: number, body: string) => (n < 0 || Object.is(n, -0) ? "-" : flags.includes("+") ? "+" : flags.includes(" ") ? " " : "") + body;
     if (conv === "s" || conv === "S" || conv === "q") {
       let text = arg === undefined ? "" : typeof arg === "number" ? formatNumber(arg) : arg;
-      if (conv === "q") text = /^[\w@%+=:,.\/-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";
+      if (conv === "q") text = shell ? shellQuote(text) : /^[\w@%+=:,.\/-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";
       if (precision !== undefined) text = text.slice(0, precision);
       out += pad(text, width, left, false);
     } else if (conv === "b") {
@@ -251,6 +270,7 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
       out += pad(arg === undefined ? "" : typeof arg === "number" ? String.fromCharCode(arg) : arg.slice(0, 1), width, left, false);
     } else {
       const n = arg === undefined ? 0 : toNumber(arg);
+      if (shell && typeof arg === "string" && !/^\s*['"]/.test(arg) && !(/[diouxXc]/.test(conv) ? /^\s*[+-]?(0[xX][0-9a-fA-F]+|\d+)\s*$/ : /^\s*[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?(p[+-]?\d+)?|(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?|inf(inity)?|nan)\s*$/i).test(arg)) errors.push(arg + ": invalid number");
       let text: string;
       if (conv === "d" || conv === "i" || conv === "u") {
         const int = Math.trunc(Number.isFinite(n) ? n : 0);
@@ -276,5 +296,5 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
       out += pad(text, width, left, flags.includes("0") && !left && (precision === undefined || !/[diouxX]/.test(conv)));
     }
   }
-  return { text: out, used, stop: false };
+  return errors.length ? { text: out, used, stop: false, errors } : { text: out, used, stop: false };
 }

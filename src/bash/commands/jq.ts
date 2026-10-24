@@ -1150,6 +1150,8 @@ class Interpreter {
       case "var":
         if (node.name === "ENV") yield this.options.env as Json;
         else if (node.name === "__prog_args") yield [];
+        else if (node.name === "ARGS") yield env.variable("__prog_args");
+        else if (node.name === "__loc__") yield { file: "<top-level>", line: 1 };
         else yield env.variable(node.name);
         return;
       case "as":
@@ -2075,9 +2077,19 @@ class Interpreter {
         if (ok) yield input;
         return;
       }
-      case "tostream/0":
-        for (const [path, value] of allPaths(input, [])) if (value === null || typeof value !== "object" || !Object.keys(value).length) yield [path as Json, value];
+      case "tostream/0": {
+        const stream = function* (value: Json, path: Json[]): Generator<Json> {
+          const entries: [Json, Json][] = Array.isArray(value) ? value.map((child, index) => [index, child]) : value !== null && typeof value === "object" ? Object.entries(value) : [];
+          if (!entries.length) {
+            yield [path, value];
+            return;
+          }
+          for (const [key, child] of entries) yield* stream(child, [...path, key]);
+          yield [[...path, entries[entries.length - 1][0]]];
+        };
+        yield* stream(input, []);
         return;
+      }
       case "walk/1": {
         const visit = (value: Json): Json => {
           let next = value;
