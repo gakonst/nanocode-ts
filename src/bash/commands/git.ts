@@ -4,6 +4,10 @@ import { TarReader } from "./archive.ts";
 
 const MAX_BYTES = 200 * 1024 * 1024;
 
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+
+const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+
 const MAX_FILES = 50_000;
 
 const MARKER = ".git/nanocode.json";
@@ -21,9 +25,10 @@ type Snapshot = {
   message: string | null;
   cloned: string;
   files: Record<string, [number, number]>;
+  omitted?: string[];
 };
 
-export type GitHubOptions = { archive?(owner: string, repo: string, ref: string): string; details?: boolean; maxBytes?: number; maxFiles?: number };
+export type GitHubOptions = { archive?(owner: string, repo: string, ref: string): string; details?: boolean; maxBytes?: number; maxFiles?: number; maxFileBytes?: number; maxDownloadBytes?: number };
 
 type Clone = { repository: string; ref: string | undefined; directory: string | undefined; quiet: boolean };
 
@@ -156,7 +161,11 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
   const files: Record<string, [number, number]> = {};
   const maxBytes = github.maxBytes ?? MAX_BYTES;
   const maxFiles = github.maxFiles ?? MAX_FILES;
-  const reader = new TarReader(maxBytes);
+  const maxFileBytes = github.maxFileBytes ?? MAX_FILE_BYTES;
+  const maxDownload = github.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES;
+  const reader = new TarReader(maxFileBytes);
+  const omitted: { path: string; bytes: number; reason: string }[] = [];
+  let written = 0;
   const stream = response.body!.pipeThrough(new DecompressionStream("gzip")).getReader();
   let root: string | undefined;
   let bytes = 0;
@@ -170,7 +179,7 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
       const next = await stream.read();
       if (next.done) break;
       bytes += next.value.length;
-      if (bytes > maxBytes) throw new CommandError("fatal: repository archive is larger than " + Math.round(maxBytes / 1024 / 1024) + " MiB uncompressed; clone a smaller repository or fetch single files with curl", 128);
+      if (bytes > maxDownload) throw new CommandError("fatal: repository archive is larger than " + Math.round(maxDownload / 1024 / 1024) + " MiB uncompressed; clone a smaller repository or fetch single files with curl", 128);
       for (const entry of reader.push(next.value)) {
         const parts = entry.name.split("/");
         if (entry.name.startsWith("/") || entry.name.includes("\\") || entry.name.includes("\0") || parts.some(part => part === ".." || part === "." || part === "" || part === ".git")) throw new CommandError("fatal: repository archive contains an unsafe path: " + entry.name, 128);
@@ -187,9 +196,23 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
           skipped++;
           continue;
         }
-        if (++count > maxFiles) throw new CommandError("fatal: repository archive has more than " + maxFiles + " files", 128);
+        const reason = entry.omitted !== undefined ? "larger than " + size(maxFileBytes) : count >= maxFiles ? "past the " + maxFiles + "-file limit" : written + entry.data.length > maxBytes ? "past the " + size(maxBytes) + " limit" : undefined;
+        if (reason) {
+          omitted.push({ path: relative, bytes: entry.omitted ?? entry.data.length, reason });
+          continue;
+        }
+        count++;
+        written += entry.data.length;
         await ensure(parentOf(path));
-        await ctx.fs.write(path, entry.data);
+        try {
+          await ctx.fs.write(path, entry.data);
+        } catch (error) {
+          if (!(error instanceof FsError) || error.code !== "EFBIG") throw error;
+          omitted.push({ path: relative, bytes: entry.data.length, reason: "larger than this filesystem stores" });
+          count--;
+          written -= entry.data.length;
+          continue;
+        }
         const stat = await ctx.fs.stat(path);
         files[relative] = [entry.data.length, stat?.mtime ?? 0];
       }
@@ -207,12 +230,18 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
   const pax = reader.global["comment"];
   const commit = pax && /^[0-9a-f]{40}$/.test(pax) ? pax : null;
   const info = github.details === false ? { branch: ref === "HEAD" ? null : ref, author: null, date: null, message: null, commit } : await details(ctx, options.repository, ref, commit);
-  const snapshot: Snapshot = { repository: options.repository, url: "https://github.com/" + options.repository + ".git", ref, branch: info.branch, commit: info.commit, author: info.author, date: info.date, message: info.message, cloned: new Date().toISOString(), files };
+  const snapshot: Snapshot = { repository: options.repository, url: "https://github.com/" + options.repository + ".git", ref, branch: info.branch, commit: info.commit, author: info.author, date: info.date, message: info.message, cloned: new Date().toISOString(), files, ...(omitted.length ? { omitted: omitted.map(item => item.path) } : {}) };
   await ensure(target + "/.git");
   await ctx.fs.write(target + "/.git/HEAD", encode(snapshot.branch ? "ref: refs/heads/" + snapshot.branch + "\n" : (snapshot.commit ?? ref) + "\n"));
   await ctx.fs.write(target + "/.git/config", encode("[remote \"origin\"]\n\turl = " + snapshot.url + "\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n" + (snapshot.branch ? "[branch \"" + snapshot.branch + "\"]\n\tremote = origin\n\tmerge = refs/heads/" + snapshot.branch + "\n" : "")));
   await ctx.fs.write(target + "/" + MARKER, encode(JSON.stringify(snapshot)));
-  if (!options.quiet) ctx.stderr.write("Downloaded " + count + " files (" + size(bytes) + ") from " + options.repository + " at " + (snapshot.commit ? snapshot.commit.slice(0, 7) : ref) + ": a source snapshot without history" + (skipped ? "; skipped " + skipped + " symbolic link" + (skipped === 1 ? "" : "s") : "") + ".\n");
+  if (omitted.length) {
+    const raw = "https://raw.githubusercontent.com/" + options.repository + "/" + (snapshot.commit ?? ref) + "/";
+    ctx.stderr.write("warning: left out " + omitted.length + " file" + (omitted.length === 1 ? "" : "s") + " (" + size(omitted.reduce((total, item) => total + item.bytes, 0)) + "); fetch one with curl -sLO " + raw + "PATH\n");
+    for (const item of omitted.slice(0, 10)) ctx.stderr.write("  " + item.path + " (" + size(item.bytes) + ", " + item.reason + ")\n");
+    if (omitted.length > 10) ctx.stderr.write("  ... and " + (omitted.length - 10) + " more, listed in .git/nanocode.json\n");
+  }
+  if (!options.quiet) ctx.stderr.write("Downloaded " + count + " files (" + size(written) + ") from " + options.repository + " at " + (snapshot.commit ? snapshot.commit.slice(0, 7) : ref) + ": a source snapshot without history" + (skipped ? "; skipped " + skipped + " symbolic link" + (skipped === 1 ? "" : "s") : "") + ".\n");
   return 0;
 }
 
@@ -253,7 +282,8 @@ async function changes(ctx: CommandContext, root: string, snapshot: Snapshot) {
     if (!now) deleted.push(path);
     else if (now.size !== length || now.mtime !== mtime) modified.push(path);
   }
-  for (const path of current.keys()) if (!Object.hasOwn(snapshot.files, path)) untracked.push(path);
+  const omitted = new Set(snapshot.omitted);
+  for (const path of current.keys()) if (!Object.hasOwn(snapshot.files, path) && !omitted.has(path)) untracked.push(path);
   return { modified: modified.sort(), deleted: deleted.sort(), untracked: untracked.sort() };
 }
 
