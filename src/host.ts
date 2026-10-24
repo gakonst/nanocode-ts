@@ -1,4 +1,5 @@
 import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { deferMcp, type McpPolicy } from "./mcp.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
 type Exports = {
@@ -100,10 +101,10 @@ export class AgentRuntime {
     return runtime;
   }
 
-  async serveHand(options: { workspace: WorkspaceHost; cwd: string; fetch?: RuntimeOptions["fetch"]; dispatch?: RuntimeOptions["dispatch"]; tools?: { definitions: HostTool[]; call: NonNullable<RuntimeOptions["tools"]>["call"] }; mcp_servers?: McpServer[]; name?: string; max_frame_bytes?: number; send(text: string): void }): Promise<{ catalog: string; receive(text: string): Promise<void>; closed(): Promise<void> }> {
+  async serveHand(options: { workspace: WorkspaceHost; cwd: string; fetch?: RuntimeOptions["fetch"]; dispatch?: RuntimeOptions["dispatch"]; tools?: { definitions: HostTool[]; call: NonNullable<RuntimeOptions["tools"]>["call"] }; mcp_servers?: McpServer[]; mcp?: McpPolicy; name?: string; max_frame_bytes?: number; send(text: string): void }): Promise<{ catalog: string; receive(text: string): Promise<void>; closed(): Promise<void> }> {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
-    this.options = { ...this.options, workspace: options.workspace, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.dispatch ? { dispatch: options.dispatch } : {}), ...(options.tools ? { tools: options.tools } : {}), handSend: options.send };
+    this.options = { ...this.options, workspace: options.workspace, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.dispatch ? { dispatch: deferMcp(options.dispatch, options.mcp_servers, options.mcp) } : {}), ...(options.tools ? { tools: options.tools } : {}), handSend: options.send };
     const catalog = await this.command("hand_open", { name: options.name ?? null, workspace: options.cwd, max_frame_bytes: options.max_frame_bytes ?? null, tools: options.tools?.definitions ?? [], mcp_servers: options.mcp_servers ?? [] }) as string;
     return {
       catalog,
@@ -115,7 +116,7 @@ export class AgentRuntime {
   async open(config: AgentConfiguration, options: RuntimeOptions): Promise<void> {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
-    this.options = { ...options, published: this.options.published, wake: this.options.wake };
+    this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, wake: this.options.wake };
     const extra = config.code_mode ? options.workspace?.instructions : undefined;
     if (extra && !config.instructions?.includes(extra)) config = { ...config, instructions: config.instructions ? config.instructions + "\n\n" + extra : extra };
     this.hands = config.hands ?? false;
