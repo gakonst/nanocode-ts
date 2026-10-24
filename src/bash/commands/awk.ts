@@ -771,15 +771,15 @@ class Interpreter {
     return fmt === "%.6g" ? formatNumber(value) : format(fmt, [value], false).text;
   }
 
-  lookup(name: string): { scope: Map<string, Cell> } {
+  lookup(name: string): Map<string, Cell> {
     const frame = this.frames[this.frames.length - 1];
-    if (frame && frame.has(name)) return { scope: frame };
-    return { scope: this.globals };
+    if (frame && frame.has(name)) return frame;
+    return this.globals;
   }
 
   scalar(name: string): Value {
     if (name === "NF") return this.nf;
-    const cell = this.lookup(name).scope.get(name);
+    const cell = this.lookup(name).get(name);
     if (cell instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
     return cell;
   }
@@ -789,13 +789,13 @@ class Interpreter {
       this.setNF(Math.max(0, Math.trunc(toNum(value))));
       return;
     }
-    const { scope } = this.lookup(name);
+    const scope = this.lookup(name);
     if (scope.get(name) instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
     scope.set(name, value);
   }
 
   array(name: string): Map<string, Value> {
-    const { scope } = this.lookup(name);
+    const scope = this.lookup(name);
     let cell = scope.get(name);
     if (cell === undefined) {
       cell = new Map();
@@ -994,12 +994,12 @@ class Interpreter {
         continue;
       }
       if (arg.k === "var") {
-        const cell = this.lookup(arg.name).scope.get(arg.name);
+        const cell = this.lookup(arg.name).get(arg.name);
         if (cell instanceof Map) {
           frame.set(fn.params[i], cell);
           continue;
         }
-        if (cell === undefined && !this.lookup(arg.name).scope.has(arg.name)) {
+        if (cell === undefined && !this.lookup(arg.name).has(arg.name)) {
           const fresh = new Map<string, Value>();
           bindings.push([arg.name, fresh]);
           frame.set(fn.params[i], fresh);
@@ -1018,7 +1018,7 @@ class Interpreter {
     } finally {
       this.frames.pop();
       this.depth--;
-      for (const [name, map] of bindings) if (map.size) this.lookup(name).scope.set(name, map);
+      for (const [name, map] of bindings) if (map.size) this.lookup(name).set(name, map);
     }
   }
 
@@ -1054,7 +1054,7 @@ class Interpreter {
         if (!args.length) return [...(this.fields[0] ?? "")].length;
         const arg = args[0];
         if (arg.k === "var") {
-          const cell = this.lookup(arg.name).scope.get(arg.name);
+          const cell = this.lookup(arg.name).get(arg.name);
           if (cell instanceof Map) return cell.size;
         }
         return [...(await text(0))].length;

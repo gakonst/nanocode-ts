@@ -31,6 +31,7 @@ export class CommandError extends Error {
 }
 
 class FatalError extends Error {
+  reported = false;
   readonly status: number;
   constructor(message: string, status = 1) {
     super(message);
@@ -502,6 +503,12 @@ export class Runner {
     }
     try {
       return await this.compound(command, redirected.io);
+    } catch (error) {
+      if (error instanceof FatalError && !error.reported && command.redirects.length) {
+        redirected.io.stderr.write("bash: " + error.message + "\n");
+        error.reported = true;
+      }
+      throw error;
     } finally {
       await redirected.flush();
       for (const { path, body } of this.#deferred.splice(mark)) {
@@ -2032,7 +2039,7 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
       return error.status;
     }
     if (error instanceof FatalError || error instanceof ArithError || error instanceof CommandError) {
-      io.stderr.write("bash: " + error.message + "\n");
+      if (!(error instanceof FatalError && error.reported)) io.stderr.write("bash: " + error.message + "\n");
       return error instanceof FatalError || error instanceof CommandError ? error.status : 1;
     }
     throw error;
