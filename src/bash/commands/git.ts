@@ -1,5 +1,5 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
-import { decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
+import { breathe, decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
 import { TarReader } from "./archive.ts";
 
 const MAX_BYTES = 200 * 1024 * 1024;
@@ -203,6 +203,7 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
         }
         count++;
         written += entry.data.length;
+        await breathe();
         await ensure(parentOf(path));
         try {
           await ctx.fs.write(path, entry.data);

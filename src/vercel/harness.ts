@@ -81,13 +81,14 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
 
   async function run(ctx: DriveContext, journal: SqlJournal, session: NanocodeSession, counts: { model_requests: number; tool_calls: number; models: ModelCall[]; open_ms: number }): Promise<void> {
     const opening = performance.now();
+    const publish = publisher(ctx);
     const runtime = await AgentRuntime.instantiate(await module(), journal, {
       published: events => {
         for (const logged of events) {
           const call = modelCall(logged);
           if (call) counts.models.push(call);
         }
-        publish(ctx, events);
+        publish(events);
       },
     });
     const channel = (ctx.config as { hand?: unknown } | undefined)?.hand;
@@ -368,11 +369,37 @@ function modelCall(logged: LoggedEvent): ModelCall | undefined {
   };
 }
 
-function publish(ctx: DriveContext, events: LoggedEvent[]): void {
-  for (const logged of events) {
-    const live = liveEvent(logged);
-    if (live) ctx.live(live);
-  }
+export const STREAMED_WASM_CALLS = 20;
+
+function publisher(ctx: DriveContext): (events: LoggedEvent[]) => void {
+  const calls = new Map<string, number>();
+  const quiet = new Set<string>();
+  return events => {
+    for (const logged of events) {
+      const live = liveEvent(logged) as (Record<string, unknown> & { type: string }) | undefined;
+      if (!live) continue;
+      const parent = typeof live["parent"] === "string" ? live["parent"] : undefined;
+      const id = typeof live["call_id"] === "string" ? live["call_id"] : undefined;
+      if (live.type === "tool_start" && parent && id && live["name"] === "wasm" && (live["args"] as { op?: unknown } | undefined)?.op === "call") {
+        const count = (calls.get(parent) ?? 0) + 1;
+        calls.set(parent, count);
+        if (count > STREAMED_WASM_CALLS) {
+          quiet.add(id);
+          continue;
+        }
+      }
+      if ((live.type === "tool_end" || live.type === "tool_input" || live.type === "tool_output") && id && quiet.has(id)) {
+        if (live.type === "tool_end") quiet.delete(id);
+        continue;
+      }
+      if (live.type === "tool_end" && id && calls.has(id)) {
+        const skipped = (calls.get(id) ?? 0) - STREAMED_WASM_CALLS;
+        calls.delete(id);
+        if (skipped > 0) ctx.live({ type: "tool_output", call_id: id, text: skipped + " more wasm calls in this cell were not streamed" } as never);
+      }
+      ctx.live(live as never);
+    }
+  };
 }
 
 

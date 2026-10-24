@@ -373,3 +373,15 @@ export class MemoryFileSystem implements FileSystem {
     targetParent.set(baseOf(target), node);
   }
 }
+
+let breath = 0;
+
+export function breathe(): Promise<void> | undefined {
+  const now = Date.now();
+  if (!breath) breath = now;
+  if (now - breath < 40) return undefined;
+  return new Promise<void>(resolve => setTimeout(() => {
+    breath = Date.now();
+    resolve();
+  }, 0));
+}

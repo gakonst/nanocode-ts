@@ -1,6 +1,7 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
-import { decode, encode, FsError, parentOf, type FileSystem } from "../fs.ts";
+import { breathe, decode, encode, FsError, parentOf, type FileSystem } from "../fs.ts";
 import { mkdirs } from "./files.ts";
+import { pythonWorkers, workerPreload, workerRun, workerVersion } from "./pyworker.ts";
 
 export const PYODIDE_VERSION = "314.0.7";
 
@@ -41,6 +42,7 @@ export type PythonOptions = {
   indexURL?: string;
   maxBytes?: number;
   maxFiles?: number;
+  worker?: boolean;
 };
 
 type Mode = { kind: "code" | "stdin" | "file" | "module" | "pip"; target: string; argv: string[]; filename: string };
@@ -354,8 +356,19 @@ export function pythonHint(text: string): readonly string[] | undefined {
 
 const preloaded = new WeakMap<Instance, Set<string>>();
 
+function threaded(options: PythonOptions): boolean {
+  return options.worker !== false && !options.load && !options.indexURL && pythonWorkers();
+}
+
+const warmed = new Set<string>();
+
 export function preloadPython(options: PythonOptions = {}, packages: readonly string[] = []): Promise<void> {
   if (!canCompile()) return Promise.resolve();
+  if (threaded(options)) {
+    const fresh = packages.filter(name => !warmed.has(name));
+    for (const name of fresh) warmed.add(name);
+    return workerPreload(HELPER, packageCacheDir(), fresh).catch(() => {});
+  }
   return instance(options).then(async python => {
     const loaded = preloaded.get(python) ?? new Set<string>();
     preloaded.set(python, loaded);
@@ -381,6 +394,7 @@ async function snapshot(fs: FileSystem, roots: string[], maxBytes: number, maxFi
   const result: Snapshot = { files: new Map(), dirs: new Set(), partial: new Set(), bytes: 0, entries: 0 };
   const visit = async (path: string): Promise<void> => {
     if (reserved(path) || result.files.has(path) || result.dirs.has(path)) return;
+    await breathe();
     const stat = await fs.stat(path);
     if (!stat) return;
     if (result.entries >= maxFiles || (stat.kind === "file" && result.bytes + stat.size > maxBytes)) {
@@ -452,6 +466,7 @@ async function writeBack(fs: FileSystem, snap: Snapshot, after: Tree): Promise<v
   for (const [path, data] of after.files) {
     const before = snap.files.get(path);
     if (before && same(before, data)) continue;
+    await breathe();
     await mkdirs(fs, parentOf(path));
     await fs.write(path, data);
   }
@@ -516,12 +531,33 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
       }
     }
     const stdin = ctx.stdin.read();
+    if (threaded(options)) return executeThreaded(ctx, mode, stdin, maxBytes, maxFiles);
     const python = await instance(options);
     const task = python.queue.then(() => execute(ctx, python, mode, stdin, maxBytes, maxFiles));
     python.queue = task.catch(() => {});
     return task;
   };
   return { pip: handler, pip3: handler, python: handler, python3: handler };
+}
+
+async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number): Promise<number> {
+  if (mode === "version") {
+    ctx.stdout.write("Python " + await workerVersion(HELPER, packageCacheDir()) + "\n");
+    return 0;
+  }
+  const roots = [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
+  const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
+  const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
+  const target = mode.kind === "stdin" ? stdin : mode.kind === "file" ? new TextDecoder().decode(snap.files.get(mode.filename) ?? (await ctx.fs.read(mode.filename))) : mode.target;
+  if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+  const env = { ...ctx.env, PWD: ctx.cwd, PYTHONDONTWRITEBYTECODE: "1" };
+  const path0 = mode.kind === "file" ? parentOf(mode.filename) : mode.kind === "module" ? ctx.cwd : "";
+  const done = await workerRun(HELPER, packageCacheDir(), ctx, { kind: mode.kind, name: ctx.name, target, argv: mode.argv, filename: mode.filename, cwd: ctx.cwd, env, path0, roots: unique, dirs: [...snap.dirs], files: [...snap.files], stdin: encode(mode.kind === "stdin" ? "" : stdin) });
+  await writeBack(ctx.fs, snap, done.tree);
+  if (done.failure !== undefined) throw done.failure;
+  if (done.status >= 0) return done.status;
+  if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+  throw new CommandError("timed out after " + ctx.limits.timeoutMs + " ms", 124);
 }
 
 async function execute(ctx: CommandContext, python: Instance, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number): Promise<number> {
