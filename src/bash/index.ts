@@ -109,7 +109,7 @@ export class Bash {
       state.vars.set(name, [value]);
       state.exported.add(name);
     }
-    for (const [name, value] of Object.entries({ BASH: "/bin/bash", BASH_VERSION: "5.2.21(1)-release", HOSTNAME: "localhost", IFS: " \t\n", OPTIND: "1", OSTYPE: "linux-gnu", PPID: "1", UID: "1000", EUID: "1000" })) if (!state.vars.has(name)) state.vars.set(name, [value]);
+    for (const [name, value] of Object.entries({ BASH: "/bin/bash", BASH_VERSION: "5.2.21(1)-release", HOSTNAME: "localhost", SHLVL: "1", IFS: " \t\n", OPTIND: "1", OSTYPE: "linux-gnu", PPID: "1", UID: "1000", EUID: "1000" })) if (!state.vars.has(name)) state.vars.set(name, [value]);
     const budget = { used: 0, refused: false };
     const runner = new Runner({ fs: budgeted(this.fs, this.limits.maxFileOperations, budget), commands: this.commands, fetch: this.fetch, limits: this.limits }, state, controller.signal);
     const stdout = new Output(this.limits.maxOutputLength, false);

@@ -17,7 +17,7 @@ export type Assign = { name: string; index?: Word; value?: Word; items?: Word[];
 export type TestToken = { op: string } | { word: Word };
 
 export type Command =
-  | { type: "simple"; assigns: Assign[]; words: (Word | Assign)[]; redirects: Redirect[] }
+  | { type: "simple"; assigns: Assign[]; words: (Word | Assign)[]; redirects: Redirect[]; line?: number }
   | { type: "if"; clauses: { cond: Script; body: Script }[]; otherwise?: Script; redirects: Redirect[] }
   | { type: "for"; name: string; items?: Word[]; body: Script; redirects: Redirect[] }
   | { type: "cfor"; init: Word; cond: Word; step: Word; body: Script; redirects: Redirect[] }
@@ -59,9 +59,21 @@ class Parser {
   src: string;
   pos = 0;
   pending: Pending[] = [];
+  #linePos = 0;
+  #line = 1;
 
   constructor(src: string) {
     this.src = src;
+  }
+
+  line(): number {
+    if (this.pos < this.#linePos) {
+      this.#linePos = 0;
+      this.#line = 1;
+    }
+    for (let i = this.#linePos; i < this.pos; i++) if (this.src[i] === "\n") this.#line++;
+    this.#linePos = this.pos;
+    return this.#line;
   }
 
   done() {
@@ -177,7 +189,10 @@ class Parser {
       this.blanks();
       if (!this.starts("|") || this.starts("||")) break;
       this.pos++;
-      if (this.starts("&")) this.pos++;
+      if (this.starts("&")) {
+        this.pos++;
+        commands[commands.length - 1].redirects.push({ fd: 2, op: ">&", target: [{ type: "text", value: "1", quoted: false }] });
+      }
       this.separators();
       commands.push(this.command());
     }
@@ -390,7 +405,7 @@ class Parser {
   }
 
   simple(): Command {
-    const command: Command & { type: "simple" } = { type: "simple", assigns: [], words: [], redirects: [] };
+    const command: Command & { type: "simple" } = { type: "simple", assigns: [], words: [], redirects: [], line: this.line() };
     for (;;) {
       this.blanks();
       if (this.done()) break;

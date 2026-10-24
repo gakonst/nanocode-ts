@@ -302,6 +302,7 @@ export class Runner {
   flushes: (() => Promise<void>)[] = [];
   #deferred: { path: string; body: Script }[] = [];
   #processes = 0;
+  #started = Date.now();
   #steps = 0;
   #depth = 0;
   #condition = 0;
@@ -673,6 +674,7 @@ export class Runner {
 
   async simple(command: Command & { type: "simple" }, io: IO): Promise<number> {
     this.#substitution = undefined;
+    if (command.line !== undefined) this.state.vars.set("LINENO", [String(command.line)]);
     const head = command.words[0];
     if (head && Array.isArray(head) && head.length === 1 && head[0].type === "text" && !head[0].quoted && DECLARATIONS.has(head[0].value) && !this.state.functions.has(head[0].value)) {
       return this.declare(head[0].value, command.words.slice(1), io);
@@ -1108,6 +1110,16 @@ export class Runner {
         return [(state.options.errexit ? "e" : "") + (state.options.nounset ? "u" : "") + (state.options.xtrace ? "x" : "") + "hB"];
       case "RANDOM":
         return [String(Math.floor(Math.random() * 32768))];
+      case "SECONDS":
+        return state.vars.get(name) ?? [String(Math.floor((Date.now() - this.#started) / 1000))];
+      case "EPOCHSECONDS":
+        return [String(Math.floor(Date.now() / 1000))];
+      case "EPOCHREALTIME":
+        return [(Date.now() / 1000).toFixed(6)];
+      case "BASHPID":
+        return ["1"];
+      case "SRANDOM":
+        return [String(Math.floor(Math.random() * 4294967296))];
     }
     if (/^\d+$/.test(name)) {
       const value = state.positional[Number(name) - 1];
@@ -1221,10 +1233,12 @@ export class Runner {
         const source = name === "@" || name === "*" ? ["bash", ...result] : result;
         result = slice(source);
       } else result = [slice([...result[0]]).join("")];
-    } else if (op === "^^") result = result.map(value => value.toUpperCase());
-    else if (op === ",,") result = result.map(value => value.toLowerCase());
-    else if (op === "^") result = result.map(value => value.charAt(0).toUpperCase() + value.slice(1));
-    else if (op === ",") result = result.map(value => value.charAt(0).toLowerCase() + value.slice(1));
+    } else if (op === "^^" || op === ",," || op === "^" || op === ",") {
+      const source = part.arg?.length ? globSource(await this.pattern(part.arg, io)) : "";
+      const allowed = source ? new RegExp("^(?:" + source + ")$") : undefined;
+      const convert = (c: string) => (allowed && !allowed.test(c) ? c : op[0] === "^" ? c.toUpperCase() : c.toLowerCase());
+      result = result.map(value => (op.length === 2 ? [...value].map(convert).join("") : value ? convert(value.charAt(0)) + value.slice(1) : value));
+    }
     else if (op === "@Q" || op === "@K") result = result.map(shellQuote);
     else if (op === "@U") result = result.map(value => value.toUpperCase());
     else if (op === "@u") result = result.map(value => value.charAt(0).toUpperCase() + value.slice(1));

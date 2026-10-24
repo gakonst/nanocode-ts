@@ -589,10 +589,12 @@ export const sed: CommandHandler = async ctx => {
     }
   } else {
     let text = "";
-    for (const operand of operands.length ? operands : ["-"]) {
+    const inputs = operands.length ? operands : ["-"];
+    for (let i = 0; i < inputs.length; i++) {
+      const operand = inputs[i];
       try {
         const chunk = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
-        text += chunk && !chunk.endsWith("\n") && operand !== operands[operands.length - 1] ? chunk + "\n" : chunk;
+        text += chunk && !chunk.endsWith("\n") && i < inputs.length - 1 ? chunk + "\n" : chunk;
       } catch (error) {
         if (!(error instanceof FsError)) throw error;
         ctx.stderr.write("sed: can't read " + operand + ": No such file or directory\n");
