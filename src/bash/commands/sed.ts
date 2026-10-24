@@ -1,4 +1,4 @@
-import { CommandError, streaming, type CommandHandler } from "../shell.ts";
+import { CommandError, budget, flatten, streaming, type CommandHandler } from "../shell.ts";
 import { FsError, decode, encode } from "../fs.ts";
 import { posixRegExp } from "../text.ts";
 import { options, put } from "./util.ts";
@@ -455,6 +455,11 @@ export const sed: CommandHandler = streaming(async ctx => {
     };
     let lineNumber = 0;
     let hold = "";
+    const grow = (text: string, before: number): string => {
+      if (text.length >>> 20 !== before >>> 20) budget(ctx.limits, 4 * text.length, "sed: the pattern and hold space");
+      if (text.length > 4096 && Math.clz32(text.length) < Math.clz32(before)) flatten(text);
+      return text;
+    };
     for (const command of commands) if (command.range) command.range = { active: command.from?.kind === "line" && command.from.line === 0 && command.to?.kind === "regex", end: 0 };
     const isLast = () => index >= input.length;
     const chunks: string[] = [];
@@ -625,20 +630,20 @@ export const sed: CommandHandler = streaming(async ctx => {
               pc = commands.length;
               break;
             }
-            space += "\n" + input[index++];
+            space = grow(space + "\n" + input[index++], space.length);
             lineNumber++;
             break;
           case "g":
             space = hold;
             break;
           case "G":
-            space += "\n" + hold;
+            space = grow(space + "\n" + hold, space.length);
             break;
           case "h":
             hold = space;
             break;
           case "H":
-            hold += "\n" + space;
+            hold = grow(hold + "\n" + space, hold.length);
             break;
           case "x":
             [space, hold] = [hold, space];

@@ -6,7 +6,8 @@ import { textCommands } from "./commands/text.ts";
 import { sed } from "./commands/sed.ts";
 import { awk } from "./commands/awk.ts";
 import { jq } from "./commands/jq.ts";
-import { curl } from "./commands/curl.ts";
+import { curl, wget } from "./commands/curl.ts";
+import { unzip, zip } from "./commands/zip.ts";
 import { patch } from "./commands/patch.ts";
 import { extraCommands } from "./commands/extra.ts";
 import { gitCommands, type GitHubOptions } from "./commands/git.ts";
@@ -51,14 +52,15 @@ const WORKSPACE_TIMEOUT_MS = 600_000;
 export const DEFAULT_LIMITS: Limits = {
   maxCommands: 1_000_000,
   maxLoopIterations: 1_000_000,
-  maxCallDepth: 64,
+  maxCallDepth: 1000,
   maxOutputLength: 1_000_000,
   maxBufferLength: 16_000_000,
+  maxMemoryBytes: 1 << 30,
   maxFileOperations: 100_000,
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, patch };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, wget, patch, unzip, zip };
 
 export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
 

@@ -572,7 +572,7 @@ async function execute(ctx: CommandContext, python: Instance, mode: Mode | "vers
   pyodide.FS.chdir("/");
   for (const path of python.mirrored) unmirror(pyodide.FS, path);
   python.mirrored = new Set(unique);
-  const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
+  const snap = await snapshot(ctx.fs, unique, Math.min(maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2)), maxFiles);
   mirror(pyodide.FS, snap);
   pyodide.FS.mkdirTree(ctx.cwd);
 

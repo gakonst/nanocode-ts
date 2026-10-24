@@ -1,4 +1,4 @@
-import { CommandError, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
+import { CommandError, budget, flatten, streaming, type CommandContext, type CommandHandler, type Limits } from "../shell.ts";
 import { FsError, decode, encode } from "../fs.ts";
 import { format, formatNumber, posixRegExp, type FormatValue } from "../text.ts";
 import { strftime } from "./text.ts";
@@ -664,6 +664,7 @@ class Strnum {
 type Value = number | string | Strnum | undefined;
 
 class AwkArray extends Map<string, Value> {
+  static limits: Limits | undefined;
   parts: string[] | undefined;
 
   fill(parts: string[]) {
@@ -697,6 +698,7 @@ class AwkArray extends Map<string, Value> {
 
   override set(key: string, value: Value): this {
     this.materialize();
+    if ((super.size & 0xffff) === 0xffff && AwkArray.limits) budget(AwkArray.limits, 100 * super.size, "awk: an array of " + super.size + " elements");
     return super.set(key, value);
   }
 
@@ -1253,8 +1255,10 @@ class Interpreter {
         if (["<", "<=", ">", ">=", "==", "!="].includes(e.op)) return this.compare(e.op, left, right) ? 1 : 0;
         return this.arith(e.op, toNum(left), toNum(right));
       }
-      case "concat":
-        return this.str(await this.eval(e.left)) + this.str(await this.eval(e.right));
+      case "concat": {
+        const left = this.str(await this.eval(e.left));
+        return this.grown(left, left + this.str(await this.eval(e.right)));
+      }
       case "match": {
         const text = this.str(await this.eval(e.left));
         const re = await this.toRegex(e.right);
@@ -1410,10 +1414,19 @@ class Interpreter {
     if (e.k === "concat") {
       const left = this.text(e.left, scope);
       const right = this.text(e.right, scope);
-      return () => left() + right();
+      return () => {
+        const head = left();
+        const text = head + right();
+        return text.length > 4096 && (Math.clz32(text.length) < Math.clz32(head.length) || text.length >>> 20 !== head.length >>> 20) ? this.grown(head, text) : text;
+      };
     }
     const fn = this.expr(e, scope);
     return () => this.str(fn(), output);
+  }
+
+  grown(head: string, text: string): string {
+    if (text.length >>> 20 !== head.length >>> 20) budget(this.ctx.limits, 4 * text.length, "awk: a string of " + text.length + " characters");
+    return text.length > 4096 && Math.clz32(text.length) < Math.clz32(head.length) ? flatten(text) : text;
   }
 
   pattern(e: Expr, scope: Set<string>): () => RegExp {
@@ -2405,7 +2418,7 @@ class Interpreter {
       if (!reader) {
         let content: string;
         try {
-          content = file === "-" || file === "/dev/stdin" ? await this.ctx.stdin.text() : decode(await this.ctx.fs.read(this.ctx.resolve(file)));
+          content = file === "-" || file === "/dev/stdin" || file === "/dev/fd/0" ? await this.ctx.stdin.text() : decode(await this.ctx.fs.read(this.ctx.resolve(file)));
         } catch {
           return -1;
         }
@@ -2607,6 +2620,7 @@ function splitRecords(text: string, rs: string): string[] {
 }
 
 export const awk: CommandHandler = streaming(async ctx => {
+  AwkArray.limits = ctx.limits;
   const args = ctx.args;
   let fs: string | undefined;
   const assigns: [string, string][] = [];

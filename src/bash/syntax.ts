@@ -10,7 +10,7 @@ export type Part =
 
 export type Word = Part[];
 
-export type Redirect = { fd: number | null; op: string; target: Word; body?: Word };
+export type Redirect = { fd: number | null; op: string; target: Word; body?: Word; name?: string };
 
 export type Assign = { name: string; index?: Word; value?: Word; items?: Word[]; keys?: (Word | undefined)[]; append: boolean };
 
@@ -19,14 +19,15 @@ export type TestToken = { op: string } | { word: Word };
 export type Command =
   | { type: "simple"; assigns: Assign[]; words: (Word | Assign)[]; redirects: Redirect[]; line?: number }
   | { type: "if"; clauses: { cond: Script; body: Script }[]; otherwise?: Script; redirects: Redirect[] }
-  | { type: "for"; name: string; items?: Word[]; body: Script; redirects: Redirect[] }
+  | { type: "for"; name: string; items?: Word[]; body: Script; redirects: Redirect[]; select?: boolean }
   | { type: "cfor"; init: Word; cond: Word; step: Word; body: Script; redirects: Redirect[] }
   | { type: "while"; until: boolean; cond: Script; body: Script; redirects: Redirect[] }
   | { type: "case"; word: Word; items: { patterns: Word[]; body: Script; next: string }[]; redirects: Redirect[] }
   | { type: "group"; body: Script; subshell: boolean; redirects: Redirect[] }
   | { type: "function"; name: string; body: Command; redirects: Redirect[] }
   | { type: "arith"; expr: Word; redirects: Redirect[] }
-  | { type: "test"; tokens: TestToken[]; redirects: Redirect[] };
+  | { type: "test"; tokens: TestToken[]; redirects: Redirect[] }
+  | { type: "coproc"; name: string; body: Command; redirects: Redirect[] };
 
 export type Pipeline = { negate: boolean; commands: Command[] };
 
@@ -231,6 +232,16 @@ class Parser {
     let command: Command;
     if (word === "if") command = this.ifCommand();
     else if (word === "for") command = this.forCommand();
+    else if (word === "coproc") {
+      this.pos += 6;
+      this.blanks();
+      const named = this.src.slice(this.pos).match(/^([A-Za-z_][A-Za-z0-9_]*)[ \t]+(?=[{(])/);
+      if (named) this.pos += named[0].length;
+      return { type: "coproc", name: named?.[1] ?? "COPROC", body: this.command(), redirects: [] };
+    } else if (word === "select") {
+      this.pos += 3;
+      command = { ...(this.forCommand() as Command & { type: "for" }), select: true };
+    }
     else if (word === "while" || word === "until") command = this.whileCommand(word);
     else if (word === "case") command = this.caseCommand();
     else if (word === "{") {
@@ -493,12 +504,13 @@ class Parser {
   }
 
   redirect(redirects: Redirect[]): boolean {
-    const match = this.src.slice(this.pos).match(/^(\d*)(<<<|<<-|<<|<>|<&|>>|>&|>\||&>>|&>|<|>)/);
+    const match = this.src.slice(this.pos).match(/^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?\})(<<<|<<-|<<|<>|<&|>>|>&|>\||&>>|&>|<|>)/);
     if (!match) return false;
     if (match[2].startsWith("&") && match[1]) return false;
     this.pos += match[0].length;
     this.blanks();
-    const redirect: Redirect = { fd: match[1] ? Number(match[1]) : null, op: match[2] === ">|" ? ">" : match[2], target: [] };
+    const named = match[1].startsWith("{") ? match[1].slice(1, -1) : undefined;
+    const redirect: Redirect = { fd: match[1] && !named ? Number(match[1]) : null, op: match[2] === ">|" ? ">" : match[2], target: [], ...(named !== undefined ? { name: named } : {}) };
     if (match[2] === ">|") forced.add(redirect);
     if (match[2] === "<<" || match[2] === "<<-") {
       const raw = this.src.slice(this.pos).match(/^[^\s;&|()<>]+/)?.[0];

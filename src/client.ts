@@ -407,6 +407,12 @@ export function imagesOf(result: unknown, found: string[] = []): string[] {
   return found;
 }
 
+const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\^_])/g;
+
+function plain(text: string): string {
+  return text.includes("\u001b") ? text.replace(ANSI, "") : text;
+}
+
 function humanize(text: string): string {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{")) return text;
@@ -473,6 +479,7 @@ export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
   const output = cell.output.trim();
   cell.output_language = cell.output && (output.startsWith("{") || output.startsWith("[")) && (() => { try { JSON.parse(output); return true; } catch { return false; } })() ? "json" : /^(diff --git|--- )/.test(cell.output) ? "diff" : "";
   if (status === "completed" && cell.exit_code !== undefined && cell.exit_code !== 0) cell.details.push(`exit ${cell.exit_code}`);
+  cell.output = plain(cell.output);
   cell.status = status;
   return cell;
 }
@@ -542,7 +549,10 @@ export type TranscriptOptions = {
   frameMs?: number;
   reducedMotion?(): boolean;
   limit?: number;
+  checkpoint?(event: LiveEvent): void;
 };
+
+export type TranscriptState = { running: ToolCell[]; stream: Omit<Stream, "shown">; links: [string, { cell: string; latest: string }][]; orphans: [string, ToolCell[]][] };
 
 type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string; started?: number; ended?: number };
 
@@ -562,6 +572,7 @@ export class Transcript {
   private readonly inputs = new Map<string, ToolInput>();
   private readonly links = new Map<string, { cell: string; latest: string }>();
   private held: Entry[] = [];
+  private readonly orphans = new Map<string, ToolCell[]>();
 
   constructor(options: TranscriptOptions) {
     this.options = options;
@@ -589,9 +600,47 @@ export class Transcript {
     this.calls.clear();
     this.inputs.clear();
     this.links.clear();
+    this.orphans.clear();
     this.held = [];
     this.clock = 0;
     this.options.live([]);
+  }
+
+  pending(): boolean {
+    return this.queue.length > 0;
+  }
+
+  state(limit = 65_536): TranscriptState {
+    const clip = (cell: ToolCell) => clipCell(cell, limit, true);
+    const { shown: _shown, ...stream } = this.stream;
+    return { running: this.running.map(clip), stream, links: [...this.links], orphans: [...this.orphans].map(([key, cells]) => [key, cells.map(clip)]) };
+  }
+
+  restore(state: TranscriptState | undefined): void {
+    if (!state || !Array.isArray(state.running)) return;
+    const index = (cell: ToolCell) => {
+      this.calls.set(cell.call_id, cell);
+      for (const child of cell.children) index(child);
+    };
+    this.running = state.running;
+    for (const cell of this.running) index(cell);
+    for (const [key, cells] of state.orphans ?? []) {
+      this.orphans.set(key, cells);
+      for (const cell of cells) index(cell);
+    }
+    for (const [key, link] of state.links ?? []) this.links.set(key, link);
+    if (state.stream && typeof state.stream.text === "string") {
+      this.stream = { ...state.stream, shown: state.stream.text.length };
+      this.reveal();
+    }
+    this.emit();
+  }
+
+  close(): void {
+    this.enqueue({ run: () => {
+      this.settle("cancelled");
+      this.orphans.clear();
+    } });
   }
 
   private enqueue(item: Queued): void {
@@ -662,10 +711,16 @@ export class Transcript {
       if (cell.tool === "wait") {
         const args = decoded(event.args) as Record<string, unknown>;
         const target = args && (typeof args.cell_id === "string" || typeof args.cell_id === "number") ? String(args.cell_id) : undefined;
-        for (const link of this.links.values()) if (link.cell === target) link.latest = id;
+        for (const [origin, link] of this.links) {
+          if (link.cell !== target) continue;
+          link.latest = id;
+          const orphans = this.orphans.get(origin);
+          this.orphans.delete(origin);
+          if (orphans) cell.children.push(...orphans.filter(orphan => !cell!.children.includes(orphan)));
+        }
       }
     } else if (event.type === "tool_output") {
-      if (cell.status === "running" && typeof event.text === "string") cell.output = event.text;
+      if (cell.status === "running" && typeof event.text === "string") cell.output = plain(event.text);
     } else {
       this.inputs.delete(id);
       finishTool(cell, event);
@@ -680,12 +735,19 @@ export class Transcript {
     while (this.running.length && (all || this.running[0].status !== "running")) {
       const cell = this.running.shift()!;
       finish(cell, all ?? cell.status);
+      const posted = structuredClone(cell);
+      if (cell.status === "yielded") {
+        const carried = cell.children.filter(child => child.status === "running");
+        if (carried.length) this.orphans.set(cell.call_id, carried);
+        for (const child of posted.children) if (child.status === "running") finish(child, "yielded");
+      }
       this.forget(cell);
-      this.options.add({ kind: "tool", text: toolSummary(cell), tool: structuredClone(cell), started_at: cell.started_at, ...(cell.duration_ms !== undefined ? { ended_at: cell.started_at + cell.duration_ms } : {}) });
+      this.options.add({ kind: "tool", text: toolSummary(posted), tool: posted, started_at: cell.started_at, ...(cell.duration_ms !== undefined ? { ended_at: cell.started_at + cell.duration_ms } : {}) });
     }
   }
 
   private forget(cell: ToolCell): void {
+    if (cell.status === "running" && [...this.orphans.values()].some(cells => cells.includes(cell))) return;
     this.calls.delete(cell.call_id);
     this.inputs.delete(cell.call_id);
     for (const child of cell.children) this.forget(child);
@@ -712,6 +774,7 @@ export class Transcript {
         current.text += typeof event.delta === "string" ? event.delta : "";
         current.started ??= at(event);
         current.ended = at(event);
+        this.options.checkpoint?.(event);
         continue;
       }
       if (next && "aside" in next && current.kind === "assistant" && current.text.slice(current.posted).trim()) {
@@ -740,21 +803,36 @@ export class Transcript {
       }
       if (kind) {
         this.stream = { kind, item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "", started: at(next.event), ended: at(next.event) };
+        this.options.checkpoint?.(next.event);
         continue;
       }
       if (TOOL_EVENTS.has(next.event.type)) {
         this.tool(next.event);
+        this.options.checkpoint?.(next.event);
         continue;
       }
-      if (next.event.type === "turn") this.settle(next.event.status === "completed" ? "completed" : "cancelled");
+      if (next.event.type === "turn") {
+        this.settle(next.event.status === "completed" ? "completed" : "cancelled");
+        this.orphans.clear();
+      }
       const entry = describe(next.event, this.options.limit);
       if (entry) this.options.add(entry);
       this.options.apply?.(next.event);
+      this.options.checkpoint?.(next.event);
     }
     this.emit();
     if (this.queue.length || this.stream.shown < this.stream.text.length) this.frame = setTimeout(() => this.step(), this.options.frameMs ?? 16);
     else this.clock = 0;
   }
+}
+
+export function clipCell(cell: ToolCell, limit: number, tail = false): ToolCell {
+  const cut = (text: string) => {
+    if (text.length <= limit) return text;
+    const dropped = `… ${text.length - limit} characters not kept`;
+    return tail ? `${dropped}\n${text.slice(-limit)}` : `${text.slice(0, limit)}\n${dropped}`;
+  };
+  return { ...cell, input: cut(cell.input), output: cut(cell.output), details: [...cell.details], children: cell.children.map(child => clipCell(child, limit, tail)) };
 }
 
 function finish(cell: ToolCell, status: ToolStatus): void {
@@ -858,6 +936,7 @@ export type ConfigOptions = {
 
 export type Config = {
   getState(): ChatState;
+  getServerState(): ChatState;
   subscribe(listener: () => void): () => void;
   send(prompt: string, attachments?: readonly Attachment[]): Promise<void>;
   readonly files: TransportFiles | undefined;
@@ -891,14 +970,18 @@ export function createConfig(options: ConfigOptions): Config {
       return fallback;
     }
   };
-  const write = (key: string, value: unknown) => {
+  const write = (key: string, value: unknown): boolean => {
     try {
       history?.storage?.setItem(key, JSON.stringify(value));
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   };
   const indexKey = () => `${history!.key}:history`;
   const entriesKey = (id: string) => `${history!.key}:entries:${id}`;
   const transportKey = (id: string) => `${history!.key}:transport:${id}`;
+  const liveKey = (id: string) => `${history!.key}:live:${id}`;
   let conversations: Conversation[] = [];
   let current: string | undefined;
   if (history) {
@@ -912,6 +995,7 @@ export function createConfig(options: ConfigOptions): Config {
     options.transport.restore?.(read(transportKey(current), undefined));
   }
   let state: ChatState = { entries: history ? read<Entry[]>(entriesKey(current!), []) : options.persist?.load() ?? [], live: [], status: "idle", error: undefined, conversations, conversation: current };
+  const server: ChatState = { entries: [], live: [], status: "idle", error: undefined, conversations: history && current ? [{ id: current, title: "", updated: 0 }] : [], conversation: current };
   const set = (next: Partial<ChatState>) => {
     state = { ...state, ...next };
     for (const listener of [...listeners]) listener();
@@ -922,15 +1006,33 @@ export function createConfig(options: ConfigOptions): Config {
   const saveTransport = () => {
     if (history && current && options.transport.snapshot) write(transportKey(current), options.transport.snapshot());
   };
-  type View = { transcript: Transcript; live: Entry[] };
+  type View = { transcript: Transcript; live: Entry[]; pushed?: unknown; processed?: unknown; dirty: boolean; saved: number; timer?: ReturnType<typeof setTimeout> };
   const views = new Map<string | undefined, View>();
+  const snapshots = new WeakMap<LiveEvent, unknown>();
+  const persist = (id: string | undefined, view: View) => {
+    if (view.timer !== undefined) clearTimeout(view.timer);
+    view.timer = undefined;
+    if (!history || !id || !options.transport.snapshot || !conversations.some(item => item.id === id)) return;
+    const snapshot = view.transcript.pending() ? view.processed : id === current ? options.transport.snapshot() : view.pushed;
+    if (snapshot === undefined) return;
+    view.dirty = false;
+    view.saved = Date.now();
+    const live = view.transcript.state();
+    if (!live.running.length && !live.stream.text && !live.orphans.length) {
+      try { history.storage?.removeItem(liveKey(id)); } catch {}
+    } else if (!write(liveKey(id), live)) return;
+    write(transportKey(id), snapshot);
+  };
+  const schedule = (id: string | undefined, view: View) => {
+    view.timer ??= setTimeout(() => persist(id, view), view.dirty ? 0 : 250);
+  };
   const drop = (id: string | undefined) => {
     views.get(id)?.transcript.reset();
     views.delete(id);
   };
   const forget = (id: string) => {
     drop(id);
-    for (const key of [entriesKey(id), transportKey(id)]) try { history?.storage?.removeItem(key); } catch {}
+    for (const key of [entriesKey(id), transportKey(id), liveKey(id)]) try { history?.storage?.removeItem(key); } catch {}
   };
   const add = (id: string | undefined, entry: Entry) => {
     if (!history) {
@@ -942,24 +1044,47 @@ export function createConfig(options: ConfigOptions): Config {
     const shown = id === current;
     const existing = conversations.find(item => item.id === id);
     if (!existing && !shown) return;
+<<<<<<< HEAD
+    const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry.tool ? { ...entry, tool: clipCell(entry.tool, 65_536) } : entry].slice(-(options.keep ?? 500));
+    while (!write(entriesKey(id!), entries)) {
+      const oldest = [...conversations].reverse().find(item => item.id !== id && item.id !== current);
+      if (!oldest) break;
+      forget(oldest.id);
+      conversations = conversations.filter(item => item.id !== oldest.id);
+    }
+    const title = existing?.title || (entry.kind === "user" ? entry.text.replace(/\s+/g, " ").slice(0, 80) : "");
+=======
     const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry].slice(-(options.keep ?? 500));
     write(entriesKey(id!), entries);
     const title = existing?.title || (entry.kind === "user" ? (entry.text || entry.attachments?.map(item => item.name).join(", ") || "").replace(/\s+/g, " ").slice(0, 80) : "");
+>>>>>>> origin/main
     conversations = [{ id: id!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
     for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
     conversations = conversations.slice(0, history.limit);
     saveIndex();
+    const target = views.get(id);
+    if (target) {
+      target.dirty = true;
+      schedule(id, target);
+    }
     if (!shown) return set({ conversations });
-    saveTransport();
+    if (!target) saveTransport();
     set({ entries, conversations });
   };
   const view = (id = current): View => {
     let found = views.get(id);
     if (found) return found;
     const created: View = {
+      dirty: false,
       live: [],
+      saved: 0,
       transcript: new Transcript({
         add: entry => add(id, entry),
+        checkpoint: event => {
+          created.processed = snapshots.has(event) ? snapshots.get(event) : created.processed;
+          if (created.dirty || Date.now() - created.saved >= 250) persist(id, created);
+          else schedule(id, created);
+        },
         live: live => {
           created.live = live;
           if (id === current) set({ live });
@@ -970,6 +1095,7 @@ export function createConfig(options: ConfigOptions): Config {
       }),
     };
     views.set(id, created);
+    if (history && id) created.transcript.restore(read<TranscriptState | undefined>(liveKey(id), undefined));
     return created;
   };
   const note = (kind: EntryKind, text: string) => {
@@ -978,8 +1104,10 @@ export function createConfig(options: ConfigOptions): Config {
     view().transcript.run(() => add(target, { kind, text, started_at }));
   };
   const push = (event: LiveEvent) => {
-    view().transcript.push(event);
-    saveTransport();
+    const target = view();
+    target.pushed = options.transport.snapshot?.();
+    snapshots.set(event, target.pushed);
+    target.transcript.push(event);
   };
   let generation = 0;
   let controller: AbortController | undefined;
@@ -1016,10 +1144,13 @@ export function createConfig(options: ConfigOptions): Config {
       set({ error: failure });
     }).finally(() => {
       if (id !== generation) return;
+      transcript.close();
       transcript.run(() => {
         if (id !== generation) return;
         controller = undefined;
-        saveTransport();
+        const shown = views.get(current);
+        if (shown) persist(current, shown);
+        else saveTransport();
         set({ status: "idle" });
       });
     });
@@ -1027,7 +1158,9 @@ export function createConfig(options: ConfigOptions): Config {
   const open = (id: string, entries: Entry[], resume = true) => {
     const detached = state.status === "pending";
     detach();
-    if (conversations.some(item => item.id === current)) saveTransport();
+    const leaving = views.get(current);
+    if (leaving && conversations.some(item => item.id === current)) persist(current, leaving);
+    else if (conversations.some(item => item.id === current)) saveTransport();
     if (!detached) drop(current);
     current = id;
     options.transport.restore?.(read(transportKey(id), undefined));
@@ -1037,6 +1170,7 @@ export function createConfig(options: ConfigOptions): Config {
   };
   const config: Config = {
     getState: () => state,
+    getServerState: () => server,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -1135,5 +1269,11 @@ export function createConfig(options: ConfigOptions): Config {
       }
     },
   };
+  if (history) {
+    state = { ...state, live: view(current).live };
+    (globalThis as { addEventListener?: (type: string, listener: () => void) => void }).addEventListener?.("pagehide", () => {
+      for (const [id, entry] of views) persist(id, entry);
+    });
+  }
   return config;
 }

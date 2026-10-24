@@ -1,4 +1,4 @@
-import { CommandError, type CommandContext, type Input } from "../shell.ts";
+import { CommandError, budget, type CommandContext, type Input, type Limits } from "../shell.ts";
 import { byte, decode, FsError, type FileSystem, type LinkStat } from "../fs.ts";
 
 export type LinkFileSystem = FileSystem & {
@@ -126,10 +126,12 @@ export function device(path: string, size = 65536): string | undefined {
 }
 
 export async function readInput(ctx: CommandContext, operand: string, size?: number): Promise<string> {
-  if (operand === "-" || operand === "/dev/stdin") return ctx.stdin.text();
+  if (operand === "-" || operand === "/dev/stdin" || operand === "/dev/fd/0") return ctx.stdin.text();
   const path = ctx.resolve(operand);
-  const special = size !== undefined || !(await ctx.fs.stat(path)) ? device(path, size) : undefined;
+  const stat = size === undefined ? await ctx.fs.stat(path) : null;
+  const special = size !== undefined || !stat ? device(path, size) : undefined;
   if (special !== undefined) return special;
+  if (stat) budget(ctx.limits, 2 * stat.size, ctx.name + ": " + operand);
   return decode(await ctx.fs.read(path));
 }
 
@@ -151,11 +153,14 @@ export async function eachInput(ctx: CommandContext, operands: string[], visit: 
 }
 
 export async function allInput(ctx: CommandContext, operands: string[]): Promise<{ text: string; status: number }> {
-  let text = "";
+  const parts: string[] = [];
+  let size = 0;
   const status = await eachInput(ctx, operands, chunk => {
-    text += chunk;
+    size += chunk.length;
+    budget(ctx.limits, size, ctx.name + ": its input");
+    parts.push(chunk);
   });
-  return { text, status };
+  return { text: parts.length === 1 ? parts[0]! : parts.join(""), status };
 }
 
 const SLICE = 1 << 16;
@@ -186,7 +191,7 @@ export async function put(ctx: CommandContext, text: string) {
   }
 }
 
-export function batches(input: Input, separator = "\n"): () => Promise<string | null> {
+export function batches(input: Input, separator = "\n", limits?: Limits): () => Promise<string | null> {
   let carry = "";
   return async () => {
     for (;;) {
@@ -196,12 +201,15 @@ export function batches(input: Input, separator = "\n"): () => Promise<string | 
         carry = "";
         return rest || null;
       }
+      const tail = separator.length > 1 ? carry.slice(1 - separator.length) : "";
+      const found = (tail + chunk).lastIndexOf(separator);
       const text = carry ? carry + chunk : chunk;
-      const end = text.lastIndexOf(separator);
-      if (end < 0) {
+      if (found < 0) {
+        if (limits && text.length > 1 << 20) budget(limits, 2 * text.length, "a line of " + text.length + " characters");
         carry = text;
         continue;
       }
+      const end = carry.length - tail.length + found;
       carry = text.slice(end + separator.length);
       return end + separator.length === text.length ? text : text.slice(0, end + separator.length);
     }
@@ -211,8 +219,8 @@ export function batches(input: Input, separator = "\n"): () => Promise<string | 
 export async function eachBatch(ctx: CommandContext, operands: string[], visit: (text: string, name: string) => void | Promise<void>, separator = "\n"): Promise<number> {
   let status = 0;
   for (const operand of operands.length ? operands : ["-"]) {
-    if (operand === "-" || operand === "/dev/stdin") {
-      const next = batches(ctx.stdin, separator);
+    if (operand === "-" || operand === "/dev/stdin" || operand === "/dev/fd/0") {
+      const next = batches(ctx.stdin, separator, ctx.limits);
       for (let text = await next(); text !== null; text = await next()) await visit(text, operand);
       continue;
     }

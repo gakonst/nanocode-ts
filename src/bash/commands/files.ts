@@ -128,7 +128,7 @@ const cat: CommandHandler = streaming(async ctx => {
   let status = 0;
   for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
     blank = false;
-    if (plain && (operand === "-" || operand === "/dev/stdin")) {
+    if (plain && (operand === "-" || operand === "/dev/stdin" || operand === "/dev/fd/0")) {
       for (let chunk = await ctx.stdin.chunk(); chunk !== null; chunk = await ctx.stdin.chunk()) await put(ctx, chunk);
       continue;
     }
