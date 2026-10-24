@@ -101,6 +101,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     const { signal } = parameters;
     let delay = reconnectMs;
     session.cursor ??= FIRST_CURSOR;
+    if (session.cursor.endsWith(";end")) return;
     while (!signal?.aborted) {
       const response = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(session.cursor)}`, { headers: headers(), signal }).catch(() => undefined);
       if (response && (response.status === 408 || response.status === 429 || response.status >= 500)) {
