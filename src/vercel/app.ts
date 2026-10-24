@@ -23,6 +23,8 @@ export type NanocodeAppOptions = Omit<NanocodeHarnessOptions, "provider" | "mode
   chaos?: boolean;
   marks?: boolean;
   traceAudience?: string;
+  directDriveMs?: number;
+  deadlineMarginMs?: number;
 };
 
 export function selectionOf(harnesses: SelectionHarness[], harness: unknown, chosen: unknown, effort: unknown): Selection | undefined {
@@ -37,7 +39,7 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
 type Body = { effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
 
 export function createNanocode(options: NanocodeAppOptions) {
-  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, defaultSelection: chosenDefault, hands: chosenHands, ...rest } = options;
+  const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, directDriveMs, deadlineMarginMs, defaultSelection: chosenDefault, hands: chosenHands, ...rest } = options;
   const hands = chosenHands ?? {};
   const harness = { ...rest, hands };
   const first = harnesses[0]!.models[0]!;
@@ -57,6 +59,8 @@ export function createNanocode(options: NanocodeAppOptions) {
     }),
     durability: kernel,
     marks: marks ?? false,
+    ...(directDriveMs ? { directDriveMs } : {}),
+    ...(deadlineMarginMs ? { deadlineMarginMs } : {}),
   });
   const chat = agent.chatRoute(authorize ? { authorize } : {});
   const handRoutes = handRoute({
