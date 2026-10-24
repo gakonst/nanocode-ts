@@ -95,7 +95,7 @@ export function useConfig(): Config {
 
 function useChatState<T>(select: (state: ChatState) => T): T {
   const config = useConfig();
-  return useSyncExternalStore(config.subscribe, () => select(config.getState()), () => select(config.getState()));
+  return useSyncExternalStore(config.subscribe, () => select(config.getState()), () => select(config.getServerState()));
 }
 
 export function useTranscript(): { entries: readonly Entry[]; live: readonly Entry[] } {
@@ -659,8 +659,12 @@ const TYPING_DELAY_MS = 500;
 export function Chat(props: ChatProps) {
   const part = usePart();
   const { entries, live } = useTranscript();
+<<<<<<< HEAD
+  const { cancel, canCancel, send, isPending: busy } = useSend();
+=======
   const { send, isPending: busy } = useSend();
   const attachments = useAttachments();
+>>>>>>> origin/main
   const doing = useActivity();
   const threads = useConversations();
   const [own, setOwn] = useState<Picker | null>(null);
@@ -880,8 +884,9 @@ export function Chat(props: ChatProps) {
 
         <p {...part("status")}>
           <span {...part("statusText")}>{props.status}</span>
-          {(props.actions || threads.enabled) && (
+          {(props.actions || threads.enabled || canCancel) && (
             <span {...part("actions")}>
+              {canCancel && <button aria-label="Stop the running turn" onClick={() => void cancel()} type="button" {...part("suggestion", { quiet: true })}>stop</button>}
               {threads.enabled && <button disabled={!threads.canSelect} onClick={openHistory} title="Conversations" type="button" {...part("suggestion", { quiet: true })}>history ({threads.conversations.length})</button>}
               {props.actions}
             </span>

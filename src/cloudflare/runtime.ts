@@ -1,8 +1,12 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
+<<<<<<< HEAD
+import { Bash, SqlFileSystem, githubArchives, type Limits } from "../bash/index.ts";
+=======
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
+>>>>>>> origin/main
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
@@ -12,6 +16,10 @@ import { DEFAULT_EXECUTOR, EXECUTOR_ID, headerJson, json, THINKING, type HostToo
 export type { HostTool, ModelProvider } from "../index.ts";
 export type { HostToolCall, ModelDispatch, PrivateBinding, SessionAuthority, SessionDescriptor, SocketDispatch, Thinking } from "./contracts.ts";
 export { THINKING } from "./contracts.ts";
+
+const WORKSPACE_MEMORY_BYTES = 48 * 1024 * 1024;
+
+const WORKSPACE_FILE_BYTES = 32 * 1024 * 1024;
 
 const WORKERS_AI_MODELS = new Set(["glm-5.3"]);
 
@@ -48,8 +56,12 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
   mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch; deferred?: boolean };
   instructions?: string;
+<<<<<<< HEAD
+  workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number };
+=======
   handInstructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
+>>>>>>> origin/main
   valueLimit?: number;
 };
 
@@ -589,7 +601,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
           const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
           const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
-          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter } });
+          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope, options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter }, limits: { maxMemoryBytes: WORKSPACE_MEMORY_BYTES, ...options.workspace?.limits } });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);

@@ -1,6 +1,6 @@
 import { FsError, decode, masked, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
-import { DECLARATIONS, SyntaxError as ParseError, ansiEscape, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
-import { functionText } from "./print.ts";
+import { DECLARATIONS, SyntaxError as ParseError, ansiEscape, forced, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
+import { functionText, wordText } from "./print.ts";
 import { ArithError, evaluateArith, type ArithValue } from "./arith.ts";
 import { escapeRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
 import { TestError, evaluateTest, type TestArg } from "./test.ts";
@@ -11,6 +11,7 @@ export type Limits = {
   maxCallDepth: number;
   maxOutputLength: number;
   maxBufferLength: number;
+  maxMemoryBytes: number;
   maxFileOperations: number;
   timeoutMs: number;
 };
@@ -21,6 +22,23 @@ export class LimitError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+export function megabytes(bytes: number): string {
+  return (bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0) + " MB";
+}
+
+export function budget(limits: Limits, bytes: number, what: string) {
+  if (bytes > limits.maxMemoryBytes) throw new LimitError(what + " needs about " + megabytes(bytes) + ", which exceeds this host's memory budget of " + megabytes(limits.maxMemoryBytes));
+}
+
+export function flatten(text: string): string {
+  if (text.length > 256) text.charCodeAt(text.length >> 1);
+  return text;
+}
+
+export function append<T>(target: T[], items: readonly T[]) {
+  for (let i = 0; i < items.length; i++) target.push(items[i]!);
 }
 
 export class CommandError extends Error {
@@ -88,12 +106,14 @@ export class Pipe {
   ended = false;
   closed = false;
   readonly limit: number;
+  readonly memory: number;
   readonly signal: AbortSignal | undefined;
   #reader: (() => void) | undefined;
   #writer: (() => void) | undefined;
 
-  constructor(limit: number, signal?: AbortSignal) {
+  constructor(limit: number, signal?: AbortSignal, memory = Infinity) {
     this.limit = limit;
+    this.memory = memory;
     this.signal = signal;
     signal?.addEventListener("abort", () => this.#wake(), { once: true });
   }
@@ -112,6 +132,7 @@ export class Pipe {
 
   push(text: string) {
     if (this.closed) throw new PipeError();
+    flatten(text);
     if (this.size > 0 && this.size + text.length > this.limit) throw new LimitError("pipe buffer exceeded " + this.limit + " characters");
     this.#chunks.push(text);
     this.size += text.length;
@@ -211,6 +232,10 @@ export class Output {
     return this.#pipe !== undefined;
   }
 
+  get bounded(): boolean {
+    return !this.#pipe && !this.#spill && !this.discard;
+  }
+
   get backlog(): boolean {
     return this.#pipe ? this.#pipe.size > PIPE_HIGH : this.#pending !== undefined;
   }
@@ -227,7 +252,7 @@ export class Output {
       this.truncated = true;
       if (!text) return;
     }
-    this.#chunks.push(text);
+    this.#chunks.push(flatten(text));
     this.length += text.length;
     if (this.#spill && this.length >= SPILL) this.#flush(false);
   }
@@ -299,6 +324,12 @@ export class Input {
     return this.#done;
   }
 
+  #refuse(size: number): never {
+    const pipe = this.#pipe!;
+    if (size > pipe.memory) throw new LimitError("input of more than " + megabytes(pipe.memory) + " exceeds this host's memory budget of " + megabytes(pipe.memory));
+    throw new LimitError("input exceeded " + pipe.limit * WHOLE_INPUT + " characters");
+  }
+
   #pending(): never {
     throw new Error("stdin is an open pipe; read it with await stdin.text(), chunk() or readLine()");
   }
@@ -311,8 +342,7 @@ export class Input {
       return false;
     }
     const rest = this.#text.length - this.#pos;
-    const cap = this.#pipe!.limit * WHOLE_INPUT;
-    if (rest + chunk.length > cap) throw new LimitError("input exceeded " + cap + " characters");
+    if (rest + chunk.length > Math.min(this.#pipe!.limit * WHOLE_INPUT, this.#pipe!.memory)) this.#refuse(rest + chunk.length);
     this.#scan = Math.max(0, this.#scan - this.#pos);
     this.#text = rest ? this.#text.slice(this.#pos) + chunk : chunk;
     this.#pos = 0;
@@ -322,12 +352,12 @@ export class Input {
   async fill() {
     if (this.#done || !this.#pipe) return;
     const pipe = this.#pipe;
-    const cap = pipe.limit * WHOLE_INPUT;
+    const cap = Math.min(pipe.limit * WHOLE_INPUT, pipe.memory);
     const parts = [this.#pos ? this.#text.slice(this.#pos) : this.#text];
     let size = parts[0].length;
     for (let chunk = await pipe.take(); chunk !== null; chunk = await pipe.take()) {
       size += chunk.length;
-      if (size > cap) throw new LimitError("input exceeded " + cap + " characters");
+      if (size > cap) this.#refuse(size);
       parts.push(chunk);
     }
     this.#done = true;
@@ -406,7 +436,9 @@ export class Input {
   }
 }
 
-export type IO = { stdin: Input; stdout: Output; stderr: Output };
+export type Fd = { input?: Input; output?: Output; close?: () => void };
+
+export type IO = { stdin: Input; stdout: Output; stderr: Output; fds?: Map<number, Fd> };
 
 export type CommandContext = {
   name: string;
@@ -470,7 +502,7 @@ export class State {
   cwd = "/";
   umask = 0o022;
   status = 0;
-  options = { errexit: false, nounset: false, pipefail: false, xtrace: false, noglob: false };
+  options = { errexit: false, nounset: false, pipefail: false, xtrace: false, noglob: false, noclobber: false };
 
   clone(): State {
     const state = new State();
@@ -612,6 +644,7 @@ export class Runner {
   #depth = 0;
   #condition = 0;
   #substitution: number | undefined;
+  #trapping = false;
 
   constructor(host: ShellHost, state: State, signal: AbortSignal, shared?: Shared) {
     this.host = host;
@@ -650,7 +683,10 @@ export class Runner {
     } catch (error) {
       if (error instanceof ExitSignal || error instanceof ReturnSignal || error instanceof KillSignal) status = error.status;
       else if (error instanceof PipeError) status = 141;
-      else throw error;
+      else if (error instanceof FatalError && io) {
+        if (!error.reported) io.stderr.write("bash: " + error.message + "\n");
+        status = 1;
+      } else throw error;
     }
     return io && this.state.traps.has("EXIT") ? await this.exitTrap(io, status) : status;
   }
@@ -738,7 +774,7 @@ export class Runner {
     const pid = ++this.#shared.pid;
     let id = 1;
     for (const job of this.state.jobs.values()) if (job.id >= id) id = job.id + 1;
-    const stdio: IO = { stdin: new Input(), stdout: io.stdout, stderr: io.stderr };
+    const stdio: IO = { stdin: new Input(), stdout: io.stdout, stderr: io.stderr, fds: io.fds };
     const job: Job = { id, pid, source: item.source ?? "", controller, promise: Promise.resolve(0) };
     job.promise = (async () => {
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -754,6 +790,49 @@ export class Runner {
     this.#shared.running.add(job.promise);
     this.state.jobs.set(pid, job);
     this.state.vars.set("!", [String(pid)]);
+  }
+
+  named(name: string): string | undefined {
+    const element = /^([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]$/.exec(name);
+    return element ? this.state.vars.get(element[1]!)?.[Number(element[2])] : this.get(name);
+  }
+
+  coproc(name: string, run: (runner: Runner, stdio: IO) => Promise<number>, io: IO): number {
+    const controller = new AbortController();
+    const runner = this.fork(this.state.clone(), AbortSignal.any([this.signal, controller.signal]));
+    const pid = ++this.#shared.pid;
+    let id = 1;
+    for (const job of this.state.jobs.values()) if (job.id >= id) id = job.id + 1;
+    const input = new Pipe(this.host.limits.maxBufferLength, this.signal);
+    const output = new Pipe(this.host.limits.maxBufferLength, this.signal);
+    const stdio: IO = { stdin: Input.pipe(input), stdout: Output.pipe(output), stderr: io.stderr, fds: io.fds };
+    const job: Job = { id, pid, source: "coproc " + name, controller, promise: Promise.resolve(0) };
+    job.promise = (async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return guard(runner, stdio, () => runner.isolated(() => run(runner, stdio)));
+    })().catch(error => {
+      io.stderr.write("bash: " + message(error) + "\n");
+      return 1;
+    }).then(status => {
+      output.end();
+      job.status = status;
+      this.#shared.running.delete(job.promise);
+      return status;
+    });
+    this.#shared.running.add(job.promise);
+    this.state.jobs.set(pid, job);
+    this.state.vars.set("!", [String(pid)]);
+    const fds = new Map(io.fds ?? []);
+    let read = 63;
+    while (fds.has(read)) read--;
+    let write = read - 1;
+    while (fds.has(write)) write--;
+    fds.set(read, { input: Input.pipe(output) });
+    fds.set(write, { output: Output.pipe(input), close: () => input.end() });
+    io.fds = fds;
+    this.state.vars.set(name, [String(read), String(write)]);
+    this.state.vars.set(name + "_PID", [String(pid)]);
+    return 0;
   }
 
   job(id: string): Job | undefined {
@@ -865,11 +944,12 @@ export class Runner {
     } else {
       const count = pipeline.commands.length;
       const pipes: Pipe[] = [];
-      for (let i = 1; i < count; i++) pipes.push(new Pipe(this.host.limits.maxBufferLength, this.signal));
+      for (let i = 1; i < count; i++) pipes.push(new Pipe(this.host.limits.maxBufferLength, this.signal, this.host.limits.maxMemoryBytes));
       const settled = await Promise.allSettled(pipeline.commands.map((command, i) => {
-        const runner = this.fork(this.state.clone());
-        const stage: IO = { stdin: i ? Input.pipe(pipes[i - 1]) : io.stdin, stdout: i < count - 1 ? Output.pipe(pipes[i]) : io.stdout, stderr: io.stderr };
-        return runner.isolated(() => runner.command(command, stage)).finally(() => {
+        const last = i === count - 1 && this.state.shopt.has("lastpipe");
+        const runner = last ? this : this.fork(this.state.clone());
+        const stage: IO = { stdin: i ? Input.pipe(pipes[i - 1]) : io.stdin, stdout: i < count - 1 ? Output.pipe(pipes[i]) : io.stdout, stderr: io.stderr, fds: io.fds };
+        return (last ? runner.command(command, stage) : runner.isolated(() => runner.command(command, stage))).finally(() => {
           if (i < count - 1) pipes[i].end();
           if (i) pipes[i - 1].close();
         });
@@ -933,7 +1013,7 @@ export class Runner {
       await redirected.flush();
       if (this.#deferred.length > mark) for (const { path, body } of this.#deferred.splice(mark)) {
         const text = decode(await this.host.fs.read(path).catch(() => new Uint8Array(0)));
-        await this.subshell(() => this.script(body, { stdin: new Input(text), stdout: io.stdout, stderr: io.stderr }));
+        await this.subshell(() => this.script(body, { stdin: new Input(text), stdout: io.stdout, stderr: io.stderr, fds: io.fds }));
       }
     }
   }
@@ -950,7 +1030,7 @@ export class Runner {
     this.enter();
     const out = this.buffer();
     try {
-      await this.subshell(() => this.script(part.body, { stdin: io.stdin, stdout: out, stderr: io.stderr }));
+      await this.subshell(() => this.script(part.body, { stdin: io.stdin, stdout: out, stderr: io.stderr, fds: io.fds }));
     } finally {
       this.leave();
     }
@@ -982,9 +1062,37 @@ export class Runner {
       }
       case "for": {
         let values: string[] = [];
-        if (command.items) for (const item of command.items) values.push(...(await this.fields(item, io)));
+        if (command.items) for (const item of command.items) append(values, await this.fields(item, io));
         else values = [...this.state.positional];
         let status = 0;
+        if (command.select) {
+          const menu = () => {
+            const width = String(values.length).length;
+            io.stderr.write(values.map((value, index) => String(index + 1).padStart(width) + ") " + value + "\n").join(""));
+          };
+          if (!values.length) return 0;
+          menu();
+          for (let iteration = 1; ; iteration++) {
+            this.iteration(iteration);
+            io.stderr.write(this.get("PS3") ?? "#? ");
+            const line = await io.stdin.readLine("\n");
+            if (!line) {
+              io.stdout.write("\n");
+              return 1;
+            }
+            this.set("REPLY", line.text);
+            if (line.text.trim() === "") {
+              menu();
+              continue;
+            }
+            const choice = /^\s*\d+\s*$/.test(line.text) ? Number(line.text) : 0;
+            this.set(command.name, choice >= 1 && choice <= values.length ? values[choice - 1] : "");
+            const signal = await this.body(command.body, io);
+            if (typeof signal === "number") status = signal;
+            else if (signal === "break") break;
+          }
+          return status;
+        }
         for (let i = 0; i < values.length; i++) {
           this.iteration(i + 1);
           this.set(command.name, values[i]);
@@ -1027,6 +1135,10 @@ export class Runner {
           falling = item.next === "fall";
         }
         return status;
+      }
+      case "coproc": {
+        const body = command.body;
+        return this.coproc(command.name, (runner, stdio) => runner.command(body, stdio), io);
       }
       case "group": {
         if (!command.subshell) return this.script(command.body, io);
@@ -1125,12 +1237,13 @@ export class Runner {
       const line = LINES[command.line] ??= String(command.line);
       if (this.state.vars.get("LINENO")?.[0] !== line) this.state.vars.set("LINENO", [line]);
     }
+    if (this.state.traps.size && this.state.traps.has("DEBUG")) await this.debugTrap(command, io);
     const head = command.words[0];
     if (head && Array.isArray(head) && head.length === 1 && head[0].type === "text" && !head[0].quoted && DECLARATIONS.has(head[0].value) && !this.state.functions.has(head[0].value)) {
       return this.declare(head[0].value, command.words.slice(1), io);
     }
     const argv: string[] = [];
-    for (const word of command.words) if (Array.isArray(word)) argv.push(...(await this.fields(word, io)));
+    for (const word of command.words) if (Array.isArray(word)) append(argv, await this.fields(word, io));
     if (!argv.length) {
       for (const assign of command.assigns) await this.assign(assign, io);
       return this.#substitution ?? 0;
@@ -1177,6 +1290,9 @@ export class Runner {
         if (key) entries.push(Number(await this.arith(key, io)), await this.string(assign.items[i], io));
         else for (const value of await this.fields(assign.items[i], io)) entries.push(value);
       }
+      let size = 0;
+      for (const entry of entries) size += typeof entry === "string" ? entry.length + 40 : 8;
+      budget(this.host.limits, size, name + ": an array of " + entries.length + " elements");
       const array = assign.append ? this.state.vars.get(name) ?? [] : [];
       let position = array.length;
       for (let i = 0; i < entries.length; i++) {
@@ -1214,7 +1330,16 @@ export class Runner {
     }
     if (assign.append) {
       const current = this.state.vars.get(name);
-      this.set(name, current && current.length > 1 ? [...current, value] : (current?.[0] ?? "") + value);
+      if (current && current.length > 1) {
+        current.push(value);
+        this.set(name, current);
+        return;
+      }
+      const before = current?.[0] ?? "";
+      const next = before + value;
+      if (next.length >>> 20 !== before.length >>> 20) budget(this.host.limits, 4 * next.length, name);
+      if (next.length > 4096 && Math.clz32(next.length) < Math.clz32(before.length)) flatten(next);
+      this.set(name, next);
     } else this.set(name, value);
   }
 
@@ -1265,7 +1390,7 @@ export class Runner {
         const value = this.state.vars.get(name);
         if (!value) continue;
         const flag = (value.length > 1 ? "a" : "") + (this.state.integers.has(name) ? "i" : "") + (this.state.readonly.has(name) ? "r" : "") + (this.state.exported.has(name) ? "x" : "");
-        const body = value.length > 1 ? "(" + value.map((item, index) => "[" + index + "]=" + JSON.stringify(item)).join(" ") + ")" : JSON.stringify(value[0] ?? "");
+        const body = value.length > 1 ? "(" + value.map((item, index) => "[" + index + "]=" + JSON.stringify(item)).filter(() => true).join(" ") + ")" : JSON.stringify(value[0] ?? "");
         io.stdout.write("declare -" + (flag || "-") + " " + name + "=" + body + "\n");
       }
       return 0;
@@ -1464,12 +1589,14 @@ export class Runner {
     this.state.vars.set("BASH_SOURCE", [this.state.sources.get(name) ?? "environment", ...(sources ?? [])]);
     this.state.positional = args;
     this.state.frames.push(frame);
+    const trap = this.state.traps.get("RETURN");
     try {
       return await this.command(body, io);
     } catch (error) {
       if (error instanceof ReturnSignal) return error.status;
       throw error;
     } finally {
+      await this.returnTrap(trap, io);
       this.state.frames.pop();
       const state = this.state;
       for (const [name, saved] of frame) {
@@ -1495,6 +1622,38 @@ export class Runner {
     }
   }
 
+  async returnTrap(before: string | undefined, io: IO) {
+    const action = this.state.traps.get("RETURN");
+    if (action === undefined || action === before || this.#trapping) return;
+    const status = this.state.status;
+    this.#trapping = true;
+    try {
+      await this.script(parse(action), io);
+    } catch (error) {
+      if (!(error instanceof ReturnSignal || error instanceof ParseError)) throw error;
+    } finally {
+      this.#trapping = false;
+      this.state.status = status;
+    }
+  }
+
+  async debugTrap(command: Command & { type: "simple" }, io: IO) {
+    const action = this.state.traps.get("DEBUG");
+    if (action === undefined || this.#trapping || this.state.frames.length) return;
+    const text = [...command.assigns.map(assign => assign.name + (assign.append ? "+=" : "=") + (assign.value ? wordText(assign.value) : assign.items ? "(" + assign.items.map(wordText).join(" ") + ")" : "")), ...command.words.filter(Array.isArray).map(word => wordText(word as Word))].join(" ");
+    const status = this.state.status;
+    this.#trapping = true;
+    this.state.vars.set("BASH_COMMAND", [text]);
+    try {
+      await this.script(parse(action), io);
+    } catch (error) {
+      if (!(error instanceof ParseError)) throw error;
+    } finally {
+      this.#trapping = false;
+      this.state.status = status;
+    }
+  }
+
   async source(path: string, args: string[], io: IO, isolated: boolean, arg0?: string, label?: string): Promise<number> {
     const text = decode(await this.host.fs.read(path));
     let script: Script;
@@ -1512,13 +1671,15 @@ export class Runner {
       if (args.length || isolated) this.state.positional = args;
       if (arg0 !== undefined) this.state.arg0 = arg0;
       this.state.vars.set("BASH_SOURCE", [arg0 ?? label ?? path, ...(sources ?? [])]);
+      const trap = this.state.traps.get("RETURN");
       try {
         return await this.script(script, io);
       } catch (error) {
         if (error instanceof ReturnSignal) return error.status;
         throw error;
       } finally {
-        if (!isolated) this.state.positional = positional;
+        if (!isolated && args.length && this.state.positional === args) this.state.positional = positional;
+        await this.returnTrap(trap, io);
         if (sources) this.state.vars.set("BASH_SOURCE", sources);
         else this.state.vars.delete("BASH_SOURCE");
         this.leave();
@@ -1530,68 +1691,137 @@ export class Runner {
   async redirect(redirects: Redirect[], io: IO): Promise<{ io: IO; flush(): Promise<void> }> {
     if (!redirects.length) return { io, flush: async () => undefined };
     const fds: [Input, Output, Output] = [io.stdin, io.stdout, io.stderr];
+    let extra = io.fds;
+    const table = () => (extra === io.fds ? (extra = new Map(io.fds ?? [])) : extra!);
     const writes: Output[] = [];
-    const open = async (target: string, append: boolean): Promise<Output> => {
+    const bad = (fd: number | string) => new CommandError(fd + ": Bad file descriptor");
+    const device = (target: string) => {
+      const match = /^\/dev\/fd\/(\d+)$/.exec(target);
+      if (!match) return undefined;
+      const fd = Number(match[1]);
+      return fd <= 2 || extra?.has(fd) ? fd : undefined;
+    };
+    const open = async (target: string, append: boolean, redirect?: Redirect): Promise<Output> => {
       if (target === "/dev/null") return new Output(0, false, true);
-      if (target === "/dev/stdout") return io.stdout;
-      if (target === "/dev/stderr") return io.stderr;
+      if (target === "/dev/stdout") return fds[1];
+      if (target === "/dev/stderr") return fds[2];
+      const fd = device(target);
+      if (fd !== undefined) {
+        const out = fd === 1 || fd === 2 ? fds[fd] : extra?.get(fd)?.output;
+        if (!out) throw bad(fd);
+        if (fd > 2) writes.push(out);
+        return out;
+      }
       if (target === "") throw new CommandError("ambiguous redirect");
       const path = this.resolve(target);
       const stat = await this.host.fs.stat(path);
       if (stat?.kind === "directory") throw new FsError("EISDIR", target);
+      if (!append && stat && this.state.options.noclobber && !(redirect && forced.has(redirect)) && stat.kind === "file") throw new CommandError(target + ": cannot overwrite existing file");
       if (!append || !stat) await this.host.fs.write(path, new Uint8Array(0));
       if (!stat && this.state.umask !== 0o022 && this.host.fs.chmod) await this.host.fs.chmod(path, 0o666 & ~this.state.umask);
       const out = Output.spill(this.host.limits.maxBufferLength, text => this.host.fs.write(path, encode(text), true));
       writes.push(out);
       return out;
     };
+    const input = async (target: string): Promise<Input> => {
+      if (target === "/dev/null") return new Input("");
+      if (target === "/dev/stdin") return fds[0];
+      const fd = device(target);
+      if (fd !== undefined) {
+        const found = fd === 0 ? fds[0] : extra?.get(fd)?.input;
+        if (!found) throw bad(fd);
+        return found;
+      }
+      return new Input(decode(await this.host.fs.read(this.resolve(target))));
+    };
     const flush = async () => {
       for (const out of writes) await out.settle();
+    };
+    const allocate = (redirect: Redirect) => {
+      if (redirect.name === undefined) return redirect.fd;
+      let fd = 10;
+      while (extra?.has(fd)) fd++;
+      this.set(redirect.name, String(fd));
+      return fd;
     };
     try {
       for (const redirect of redirects) {
         const op = redirect.op;
         if (op === "<<" || op === "<<-" || op === "<<<") {
           const text = op !== "<<<" ? await this.string(redirect.body ?? [], io) : (await this.string(redirect.target, io)) + "\n";
-          if ((redirect.fd ?? 0) === 0) fds[0] = new Input(text);
+          const fd = allocate(redirect) ?? 0;
+          if (fd === 0) fds[0] = new Input(text);
+          else if (fd > 2) table().set(fd, { input: new Input(text) });
           continue;
         }
         const target = await this.string(redirect.target, io);
         if (op === "<" || op === "<>") {
-          if ((redirect.fd ?? 0) !== 0) continue;
-          if (target === "/dev/null") fds[0] = new Input("");
-          else if (target !== "/dev/stdin") fds[0] = new Input(decode(await this.host.fs.read(this.resolve(target))));
+          const fd = allocate(redirect) ?? 0;
+          if (op === "<>" && device(target) === undefined && target !== "/dev/null" && target !== "/dev/stdin") {
+            const path = this.resolve(target);
+            const stat = await this.host.fs.stat(path);
+            if (stat?.kind === "directory") throw new FsError("EISDIR", target);
+            if (!stat) await this.host.fs.write(path, new Uint8Array(0));
+            const source = await input(target);
+            if (fd === 0) fds[0] = source;
+            else {
+              const out = Output.spill(this.host.limits.maxBufferLength, text => this.host.fs.write(path, encode(text), true));
+              writes.push(out);
+              if (fd === 1 || fd === 2) fds[fd] = out;
+              else table().set(fd, { input: source, output: out });
+            }
+            continue;
+          }
+          const source = await input(target);
+          if (fd === 0) fds[0] = source;
+          else if (fd > 2) table().set(fd, { input: source });
           continue;
         }
         if ((op === ">&" || op === "<&") && /^\d+-?$/.test(target)) {
-          const fd = redirect.fd ?? (op === ">&" ? 1 : 0);
+          const fd = allocate(redirect) ?? (op === ">&" ? 1 : 0);
           const from = Number(target.replace("-", ""));
+          const source: Fd | undefined = from === 0 ? { input: fds[0] } : from === 1 || from === 2 ? { output: fds[from] } : extra?.get(from);
+          if (!source) throw bad(from);
           if (fd === 1 || fd === 2) {
-            if (from === 1 || from === 2) fds[fd] = fds[from] as Output;
-          } else if (fd === 0 && from === 0) fds[0] = io.stdin;
+            if (!source.output) throw bad(from);
+            fds[fd] = source.output;
+            if (from > 2) writes.push(source.output);
+          } else if (fd === 0) {
+            if (!source.input) throw bad(from);
+            fds[0] = source.input;
+          } else table().set(fd, source);
+          if (target.endsWith("-") && from > 2) table().delete(from);
           continue;
         }
         if ((op === ">&" || op === "<&") && target === "-") {
-          const fd = redirect.fd ?? (op === ">&" ? 1 : 0);
+          const fd = redirect.name !== undefined ? Number(this.named(redirect.name) ?? -1) : (redirect.fd ?? (op === ">&" ? 1 : 0));
           if (fd === 1 || fd === 2) fds[fd] = new Output(0, false, true);
           else if (fd === 0) fds[0] = new Input("");
+          else {
+            const entry = extra?.get(fd);
+            await entry?.output?.settle();
+            entry?.close?.();
+            table().delete(fd);
+          }
           continue;
         }
-        if (op === "&>" || op === "&>>" || (op === ">&" && redirect.fd === null)) {
-          const out = await open(target, op === "&>>");
+        if (op === "&>" || op === "&>>" || (op === ">&" && redirect.fd === null && redirect.name === undefined)) {
+          const out = await open(target, op === "&>>", redirect);
           fds[1] = out;
           fds[2] = out;
           continue;
         }
-        const fd = redirect.fd ?? 1;
-        const out = await open(target, op === ">>");
+        const fd = allocate(redirect) ?? 1;
+        const out = await open(target, op === ">>", redirect);
         if (fd === 1 || fd === 2) fds[fd] = out;
+        else if (fd === 0) fds[0] = new Input("");
+        else table().set(fd, { output: out });
       }
     } catch (error) {
       await flush();
       throw error;
     }
-    return { io: { stdin: fds[0], stdout: fds[1], stderr: fds[2] }, flush };
+    return { io: { stdin: fds[0], stdout: fds[1], stderr: fds[2], ...(extra ? { fds: extra } : {}) }, flush };
   }
 
   async substitute(body: Script, io: IO): Promise<string> {
@@ -1611,13 +1841,16 @@ export class Runner {
     this.enter();
     const out = this.buffer();
     try {
-      const status = await this.subshell(() => this.script(body, { stdin: io.stdin, stdout: out, stderr: io.stderr }));
+      const status = await this.subshell(() => this.script(body, { stdin: io.stdin, stdout: out, stderr: io.stderr, fds: io.fds }));
       this.#substitution = status;
       this.state.status = status;
     } finally {
       this.leave();
     }
-    return out.text().replace(/\n+$/, "");
+    const text = out.text();
+    let end = text.length;
+    while (end && text.charCodeAt(end - 1) === 10) end--;
+    return end === text.length ? text : text.slice(0, end);
   }
 
   special(name: string): string[] | undefined {
@@ -1783,7 +2016,8 @@ export class Runner {
       }
       const source = globbed(pattern);
       const anchored = op === "/#" ? "^(?:" + source + ")" : op === "/%" ? "(?:" + source + ")$" : source;
-      if (source !== "") {
+      if (source === "" && (op === "/#" || op === "/%")) result = result.map(value => (op === "/#" ? replacement + value : value + replacement));
+      else if (source !== "") {
         const regex = compiled(anchored, op === "//" ? "g" : "");
         result = result.map(value => value.replace(regex, () => replacement));
       }
@@ -1931,7 +2165,7 @@ export class Runner {
         if (field.glob && !this.state.options.noglob) {
           const matches = await this.glob(field.pattern);
           if (matches.length) {
-            out.push(...matches);
+            append(out, matches);
             continue;
           }
           if (this.state.shopt.has("nullglob")) continue;
@@ -2448,7 +2682,7 @@ export const BUILTINS: Record<string, Builtin> = {
       for (const [name, value] of [...this.state.vars].sort(([a], [b]) => (a < b ? -1 : 1))) io.stdout.write(name + "=" + (value[0] ?? "") + "\n");
       return 0;
     }
-    const options: Record<string, keyof State["options"]> = { e: "errexit", u: "nounset", x: "xtrace", f: "noglob", errexit: "errexit", nounset: "nounset", xtrace: "xtrace", pipefail: "pipefail", noglob: "noglob" };
+    const options: Record<string, keyof State["options"]> = { e: "errexit", u: "nounset", x: "xtrace", f: "noglob", C: "noclobber", errexit: "errexit", nounset: "nounset", xtrace: "xtrace", pipefail: "pipefail", noglob: "noglob", noclobber: "noclobber" };
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
       if (arg === "--" || arg === "-") {
@@ -2468,7 +2702,7 @@ export const BUILTINS: Record<string, Builtin> = {
             continue;
           }
           if (options[name]) this.state.options[options[name]] = enable;
-          else if (!["posix", "vi", "emacs", "monitor", "notify", "noclobber", "allexport", "hashall", "braceexpand", "history", "ignoreeof", "verbose", "nolog", "physical", "functrace", "errtrace", "noexec", "keyword", "onecmd", "privileged", "interactive-comments"].includes(name)) throw new CommandError(name + ": invalid option name", 2);
+          else if (!["posix", "vi", "emacs", "monitor", "notify", "allexport", "hashall", "braceexpand", "history", "ignoreeof", "verbose", "nolog", "physical", "functrace", "errtrace", "noexec", "keyword", "onecmd", "privileged", "interactive-comments"].includes(name)) throw new CommandError(name + ": invalid option name", 2);
         } else if (options[flag]) this.state.options[options[flag]] = enable;
       }
     }
@@ -2481,6 +2715,7 @@ export const BUILTINS: Record<string, Builtin> = {
     return 0;
   },
   async read(args, io) {
+    let source = io.stdin;
     let raw = false;
     let delimiter = "\n";
     let array: string | undefined;
@@ -2488,7 +2723,7 @@ export const BUILTINS: Record<string, Builtin> = {
     const names: string[] = [];
     for (let i = 0; i < args.length; i++) {
       const arg = args[i];
-      if (/^-[a-zA-Z]+$/.test(arg) && !names.length) {
+      if (/^-[a-zA-Z]/.test(arg) && !names.length) {
         for (let j = 1; j < arg.length; j++) {
           const flag = arg[j];
           const value = () => (j + 1 < arg.length ? arg.slice(j + 1) : args[++i]);
@@ -2503,7 +2738,16 @@ export const BUILTINS: Record<string, Builtin> = {
           } else if (flag === "n" || flag === "N") {
             chars = Number(value());
             break;
-          } else if (flag === "p" || flag === "t" || flag === "u") {
+          } else if (flag === "u") {
+            const fd = Number(value());
+            const found = fd === 0 ? io.stdin : io.fds?.get(fd)?.input;
+            if (!found) {
+              io.stderr.write("bash: read: " + fd + ": invalid file descriptor: Bad file descriptor\n");
+              return 1;
+            }
+            source = found;
+            break;
+          } else if (flag === "p" || flag === "t") {
             value();
             break;
           }
@@ -2512,9 +2756,9 @@ export const BUILTINS: Record<string, Builtin> = {
     }
     let line: { text: string; complete: boolean } | null;
     if (chars !== undefined) {
-      const text = await io.stdin.readChars(chars);
+      const text = await source.readChars(chars);
       line = text ? { text, complete: true } : null;
-    } else line = await io.stdin.readLine(delimiter);
+    } else line = await source.readLine(delimiter);
     const targets = names.length ? names : array ? [] : ["REPLY"];
     if (!line) {
       for (const name of targets) this.set(name, "");
@@ -2536,15 +2780,52 @@ export const BUILTINS: Record<string, Builtin> = {
     let strip = false;
     let delimiter = "\n";
     let name = "MAPFILE";
+    let callback: string | undefined;
+    let quantum = 5000;
+    let skip = 0;
+    let limit = 0;
+    let origin: number | undefined;
+    let source = io.stdin;
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "-t") strip = true;
-      else if (args[i] === "-d") delimiter = args[++i] ?? "\n";
-      else if (args[i].startsWith("-")) i++;
-      else name = args[i];
+      const arg = args[i];
+      if (arg === "-t") strip = true;
+      else if (arg === "-d") delimiter = args[++i] ?? "\n";
+      else if (arg === "-C") callback = args[++i];
+      else if (arg === "-c") quantum = Number(args[++i] ?? 5000) || 5000;
+      else if (arg === "-s") skip = Number(args[++i] ?? 0);
+      else if (arg === "-n") limit = Number(args[++i] ?? 0);
+      else if (arg === "-O") origin = Number(args[++i] ?? 0);
+      else if (arg === "-u") {
+        const fd = Number(args[++i]);
+        const found = fd === 0 ? io.stdin : io.fds?.get(fd)?.input;
+        if (!found) {
+          io.stderr.write("bash: mapfile: " + fd + ": invalid file descriptor: Bad file descriptor\n");
+          return 1;
+        }
+        source = found;
+      } else if (arg.startsWith("-")) i++;
+      else name = arg;
     }
-    const values: string[] = [];
-    for (let line = await io.stdin.readLine(delimiter); line; line = await io.stdin.readLine(delimiter)) values.push(strip || !line.complete ? line.text : line.text + delimiter);
-    this.set(name, values);
+    if (delimiter === "") delimiter = "\0";
+    const existing = origin !== undefined ? (this.state.vars.get(name)?.slice() ?? []) : [];
+    const values: string[] = existing;
+    let index = origin ?? 0;
+    let read = 0;
+    for (let line = await source.readLine(delimiter); line; line = limit && read >= limit ? null : await source.readLine(delimiter)) {
+      if (skip > 0) {
+        skip--;
+        continue;
+      }
+      const value = strip || !line.complete ? line.text : line.text + delimiter;
+      if (callback !== undefined && read % quantum === quantum - 1) {
+        const status = await BUILTINS.eval.call(this, [callback, String(index), shellQuote(value)], io);
+        if (status === 2) return 1;
+      }
+      values[index++] = value;
+      read++;
+      if (limit && read >= limit) break;
+    }
+    this.set(name, Array.from(values, value => value ?? ""));
     return 0;
   },
   async eval(args, io) {
@@ -2715,7 +2996,9 @@ export const BUILTINS: Record<string, Builtin> = {
       if (!handler) return 1;
       const out = this.buffer();
       const status = await this.external("printf", handler, args.slice(2), { ...io, stdout: out });
-      this.set(args[1], out.text());
+      const element = /^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/.exec(args[1]);
+      if (element) await this.assign({ name: element[1], index: [{ type: "text", value: element[2], quoted: true }], value: [{ type: "text", value: out.text(), quoted: true }], append: false }, io);
+      else this.set(args[1], out.text());
       return status;
     }
     const handler = this.host.commands.get("printf");

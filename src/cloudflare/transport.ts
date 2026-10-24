@@ -44,8 +44,8 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   };
   const headers = (extra: Record<string, string> = {}) => ({ ...extra, ...options.headers?.() });
   const path = (suffix: string, session = state) => `${base}sessions/${encodeURIComponent(session.id!)}/${suffix}`;
-  const pause = (signal: AbortSignal | undefined) => new Promise<void>(resolve => {
-    const timer = setTimeout(done, reconnectMs);
+  const pause = (signal: AbortSignal | undefined, ms = reconnectMs) => new Promise<void>(resolve => {
+    const timer = setTimeout(done, ms);
     function done() {
       clearTimeout(timer);
       signal?.removeEventListener("abort", done);
@@ -98,10 +98,19 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   };
 
   const reconnect = async (requestId: string, sink: Sink, session: CloudflareSession, signal?: AbortSignal) => {
+    let delay = reconnectMs;
     while (!signal?.aborted) {
       const response = await fetch(path(`events?after=${session.cursor ?? 0}`, session), { headers: headers({ accept: "text/event-stream" }), signal }).catch(() => undefined);
+      if (response && (response.status === 408 || response.status === 429 || response.status >= 500)) {
+        const after = Number(response.headers.get("retry-after"));
+        void response.body?.cancel().catch(() => undefined);
+        await pause(signal, after > 0 ? after * 1000 : delay);
+        delay = Math.min(delay * 2, 15_000);
+        continue;
+      }
       if (response && await follow(response, requestId, sink, session, signal)) return;
-      await pause(signal);
+      delay = response ? reconnectMs : Math.min(delay * 2, 15_000);
+      await pause(signal, delay);
     }
   };
 

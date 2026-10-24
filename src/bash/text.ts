@@ -129,28 +129,30 @@ export function joinLines(parts: string[]): string {
 }
 
 const ESCAPE = /^\\(0[0-7]{0,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[\s\S])/;
+const FORMAT_ESCAPE = /^\\(0[0-7]{0,3}|[1-7][0-7]{0,2}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[\s\S])/;
 const OCTAL = /^\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[\s\S])/;
 const SIMPLE: Record<string, string> = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", f: "\f", v: "\v", "\\": "\\" };
 
-function escape(text: string, octal = false): [string, number, boolean] {
-  const match = text.match(octal ? OCTAL : ESCAPE);
+function escape(text: string, octal = false, format = false): [string, number, boolean] {
+  const match = text.match(octal ? OCTAL : format ? FORMAT_ESCAPE : ESCAPE);
   if (!match) return ["\\", 1, false];
   const body = match[1];
   if (body === "c") return ["", 2, true];
+  if (format && /^[1-7]/.test(body)) return [byte(parseInt(body, 8)), match[0].length, false];
   if (octal ? /^[0-7]/.test(body) : body[0] === "0") return [byte(parseInt((octal ? body : body.slice(1)) || "0", 8)), match[0].length, false];
   if (body.length > 1 && body[0] === "x") return [byte(parseInt(body.slice(1), 16)), match[0].length, false];
   if (body.length > 1 && (body[0] === "u" || body[0] === "U")) return [String.fromCodePoint(parseInt(body.slice(1), 16)), match[0].length, false];
   return [body in SIMPLE ? SIMPLE[body] : "\\" + body, match[0].length, false];
 }
 
-export function escapes(text: string): [string, boolean] {
+export function escapes(text: string, format = false): [string, boolean] {
   let out = "";
   for (let i = 0; i < text.length; i++) {
     if (text[i] !== "\\" || i + 1 >= text.length) {
       out += text[i];
       continue;
     }
-    const [value, length, stop] = escape(text.slice(i));
+    const [value, length, stop] = escape(text.slice(i), false, format);
     if (stop) return [out, true];
     out += value;
     i += length - 1;
@@ -170,11 +172,12 @@ function pad(text: string, width: number, left: boolean, zero: boolean): string 
   return " ".repeat(width - text.length) + text;
 }
 
-export function toNumber(value: FormatValue): number {
+export function toNumber(value: FormatValue, octal = false): number {
   if (typeof value === "number") return value;
   const text = value.trim();
   if (/^['"]/.test(text)) return text.length > 1 ? text.codePointAt(1)! : 0;
   if (/^[+-]?0[xX][0-9a-fA-F]+$/.test(text)) return parseInt(text, 16);
+  if (octal && /^[+-]?0[0-7]+$/.test(text)) return parseInt(text, 8);
   if (text === "") return 0;
   const number = Number(text);
   if (!Number.isNaN(number)) return number;
@@ -269,13 +272,13 @@ export function format(spec: string, args: FormatValue[], shell: boolean, time?:
       if (precision !== undefined) text = text.slice(0, precision);
       out += pad(text, width, left, false);
     } else if (conv === "b") {
-      const [expanded, stop] = escapes(arg === undefined ? "" : String(arg));
+      const [expanded, stop] = escapes(arg === undefined ? "" : String(arg), true);
       out += pad(expanded, width, left, false);
       if (stop) return { text: out, used, stop: true };
     } else if (conv === "c") {
       out += pad(arg === undefined ? "" : typeof arg === "number" ? String.fromCharCode(arg) : arg.slice(0, 1), width, left, false);
     } else {
-      const n = arg === undefined ? 0 : toNumber(arg);
+      const n = arg === undefined ? 0 : toNumber(arg, shell && /[diouxX]/.test(conv));
       if (shell && typeof arg === "string" && !/^\s*['"]/.test(arg) && !(/[diouxXc]/.test(conv) ? /^\s*[+-]?(0[xX][0-9a-fA-F]+|\d+)\s*$/ : /^\s*[+-]?(0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?(p[+-]?\d+)?|(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?|inf(inity)?|nan)\s*$/i).test(arg)) errors.push(arg + ": invalid number");
       let text: string;
       if (conv === "d" || conv === "i" || conv === "u") {

@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 
 use wasmi::{
-    CompilationMode, Config, Engine, Error, Extern, ExternType, F32, F64, Func, FuncType, Instance,
+    CompilationMode, Config, CustomFuelCosts, Engine, Error, Extern, ExternType, F32, F64, Func, FuncType, Instance,
     Memory, Module, ResumableCall, ResumableCallOutOfFuel, Store, StoreLimits, StoreLimitsBuilder,
     Val, ValType,
 };
@@ -28,7 +28,14 @@ struct Slot {
 thread_local! {
     static ENGINE: Engine = {
         let mut config = Config::default();
-        config.consume_fuel(true).compilation_mode(CompilationMode::Lazy);
+        config
+            .consume_fuel(true)
+            .fuel_cost(CustomFuelCosts {
+                bytes_copied_per_fuel: 64,
+                fuel_per_bytes_translated: 0,
+                fuel_per_bytes_validated: 0,
+            })
+            .compilation_mode(CompilationMode::Lazy);
         Engine::new(&config)
     };
     static MODULES: RefCell<Vec<Option<Module>>> = const { RefCell::new(Vec::new()) };

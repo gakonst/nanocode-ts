@@ -51,6 +51,296 @@ export class Refused extends Error {
 
 const SLICE = 10_000_000;
 
+const CHECK_BUDGET = 1_000_000;
+
+const CHECK_TABLE = "__nanocode_check";
+
+const HELPER = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 2, 7, 1, 1, 0x68, 1, 0x63, 0, 0, 3, 2, 1, 0, 7, 5, 1, 1, 0x66, 0, 1, 10, 6, 1, 4, 0, 0x10, 0, 0x0b]);
+
+class Unsupported extends Error {}
+
+function leb(value: number): number[] {
+  const out: number[] = [];
+  let rest = value >>> 0;
+  do {
+    let byte = rest & 0x7f;
+    rest >>>= 7;
+    if (rest) byte |= 0x80;
+    out.push(byte);
+  } while (rest);
+  return out;
+}
+
+function sleb(value: number): number[] {
+  const out: number[] = [];
+  let rest = value | 0;
+  for (;;) {
+    const byte = rest & 0x7f;
+    rest >>= 7;
+    if ((rest === 0 && !(byte & 0x40)) || (rest === -1 && byte & 0x40)) {
+      out.push(byte);
+      return out;
+    }
+    out.push(byte | 0x80);
+  }
+}
+
+function instrument(bytes: Uint8Array): Uint8Array | undefined {
+  if (bytes.length < 8) return undefined;
+  let pos = 8;
+  const u32 = () => {
+    let result = 0;
+    let shift = 0;
+    for (;;) {
+      const byte = bytes[pos++];
+      if (byte === undefined) throw new Unsupported();
+      result += (byte & 0x7f) * 2 ** shift;
+      shift += 7;
+      if (!(byte & 0x80)) return result;
+    }
+  };
+  const skipLeb = () => {
+    while (bytes[pos++]! & 0x80) if (pos > bytes.length) throw new Unsupported();
+  };
+  const heap = () => skipLeb();
+  const valtype = () => {
+    const byte = bytes[pos++]!;
+    if (byte === 0x63 || byte === 0x64) heap();
+  };
+  const blocktype = () => {
+    const byte = bytes[pos]!;
+    if (byte === 0x40 || (byte >= 0x6f && byte <= 0x7f) || (byte >= 0x69 && byte <= 0x6e)) pos++;
+    else if (byte === 0x63 || byte === 0x64) {
+      pos++;
+      heap();
+    } else skipLeb();
+  };
+  const memarg = () => {
+    const align = u32();
+    if (align & 0x40) skipLeb();
+    skipLeb();
+  };
+  type Section = { id: number; head: number; start: number; end: number };
+  const sections: Section[] = [];
+  while (pos < bytes.length) {
+    const head = pos;
+    const id = bytes[pos++]!;
+    const size = u32();
+    sections.push({ id, head, start: pos, end: pos + size });
+    pos += size;
+  }
+  if (pos !== bytes.length) return undefined;
+  const find = (id: number) => sections.find(section => section.id === id);
+  const code = find(10);
+  if (!code) return undefined;
+  const count = (section: Section | undefined) => {
+    if (!section) return 0;
+    pos = section.start;
+    return u32();
+  };
+  let imported = { table: 0, global: 0 };
+  const importSection = find(2);
+  if (importSection) {
+    pos = importSection.start;
+    const n = u32();
+    for (let i = 0; i < n; i++) {
+      const module = u32();
+      pos += module;
+      const field = u32();
+      pos += field;
+      const kind = bytes[pos++];
+      if (kind === 0) skipLeb();
+      else if (kind === 1) {
+        valtype();
+        const flags = u32();
+        skipLeb();
+        if (flags & 1) skipLeb();
+        imported.table++;
+      } else if (kind === 2) {
+        const flags = u32();
+        skipLeb();
+        if (flags & 1) skipLeb();
+      } else if (kind === 3) {
+        valtype();
+        pos++;
+        imported.global++;
+      } else if (kind === 4) {
+        pos++;
+        skipLeb();
+      } else throw new Unsupported();
+    }
+  }
+  const typeIndex = count(find(1));
+  const tableIndex = imported.table + count(find(4));
+  const globalIndex = imported.global + count(find(6));
+  const site = [0x23, ...leb(globalIndex), 0x41, 1, 0x6b, 0x24, ...leb(globalIndex), 0x23, ...leb(globalIndex), 0x45, 0x04, 0x40, 0x41, 0, 0x11, ...leb(typeIndex), ...leb(tableIndex), 0x41, ...sleb(CHECK_BUDGET), 0x24, ...leb(globalIndex), 0x0b];
+  pos = code.start;
+  const functions = u32();
+  const bodies: Uint8Array[] = [];
+  let loops = 0;
+  for (let f = 0; f < functions; f++) {
+    const size = u32();
+    const start = pos;
+    const end = pos + size;
+    const groups = u32();
+    for (let g = 0; g < groups; g++) {
+      skipLeb();
+      valtype();
+    }
+    const pieces: Uint8Array[] = [];
+    let copied = start;
+    while (pos < end) {
+      const op = bytes[pos++]!;
+      switch (op) {
+        case 0x03:
+          blocktype();
+          pieces.push(bytes.subarray(copied, pos), new Uint8Array(site));
+          copied = pos;
+          loops++;
+          break;
+        case 0x02: case 0x04: case 0x06:
+          blocktype();
+          break;
+        case 0x1f: {
+          blocktype();
+          const n = u32();
+          for (let i = 0; i < n; i++) {
+            const kind = bytes[pos++]!;
+            if (kind === 0 || kind === 1) skipLeb();
+            skipLeb();
+          }
+          break;
+        }
+        case 0x07: case 0x08: case 0x09: case 0x0c: case 0x0d: case 0x10: case 0x12: case 0x14: case 0x15: case 0x18: case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26: case 0x3f: case 0x40: case 0x41: case 0x42: case 0xd2: case 0xd4: case 0xd6:
+          skipLeb();
+          break;
+        case 0x0e: {
+          const n = u32();
+          for (let i = 0; i <= n; i++) skipLeb();
+          break;
+        }
+        case 0x11: case 0x13:
+          skipLeb();
+          skipLeb();
+          break;
+        case 0x1c: {
+          const n = u32();
+          for (let i = 0; i < n; i++) valtype();
+          break;
+        }
+        case 0x43:
+          pos += 4;
+          break;
+        case 0x44:
+          pos += 8;
+          break;
+        case 0xd0:
+          heap();
+          break;
+        case 0xfc: {
+          const sub = u32();
+          if (sub === 8 || sub === 10 || sub === 12 || sub === 14) {
+            skipLeb();
+            skipLeb();
+          } else if (sub === 9 || sub === 11 || sub === 13 || sub === 15 || sub === 16 || sub === 17) skipLeb();
+          else if (sub > 17) throw new Unsupported();
+          break;
+        }
+        case 0xfd: {
+          const sub = u32();
+          if (sub <= 11 || sub === 92 || sub === 93) memarg();
+          else if (sub === 12 || sub === 13) pos += 16;
+          else if (sub >= 21 && sub <= 34) pos += 1;
+          else if (sub >= 84 && sub <= 91) {
+            memarg();
+            pos += 1;
+          }
+          break;
+        }
+        case 0xfe: {
+          const sub = u32();
+          if (sub === 3) pos += 1;
+          else memarg();
+          break;
+        }
+        default:
+          if (op >= 0x28 && op <= 0x3e) memarg();
+          else if (op === 0xfb || op === 0x05 || op === 0x0a || op === 0x19 || op === 0x00 || op === 0x01 || op === 0x0b || op === 0x0f || op === 0x1a || op === 0x1b || (op >= 0x45 && op <= 0xc4) || op === 0xd1 || op === 0xd3 || op === 0xd5) {
+            if (op === 0xfb) throw new Unsupported();
+          } else throw new Unsupported();
+      }
+    }
+    if (pos !== end) throw new Unsupported();
+    pieces.push(bytes.subarray(copied, end));
+    const length = pieces.reduce((total, piece) => total + piece.length, 0);
+    const body = new Uint8Array(leb(length).length + length);
+    body.set(leb(length));
+    let at = leb(length).length;
+    for (const piece of pieces) {
+      body.set(piece, at);
+      at += piece.length;
+    }
+    bodies.push(body);
+  }
+  if (!loops) return undefined;
+  const vector = (section: Section | undefined, extra: number[]) => {
+    const n = count(section);
+    const rest = section ? bytes.subarray(pos, section.end) : new Uint8Array();
+    return new Uint8Array([...leb(n + 1), ...rest, ...extra]);
+  };
+  const name = new TextEncoder().encode(CHECK_TABLE);
+  const replaced = new Map<number, Uint8Array>([
+    [1, vector(find(1), [0x60, 0, 0])],
+    [4, vector(find(4), [0x70, 0, 1])],
+    [6, vector(find(6), [0x7f, 1, 0x41, ...sleb(CHECK_BUDGET), 0x0b])],
+    [7, vector(find(7), [...leb(name.length), ...name, 1, ...leb(tableIndex)])],
+  ]);
+  const codeLength = leb(functions).length + bodies.reduce((total, body) => total + body.length, 0);
+  const codeBytes = new Uint8Array(codeLength);
+  codeBytes.set(leb(functions));
+  let at = leb(functions).length;
+  for (const body of bodies) {
+    codeBytes.set(body, at);
+    at += body.length;
+  }
+  replaced.set(10, codeBytes);
+  const order = [1, 2, 3, 4, 5, 13, 6, 7, 8, 9, 12, 10, 11];
+  const out: Uint8Array[] = [bytes.subarray(0, 8)];
+  const emitted = new Set<number>();
+  const emit = (id: number) => {
+    const body = replaced.get(id)!;
+    out.push(new Uint8Array([id, ...leb(body.length)]), body);
+    emitted.add(id);
+  };
+  for (const section of sections) {
+    if (section.id !== 0) {
+      for (const id of order.slice(0, order.indexOf(section.id))) if (replaced.has(id) && !emitted.has(id) && !find(id)) emit(id);
+    }
+    if (replaced.has(section.id)) emit(section.id);
+    else out.push(bytes.subarray(section.head, section.end));
+  }
+  for (const id of order) if (replaced.has(id) && !emitted.has(id)) emit(id);
+  const total = out.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const part of out) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function guarded(bytes: Uint8Array): Uint8Array | undefined {
+  try {
+    return instrument(bytes);
+  } catch (error) {
+    if (error instanceof Unsupported || error instanceof RangeError) return undefined;
+    throw error;
+  }
+}
+
+
+
 const TYPES: Record<string, ValueType> = { i: "i32", I: "i64", f: "f32", F: "f64", v: "v128", r: "ref" };
 
 const KINDS: Record<string, ExternKind> = { func: "function", memory: "memory", table: "table", global: "global" };
@@ -64,7 +354,14 @@ function refusedMessage(text: string): boolean {
 export async function load(bytes: Uint8Array, options: WasmOptions = {}): Promise<Loaded> {
   if (!(options.force && options.interpreter) && nativeRefused === undefined) {
     try {
-      return native(await (WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }).compile(bytes.slice()));
+      const compile = (WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }).compile;
+      const patched = guarded(bytes);
+      if (patched) {
+        const module = await compile(patched).catch(() => undefined);
+        helper ??= await compile(HELPER).catch(() => undefined);
+        if (module && helper) return native(module, true);
+      }
+      return native(await compile(bytes.slice()), false);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (!refusedMessage(text)) throw error;
@@ -79,15 +376,18 @@ function nativeKind(kind: string): ExternKind {
   return kind === "function" || kind === "memory" || kind === "table" || kind === "global" ? kind : "tag";
 }
 
-function native(module: WebAssembly.Module): Loaded {
+let helper: WebAssembly.Module | undefined;
+
+function native(module: WebAssembly.Module, instrumented: boolean): Loaded {
   const imports = WebAssembly.Module.imports(module).map(entry => ({ module: entry.module, name: entry.name, kind: nativeKind(entry.kind) }));
-  const exports = WebAssembly.Module.exports(module).map(entry => ({ name: entry.name, kind: nativeKind(entry.kind) }));
+  const exports = WebAssembly.Module.exports(module).filter(entry => !instrumented || entry.name !== CHECK_TABLE).map(entry => ({ name: entry.name, kind: nativeKind(entry.kind) }));
   return {
     engine: "native",
     imports,
     exports,
     dispose: () => {},
-    instantiate: functions => {
+    instantiate: (functions, options = {}) => {
+      let check = options.check;
       const object: Record<string, Record<string, unknown>> = {};
       imports.forEach((entry, index) => {
         const space = (object[entry.module] ??= {});
@@ -100,6 +400,11 @@ function native(module: WebAssembly.Module): Loaded {
         instance = new WebAssembly.Instance(module, object as WebAssembly.Imports);
       } catch (error) {
         throw error instanceof WebAssembly.RuntimeError ? new Trap(error.message) : error;
+      }
+      const table = instrumented ? instance.exports[CHECK_TABLE] : undefined;
+      if (table instanceof WebAssembly.Table && helper) {
+        const tick = new WebAssembly.Instance(helper, { h: { c: () => check?.() } });
+        table.set(0, tick.exports["f"]);
       }
       const memory = () => {
         const found = instance.exports["memory"] ?? Object.values(instance.exports).find(value => value instanceof WebAssembly.Memory);
@@ -118,7 +423,8 @@ function native(module: WebAssembly.Module): Loaded {
           }
         },
         dispose: () => {},
-        call: (name, args) => {
+        call: (name, args, call = {}) => {
+          if (call.check) check = call.check;
           const fn = instance.exports[name];
           if (typeof fn !== "function") throw new Trap("no exported function named " + name);
           const invoke = (values: unknown[]) => {

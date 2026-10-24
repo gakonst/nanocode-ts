@@ -50,6 +50,7 @@ class Tree {
   #ids = 1;
   bytes = 0;
   entries = 0;
+  limit = SNAPSHOT_BYTES;
 
   constructor() {
     this.root = this.dir(true);
@@ -100,12 +101,12 @@ class Tree {
       const parent = this.ensure(parentOf(path));
       if (name === undefined || parent.children.get(name)?.kind === "file") return;
       let node: FileNode;
-      if (this.bytes + stat.size <= SNAPSHOT_BYTES) {
+      if (this.bytes + stat.size <= this.limit) {
         const data = await fs.read(path);
         this.bytes += data.length;
         node = this.file(data, true, BigInt(Math.floor(stat.mtime)) * 1_000_000n);
       } else {
-        if (explicit) throw new CommandError(path + " does not fit in the " + SNAPSHOT_BYTES / 1024 / 1024 + " MiB of files a program can load", 1);
+        if (explicit) throw new CommandError(path + " does not fit in the " + Math.floor(this.limit / 1048576) + " MiB of files a program can load", 1);
         node = this.file(new Uint8Array(), false, BigInt(Math.floor(stat.mtime)) * 1_000_000n);
         node.size = stat.size;
       }
@@ -210,6 +211,7 @@ const handler = (options: WasmOptions): CommandHandler => async ctx => {
   if (!isWasm(bytes)) throw new CommandError(run.file + ": not a WebAssembly module (no \\0asm header)", 126);
   const module = await compile(bytes, options);
   const tree = new Tree();
+  tree.limit = Math.min(SNAPSHOT_BYTES, Math.floor(ctx.limits.maxMemoryBytes / 2));
   for (const arg of [...run.dirs.map(dir => dir.host), ...run.args]) {
     if (!arg || arg.startsWith("-") || arg.length > 4096) continue;
     const target = ctx.resolve(arg.replace(/^[A-Za-z_-]+=/, ""));
@@ -281,7 +283,7 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
     if (node.loaded) return E.SUCCESS;
     if (!warned.has(path)) {
       warned.add(path);
-      ctx.stderr.write("wasm: " + path + " was not loaded for this program (" + SNAPSHOT_BYTES / 1024 / 1024 + " MiB limit); pass it as an argument or run from its directory\n");
+      ctx.stderr.write("wasm: " + path + " was not loaded for this program (" + Math.floor(tree.limit / 1048576) + " MiB limit); pass it as an argument or run from its directory\n");
     }
     return E.FBIG;
   };
@@ -404,6 +406,9 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
     return handle;
   };
 
+  let skew = 0n;
+  const clock = (id: number) => (id === 0 ? BigInt(Date.now()) * 1_000_000n : BigInt(Math.round(performance.now() * 1_000_000))) + skew;
+
   const wasi: Record<string, (...args: never[]) => number> = {
     args_get: (pointers: number, buffer: number) => strings(argv, pointers, buffer),
     args_sizes_get: (count: number, size: number) => sizes(argv, count, size),
@@ -415,13 +420,15 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
     },
     clock_time_get: (id: number, _precision: bigint, pointer: number) => {
       check();
-      const now = id === 0 ? BigInt(Date.now()) * 1_000_000n : BigInt(Math.round(performance.now() * 1_000_000));
-      view().setBigUint64(pointer, now, true);
+      view().setBigUint64(pointer, clock(id), true);
       return E.SUCCESS;
     },
     random_get: (pointer: number, length: number) => {
       for (let offset = 0; offset < length; offset += 65536) crypto.getRandomValues(bytes().subarray(pointer + offset, pointer + Math.min(length, offset + 65536)));
       return E.SUCCESS;
+    },
+    proc_raise: (signal: number) => {
+      throw new Exit(128 + signal);
     },
     proc_exit: (code: number) => {
       throw new Exit(code);
@@ -435,6 +442,14 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
       const dv = view();
       const subs = Array.from({ length: count }, (_, i) => input + i * 48);
       const io = subs.filter(sub => dv.getUint8(sub + 8) !== 0);
+      if (!io.length && subs.length) {
+        const waits = subs.map(sub => {
+          const timeout = dv.getBigUint64(sub + 24, true);
+          return dv.getUint16(sub + 40, true) & 1 ? timeout - clock(dv.getUint32(sub + 16, true)) : timeout;
+        });
+        const wait = waits.reduce((a, b) => (b < a ? b : a));
+        if (wait > 0n) skew += wait;
+      }
       let events = 0;
       for (const sub of io.length ? io : subs) {
         const event = output + events++ * 32;

@@ -44,8 +44,8 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     const selection = options.selection();
     return { harness: selection.harness, model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) };
   };
-  const pause = (signal: AbortSignal | undefined) => new Promise<void>(resolve => {
-    const timer = setTimeout(done, reconnectMs);
+  const pause = (signal: AbortSignal | undefined, ms = reconnectMs) => new Promise<void>(resolve => {
+    const timer = setTimeout(done, ms);
     function done() {
       clearTimeout(timer);
       signal?.removeEventListener("abort", done);
@@ -97,10 +97,19 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
 
   const reconnect = async (id: string, parameters: Omit<TransportParameters, "prompt">, session: VercelSession) => {
     const { signal } = parameters;
+    let delay = reconnectMs;
     while (session.cursor && !signal?.aborted) {
-      const settled = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(session.cursor)}`, { headers: headers(), signal }).then(response => follow(response, parameters, session), () => false);
-      if (settled) return;
-      await pause(signal);
+      const response = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(session.cursor)}`, { headers: headers(), signal }).catch(() => undefined);
+      if (response && (response.status === 408 || response.status === 429 || response.status >= 500)) {
+        const after = Number(response.headers.get("retry-after"));
+        void response.body?.cancel().catch(() => undefined);
+        await pause(signal, after > 0 ? after * 1000 : delay);
+        delay = Math.min(delay * 2, 15_000);
+        continue;
+      }
+      if (response && await follow(response, parameters, session)) return;
+      delay = response ? reconnectMs : Math.min(delay * 2, 15_000);
+      await pause(signal, delay);
     }
   };
 

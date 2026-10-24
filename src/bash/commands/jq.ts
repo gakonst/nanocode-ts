@@ -2379,6 +2379,8 @@ export const jq: CommandHandler = async ctx => {
   let indent = 2;
   let asciiOutput = false;
   let rawOutput0 = false;
+  let streaming = false;
+  let sequence = false;
   let filter: string | undefined;
   const vars: Record<string, Json> = {};
   const named: Record<string, Json> = {};
@@ -2429,8 +2431,8 @@ export const jq: CommandHandler = async ctx => {
         "--color-output": () => undefined,
         "--monochrome-output": () => undefined,
         "--unbuffered": () => undefined,
-        "--seq": () => undefined,
-        "--stream": () => undefined,
+        "--seq": () => (sequence = true),
+        "--stream": () => (streaming = true),
       };
       if (!long[arg]) throw new CommandError("Unknown option: " + arg, 2);
       long[arg]();
@@ -2479,8 +2481,23 @@ export const jq: CommandHandler = async ctx => {
       if (lines[lines.length - 1] === "") lines.pop();
       inputs = slurp ? [text] : lines;
     } else {
-      const parsed = parseStream(text);
-      inputs = slurp ? [parsed] : parsed;
+      const parsed = parseStream(sequence ? text.replace(/\x1e/g, "\n") : text);
+      const events = (value: Json): Json[] => {
+        const out: Json[] = [];
+        const walk = (node: Json, path: Json[], top: boolean) => {
+          const entries: [Json, Json][] = Array.isArray(node) ? node.map((child, index) => [index, child]) : node !== null && typeof node === "object" ? Object.entries(node) : [];
+          if (!entries.length) {
+            out.push([path, node]);
+            return;
+          }
+          for (const [key, child] of entries) walk(child, [...path, key], false);
+          if (!top || path.length || entries.length) out.push([[...path, entries[entries.length - 1]![0]]]);
+        };
+        walk(value, [], true);
+        return out;
+      };
+      const stream = streaming ? parsed.flatMap(events) : parsed;
+      inputs = slurp ? [stream] : stream;
     }
   } catch (error) {
     if (error instanceof JqError) {
@@ -2514,7 +2531,7 @@ export const jq: CommandHandler = async ctx => {
     last = value;
     let out = raw && typeof value === "string" ? value : toJson(value, space, sortKeys);
     if (asciiOutput) out = out.replace(/[\u007f-\uffff]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
-    ctx.stdout.write(out + (rawOutput0 ? "\0" : join ? "" : "\n"));
+    ctx.stdout.write((sequence ? "\x1e" : "") + out + (rawOutput0 ? "\0" : join ? "" : "\n"));
   };
   try {
     while (cursor < queue.length) {

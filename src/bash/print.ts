@@ -241,7 +241,7 @@ class Printer {
         return;
       }
       case "for":
-        this.out += "for " + command.name + " in " + (command.items ? command.items.map(wordText).join(" ") : '"$@"') + ";";
+        this.out += (command.select ? "select " : "for ") + command.name + " in " + (command.items ? command.items.map(wordText).join(" ") : '"$@"') + ";";
         this.loop(command.body);
         break;
       case "cfor": {
@@ -282,6 +282,10 @@ class Printer {
         }
         this.indentation -= 4;
         this.newline("esac");
+        break;
+      case "coproc":
+        this.out += "coproc " + (command.name === "COPROC" ? "" : command.name + " ");
+        this.command(command.body);
         break;
       case "group":
         if (command.subshell) {
@@ -362,6 +366,7 @@ class Printer {
 }
 
 function redirectText(redirect: Redirect): string {
+  if (redirect.name !== undefined) return "{" + redirect.name + "}" + redirectText({ fd: null, op: redirect.op, target: redirect.target }).replace(/^\d+/, "");
   const target = wordText(redirect.target);
   const fd = redirect.fd;
   switch (redirect.op) {

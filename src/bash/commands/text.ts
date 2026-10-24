@@ -1,7 +1,29 @@
-import { CommandError, PipeError, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
+import { CommandError, PipeError, budget, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, decode, encode } from "../fs.ts";
 import { escapeRegExp, escapes, format, globRegExp, joinLines, lines, posixRegExp } from "../text.ts";
 import { allInput, batches, device, eachBatch, eachInput, last, options, pause, put, readInput } from "./util.ts";
+
+async function eachLine(ctx: CommandContext, operands: string[], visit: (line: string) => string, terminate = false): Promise<number> {
+  let carry = "";
+  const status = await eachBatch(ctx, operands, async batch => {
+    const text = carry ? carry + batch : batch;
+    const cut = text.lastIndexOf("\n");
+    carry = text.slice(cut + 1);
+    if (cut < 0) return;
+    let out = "";
+    for (let start = 0; start <= cut;) {
+      const end = text.indexOf("\n", start);
+      out += visit(text.slice(start, end)) + "\n";
+      start = end + 1;
+      if (out.length < 1 << 16) continue;
+      await put(ctx, out);
+      out = "";
+    }
+    await put(ctx, out);
+  });
+  if (carry) await put(ctx, visit(carry) + (terminate ? "\n" : ""));
+  return status;
+}
 
 const echo: CommandHandler = ctx => {
   let newline = true;
@@ -97,7 +119,7 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
   const size = byteSpec !== undefined && !tail && !byteSpec.startsWith("-") ? Math.max(0, count(byteSpec, 0)) : undefined;
   let status = 0;
   for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
-    if (operand !== "-" && operand !== "/dev/stdin") {
+    if (operand !== "-" && operand !== "/dev/stdin" && operand !== "/dev/fd/0") {
       status |= await eachInput(ctx, [operand], async (text, name) => {
         header(name);
         await render(text);
@@ -322,7 +344,7 @@ const grep: CommandHandler = streaming(async ctx => {
   const patterns: string[] = [...(parsed.values.get("e") ?? [])];
   for (const file of parsed.values.get("f") ?? []) {
     try {
-      patterns.push(...lines(file === "-" ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(file)))));
+      for (const line of lines(file === "-" ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(file))))) patterns.push(line);
     } catch (error) {
       if (!(error instanceof FsError)) throw error;
       throw new CommandError(file + ": No such file or directory", 2);
@@ -330,7 +352,7 @@ const grep: CommandHandler = streaming(async ctx => {
   }
   if (!parsed.values.has("e") && !parsed.values.has("f")) {
     if (!operands.length) throw new CommandError("usage: grep [OPTION]... PATTERNS [FILE]...", 2);
-    patterns.push(...operands.shift()!.split("\n"));
+    for (const line of operands.shift()!.split("\n")) patterns.push(line);
   }
   let flags = (f.has("i") ? "i" : "") + "g";
   const sources = patterns.map(pattern => {
@@ -518,10 +540,212 @@ function versionCompare(a: string, b: string): number {
   return 0;
 }
 
+type Compact = { numeric: boolean; reverse: boolean; stable: boolean; unique: boolean };
+
+function lineCount(text: string, separator: string): number {
+  if (!text) return 0;
+  let n = 0;
+  for (let at = text.indexOf(separator); at >= 0; at = text.indexOf(separator, at + 1)) n++;
+  return text.endsWith(separator) ? n : n + 1;
+}
+
+function mergeSort(order: Uint32Array<ArrayBuffer>, compare: (a: number, b: number) => number) {
+  const n = order.length;
+  const run = 32;
+  for (let lo = 0; lo < n; lo += run) {
+    const hi = Math.min(lo + run, n);
+    for (let i = lo + 1; i < hi; i++) {
+      const value = order[i]!;
+      let j = i - 1;
+      while (j >= lo && compare(order[j]!, value) > 0) {
+        order[j + 1] = order[j]!;
+        j--;
+      }
+      order[j + 1] = value;
+    }
+  }
+  if (n <= run) return;
+  let source = order;
+  let target = new Uint32Array(n);
+  for (let width = run; width < n; width *= 2) {
+    for (let lo = 0; lo < n; lo += 2 * width) {
+      const mid = Math.min(lo + width, n);
+      const hi = Math.min(lo + 2 * width, n);
+      if (mid >= hi || compare(source[mid - 1]!, source[mid]!) <= 0) {
+        target.set(source.subarray(lo, hi), lo);
+        continue;
+      }
+      let i = lo;
+      let j = mid;
+      let k = lo;
+      while (i < mid && j < hi) target[k++] = compare(source[j]!, source[i]!) < 0 ? source[j++]! : source[i++]!;
+      while (i < mid) target[k++] = source[i++]!;
+      while (j < hi) target[k++] = source[j++]!;
+    }
+    [source, target] = [target, source];
+  }
+  if (source !== order) order.set(source);
+}
+
+function numberAt(text: string, start: number, end: number): number {
+  let i = start;
+  while (i < end) {
+    const c = text.charCodeAt(i);
+    if (c !== 32 && (c < 9 || c > 13)) break;
+    i++;
+  }
+  let negative = false;
+  if (i < end && text.charCodeAt(i) === 45) {
+    negative = true;
+    i++;
+  }
+  let value = 0;
+  let digits = 0;
+  while (i < end && digits < 10) {
+    const c = text.charCodeAt(i);
+    if (c < 48 || c > 57) break;
+    value = value * 10 + c - 48;
+    digits++;
+    i++;
+  }
+  const next = i < end ? text.charCodeAt(i) : 32;
+  if (digits && digits < 10 && next !== 46 && next !== 69 && next !== 101 && next !== 120 && next !== 88) return negative ? -value || 0 : value;
+  return parseFloat(text.slice(start, end).trim()) || 0;
+}
+
+async function compactSort(ctx: CommandContext, text: string, separator: string, order: Compact, out: string | undefined) {
+  const n = lineCount(text, separator);
+  const length = text.length;
+  const mark = separator.charCodeAt(0);
+  const sign = order.reverse ? -1 : 1;
+  const endOf = (start: number) => {
+    const end = text.indexOf(separator, start);
+    return end < 0 ? length : end;
+  };
+  const textCompare = (a: number, b: number): number => {
+    for (;;) {
+      let x = a < length ? text.charCodeAt(a) : -1;
+      let y = b < length ? text.charCodeAt(b) : -1;
+      if (x === mark) x = -1;
+      if (y === mark) y = -1;
+      if (x !== y) return x < y ? -1 : 1;
+      if (x < 0) return 0;
+      a++;
+      b++;
+    }
+  };
+  const starts = (visit: (start: number, end: number, index: number) => void) => {
+    for (let start = 0, index = 0; index < n; index++) {
+      const end = endOf(start);
+      visit(start, end, index);
+      start = end + 1;
+    }
+  };
+  const write = async (next: (index: number) => number, total: number) => {
+    budget(ctx.limits, length + 8 * n + (out === undefined ? 0 : 2 * length), "sort: " + n + " lines");
+    const parts: string[] = [];
+    let chunk = "";
+    let previous = -1;
+    for (let i = 0; i < total; i++) {
+      const start = next(i);
+      if (order.unique && previous >= 0 && duplicate(previous, start)) continue;
+      previous = start;
+      chunk += text.slice(start, endOf(start)) + separator;
+      if (chunk.length < 1 << 16) continue;
+      if (out === undefined) await put(ctx, chunk);
+      else parts.push(chunk);
+      chunk = "";
+    }
+    if (out === undefined) await put(ctx, chunk);
+    else {
+      parts.push(chunk);
+      await ctx.fs.write(ctx.resolve(out), encode(parts.join("")));
+    }
+  };
+  let duplicate = (a: number, b: number) => textCompare(a, b) === 0;
+  if (!order.numeric) {
+    budget(ctx.limits, length + 8 * n, "sort: " + n + " lines");
+    const positions = new Uint32Array(n);
+    starts((start, _end, index) => void (positions[index] = start));
+    mergeSort(positions, (a, b) => sign * textCompare(a, b));
+    await write(i => positions[i]!, n);
+    return;
+  }
+  budget(ctx.limits, length + 8 * n, "sort: " + n + " lines");
+  const packed = new BigInt64Array(n);
+  const words = new Int32Array(packed.buffer);
+  let integral = true;
+  starts((start, end, index) => {
+    if (!integral) return;
+    const key = numberAt(text, start, end);
+    if (!Number.isInteger(key) || key > 0x7fffffff || key < -0x7fffffff) {
+      integral = false;
+      return;
+    }
+    words[2 * index] = start;
+    words[2 * index + 1] = sign * key;
+  });
+  if (integral) {
+    packed.sort();
+    if (!order.stable && !order.unique) {
+      for (let lo = 0; lo < n;) {
+        let hi = lo + 1;
+        while (hi < n && words[2 * hi + 1] === words[2 * lo + 1]) hi++;
+        if (hi - lo > 1) {
+          const run: number[] = [];
+          for (let i = lo; i < hi; i++) run.push(words[2 * i]! >>> 0);
+          run.sort((a, b) => sign * textCompare(a, b));
+          for (let i = lo; i < hi; i++) words[2 * i] = run[i - lo]!;
+        }
+        lo = hi;
+      }
+    }
+    if (order.unique) {
+      let previous = Number.NaN;
+      const kept: number[] = [];
+      for (let i = 0; i < n; i++) {
+        const key = words[2 * i + 1]!;
+        if (key === previous) continue;
+        previous = key;
+        kept.push(i);
+      }
+      duplicate = () => false;
+      await write(i => words[2 * kept[i]!]! >>> 0, kept.length);
+      return;
+    }
+    await write(i => words[2 * i]! >>> 0, n);
+    return;
+  }
+  budget(ctx.limits, length + 20 * n, "sort: " + n + " lines");
+  const positions = new Uint32Array(n);
+  const keys = new Float64Array(n);
+  starts((start, end, index) => {
+    positions[index] = start;
+    keys[index] = numberAt(text, start, end);
+  });
+  const indices = new Uint32Array(n);
+  for (let i = 0; i < n; i++) indices[i] = i;
+  const tie = order.stable || order.unique ? () => 0 : (a: number, b: number) => sign * textCompare(positions[a]!, positions[b]!);
+  mergeSort(indices, (a, b) => sign * (keys[a]! - keys[b]!) || tie(a, b));
+  if (order.unique) {
+    const kept: number[] = [];
+    for (let i = 0; i < n; i++) if (!i || keys[indices[i]!] !== keys[indices[i - 1]!]) kept.push(indices[i]!);
+    duplicate = () => false;
+    await write(i => positions[kept[i]!]!, kept.length);
+    return;
+  }
+  await write(i => positions[indices[i]!]!, n);
+}
+
 const sort: CommandHandler = async ctx => {
   const parsed = options(ctx.args, { flags: "nrufbsghVMcCRz", values: "ktoST", long: { "numeric-sort": "n", reverse: "r", unique: "u", "ignore-case": "f", "ignore-leading-blanks": "b", stable: "s", "general-numeric-sort": "g", "human-numeric-sort": "h", "version-sort": "V", key: "k", "field-separator": "t", output: "o", check: "c", "random-sort": "R", "month-sort": "M", "zero-terminated": "z", "dictionary-order": "d", "parallel": "parallel", "buffer-size": "S", "temporary-directory": "T" } });
   const f = parsed.flags;
   const { text, status } = await allInput(ctx, parsed.operands);
+  if (!parsed.values.has("k") && ![..."cCRfbhMVd"].some(flag => f.has(flag))) {
+    await compactSort(ctx, text, f.has("z") ? "\0" : "\n", { numeric: f.has("n") || f.has("g"), reverse: f.has("r"), stable: f.has("s"), unique: f.has("u") }, last(parsed, "o"));
+    return status;
+  }
+  budget(ctx.limits, 2 * text.length + 160 * lineCount(text, f.has("z") ? "\0" : "\n"), "sort: " + lineCount(text, f.has("z") ? "\0" : "\n") + " lines");
   const items = f.has("z") ? text.split("\0").filter((item, index, all) => item !== "" || index < all.length - 1) : lines(text);
   const separator = last(parsed, "t");
   const keys = (parsed.values.get("k") ?? []).map(parseKey);
@@ -845,7 +1069,7 @@ const seq: CommandHandler = async ctx => {
       if (inc > 0 ? value > b + 1e-10 : value < b - 1e-10) break;
       buffer += (i ? separator : "") + (spec ? format(spec, [value], false).text : value.toFixed(decimals));
       if (buffer.length < 65536) continue;
-      if (!ctx.stdout.piped && (written += buffer.length) > ctx.limits.maxBufferLength) throw new CommandError("output exceeded " + ctx.limits.maxBufferLength + " characters");
+      if (ctx.stdout.bounded && (written += buffer.length) > ctx.limits.maxBufferLength) throw new CommandError("output exceeded " + ctx.limits.maxBufferLength + " characters");
       await put(ctx, buffer);
       buffer = "";
     }
@@ -861,25 +1085,41 @@ const seq: CommandHandler = async ctx => {
     out.push(last(parsed, "f") ? format(last(parsed, "f")!, [value], false).text : value.toFixed(decimals));
   }
   if (parsed.flags.has("w")) {
-    const width = Math.max(...out.map(value => value.length));
+    const width = out.reduce((width, value) => Math.max(width, value.length), 0);
     for (let i = 0; i < out.length; i++) out[i] = out[i].startsWith("-") ? "-" + out[i].slice(1).padStart(width - 1, "0") : out[i].padStart(width, "0");
   }
   ctx.stdout.write(out.length ? out.join(last(parsed, "s") ?? "\n") + "\n" : "");
   return 0;
 };
 
-const rev: CommandHandler = async ctx => {
-  const { text, status } = await allInput(ctx, ctx.args);
-  const reversed = lines(text).map(line => (/[\uD800-\uDFFF]/.test(line) ? [...line].reverse().join("") : line.split("").reverse().join("")));
-  ctx.stdout.write(text === "" || text.endsWith("\n") ? joinLines(reversed) : reversed.join("\n"));
-  return status;
-};
+const rev: CommandHandler = streaming(async ctx => (await eachLine(ctx, ctx.args, line => (/[\uD800-\uDFFF]/.test(line) ? [...line].reverse().join("") : line.split("").reverse().join("")))));
 
 const tac: CommandHandler = async ctx => {
   const parsed = options(ctx.args, { flags: "br", values: "s", long: { before: "b", regex: "r", separator: "s" } });
   const [separator] = escapes(last(parsed, "s") ?? "\n");
   if (separator === "") throw new CommandError("separator cannot be empty");
-  return eachInput(ctx, parsed.operands, text => {
+  return eachInput(ctx, parsed.operands, async text => {
+    if (separator.length === 1) {
+      const shift = parsed.flags.has("b") ? 0 : 1;
+      let hi = text.length;
+      let from = text.length - 1;
+      let out = "";
+      for (;;) {
+        const at = from < 0 ? -1 : text.lastIndexOf(separator, from);
+        const lo = at < 0 ? 0 : at + shift;
+        out += text.slice(lo, hi);
+        if (out.length >= 1 << 16) {
+          await put(ctx, out);
+          out = "";
+        }
+        if (at < 0) break;
+        hi = lo;
+        from = at - 1;
+      }
+      await put(ctx, out);
+      return;
+    }
+    budget(ctx.limits, 2 * text.length + 40 * lineCount(text, separator), "tac: its input");
     const parts = text.split(separator);
     const tail = parts.pop()!;
     const records = parsed.flags.has("b") ? parts.map((part, index) => (index ? separator : "") + part) : parts.map(part => part + separator);
@@ -891,9 +1131,8 @@ const tac: CommandHandler = async ctx => {
   });
 };
 
-const nl: CommandHandler = async ctx => {
+const nl: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, { values: "bwsvinh", long: { "body-numbering": "b", "number-width": "w", "number-separator": "s", "starting-line-number": "v", "line-increment": "i", "number-format": "n", "header-numbering": "h" } });
-  const { text, status } = await allInput(ctx, parsed.operands);
   const style = last(parsed, "b") ?? "t";
   const width = Number(last(parsed, "w") ?? 6);
   const separator = last(parsed, "s") ?? "\t";
@@ -908,20 +1147,52 @@ const nl: CommandHandler = async ctx => {
     if (formatting === "rz") return value < 0 ? "-" + String(-value).padStart(width - 1, "0") : digits.padStart(width, "0");
     return digits.padStart(width);
   };
-  ctx.stdout.write(joinLines(lines(text).map(line => {
+  return eachLine(ctx, parsed.operands, line => {
     const numbered = style === "a" || (style === "t" && line !== "") || (pattern !== undefined && pattern.test(line));
     if (!numbered) return " ".repeat(width + separator.length) + line;
     const result = number(n) + separator + line;
     n += increment;
     return result;
-  })));
-  return status;
-};
+  }, true);
+});
 
 const paste: CommandHandler = async ctx => {
   const parsed = options(ctx.args, { flags: "s", values: "d", long: { serial: "s", delimiters: "d" } });
   const [delimiters] = escapes(last(parsed, "d") ?? "\t");
   const operands = parsed.operands.length ? parsed.operands : ["-"];
+  const delimiter = (index: number) => delimiters[index % Math.max(1, delimiters.length)] ?? "";
+  if (parsed.flags.has("s")) {
+    let status = 0;
+    let stdin = false;
+    for (const operand of operands) {
+      let text = "";
+      if (operand === "-") {
+        text = stdin ? "" : ctx.stdin.read();
+        stdin = true;
+      } else {
+        try {
+          text = await readInput(ctx, operand);
+        } catch (error) {
+          if (!(error instanceof FsError)) throw error;
+          ctx.stderr.write("paste: " + operand + ": No such file or directory\n");
+          status = 1;
+          continue;
+        }
+      }
+      let out = "";
+      for (let start = 0, index = 0; start < text.length; index++) {
+        let end = text.indexOf("\n", start);
+        if (end < 0) end = text.length;
+        out += (index ? delimiter(index - 1) : "") + text.slice(start, end);
+        start = end + 1;
+        if (out.length < 1 << 16) continue;
+        await put(ctx, out);
+        out = "";
+      }
+      await put(ctx, out + "\n");
+    }
+    return status;
+  }
   const columns: string[][] = [];
   let status = 0;
   let stdin: string[] | undefined;
@@ -941,7 +1212,6 @@ const paste: CommandHandler = async ctx => {
       status = 1;
     }
   }
-  const delimiter = (index: number) => delimiters[index % Math.max(1, delimiters.length)] ?? "";
   const join = (values: string[]) => values.reduce((out, value, index) => (index ? out + delimiter(index - 1) : "") + value, "");
   if (parsed.flags.has("s")) ctx.stdout.write(joinLines(columns.map(join)));
   else {
@@ -1073,7 +1343,7 @@ const xargs: CommandHandler = streaming(async ctx => {
           break;
         }
         if (!words.length) continue;
-        current.push(...words);
+        for (const word of words) current.push(word);
         if (/[ \t]$/.test(line)) continue;
         if (++count >= maxLines) {
           groups.push(current);
@@ -1295,19 +1565,41 @@ const base64: CommandHandler = async ctx => {
   const operand = parsed.operands[0] ?? "-";
   const bytes = operand === "-" ? encode(ctx.stdin.read()) : await ctx.fs.read(ctx.resolve(operand));
   if (parsed.flags.has("d")) {
-    const text = decode(bytes).replace(/[^A-Za-z0-9+/=_-]/g, "").replace(/-/g, "+").replace(/_/g, "/");
-    let binary: string;
+    const raw = decode(bytes);
+    const text = (parsed.flags.has("i") ? raw.replace(/[^A-Za-z0-9+/=_-]/g, "") : raw.replace(/[\r\n]/g, "")).replace(/-/g, "+").replace(/_/g, "/");
+    const bad = text.search(/[^A-Za-z0-9+/=]/);
+    const valid = bad < 0 ? text : text.slice(0, bad);
+    const padding = valid.indexOf("=");
+    const body = padding < 0 ? valid : valid.slice(0, padding);
+    const whole = body.length - (body.length % 4);
+    const partial = body.length % 4 >= 2 ? body.slice(whole) : "";
+    let binary = "";
     try {
-      binary = atob(text.padEnd(Math.ceil(text.length / 4) * 4, "="));
+      binary = atob(body.slice(0, whole)) + (partial ? atob(partial.padEnd(4, "=")) : "");
     } catch {
-      throw new CommandError("invalid input");
+      binary = "";
     }
     ctx.stdout.write(decode(Uint8Array.from(binary, c => c.charCodeAt(0))));
+    const trailing = padding < 0 ? "" : valid.slice(padding);
+    const complete = bad < 0 && body.length % 4 === 0 ? trailing === "" : bad < 0 && ((body.length % 4 === 2 && /^==$/.test(trailing)) || (body.length % 4 === 3 && trailing === "=") || (trailing === "" && body.length % 4 === 0));
+    if (!complete) throw new CommandError("invalid input");
     return 0;
   }
+  budget(ctx.limits, 4 * bytes.length, "base64: its input");
   const encoded = bytesToBase64(bytes);
   const wrap = Number(last(parsed, "w") ?? 76);
-  ctx.stdout.write((wrap > 0 ? encoded.match(new RegExp(".{1," + wrap + "}", "g"))?.join("\n") ?? "" : encoded) + "\n");
+  if (!(wrap > 0)) {
+    await put(ctx, encoded + "\n");
+    return 0;
+  }
+  let out = "";
+  for (let start = 0; start < encoded.length; start += wrap) {
+    out += encoded.slice(start, start + wrap) + "\n";
+    if (out.length < 1 << 16) continue;
+    await put(ctx, out);
+    out = "";
+  }
+  await put(ctx, encoded.length ? out : "\n");
   return 0;
 };
 
@@ -1510,11 +1802,37 @@ const fold: CommandHandler = async ctx => {
 };
 
 const column: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "tn", values: "so", long: { table: "t", separator: "s", "output-separator": "o" } });
+  const parsed = options(ctx.args, { flags: "tnxeL", values: "soc", long: { table: "t", separator: "s", "output-separator": "o", fillrows: "x", "output-width": "c" } });
   const { text, status } = await allInput(ctx, parsed.operands);
   const rows = lines(text);
   if (!parsed.flags.has("t")) {
-    ctx.stdout.write(joinLines(rows));
+    const entries = rows.filter(row => row !== "");
+    if (!entries.length) return status;
+    const width = Number(last(parsed, "c") ?? ctx.env["COLUMNS"] ?? 80);
+    const longest = Math.max(...entries.map(entry => [...entry].length));
+    const column = (longest + 8) & ~7;
+    const columns = Math.max(1, Math.floor(width / column));
+    const height = Math.ceil(entries.length / columns);
+    const across = parsed.flags.has("x");
+    let out = "";
+    for (let row = 0; row < height; row++) {
+      const cells: string[] = [];
+      for (let col = 0; col < columns; col++) {
+        const index = across ? row * columns + col : col * height + row;
+        if (index < entries.length && (across ? col < columns : true)) cells.push(entries[index]!);
+      }
+      cells.forEach((cell, index) => {
+        out += cell;
+        if (index === cells.length - 1) return;
+        let count = [...cell].length;
+        while (count < column) {
+          out += "\t";
+          count = (count + 8) & ~7;
+        }
+      });
+      out += "\n";
+    }
+    ctx.stdout.write(out);
     return status;
   }
   const separator = last(parsed, "s");
