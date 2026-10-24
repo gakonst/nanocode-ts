@@ -1,5 +1,6 @@
 import type { Address } from "viem";
 import * as Mcp from "./mcp.ts";
+import * as Payment from "./payment.ts";
 import * as Wallet from "./wallet.ts";
 
 const topUp = "0.05";
@@ -76,21 +77,7 @@ export function create(connected: Wallet.Wallet, options: { servers?: readonly M
   }
 
   function metered(origin: string, body: ReadableStream<Uint8Array>) {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-        buffer += decoder.decode(chunk, { stream: true });
-        const events = buffer.split(/\r?\n\r?\n/);
-        buffer = events.pop() ?? "";
-        for (const event of events) {
-          if (!/^event: ?payment-receipt$/m.test(event)) continue;
-          const data = event.match(/^data: ?(.*)$/m)?.[1];
-          if (data) receipt(origin, data, false);
-        }
-      },
-    }));
+    return Payment.receipts(body, data => receipt(origin, data, false));
   }
 
   const build = async () => {
