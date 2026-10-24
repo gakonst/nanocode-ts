@@ -14,9 +14,13 @@ export type McpPolicy = NonNullable<RuntimeOptions["mcp"]>;
 
 export const DESCRIBE_TOOLS = "describe_tools";
 
+export const CALL_TOOL = "call_tool";
+
 const DEFAULT_CACHE_MS = 600_000;
 
-const BRIEF_CHARACTERS = 240;
+const BRIEF_CHARACTERS = 160;
+
+const MENTION_CHARACTERS = 48;
 
 const encoder = new TextEncoder();
 
@@ -63,6 +67,12 @@ function brief(text: string | undefined) {
   return out.length > BRIEF_CHARACTERS ? out.slice(0, BRIEF_CHARACTERS - 1) + "…" : out;
 }
 
+function mention(tool: Tool) {
+  const first = (tool.description ?? "").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/)[0] ?? "";
+  const text = first.length > MENTION_CHARACTERS ? first.slice(0, first.lastIndexOf(" ", MENTION_CHARACTERS)) + "…" : first.replace(/\.$/, "");
+  return text ? tool.name + " (" + text + ")" : tool.name;
+}
+
 function slim(schema: Schema | undefined): Schema {
   if (!schema || typeof schema !== "object") return {};
   const out: Schema = {};
@@ -85,6 +95,29 @@ const describer: Tool = {
   inputSchema: { type: "object", properties: { names: { type: "array", items: { type: "string" } } }, required: ["names"] },
 };
 
+function caller(rest: Tool[]): Tool {
+  return {
+    name: CALL_TOOL,
+    description: "Calls one of this server's other tools by name, paid like a direct call: get its arguments from describe_tools first. The other tools: " + rest.map(mention).join("; ") + ".",
+    inputSchema: { type: "object", properties: { name: { type: "string" }, arguments: { type: "object" } }, required: ["name"] },
+  };
+}
+
+function catalog(tools: Tool[], core: readonly string[] | undefined): Tool[] {
+  const listed = core ? tools.filter(tool => core.includes(tool.name)) : tools;
+  const rest = core ? tools.filter(tool => !core.includes(tool.name)) : [];
+  return [...listed.map(compact), describer, ...(rest.length ? [caller(rest)] : [])];
+}
+
+function forwarded(body: Uint8Array, tools: Tool[] | undefined): Uint8Array | { error: string } {
+  const parsed = message(body) as { params?: { arguments?: { name?: unknown; arguments?: unknown }; [key: string]: unknown }; [key: string]: unknown } | undefined;
+  const name = parsed?.params?.arguments?.name;
+  if (!parsed?.params || typeof name !== "string" || name === CALL_TOOL) return { error: "call_tool needs the name of one of this server's tools" };
+  if (tools && !tools.some(tool => tool.name === name)) return { error: JSON.stringify({ unknown: name, available: tools.map(tool => tool.name) }) };
+  const input = parsed.params.arguments?.arguments;
+  return encoder.encode(JSON.stringify({ ...parsed, params: { ...parsed.params, name, arguments: input && typeof input === "object" ? input : {} } }));
+}
+
 function described(tools: Tool[], names: unknown) {
   const wanted = Array.isArray(names) ? names.map(String) : tools.map(tool => tool.name);
   const found = tools.filter(tool => wanted.includes(tool.name)).map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}) }));
@@ -96,12 +129,14 @@ function described(tools: Tool[], names: unknown) {
 export function deferMcp<R extends Request, A extends unknown[]>(send: Send<R, A>, servers: readonly McpServer[] | undefined, policy: McpPolicy = {}): Send<R, A> {
   if (!servers?.length) return send;
   const urls = new Set(servers.map(server => key(server.url)));
+  const named = new Map(servers.map(server => [key(server.url), server.name]));
   const ttl = policy.cacheMs ?? DEFAULT_CACHE_MS;
   const deferred = policy.deferred ?? true;
   return async (request, signal, ...rest) => {
     if (request.provider != null || request.method !== "POST" || !URL.canParse(request.endpoint) || !urls.has(key(request.endpoint))) return send(request, signal, ...rest);
     const url = key(request.endpoint) + "|" + JSON.stringify(request.headers.filter(([name]) => !/^(mcp-session-id|mcp-protocol-version|content-length|content-type|accept|user-agent|last-event-id)$/i.test(name)).sort());
     const body = message(request.body);
+    const core = policy.core?.[named.get(key(request.endpoint)) ?? ""];
     let listing = listings.get(url);
     if (listing && Date.now() - listing.at > ttl) {
       listings.delete(url);
@@ -142,9 +177,14 @@ export function deferMcp<R extends Request, A extends unknown[]>(send: Send<R, A
       case "tools/list": {
         const tools = await (listing?.tools ?? (listings.set(url, listing = { at: Date.now(), tools: list() }), listing.tools));
         if (!tools) return send(request, signal, ...rest);
-        return reply(body.id, { tools: deferred ? [...tools.map(compact), describer] : tools });
+        return reply(body.id, { tools: deferred ? catalog(tools, core) : tools });
       }
       case "tools/call": {
+        if (deferred && body.params?.name === CALL_TOOL) {
+          const next = forwarded(request.body, await (listing?.tools ?? list()));
+          if ("error" in next) return reply(body.id, { content: [{ type: "text", text: next.error }], isError: true });
+          return send({ ...request, body: next }, signal, ...rest);
+        }
         if (!deferred || body.params?.name !== DESCRIBE_TOOLS) return send(request, signal, ...rest);
         const tools = await (listing?.tools ?? list());
         return reply(body.id, tools ? described(tools, body.params.arguments?.names) : { content: [{ type: "text", text: "the server's tool list is unavailable" }], isError: true });

@@ -1,7 +1,6 @@
 "use client";
 
-import { type ChangeEvent, type ClipboardEvent, createContext, type DragEvent, Fragment, isValidElement, type JSX, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { type Components, defaultRehypePlugins, Streamdown, type StreamdownProps, useIsCodeFenceIncomplete } from "streamdown";
+import { type ChangeEvent, type ClipboardEvent, createContext, type DragEvent, Fragment, type KeyboardEvent, lazy, type ReactNode, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { type Activity, activity, type Attachment, bytes, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type TransportFiles, type Turn, turns, workspaceFile } from "../client.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
@@ -57,7 +56,7 @@ export function useExpanded(): { open: ReadonlySet<string>; toggle(id: string, o
   return useContext(ExpandedContext);
 }
 
-const HighlightContext = createContext<Highlighter | undefined>(undefined);
+const HighlightContext = createContext<{ highlighter?: Highlighter; request?(): void }>({});
 
 export function NanocodeProvider(props: { config: Config; highlight?: () => Promise<Highlighter>; skin?: Skin; children: ReactNode }) {
   const [highlighter, setHighlighter] = useState<Highlighter>();
@@ -70,17 +69,29 @@ export function NanocodeProvider(props: { config: Config; highlight?: () => Prom
   }), []);
   const expanded = useMemo(() => ({ open, toggle }), [open, toggle]);
   const { highlight } = props;
+  const [wanted, setWanted] = useState(false);
+  const request = useCallback(() => setWanted(true), []);
+  const highlighting = useMemo(() => ({ ...(highlighter ? { highlighter } : {}), ...(highlight ? { request } : {}) }), [highlighter, highlight, request]);
   useEffect(() => {
-    if (!highlight) return;
+    if (!highlight || !wanted) return;
     let active = true;
     highlight().then(loaded => { if (active) setHighlighter(() => loaded); }, () => {});
     return () => { active = false; };
-  }, [highlight]);
+  }, [highlight, wanted]);
+  useEffect(() => {
+    const start = () => void preloadMarkdown().catch(() => {});
+    if (typeof requestIdleCallback !== "function") {
+      const timer = setTimeout(start, 200);
+      return () => clearTimeout(timer);
+    }
+    const id = requestIdleCallback(start, { timeout: 1500 });
+    return () => cancelIdleCallback(id);
+  }, []);
   return (
     <ConfigContext.Provider value={props.config}>
       <SkinContext.Provider value={props.skin ?? EMPTY_SKIN}>
         <ExpandedContext.Provider value={expanded}>
-          <HighlightContext.Provider value={highlighter}>{props.children}</HighlightContext.Provider>
+          <HighlightContext.Provider value={highlighting}>{props.children}</HighlightContext.Provider>
         </ExpandedContext.Provider>
       </SkinContext.Provider>
     </ConfigContext.Provider>
@@ -139,16 +150,17 @@ export function useNote(): (kind: EntryKind, text: string) => void {
 
 let fallback: Promise<Highlighter> | undefined;
 
-export function useHighlighter(): Highlighter | undefined {
-  const provided = useContext(HighlightContext);
+export function useHighlighter(wanted = true): Highlighter | undefined {
+  const { highlighter: provided, request } = useContext(HighlightContext);
   const [loaded, setLoaded] = useState<Highlighter>();
   useEffect(() => {
-    if (provided) return;
+    if (provided || !wanted) return;
+    if (request) return request();
     let active = true;
     fallback ??= import("../highlight.ts").then(module => module.highlight);
     fallback.then(highlighter => { if (active) setLoaded(() => highlighter); }, () => {});
     return () => { active = false; };
-  }, [provided]);
+  }, [provided, request, wanted]);
   return provided ?? loaded;
 }
 
@@ -172,7 +184,7 @@ export function fences(text: string): ({ kind: "text"; text: string } | { kind: 
 }
 
 function Tokens(props: { code: string; language: string }) {
-  const highlighter = useHighlighter();
+  const highlighter = useHighlighter(!!props.language && props.language !== "text");
   const tokens = useMemo(() => {
     if (!highlighter || !props.language || props.language === "text") return undefined;
     try {
@@ -188,31 +200,6 @@ export function Code(props: { code: string; language: string; framed?: boolean; 
   const part = usePart();
   return <pre data-language={props.language} {...part("code", { framed: props.framed ?? false, incomplete: props.incomplete })}><Tokens code={props.code} language={props.language} /></pre>;
 }
-
-type PartOf = (name: Part, state?: PartState) => PartProps;
-
-type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
-
-type Pluggable = PluggableList[number];
-
-type Hast = { type: string; tagName?: string; value?: string; children?: Hast[] };
-
-const BLOCKS = new Set(["blockquote", "div", "li", "ol", "section", "table", "tbody", "thead", "tr", "ul"]);
-
-function trim() {
-  const visit = (node: Hast, root: boolean) => {
-    if (!node.children) return;
-    if (root || BLOCKS.has(node.tagName ?? "")) node.children = node.children.filter(child => child.type !== "text" || !/^\s*\n\s*$/.test(child.value ?? ""));
-    for (const child of node.children) visit(child, false);
-  };
-  return (tree: Hast) => visit(tree, true);
-}
-
-const [sanitize, schema] = defaultRehypePlugins.sanitize as [Extract<Pluggable, (...args: never[]) => unknown>, { protocols?: Record<string, string[]> }];
-
-const REHYPE: PluggableList = [defaultRehypePlugins.raw!, [sanitize, { ...schema, protocols: { ...schema.protocols, src: [...(schema.protocols?.src ?? []), "data", "workspace", "sandbox"] } }], defaultRehypePlugins.harden!, trim];
-
-const LINK = /^(https?:|mailto:)/i;
 
 const IMAGE = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i;
 
@@ -308,104 +295,18 @@ export function Image(props: { src: string; alt?: string; title?: string }) {
   );
 }
 
-type Props<T extends keyof JSX.IntrinsicElements> = JSX.IntrinsicElements[T] & { node?: unknown };
-
-function text(children: ReactNode): string {
-  if (typeof children === "string") return children;
-  if (Array.isArray(children)) return children.map(text).join("");
-  if (isValidElement<{ children?: ReactNode }>(children)) return text(children.props.children);
-  return children === undefined || children === null || typeof children === "boolean" ? "" : String(children);
-}
-
-function Fence(props: { code: string; language: string; render: { current: MarkdownProps["code"] } }) {
-  const incomplete = useIsCodeFenceIncomplete();
-  return <>{props.render.current?.(props.language, props.code) ?? <Code code={props.code} framed incomplete={incomplete} language={props.language} />}</>;
-}
-
-function components(part: PartOf, render: { current: MarkdownProps["code"] }): Components {
-  const heading = (level: number) => (props: Props<"h1">) => {
-    const Tag = ("h" + level) as "h1";
-    return <Tag {...part("heading", { level })}>{props.children}</Tag>;
-  };
-  const align = (props: Props<"td">) => {
-    const value = (props.style as { textAlign?: string } | undefined)?.textAlign ?? props.align;
-    return value === "left" || value === "center" || value === "right" ? value : undefined;
-  };
-  return {
-    a: (props: Props<"a">) => props.href && LINK.test(props.href) ? <a href={props.href} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a> : <span {...part("link", { incomplete: true })}>{props.children}</span>,
-    blockquote: (props: Props<"blockquote">) => <blockquote {...part("quote")}>{props.children}</blockquote>,
-    code: (props: Props<"code"> & { "data-block"?: string }) => {
-      if (!("data-block" in props)) return <code {...part("inline")}>{props.children}</code>;
-      const language = /language-(\S+)/.exec(props.className ?? "")?.[1] ?? "text";
-      return <Fence code={text(props.children).replace(/\n$/, "")} language={language} render={render} />;
-    },
-    del: (props: Props<"del">) => <del {...part("strike")}>{props.children}</del>,
-    em: (props: Props<"em">) => <em {...part("em")}>{props.children}</em>,
-    h1: heading(1),
-    h2: heading(2),
-    h3: heading(3),
-    h4: heading(4),
-    h5: heading(5),
-    h6: heading(6),
-    hr: () => <hr {...part("rule")} />,
-    img: (props: Props<"img">) => <Image alt={props.alt} src={typeof props.src === "string" ? props.src : ""} title={props.title} />,
-    inlineCode: (props: Props<"code">) => <code {...part("inline")}>{props.children}</code>,
-    li: (props: Props<"li">) => <li {...part("item")}>{props.children}</li>,
-    ol: (props: Props<"ol">) => <ol start={props.start} {...part("list", { ordered: true })}>{props.children}</ol>,
-    p: (props: Props<"p">) => <p {...part("paragraph")}>{props.children}</p>,
-    strong: (props: Props<"strong">) => <strong {...part("strong")}>{props.children}</strong>,
-    table: (props: Props<"table">) => <table {...part("table")}>{props.children}</table>,
-    td: (props: Props<"td">) => <td {...part("cell", { align: align(props), header: false })}>{props.children}</td>,
-    th: (props: Props<"th">) => <th {...part("cell", { align: align(props), header: true })}>{props.children}</th>,
-    ul: (props: Props<"ul">) => <ul {...part("list", { ordered: false })}>{props.children}</ul>,
-  };
-}
-
 export type MarkdownProps = { text: string; live?: boolean; code?(language: string, code: string): ReactNode };
 
-const OFF = { enabled: false };
+const Streamed = lazy(() => import("./markdown.tsx"));
 
-const ROW = /^ {0,3}\|.*\|/;
-
-function cells(row: string): string[] {
-  return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
-}
-
-function table(text: string): string {
-  const lines = text.split("\n");
-  const last = lines.length > 1 && lines[lines.length - 1] === "" ? lines.length - 2 : lines.length - 1;
-  const typed = lines[last] ?? "";
-  if (/^ {0,3}\|[ :|-]*$/.test(typed) && ROW.test(lines[last - 1] ?? "") && !ROW.test(lines[last - 2] ?? "")) {
-    const written = cells(typed);
-    lines[last] = "|" + cells(lines[last - 1]!).map((_, column) => /^:?-+:?$/.test(written[column] ?? "") ? written[column] : "---").join("|") + "|";
-  } else if (/^ {0,3}\|[^|]+\|/.test(typed) && !ROW.test(lines[last - 1] ?? "")) {
-    const header = typed.trimEnd().endsWith("|") ? typed : typed + "|";
-    lines[last] = header + "\n|" + cells(header).map(() => "---").join("|") + "|";
-  }
-  return lines.join("\n");
+export function preloadMarkdown(): Promise<unknown> {
+  return import("./markdown.tsx");
 }
 
 export function Markdown(props: MarkdownProps) {
   const part = usePart();
-  const render = useRef(props.code);
-  render.current = props.code;
-  const parts = useMemo(() => components(part, render), [part]);
-  const { className, ...attributes } = part("markdown", { live: props.live });
-  return (
-    <Streamdown
-      {...attributes}
-      className={typeof className === "string" ? className : undefined}
-      components={parts}
-      controls={false}
-      isAnimating={props.live ?? false}
-      linkSafety={OFF}
-      mode="streaming"
-      parseIncompleteMarkdown
-      rehypePlugins={REHYPE}
-    >
-      {props.live === false ? props.text : table(props.text)}
-    </Streamdown>
-  );
+  const fallback = <div {...part("markdown", { live: props.live })}><p {...part("paragraph")}>{props.text}</p></div>;
+  return <Suspense fallback={fallback}><Streamed {...props} /></Suspense>;
 }
 
 export function Reply(props: MarkdownProps) {

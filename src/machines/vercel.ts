@@ -1,4 +1,5 @@
 import { defineDoc, type DurableSessions } from "durable-harness";
+import * as Mcp from "./mcp.ts";
 import * as Payment from "./payment.ts";
 import { account, type Account, device, json, keys, paying, type Store } from "./account.ts";
 
@@ -82,7 +83,7 @@ export function createWallets(options: WalletsOptions) {
     GET: (request: Request) => guarded(request, request => handlers.me(request, undefined)),
     POST: (request: Request) => guarded(request, request => handlers.register(request, undefined)),
     device,
-    mcp: { servers: [...servers], fetch: (sessionId: string) => paying(() => holder(sessionId), servers) },
+    mcp: { servers: [...servers], fetch: (sessionId: string) => paying(() => holder(sessionId), servers), core: Mcp.core },
     servers,
   };
 }

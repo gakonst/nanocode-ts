@@ -233,7 +233,7 @@ export type RuntimeOptions = {
   };
   workspace?: WorkspaceHost;
   fetch?(input: string, init: RequestInit): Promise<Response>;
-  mcp?: { deferred?: boolean; cacheMs?: number };
+  mcp?: { deferred?: boolean; cacheMs?: number; core?: Record<string, readonly string[]> };
   remote?: {
     failed?(): boolean;
     execute(request: RemoteRequest, id: number): Promise<unknown>;
