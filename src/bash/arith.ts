@@ -13,7 +13,7 @@ function tokenize(source: string): Token[] {
   let i = 0;
   while (i < source.length) {
     const c = source[i];
-    if (/\s/.test(c)) {
+    if (/\s/.test(c) || c === '"') {
       i++;
       continue;
     }
@@ -89,7 +89,7 @@ export function evaluateArith(source: string, scope: ArithScope, depth = 0): num
   const variable = (name: string, index?: number): number => {
     const text = scope.get(name, index).trim();
     if (text === "") return 0;
-    if (/^-?\d+$/.test(text)) return Number(text);
+    if (/^-?(0|[1-9]\d*)$/.test(text)) return Number(text);
     return evaluateArith(text, scope, depth + 1);
   };
   const subscript = (run: boolean): number | undefined => {

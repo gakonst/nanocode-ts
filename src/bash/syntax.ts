@@ -700,6 +700,18 @@ class Parser {
         this.pos++;
         this.double(parts, '"');
         this.pos++;
+      } else if (c === "$" && this.src[this.pos + 1] === "'") {
+        this.pos += 2;
+        let value = "";
+        while (!this.done() && this.src[this.pos] !== "'") {
+          if (this.src[this.pos] === "\\") {
+            const [text, length] = ansiEscape(this.src, this.pos + 1);
+            value += text;
+            this.pos += 1 + length;
+          } else value += this.src[this.pos++];
+        }
+        this.pos++;
+        push(parts, value, true);
       } else if (c === "$" || c === "`") parts.push(this.dollar(true));
       else {
         push(parts, c, false);
