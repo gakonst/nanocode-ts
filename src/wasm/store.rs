@@ -1,7 +1,10 @@
-use nanocode::durability::{Sql, SqlRow, SqlStatement, StoreError, StoreFuture};
+use nanocode::durability::{
+    BlobKey, BlobStore, Sql, SqlRow, SqlStatement, StoreError, StoreFuture,
+};
 use serde::Serialize;
+use serde_json::{Value, json};
 
-use super::bridge::call_bytes_with;
+use super::bridge::{call_bytes_with, call_optional_bytes, call_with_body};
 
 const NULL_CELL: u32 = u32::MAX;
 
@@ -104,6 +107,35 @@ impl Sql for WorkerStore {
             }
             .decode()
             .map_err(StoreError::Backend)
+        })
+    }
+}
+
+pub struct WorkerBlobs;
+
+fn backend(error: Value) -> StoreError {
+    StoreError::Backend(error.to_string())
+}
+
+impl BlobStore for WorkerBlobs {
+    fn put<'a>(
+        &'a self,
+        key: &'a BlobKey,
+        bytes: &'a [u8],
+    ) -> StoreFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            call_with_body(json!({"op": "blob_put", "key": key.as_str()}), bytes)
+                .await
+                .map(drop)
+                .map_err(backend)
+        })
+    }
+
+    fn get<'a>(&'a self, key: &'a BlobKey) -> StoreFuture<'a, Result<Option<Vec<u8>>, StoreError>> {
+        Box::pin(async move {
+            call_optional_bytes(json!({"op": "blob_get", "key": key.as_str()}))
+                .await
+                .map_err(backend)
         })
     }
 }

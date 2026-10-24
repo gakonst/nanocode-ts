@@ -306,6 +306,8 @@ enum Command {
         value_limit: Option<usize>,
         #[serde(default)]
         logical_limit: Option<usize>,
+        #[serde(default)]
+        blob_threshold: Option<usize>,
     },
     Init {
         config: Value,
@@ -490,6 +492,7 @@ thread_local! {
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
     static LOGICAL_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
+    static BLOB_THRESHOLD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 #[derive(Deserialize)]
@@ -551,8 +554,12 @@ fn log(scope: &str) -> Arc<Log> {
                 Some(limit) => log.value_limit(limit),
                 None => log,
             };
-            Arc::new(match LOGICAL_LIMIT.get() {
+            let log = match LOGICAL_LIMIT.get() {
                 Some(limit) => log.logical_limit(limit),
+                None => log,
+            };
+            Arc::new(match BLOB_THRESHOLD.get() {
+                Some(threshold) => log.blobs(Arc::new(store::WorkerBlobs), threshold),
                 None => log,
             })
         }))
@@ -838,6 +845,11 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .map_err(configuration)
     };
     let mut builder = Nanocode::builder();
+    if BLOB_THRESHOLD.get().is_some() {
+        builder = builder.images(
+            nanocode::ImageHistory::default().with_blob_store(Arc::new(store::WorkerBlobs)),
+        );
+    }
     if let Some((harness, _)) = claude {
         builder = builder.claude(harness.tools(selected(Provider::Claude)?));
     }
@@ -1307,9 +1319,11 @@ fn execute(command: Command) -> Executed {
         Command::Configure {
             value_limit,
             logical_limit,
+            blob_threshold,
         } => executed(async move {
             VALUE_LIMIT.set(value_limit);
             LOGICAL_LIMIT.set(logical_limit);
+            BLOB_THRESHOLD.set(blob_threshold);
             Ok(Value::Null)
         }),
         Command::Init { config } => executed(init(config)),
