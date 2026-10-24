@@ -30,5 +30,8 @@
     "src/sandbox/shell.ts",
     "src/react/*.ts",
     "src/react/*.tsx"
+  ],
+  "exclude": [
+    "src/machines/vercel.ts"
   ]
 }

@@ -1,6 +1,7 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
 import { breathe, decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
 import { TarReader } from "./archive.ts";
+import { mark } from "../../egress.ts";
 
 const MAX_BYTES = 200 * 1024 * 1024;
 
@@ -535,12 +536,21 @@ export function gitCommands(github: GitHubOptions = {}): Record<string, CommandH
 const ALLOWED = [/^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/(?:tar\.gz|legacy\.tar\.gz|zip|legacy\.zip)\//, /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:archive|releases\/download|raw)\//, /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\//, /^https:\/\/(?:objects|release-assets)\.githubusercontent\.com\//, /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+(?:\/(?:tarball|zipball|commits|releases)(?:\/[^?#]*)?)?(?:\?[^#]*)?$/];
 
 export function githubArchives(fetcher: typeof fetch = globalThis.fetch): typeof fetch {
-  return (input, init) => {
+  return mark(async (input, init) => {
     const request = new Request(input, init);
-    if ((request.method === "GET" || request.method === "HEAD") && ALLOWED.some(pattern => pattern.test(request.url))) {
-      if (typeof (globalThis as { document?: unknown }).document === "undefined" && !request.headers.has("user-agent")) request.headers.set("user-agent", "nanocode-ts");
-      return fetcher(request);
+    if ((request.method !== "GET" && request.method !== "HEAD") || !ALLOWED.some(pattern => pattern.test(request.url))) throw new TypeError(request.method + " " + request.url + " refused: this host reaches only public GitHub repositories (GET https://api.github.com/repos/OWNER/REPO with its /commits, /releases, /tarball and /zipball, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, and raw.githubusercontent.com), so no other URL works from cells, curl or wget");
+    if (typeof (globalThis as { document?: unknown }).document !== "undefined") return fetcher(request);
+    if (!request.headers.has("user-agent")) request.headers.set("user-agent", "nanocode-ts");
+    const mode = request.redirect;
+    let url = request.url;
+    for (let hop = 0; ; hop++) {
+      const response = await fetcher(url, { method: request.method, headers: request.headers, redirect: "manual", signal: request.signal });
+      const location = response.headers.get("location");
+      if (mode === "manual" || response.status < 300 || response.status > 399 || location === null) return response;
+      await response.body?.cancel().catch(() => undefined);
+      const next = new URL(location, url).href;
+      if (mode === "error" || hop >= 10 || !ALLOWED.some(pattern => pattern.test(next))) throw new TypeError(request.method + " " + url + " redirected to " + next + ", which this host does not reach (only public GitHub repositories)");
+      url = next;
     }
-    return Promise.reject(new TypeError(request.method + " " + request.url + " refused: this host reaches only public GitHub repositories (GET https://api.github.com/repos/OWNER/REPO with its /commits, /releases, /tarball and /zipball, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, and raw.githubusercontent.com), so no other URL works from cells, curl or wget"));
-  };
+  });
 }
