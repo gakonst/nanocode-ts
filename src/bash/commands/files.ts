@@ -1,6 +1,7 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, encode, normalize, parentOf, type FileStat, type FileSystem } from "../fs.ts";
-import { globRegExp } from "../text.ts";
+import { globRegExp, posixRegExp } from "../text.ts";
+import { strftime } from "./text.ts";
 import { eachInput, last, options } from "./util.ts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -29,7 +30,8 @@ function human(size: number): string {
     value /= 1024;
     unit++;
   }
-  return (value < 10 ? Math.ceil(value * 10) / 10 : Math.ceil(value)).toString() + units[unit];
+  const rounded = Math.ceil(value * 10) / 10;
+  return (rounded < 10 ? rounded.toFixed(1) : String(Math.ceil(value))) + units[unit];
 }
 
 function when(mtime: number): string {
@@ -303,56 +305,216 @@ const touch: CommandHandler = async ctx => {
   return status;
 };
 
-type FindNode = { kind: "and"; left: FindNode; right: FindNode } | { kind: "or"; left: FindNode; right: FindNode } | { kind: "not"; node: FindNode } | { kind: "test"; name: string; arg?: string; command?: string[]; batch?: boolean };
+type FindTest = { kind: "test"; name: string; arg?: string; command?: string[]; batch?: boolean; regex?: RegExp };
 
-type FindEntry = { path: string; display: string; stat: FileStat; depth: number; name: string };
+type FindNode = { kind: "and"; left: FindNode; right: FindNode } | { kind: "or"; left: FindNode; right: FindNode } | { kind: "comma"; left: FindNode; right: FindNode } | { kind: "not"; node: FindNode } | FindTest;
+
+type FindEntry = { path: string; display: string; stat: FileStat; depth: number; name: string; root: string; pruned: boolean };
+
+const quote = (value: string) => (/^[\w@%+=:,.\/-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'");
+
+function emacsRegExp(pattern: string): string {
+  let out = "";
+  let inBracket = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (inBracket) {
+      out += c;
+      if (c === "]") inBracket = false;
+      continue;
+    }
+    if (c === "[") {
+      inBracket = true;
+      out += c;
+      if (pattern[i + 1] === "^") out += pattern[++i];
+      if (pattern[i + 1] === "]") out += pattern[++i];
+      continue;
+    }
+    if (c === "\\" && i + 1 < pattern.length) {
+      const n = pattern[++i];
+      out += "(){}|".includes(n) ? n : "\\" + n;
+      continue;
+    }
+    out += "(){}|".includes(c) ? "\\" + c : c;
+  }
+  return out;
+}
+
+function permBits(spec: string, base: number): number | undefined {
+  if (/^[0-7]+$/.test(spec)) return parseInt(spec, 8);
+  let mode = base;
+  for (const clause of spec.split(",")) {
+    const match = clause.match(/^([ugoa]*)([-+=])([rwxXst]*)$/);
+    if (!match) return undefined;
+    const who = match[1] === "" || match[1].includes("a") ? "ugo" : match[1];
+    let bits = 0;
+    for (const p of match[3]) bits |= p === "r" ? 4 : p === "w" ? 2 : p === "x" || p === "X" ? 1 : 0;
+    let mask = 0;
+    for (const w of who) mask |= bits << (w === "u" ? 6 : w === "g" ? 3 : 0);
+    let clear = 0;
+    for (const w of who) clear |= 7 << (w === "u" ? 6 : w === "g" ? 3 : 0);
+    if (match[2] === "+") mode |= mask;
+    else if (match[2] === "-") mode &= ~mask;
+    else mode = (mode & ~clear) | mask;
+  }
+  return mode;
+}
+
+const FIND_ACTIONS = ["-delete", "-exec", "-execdir", "-fprint", "-fprint0", "-fprintf", "-ls", "-fls", "-ok", "-okdir", "-print", "-print0", "-printf"];
+const FIND_UNARY = ["-delete", "-print", "-print0", "-true", "-false", "-empty", "-prune", "-quit", "-ls", "-readable", "-writable", "-executable", "-nouser", "-nogroup"];
+const FIND_BINARY = ["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-type", "-xtype", "-size", "-newer", "-anewer", "-cnewer", "-regex", "-iregex", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-perm", "-user", "-group", "-uid", "-gid", "-links", "-inum", "-samefile", "-lname", "-ilname", "-printf", "-fprint", "-fprint0", "-used", "-newermt"];
+const FIND_GLOBAL = ["-depth", "-d", "-follow", "-xdev", "-mount", "-noleaf", "-ignore_readdir_race", "-noignore_readdir_race", "-daystart", "-nowarn", "-warn"];
+
+function findPrintf(spec: string, entry: FindEntry): string {
+  const size = entry.stat.kind === "directory" ? 4096 : entry.stat.size;
+  const blocks = entry.stat.kind === "directory" ? 4 : Math.ceil(entry.stat.size / 4096) * 4;
+  const seconds = entry.stat.mtime / 1000;
+  const date = new Date(entry.stat.mtime);
+  const fraction = (entry.stat.mtime % 1000).toString().padStart(3, "0") + "0000000";
+  const slash = entry.display.lastIndexOf("/");
+  const values = (c: string): string | undefined => {
+    switch (c) {
+      case "p": return entry.display;
+      case "f": return entry.depth === 0 ? entry.display.replace(/(.)\/+$/, "$1").replace(/^.*\/(?=.)/, "") : entry.name;
+      case "h": return slash < 0 ? "." : slash === 0 ? "/" : entry.display.slice(0, slash);
+      case "P": return entry.depth === 0 ? "" : entry.display.slice(entry.root.length).replace(/^\/+/, "");
+      case "H": return entry.root;
+      case "d": return String(entry.depth);
+      case "y":
+      case "Y": return entry.stat.kind === "directory" ? "d" : "f";
+      case "m": return (entry.stat.mode & 0o7777).toString(8);
+      case "M": return mode(entry.stat);
+      case "s": return String(size);
+      case "k": return String(blocks);
+      case "b": return String(blocks * 2);
+      case "u":
+      case "g": return "user";
+      case "U":
+      case "G": return "1000";
+      case "n": return "1";
+      case "i": return "0";
+      case "S": return "1";
+      case "l": return "";
+      case "%": return "%";
+    }
+    return undefined;
+  };
+  let out = "";
+  for (let i = 0; i < spec.length; i++) {
+    const c = spec[i];
+    if (c === "\\" && i + 1 < spec.length) {
+      const next = spec[i + 1];
+      const octal = spec.slice(i + 1).match(/^[0-7]{1,3}/);
+      if (octal) {
+        out += String.fromCharCode(parseInt(octal[0], 8));
+        i += octal[0].length;
+        continue;
+      }
+      const simple: Record<string, string> = { n: "\n", t: "\t", "\\": "\\", a: "\x07", b: "\b", f: "\f", r: "\r", v: "\v" };
+      if (next === "c") break;
+      out += simple[next] ?? "\\" + next;
+      i++;
+      continue;
+    }
+    if (c !== "%") {
+      out += c;
+      continue;
+    }
+    const match = spec.slice(i).match(/^%([-+ #0]*)(\d*)(?:\.(\d+))?([TAC][a-zA-Z@+]|[a-zA-Z%])/);
+    if (!match) {
+      out += c;
+      continue;
+    }
+    i += match[0].length - 1;
+    const directive = match[4];
+    let value: string;
+    if (/^[TAC]./.test(directive)) {
+      const k = directive[1];
+      value = k === "@" ? Math.floor(seconds) + "." + fraction : k === "+" ? strftime("%Y-%m-%d+%H:%M:%S", date) + "." + fraction : strftime("%" + k, date);
+    } else if ("tac".includes(directive)) value = strftime("%a %b %e %H:%M:%S", date) + "." + fraction + strftime(" %Y", date);
+    else value = values(directive) ?? match[0];
+    if (match[3] !== undefined && !/^[dskb]$/.test(directive)) value = value.slice(0, Number(match[3]));
+    const width = Number(match[2] || 0);
+    if (value.length < width) value = match[1].includes("-") ? value.padEnd(width) : value.padStart(width, match[1].includes("0") && /^[dskb]$/.test(directive) ? "0" : " ");
+    out += value;
+  }
+  return out;
+}
 
 const find: CommandHandler = async ctx => {
   const args = ctx.args;
   const roots: string[] = [];
   let i = 0;
-  while (i < args.length && !args[i].startsWith("-") && args[i] !== "!" && args[i] !== "(") roots.push(args[i++]);
+  while (i < args.length && /^-[HLP]$/.test(args[i])) i++;
+  if (args[i] === "--") i++;
+  while (i < args.length && !(args[i].startsWith("-") && args[i].length > 1) && args[i] !== "!" && args[i] !== "(" && args[i] !== ")" && args[i] !== ",") roots.push(args[i++]);
   if (!roots.length) roots.push(".");
   let maxDepth = Infinity;
   let minDepth = 0;
+  let depthFirst = false;
   let printed = false;
+  let regexType = "emacs";
   const tokens = args.slice(i);
   let pos = 0;
-  const batches: { command: string[]; paths: string[] }[] = [];
+  const batches = new Map<FindNode, { dir: string; paths: string[] }[]>();
   const primary = (): FindNode => {
     const token = tokens[pos++];
-    if (token === undefined) throw new CommandError("expected an expression");
+    if (token === undefined) throw new CommandError("expected an expression", 1);
     if (token === "(") {
-      const node = or();
-      if (tokens[pos++] !== ")") throw new CommandError("missing ')'");
+      const node = comma();
+      if (tokens[pos++] !== ")") throw new CommandError("invalid expression; I was expecting to find a ')' somewhere but did not see one.", 1);
       return node;
     }
     if (token === "!" || token === "-not") return { kind: "not", node: primary() };
     if (token === "-maxdepth" || token === "-mindepth") {
-      const value = Number(tokens[pos++]);
-      if (token === "-maxdepth") maxDepth = value;
-      else minDepth = value;
+      const value = tokens[pos++];
+      if (value === undefined || !/^\d+$/.test(value)) throw new CommandError("Expected a positive decimal integer argument to " + token + ", but got '" + (value ?? "") + "'", 1);
+      if (token === "-maxdepth") maxDepth = Number(value);
+      else minDepth = Number(value);
       return { kind: "test", name: "-true" };
     }
-    if (token === "-exec" || token === "-execdir" || token === "-ok") {
-      const command: string[] = [];
-      while (pos < tokens.length && tokens[pos] !== ";" && tokens[pos] !== "+") command.push(tokens[pos++]);
-      const batch = tokens[pos++] === "+";
-      printed = true;
-      return { kind: "test", name: "-exec", command, batch };
+    if (token === "-regextype") {
+      regexType = tokens[pos++] ?? "emacs";
+      return { kind: "test", name: "-true" };
     }
-    if (["-print", "-print0", "-delete", "-ls"].includes(token)) printed = true;
-    if (["-name", "-iname", "-path", "-ipath", "-wholename", "-type", "-size", "-newer", "-regex", "-iregex", "-mtime", "-mmin", "-perm", "-user", "-group"].includes(token)) {
+    if (FIND_GLOBAL.includes(token)) {
+      if (token === "-depth" || token === "-d") depthFirst = true;
+      return { kind: "test", name: "-true" };
+    }
+    if (FIND_ACTIONS.includes(token)) printed = true;
+    if (token === "-delete") depthFirst = true;
+    if (token === "-exec" || token === "-execdir" || token === "-ok" || token === "-okdir") {
+      const command: string[] = [];
+      while (pos < tokens.length && tokens[pos] !== ";" && !(tokens[pos] === "+" && command[command.length - 1] === "{}")) command.push(tokens[pos++]);
+      if (pos >= tokens.length) throw new CommandError("missing argument to '" + token + "'", 1);
+      if (!command.length) throw new CommandError("invalid argument '" + tokens[pos] + "' to '" + token + "'", 1);
+      const batch = tokens[pos++] === "+";
+      return { kind: "test", name: token.startsWith("-exec") ? token : token === "-ok" ? "-exec" : "-execdir", command, batch };
+    }
+    if (FIND_BINARY.includes(token)) {
       const arg = tokens[pos++];
-      if (arg === undefined) throw new CommandError("missing argument to `" + token + "'");
+      if (arg === undefined) throw new CommandError("missing argument to '" + token + "'", 1);
+      if (token === "-regex" || token === "-iregex") {
+        let source: string;
+        try {
+          source = regexType === "emacs" || regexType === "posix-basic" ? posixRegExp(regexType === "emacs" ? emacsRegExp(arg) : arg, regexType === "emacs").source : posixRegExp(arg, true).source;
+        } catch {
+          source = arg;
+        }
+        return { kind: "test", name: token, arg, regex: new RegExp("^(?:" + source + ")$", token === "-iregex" ? "s" + "i" : "s") };
+      }
+      if (token === "-type" && !/^[fdlbcps](,[fdlbcps])*$/.test(arg)) throw new CommandError("Unknown argument to -type: " + arg, 1);
+      if (token === "-size" && !/^[+-]?\d+[cwbkMG]?$/.test(arg)) throw new CommandError("invalid -size type '" + arg.replace(/^[+-]?\d+/, "") + "'", 1);
+      if (/^-[acm](time|min)$/.test(token) && !/^[+-]?\d+(\.\d+)?$/.test(arg)) throw new CommandError("invalid argument '" + arg + "' to '" + token + "'", 1);
       return { kind: "test", name: token, arg };
     }
-    if (["-print", "-print0", "-delete", "-true", "-false", "-empty", "-prune", "-quit", "-ls", "-depth", "-follow", "-xdev", "-readable", "-writable", "-executable"].includes(token)) return { kind: "test", name: token };
-    throw new CommandError("unknown predicate `" + token + "'");
+    if (FIND_UNARY.includes(token)) return { kind: "test", name: token };
+    if (token.startsWith("-")) throw new CommandError("unknown predicate '" + token + "'", 1);
+    throw new CommandError("paths must precede expression: '" + token + "'", 1);
   };
   const and = (): FindNode => {
     let node = primary();
-    while (pos < tokens.length && tokens[pos] !== "-o" && tokens[pos] !== "-or" && tokens[pos] !== ")") {
+    while (pos < tokens.length && tokens[pos] !== "-o" && tokens[pos] !== "-or" && tokens[pos] !== ")" && tokens[pos] !== ",") {
       if (tokens[pos] === "-a" || tokens[pos] === "-and") pos++;
       node = { kind: "and", left: node, right: primary() };
     }
@@ -366,24 +528,51 @@ const find: CommandHandler = async ctx => {
     }
     return node;
   };
-  const expression: FindNode = tokens.length ? or() : { kind: "test", name: "-true" };
+  const comma = (): FindNode => {
+    let node = or();
+    while (tokens[pos] === ",") {
+      pos++;
+      node = { kind: "comma", left: node, right: or() };
+    }
+    return node;
+  };
+  const expression: FindNode = tokens.length ? comma() : { kind: "test", name: "-true" };
+  if (pos < tokens.length) throw new CommandError(tokens[pos] === ")" ? "invalid expression; you have too many ')'" : "paths must precede expression: '" + tokens[pos] + "'", 1);
   const root: FindNode = printed ? expression : { kind: "and", left: expression, right: { kind: "test", name: "-print" } };
   let status = 0;
-  const deletions: string[] = [];
+  const now = Date.now();
+  const refs = new Map<string, FileStat | null>();
+  const reference = async (arg: string) => {
+    if (!refs.has(arg)) refs.set(arg, await ctx.fs.stat(ctx.resolve(arg)));
+    const stat = refs.get(arg);
+    if (!stat) throw new CommandError("'" + arg + "': No such file or directory", 1);
+    return stat;
+  };
+  const run = async (argv: string[], dir?: string): Promise<number> => {
+    if (dir === undefined) return ctx.run(argv, "");
+    const result = await ctx.exec("cd " + quote(dir) + " && " + argv.map(quote).join(" "));
+    ctx.stdout.write(result.stdout);
+    return result.status;
+  };
   const evaluate = async (node: FindNode, entry: FindEntry): Promise<boolean> => {
-    if (node.kind === "and") return (await evaluate(node.left, entry)) && evaluate(node.right, entry);
-    if (node.kind === "or") return (await evaluate(node.left, entry)) || evaluate(node.right, entry);
+    if (node.kind === "and" || node.kind === "or" || node.kind === "comma") {
+      const left = await evaluate(node.left, entry);
+      if (node.kind === "and" && !left) return false;
+      if (node.kind === "or" && left) return true;
+      return evaluate(node.right, entry);
+    }
     if (node.kind === "not") return !(await evaluate(node.node, entry));
     const arg = node.arg ?? "";
     switch (node.name) {
       case "-true":
-      case "-depth":
-      case "-follow":
-      case "-xdev":
       case "-readable":
       case "-writable":
         return true;
       case "-false":
+      case "-nouser":
+      case "-nogroup":
+      case "-lname":
+      case "-ilname":
         return false;
       case "-name":
         return globRegExp(arg).test(entry.name);
@@ -393,41 +582,69 @@ const find: CommandHandler = async ctx => {
       case "-wholename":
         return globRegExp(arg).test(entry.display);
       case "-ipath":
+      case "-iwholename":
         return globRegExp(arg, "i").test(entry.display);
       case "-regex":
-        return new RegExp("^(?:" + arg + ")$").test(entry.display);
       case "-iregex":
-        return new RegExp("^(?:" + arg + ")$", "i").test(entry.display);
+        return node.regex!.test(entry.display);
       case "-type":
+      case "-xtype":
         return arg.split(",").some(type => (type === "f" && entry.stat.kind === "file") || (type === "d" && entry.stat.kind === "directory"));
       case "-empty":
         return entry.stat.kind === "file" ? entry.stat.size === 0 : (await ctx.fs.list(entry.path)).length === 0;
       case "-executable":
         return (entry.stat.mode & 0o111) !== 0;
       case "-size": {
-        const match = arg.match(/^([+-]?)(\d+)([ckMGb]?)$/);
-        if (!match) throw new CommandError("invalid argument `" + arg + "' to `-size'");
-        const unit = { c: 1, k: 1024, M: 1024 ** 2, G: 1024 ** 3, b: 512, "": 512 }[match[3]]!;
-        const size = Math.ceil(entry.stat.size / unit);
+        const match = arg.match(/^([+-]?)(\d+)([cwbkMG]?)$/)!;
+        const unit = { c: 1, w: 2, k: 1024, M: 1024 ** 2, G: 1024 ** 3, b: 512, "": 512 }[match[3]]!;
+        const size = Math.ceil((entry.stat.kind === "directory" ? 4096 : entry.stat.size) / unit);
         const n = Number(match[2]);
         return match[1] === "+" ? size > n : match[1] === "-" ? size < n : size === n;
       }
       case "-mtime":
-      case "-mmin": {
-        const match = arg.match(/^([+-]?)(\d+)$/);
-        if (!match) return false;
-        const age = (Date.now() - entry.stat.mtime) / (node.name === "-mtime" ? 86400000 : 60000);
+      case "-atime":
+      case "-ctime":
+      case "-mmin":
+      case "-amin":
+      case "-cmin": {
+        const match = arg.match(/^([+-]?)(\d+(?:\.\d+)?)$/)!;
+        const minutes = node.name.endsWith("min");
+        const age = (now - entry.stat.mtime) / (minutes ? 60000 : 86400000);
         const n = Number(match[2]);
-        return match[1] === "+" ? age > n + (node.name === "-mtime" ? 1 : 0) : match[1] === "-" ? age < n : Math.floor(age) === n;
+        const value = minutes ? Math.ceil(age) : Math.floor(age);
+        return match[1] === "+" ? value > n : match[1] === "-" ? (minutes ? age < n : value < n) : value === n;
       }
-      case "-newer": {
-        const other = await ctx.fs.stat(ctx.resolve(arg));
-        return other !== null && entry.stat.mtime > other.mtime;
+      case "-newer":
+      case "-anewer":
+      case "-cnewer":
+        return entry.stat.mtime > (await reference(arg)).mtime;
+      case "-newermt": {
+        const time = Date.parse(arg);
+        if (Number.isNaN(time)) throw new CommandError("I cannot figure out how to interpret '" + arg + "' as a date or time", 1);
+        return entry.stat.mtime > time;
       }
-      case "-perm":
+      case "-samefile":
+        return entry.path === ctx.resolve(arg);
+      case "-perm": {
+        const prefix = /^[-\/+]/.test(arg) ? arg[0] : "";
+        const bits = permBits(prefix ? arg.slice(1) : arg, 0);
+        if (bits === undefined) throw new CommandError("invalid mode '" + arg + "'", 1);
+        const actual = entry.stat.mode & 0o7777;
+        return prefix === "-" ? (actual & bits) === bits : prefix ? bits === 0 || (actual & bits) !== 0 : actual === bits;
+      }
       case "-user":
       case "-group":
+        return arg === "user" || arg === ctx.env.USER || arg === "1000";
+      case "-uid":
+      case "-gid":
+        return arg === "1000";
+      case "-links":
+        return /^[-+]?\d+$/.test(arg) ? (arg.startsWith("+") ? 1 > Number(arg.slice(1)) : arg.startsWith("-") ? 1 < Number(arg.slice(1)) : Number(arg) === 1) : false;
+      case "-inum":
+      case "-used":
+        return false;
       case "-prune":
+        if (!depthFirst) entry.pruned = true;
         return true;
       case "-print":
         ctx.stdout.write(entry.display + "\n");
@@ -435,63 +652,88 @@ const find: CommandHandler = async ctx => {
       case "-print0":
         ctx.stdout.write(entry.display + "\0");
         return true;
+      case "-printf":
+        ctx.stdout.write(findPrintf(arg, entry));
+        return true;
+      case "-fprint":
+      case "-fprint0":
+        await ctx.fs.write(ctx.resolve(arg), encode(entry.display + (node.name === "-fprint0" ? "\0" : "\n")), true);
+        return true;
       case "-ls":
-        ctx.stdout.write(mode(entry.stat) + " 1 user user " + entry.stat.size + " " + when(entry.stat.mtime) + " " + entry.display + "\n");
+        ctx.stdout.write("      0      " + (entry.stat.kind === "directory" ? 4 : Math.ceil(entry.stat.size / 4096) * 4) + " " + mode(entry.stat) + "   1 user     user     " + String(entry.stat.kind === "directory" ? 4096 : entry.stat.size).padStart(8) + " " + when(entry.stat.mtime) + " " + entry.display + "\n");
         return true;
       case "-delete":
-        deletions.push(entry.path);
-        return true;
+        try {
+          if (entry.stat.kind === "directory" && (await ctx.fs.list(entry.path)).length) throw new FsError("ENOTEMPTY", entry.path);
+          if (entry.depth === 0 && entry.display === ".") return true;
+          await ctx.fs.remove(entry.path);
+          return true;
+        } catch (error) {
+          ctx.stderr.write("find: cannot delete '" + entry.display + "': " + failure(error) + "\n");
+          status = 1;
+          return false;
+        }
       case "-quit":
         throw new FindQuit();
-      case "-exec": {
+      case "-exec":
+      case "-execdir": {
         const command = node.command ?? [];
+        const dir = node.name === "-execdir" ? (entry.depth === 0 && entry.path !== "/" ? parentOf(entry.path) : parentOf(entry.path)) : undefined;
+        const target = node.name === "-execdir" ? (entry.path === "/" ? "/" : "./" + baseOf(entry.path)) : entry.display;
         if (node.batch) {
-          let batch = batches.find(item => item.command === command);
-          if (!batch) batches.push(batch = { command, paths: [] });
-          batch.paths.push(entry.display);
+          const list = batches.get(node) ?? [];
+          batches.set(node, list);
+          let batch = list.find(item => item.dir === (dir ?? ""));
+          if (!batch) list.push((batch = { dir: dir ?? "", paths: [] }));
+          batch.paths.push(target);
           return true;
         }
-        const argv = command.map(word => word.split("{}").join(entry.display));
-        return (await ctx.run(argv, "")) === 0;
+        return (await run(command.map(word => word.split("{}").join(target)), dir)) === 0;
       }
     }
     return false;
   };
   const walk = async (entry: FindEntry) => {
-    if (entry.depth >= minDepth) await evaluate(root, entry);
-    if (entry.stat.kind !== "directory" || entry.depth >= maxDepth) return;
-    for (const name of await ctx.fs.list(entry.path)) {
-      const path = join(entry.path, name);
-      const stat = await ctx.fs.stat(path);
-      if (!stat) continue;
-      await walk({ path, display: entry.display === "/" ? "/" + name : entry.display.replace(/\/$/, "") + "/" + name, stat, depth: entry.depth + 1, name });
+    if (!depthFirst && entry.depth >= minDepth) await evaluate(root, entry);
+    if (entry.stat.kind === "directory" && entry.depth < maxDepth && !entry.pruned) {
+      let names: string[] = [];
+      try {
+        names = await ctx.fs.list(entry.path);
+      } catch (error) {
+        ctx.stderr.write("find: '" + entry.display + "': " + failure(error) + "\n");
+        status = 1;
+      }
+      for (const name of names) {
+        const path = join(entry.path, name);
+        const stat = await ctx.fs.stat(path);
+        if (!stat) continue;
+        await walk({ path, display: entry.display.endsWith("/") ? entry.display + name : entry.display + "/" + name, stat, depth: entry.depth + 1, name, root: entry.root, pruned: false });
+      }
     }
+    if (depthFirst && entry.depth >= minDepth) await evaluate(root, entry);
   };
   try {
-    for (const root of roots) {
-      const path = ctx.resolve(root);
+    for (const start of roots) {
+      const path = ctx.resolve(start);
       const stat = await ctx.fs.stat(path);
       if (!stat) {
-        ctx.stderr.write("find: '" + root + "': No such file or directory\n");
+        ctx.stderr.write("find: '" + start + "': No such file or directory\n");
         status = 1;
         continue;
       }
-      await walk({ path, display: root, stat, depth: 0, name: baseOf(path) || "/" });
+      const trimmed = start.replace(/(.)\/+$/, "$1");
+      await walk({ path, display: start, stat, depth: 0, name: trimmed === "/" ? "/" : trimmed.slice(trimmed.lastIndexOf("/") + 1), root: start, pruned: false });
     }
   } catch (error) {
     if (!(error instanceof FindQuit)) throw error;
   }
-  for (const batch of batches) {
-    const index = batch.command.indexOf("{}");
-    const argv = index < 0 ? [...batch.command, ...batch.paths] : [...batch.command.slice(0, index), ...batch.paths, ...batch.command.slice(index + 1)];
-    if ((await ctx.run(argv, "")) !== 0) status = 1;
-  }
-  for (const path of deletions.sort((a, b) => b.length - a.length)) {
-    try {
-      await ctx.fs.remove(path);
-    } catch (error) {
-      ctx.stderr.write("find: cannot delete '" + path + "': " + failure(error) + "\n");
-      status = 1;
+  for (const [node, list] of batches) {
+    if (node.kind !== "test") continue;
+    const command = node.command ?? [];
+    const index = command.lastIndexOf("{}");
+    for (const batch of list) {
+      const argv = [...command.slice(0, index), ...batch.paths, ...command.slice(index + 1)];
+      if ((await run(argv, node.name === "-execdir" ? batch.dir : undefined)) !== 0) status = 1;
     }
   }
   return status;
@@ -588,23 +830,54 @@ const mktemp: CommandHandler = async ctx => {
 };
 
 const du: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "shacb", values: "d", long: { summarize: "s", "human-readable": "h", "max-depth": "d" } });
-  const depth = parsed.flags.has("s") ? 0 : Number(last(parsed, "d") ?? Infinity);
-  const show = (size: number) => (parsed.flags.has("h") ? human(size) : parsed.flags.has("b") ? String(size) : String(Math.ceil(size / 1024)));
+  const parsed = options(ctx.args, { flags: "shacbkmxLlS0", values: "dBt", long: { summarize: "s", "human-readable": "h", all: "a", total: "c", bytes: "b", "apparent-size": "A", "max-depth": "d", "block-size": "B", threshold: "t", "one-file-system": "x", "dereference": "L", "count-links": "l", "separate-dirs": "S", null: "0", si: "H", exclude: "exclude" } });
+  const f = parsed.flags;
+  const apparent = f.has("A") || f.has("b");
+  const depth = f.has("s") ? 0 : Number(last(parsed, "d") ?? Infinity);
+  const blockSize = (() => {
+    const spec = last(parsed, "B");
+    if (spec === undefined) return f.has("b") ? 1 : f.has("m") ? 1024 * 1024 : 1024;
+    const match = spec.match(/^(\d*)([KMG]?)(i?B?)$/i);
+    if (!match) throw new CommandError("invalid -B argument '" + spec + "'");
+    return Number(match[1] || 1) * 1024 ** " KMG".indexOf((match[2] || " ").toUpperCase());
+  })();
+  const excludes = (parsed.values.get("exclude") ?? []).map(glob => globRegExp(glob));
+  const show = (bytes: number) => {
+    if (f.has("h")) return bytes === 0 ? "0" : human(bytes);
+    return String(Math.ceil(bytes / blockSize));
+  };
+  const usage = (stat: FileStat) => (apparent ? (stat.kind === "file" ? stat.size : 0) : stat.kind === "directory" ? 4096 : Math.ceil(stat.size / 4096) * 4096);
+  const terminator = f.has("0") ? "\0" : "\n";
+  let status = 0;
+  let total = 0;
   const walk = async (path: string, display: string, level: number): Promise<number> => {
     const stat = await ctx.fs.stat(path);
     if (!stat) throw new FsError("ENOENT", display);
     if (stat.kind === "file") {
-      if (parsed.flags.has("a") && level <= depth) ctx.stdout.write(show(stat.size) + "\t" + display + "\n");
-      return stat.size;
+      const size = usage(stat);
+      if ((level === 0 || f.has("a")) && level <= depth) ctx.stdout.write(show(size) + "\t" + display + terminator);
+      return size;
     }
-    let total = 0;
-    for (const name of await ctx.fs.list(path)) total += await walk(join(path, name), display.replace(/\/$/, "") + "/" + name, level + 1);
-    if (level <= depth) ctx.stdout.write(show(total) + "\t" + display + "\n");
-    return total;
+    let sum = usage(stat);
+    for (const name of await ctx.fs.list(path)) {
+      if (excludes.some(glob => glob.test(name))) continue;
+      const child = await walk(join(path, name), display.endsWith("/") ? display + name : display + "/" + name, level + 1);
+      const childStat = await ctx.fs.stat(join(path, name));
+      if (!f.has("S") || childStat?.kind === "file") sum += child;
+    }
+    if (level <= depth) ctx.stdout.write(show(sum) + "\t" + display + terminator);
+    return sum;
   };
-  for (const operand of parsed.operands.length ? parsed.operands : ["."]) await walk(ctx.resolve(operand), operand, 0);
-  return 0;
+  for (const operand of parsed.operands.length ? parsed.operands : ["."]) {
+    try {
+      total += await walk(ctx.resolve(operand), operand, 0);
+    } catch (error) {
+      ctx.stderr.write("du: cannot access '" + operand + "': " + failure(error) + "\n");
+      status = 1;
+    }
+  }
+  if (f.has("c")) ctx.stdout.write(show(total) + "\ttotal" + terminator);
+  return status;
 };
 
 const stat: CommandHandler = async ctx => {

@@ -1,5 +1,5 @@
 import { CommandError, type CommandContext } from "../shell.ts";
-import { decode, FsError } from "../fs.ts";
+import { byte, decode, FsError } from "../fs.ts";
 
 export type Parsed = { flags: Set<string>; values: Map<string, string[]>; operands: string[] };
 
@@ -62,17 +62,33 @@ export function last(parsed: Parsed, key: string): string | undefined {
   return list?.[list.length - 1];
 }
 
-export async function readInput(ctx: CommandContext, operand: string): Promise<string> {
-  if (operand === "-" || operand === "/dev/stdin") return ctx.stdin.read();
-  return decode(await ctx.fs.read(ctx.resolve(operand)));
+export function device(path: string, size = 65536): string | undefined {
+  if (path === "/dev/null") return "";
+  if (path === "/dev/zero") return "\0".repeat(size);
+  if (path !== "/dev/urandom" && path !== "/dev/random") return undefined;
+  let out = "";
+  const bytes = new Uint8Array(Math.min(size, 65536));
+  while (out.length < size) {
+    crypto.getRandomValues(bytes);
+    for (let i = 0; i < bytes.length && out.length < size; i++) out += byte(bytes[i]!);
+  }
+  return out;
 }
 
-export async function eachInput(ctx: CommandContext, operands: string[], visit: (text: string, name: string) => void | Promise<void>): Promise<number> {
+export async function readInput(ctx: CommandContext, operand: string, size?: number): Promise<string> {
+  if (operand === "-" || operand === "/dev/stdin") return ctx.stdin.read();
+  const path = ctx.resolve(operand);
+  const special = size !== undefined || !(await ctx.fs.stat(path)) ? device(path, size) : undefined;
+  if (special !== undefined) return special;
+  return decode(await ctx.fs.read(path));
+}
+
+export async function eachInput(ctx: CommandContext, operands: string[], visit: (text: string, name: string) => void | Promise<void>, size?: number): Promise<number> {
   let status = 0;
   for (const operand of operands.length ? operands : ["-"]) {
     let text: string;
     try {
-      text = await readInput(ctx, operand);
+      text = await readInput(ctx, operand, size);
     } catch (error) {
       if (!(error instanceof FsError)) throw error;
       ctx.stderr.write(ctx.name + ": " + operand + ": " + (error.code === "ENOENT" ? "No such file or directory" : error.code === "EISDIR" ? "Is a directory" : error.message) + "\n");
