@@ -1,6 +1,6 @@
 import { decode, encode } from "../fs.ts";
 
-export type TarEntry = { name: string; type: "file" | "directory" | "symlink" | "link" | "other"; data: Uint8Array; mode: number; mtime: number; linkname: string };
+export type TarEntry = { name: string; type: "file" | "directory" | "symlink" | "link" | "other"; data: Uint8Array; mode: number; mtime: number; linkname: string; omitted?: number };
 
 async function transform(data: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
   const output = new Blob([data.slice()]).stream().pipeThrough(stream);
@@ -150,13 +150,18 @@ export class TarReader {
         this.#finish(block, new Uint8Array(), out);
         continue;
       }
+      if (size > this.#maxEntry && (type === "0" || type === "" || type === "7")) {
+        this.#skip = Math.ceil(size / 512) * 512;
+        this.#finish(block, new Uint8Array(), out, size);
+        continue;
+      }
       if (size > this.#maxEntry) throw new Error("archive entry of " + size + " bytes exceeds the limit of " + this.#maxEntry + " bytes");
       this.#body = { header: block, data: new Uint8Array(size), filled: 0 };
     }
     return out;
   }
 
-  #finish(block: Uint8Array, data: Uint8Array, out: TarEntry[]) {
+  #finish(block: Uint8Array, data: Uint8Array, out: TarEntry[], omitted?: number) {
     const type = field(block, 156, 1);
     if (type === "x") {
       Object.assign(this.#pax, records(data));
@@ -184,7 +189,7 @@ export class TarReader {
     this.#longName = undefined;
     this.#longLink = undefined;
     const kind: TarEntry["type"] = type === "5" || ((type === "0" || type === "") && name.endsWith("/")) ? "directory" : type === "0" || type === "" || type === "7" ? "file" : type === "2" ? "symlink" : type === "1" ? "link" : "other";
-    out.push({ name: kind === "directory" ? name.replace(/\/+$/, "") : name, type: kind, data, mode, mtime, linkname });
+    out.push({ name: kind === "directory" ? name.replace(/\/+$/, "") : name, type: kind, data, mode, mtime, linkname, ...(omitted === undefined ? {} : { omitted }) });
   }
 }
 
