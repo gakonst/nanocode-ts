@@ -72,14 +72,38 @@ function join(base: string, name: string): string {
   return base === "/" ? "/" + name : base + "/" + name;
 }
 
+function visible(text: string, tabs: boolean): string {
+  let out = "";
+  for (const value of encode(text)) {
+    let byte = value;
+    let prefix = "";
+    if (byte >= 0x80) {
+      prefix = "M-";
+      byte -= 0x80;
+    }
+    if (byte === 9 && !tabs && !prefix) out += "\t";
+    else if (byte === 10 && !prefix) out += "\n";
+    else if (byte < 0x20) out += prefix + "^" + String.fromCharCode(byte + 64);
+    else if (byte === 0x7f) out += prefix + "^?";
+    else out += prefix + String.fromCharCode(byte);
+  }
+  return out;
+}
+
 const cat: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "nbsAEvTeu", long: { number: "n", "number-nonblank": "b", "squeeze-blank": "s", "show-ends": "E" } });
+  const parsed = options(ctx.args, { flags: "nbsAEvTetu", long: { number: "n", "number-nonblank": "b", "squeeze-blank": "s", "show-ends": "E", "show-all": "A", "show-tabs": "T", "show-nonprinting": "v" } });
+  const f = parsed.flags;
+  const nonprinting = f.has("A") || f.has("v") || f.has("e") || f.has("t");
+  const tabs = f.has("A") || f.has("T") || f.has("t");
+  const ends = f.has("A") || f.has("E") || f.has("e");
   let line = 0;
   return eachInput(ctx, parsed.operands, text => {
-    if (!parsed.flags.has("n") && !parsed.flags.has("b") && !parsed.flags.has("E") && !parsed.flags.has("s")) {
+    if (!f.has("n") && !f.has("b") && !ends && !f.has("s") && !nonprinting && !tabs) {
       ctx.stdout.write(text);
       return;
     }
+    if (nonprinting) text = visible(text, tabs);
+    else if (tabs) text = text.replace(/\t/g, "^I");
     const parts = text.split("\n");
     const trailing = parts[parts.length - 1] === "";
     if (trailing) parts.pop();
@@ -89,7 +113,7 @@ const cat: CommandHandler = async ctx => {
       if (parsed.flags.has("s") && part === "" && blank) continue;
       blank = part === "";
       const numbered = parsed.flags.has("b") ? part !== "" : parsed.flags.has("n");
-      out.push((numbered ? String(++line).padStart(6) + "\t" : "") + part + (parsed.flags.has("E") ? "$" : ""));
+      out.push((numbered ? String(++line).padStart(6) + "\t" : "") + part + (ends ? "$" : ""));
     }
     ctx.stdout.write(out.join("\n") + (trailing ? "\n" : ""));
   });
@@ -221,7 +245,18 @@ const rmdir: CommandHandler = async ctx => {
       const path = ctx.resolve(operand);
       const stat = await ctx.fs.stat(path);
       if (stat?.kind === "file") throw new FsError("ENOTDIR", operand);
+      if (stat && (await ctx.fs.list(path)).length) throw new FsError("ENOTEMPTY", operand);
       await ctx.fs.remove(path);
+      if (parsed.flags.has("p")) {
+        let rest = operand.replace(/\/+$/, "");
+        while (rest.includes("/")) {
+          rest = rest.slice(0, rest.lastIndexOf("/")).replace(/\/+$/, "");
+          if (!rest) break;
+          const parent = ctx.resolve(rest);
+          if ((await ctx.fs.list(parent)).length) throw new FsError("ENOTEMPTY", rest);
+          await ctx.fs.remove(parent);
+        }
+      }
     } catch (error) {
       ctx.stderr.write("rmdir: failed to remove '" + operand + "': " + failure(error) + "\n");
       status = 1;
@@ -242,6 +277,10 @@ async function transfer(ctx: CommandContext, move: boolean): Promise<number> {
   const targetPath = ctx.resolve(target);
   const targetStat = await ctx.fs.stat(targetPath);
   const intoDirectory = targetStat?.kind === "directory" && !parsed.flags.has("T");
+  if (!targetStat && target.endsWith("/") && sources.length === 1) {
+    ctx.stderr.write(name + ": cannot " + (move ? "move '" + sources[0] + "' to" : "create regular file") + " '" + target + "': Not a directory\n");
+    return 1;
+  }
   if (sources.length > 1 && !intoDirectory) throw new CommandError("target '" + target + "' is not a directory");
   const recursive = parsed.flags.has("r") || parsed.flags.has("R") || parsed.flags.has("a");
   let status = 0;

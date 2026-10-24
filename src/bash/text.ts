@@ -209,7 +209,7 @@ function shellQuote(text: string): string {
   return text.replace(/[^\w@%+=:,.\/~-]|^~/g, "\\$&");
 }
 
-export function format(spec: string, args: FormatValue[], shell: boolean): { text: string; used: number; stop: boolean; errors?: string[] } {
+export function format(spec: string, args: FormatValue[], shell: boolean, time?: (spec: string, seconds: number) => string): { text: string; used: number; stop: boolean; errors?: string[] } {
   let out = "";
   let used = 0;
   const errors: string[] = [];
@@ -225,6 +225,15 @@ export function format(spec: string, args: FormatValue[], shell: boolean): { tex
     }
     if (c !== "%") {
       out += c;
+      continue;
+    }
+    const clock = time ? spec.slice(i).match(/^%(-?)(\d*)\(([^)]*)\)T/) : null;
+    if (clock && time) {
+      i += clock[0].length - 1;
+      const arg = next();
+      const value = arg === undefined || arg === "" ? -1 : toNumber(arg);
+      const text = time(clock[3]!, value < 0 ? Math.floor(Date.now() / 1000) : value);
+      out += pad(text, Number(clock[2] || 0), clock[1] === "-", false);
       continue;
     }
     const match = spec.slice(i).match(/^%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/);

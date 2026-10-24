@@ -33,7 +33,7 @@ const printf: CommandHandler = ctx => {
   let remaining = rest;
   let status = 0;
   for (;;) {
-    const result = format(spec, remaining, true);
+    const result = format(spec, remaining, true, (pattern, seconds) => strftime(pattern || "%X", new Date(seconds * 1000)));
     ctx.stdout.write(result.text);
     for (const error of result.errors ?? []) {
       ctx.stderr.write("printf: " + error + "\n");
@@ -863,8 +863,19 @@ const date: CommandHandler = ctx => {
     else if (trimmed === "now" || trimmed === "") when = new Date();
     else if (trimmed === "yesterday" || trimmed === "tomorrow") when = new Date(Date.now() + (trimmed === "yesterday" ? -86400000 : 86400000));
     else {
+      const offset = trimmed.match(/^(.*?\S)\s*([+-])\s*(\d+)\s*(second|minute|hour|day|week|month|year)s?$/);
       const relative = trimmed.match(/^([+-]?\d+)\s*(second|minute|hour|day|week)s?(\s+ago)?$/);
-      if (relative) {
+      if (offset) {
+        const base = offset[1]!;
+        const start = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(base) ? base + "T00:00:00Z" : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(base) ? base.replace(" ", "T") + "Z" : base);
+        if (Number.isNaN(start)) throw new CommandError("invalid date '" + input + "'");
+        const amount = Number(offset[3]) * (offset[2] === "-" ? -1 : 1);
+        const date = new Date(start);
+        if (offset[4] === "month") date.setUTCMonth(date.getUTCMonth() + amount);
+        else if (offset[4] === "year") date.setUTCFullYear(date.getUTCFullYear() + amount);
+        else date.setTime(start + amount * { second: 1000, minute: 60000, hour: 3600000, day: 86400000, week: 604800000 }[offset[4] as "day"]);
+        when = date;
+      } else if (relative) {
         const unit = { second: 1000, minute: 60000, hour: 3600000, day: 86400000, week: 604800000 }[relative[2]]!;
         when = new Date(Date.now() + Number(relative[1]) * unit * (relative[3] ? -1 : 1));
       } else {

@@ -14,10 +14,28 @@ async function bytesOf(ctx: CommandContext, operand: string): Promise<Uint8Array
 
 function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
   return async ctx => {
-    const parsed = options(ctx.args, { flags: "cdfkqv123456789", long: { stdout: "c", decompress: "d", force: "f", keep: "k" } });
+    const parsed = options(ctx.args, { flags: "cdfklnqrtv123456789", long: { stdout: "c", decompress: "d", force: "f", keep: "k", list: "l", test: "t", best: "9", fast: "1", quiet: "q", "no-name": "n", recursive: "r", verbose: "v" } });
     const decompress = mode !== "gzip" || parsed.flags.has("d");
     const stdout = mode === "zcat" || parsed.flags.has("c");
     let status = 0;
+    if (parsed.flags.has("l") || parsed.flags.has("t")) {
+      let header = false;
+      for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+        try {
+          const input = await bytesOf(ctx, operand);
+          const output = await gunzip(input);
+          if (parsed.flags.has("t")) continue;
+          if (!header) ctx.stdout.write("         compressed        uncompressed  ratio uncompressed_name\n");
+          header = true;
+          const ratio = output.length ? ((output.length - input.length) / output.length) * 100 : 0;
+          ctx.stdout.write(String(input.length).padStart(19) + " " + String(output.length).padStart(19) + " " + (ratio.toFixed(1) + "%").padStart(6) + " " + (operand === "-" ? "" : operand.replace(/\.gz$/, "")) + "\n");
+        } catch (error) {
+          ctx.stderr.write("gzip: " + operand + ": " + (error instanceof FsError && error.code === "ENOENT" ? "No such file or directory" : "not in gzip format") + "\n");
+          status = 1;
+        }
+      }
+      return status;
+    }
     for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
       try {
         const input = await bytesOf(ctx, operand);
@@ -44,13 +62,13 @@ async function collect(ctx: CommandContext, root: string, operand: string, entri
   const path = ctx.resolve(root === "." ? operand : root + "/" + operand);
   const stat = await ctx.fs.stat(path);
   if (!stat) throw new CommandError(operand + ": Cannot stat: No such file or directory");
-  const name = operand.replace(/^\.\//, "").replace(/\/+$/, "");
+  const name = operand.replace(/(.)\/+$/, "$1");
   if (stat.kind === "file") {
     entries.push({ name, type: "file", data: await ctx.fs.read(path), mode: stat.mode, mtime: stat.mtime, linkname: "" });
     return;
   }
   entries.push({ name, type: "directory", data: new Uint8Array(), mode: stat.mode, mtime: stat.mtime, linkname: "" });
-  for (const child of await ctx.fs.list(path)) await collect(ctx, root, name + "/" + child, entries);
+  for (const child of await ctx.fs.list(path)) await collect(ctx, root, (name === "/" ? "" : name) + "/" + child, entries);
 }
 
 const cmp: CommandHandler = async ctx => {
@@ -375,14 +393,25 @@ const od: CommandHandler = async ctx => {
 };
 
 const split: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "d", values: "lba", numeric: true });
+  const parsed = options(ctx.args.map(arg => (/^-\d+$/.test(arg) ? "-l" + arg.slice(1) : arg)), { flags: "dx", values: "lban", long: { lines: "l", bytes: "b", "suffix-length": "a", number: "n", "numeric-suffixes": "d", "hex-suffixes": "x", "additional-suffix": "additional-suffix" } });
   const [input = "-", prefix = "x"] = parsed.operands;
-  const lines = Number(last(parsed, "l") ?? last(parsed, "n") ?? 1000);
+  const lines = Number(last(parsed, "l") ?? 1000);
   const size = last(parsed, "b");
+  const parts = last(parsed, "n");
   const width = Number(last(parsed, "a") ?? 2);
   const data = await bytesOf(ctx, input);
   const chunks: Uint8Array[] = [];
-  if (size) {
+  if (parts !== undefined) {
+    const count = Number(parts.replace(/^[lr]\//, ""));
+    if (!Number.isInteger(count) || count < 1) throw new CommandError("invalid number of chunks: '" + parts + "'");
+    const base = Math.floor(data.length / count);
+    let offset = 0;
+    for (let i = 0; i < count; i++) {
+      const length = i === count - 1 ? data.length - offset : base;
+      chunks.push(data.slice(offset, offset + length));
+      offset += length;
+    }
+  } else if (size) {
     const bytes = Number(size.replace(/[kKmM]$/, "")) * (/[kK]$/.test(size) ? 1024 : /[mM]$/.test(size) ? 1024 * 1024 : 1);
     for (let offset = 0; offset < data.length; offset += bytes) chunks.push(data.slice(offset, offset + bytes));
   } else {
@@ -2059,6 +2088,59 @@ const bc: CommandHandler = async ctx => {
   return status;
 };
 
+const unexpand: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "a", values: "t", long: { all: "a", tabs: "t", "first-only": "F" } });
+  const tab = Number(last(parsed, "t") ?? 8);
+  const all = parsed.flags.has("a") || (parsed.values.has("t") && !parsed.flags.has("F"));
+  return eachInput(ctx, parsed.operands, text => {
+    ctx.stdout.write(text.split("\n").map(line => {
+      let out = "";
+      let column = 0;
+      let pending = "";
+      let pendingStart = 0;
+      let leading = true;
+      for (const char of line) {
+        if ((char === " " || char === "\t") && (leading || all)) {
+          if (!pending) pendingStart = column;
+          pending += char;
+          column = char === "\t" ? (Math.floor(column / tab) + 1) * tab : column + 1;
+          if (column % tab === 0) {
+            out += pending.length > 1 || pending === "\t" ? "\t" : pending;
+            pending = "";
+            pendingStart = column;
+          }
+          continue;
+        }
+        out += pending + char;
+        pending = "";
+        leading = false;
+        column++;
+      }
+      void pendingStart;
+      return out + pending;
+    }).join("\n"));
+  });
+};
+
+const id: CommandHandler = ctx => {
+  const parsed = options(ctx.args, { flags: "ugGnr", long: { user: "u", group: "g", groups: "G", name: "n", real: "r" } });
+  const user = ctx.env.USER ?? "user";
+  const f = parsed.flags;
+  if (f.has("u")) ctx.stdout.write((f.has("n") ? user : "1000") + "\n");
+  else if (f.has("g") || f.has("G")) ctx.stdout.write((f.has("n") ? user : "1000") + "\n");
+  else ctx.stdout.write("uid=1000(" + user + ") gid=1000(" + user + ") groups=1000(" + user + ")\n");
+  return 0;
+};
+
+const kill: CommandHandler = ctx => {
+  if (ctx.args[0] === "-l" || ctx.args[0] === "-L") {
+    ctx.stdout.write("HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM\n");
+    return 0;
+  }
+  if (!ctx.args.some(arg => !arg.startsWith("-"))) throw new CommandError("usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", 2);
+  return 0;
+};
+
 export const extraCommands: Record<string, CommandHandler> = {
   bc,
   cmp,
@@ -2070,7 +2152,9 @@ export const extraCommands: Record<string, CommandHandler> = {
   gzip: compressor("gzip"),
   hexdump,
   iconv,
+  id,
   join,
+  kill,
   ln,
   md5sum,
   numfmt,
@@ -2084,6 +2168,7 @@ export const extraCommands: Record<string, CommandHandler> = {
   timeout,
   tree,
   truncate,
+  unexpand,
   which,
   xxd,
   yes,
