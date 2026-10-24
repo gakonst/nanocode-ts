@@ -10,6 +10,10 @@ const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const MAX_FILES = 50_000;
 
+const STALL_MS = 30_000;
+
+const ATTEMPTS = 2;
+
 const MARKER = ".git/nanocode.json";
 
 const SUPPORTED = "clone, status, log, show, rev-parse, branch, remote, ls-files, describe";
@@ -28,7 +32,7 @@ type Snapshot = {
   omitted?: string[];
 };
 
-export type GitHubOptions = { archive?(owner: string, repo: string, ref: string): string; details?: boolean; maxBytes?: number; maxFiles?: number; maxFileBytes?: number; maxDownloadBytes?: number };
+export type GitHubOptions = { archive?(owner: string, repo: string, ref: string): string; details?: boolean; maxBytes?: number; maxFiles?: number; maxFileBytes?: number; maxDownloadBytes?: number; stallMs?: number };
 
 type Clone = { repository: string; ref: string | undefined; directory: string | undefined; quiet: boolean };
 
@@ -83,27 +87,66 @@ export function codeload(owner: string, repo: string, ref: string): string {
   return "https://codeload.github.com/" + owner + "/" + repo + "/tar.gz/" + ref.split("/").map(encodeURIComponent).join("/");
 }
 
-async function fetchArchive(ctx: CommandContext, github: GitHubOptions, repository: string, ref: string): Promise<Response> {
+class Stalled extends Error {}
+
+type Watch = { signal: AbortSignal; arm(): void; stop(): void; race<T>(promise: Promise<T>): Promise<T> };
+
+function watchdog(parent: AbortSignal, ms: number, what: string): Watch {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let fail: (error: Error) => void = () => {};
+  const stalled = new Promise<never>((_, reject) => {
+    fail = reject;
+  });
+  stalled.catch(() => {});
+  return {
+    signal: AbortSignal.any([parent, controller.signal]),
+    arm() {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        const error = new Stalled(what + " sent no data for " + Math.round(ms / 1000) + " s");
+        controller.abort(error);
+        fail(error);
+      }, ms);
+    },
+    stop() {
+      if (timer !== undefined) clearTimeout(timer);
+    },
+    race: promise => Promise.race([promise, stalled]),
+  };
+}
+
+function lost(error: unknown): boolean {
+  return error instanceof Stalled || (error instanceof Error && !(error instanceof CommandError) && /network connection lost|connection (?:was )?(?:reset|closed|lost)|terminated|socket hang up|ECONNRESET|other side closed/i.test(error.message));
+}
+
+async function fetchArchive(ctx: CommandContext, github: GitHubOptions, repository: string, ref: string): Promise<{ response: Response; watch: Watch }> {
   const fetcher = ctx.fetch;
   if (!fetcher) throw new CommandError("fatal: network access is not available in this shell", 128);
   const [owner, repo] = repository.split("/");
   const urls = github.archive ? [github.archive(owner, repo, ref)] : [codeload(owner, repo, ref), "https://api.github.com/repos/" + repository + "/tarball/" + encodeURIComponent(ref)];
+  const stallMs = github.stallMs ?? STALL_MS;
   let last = 0;
   for (const url of urls) {
+    const watch = watchdog(ctx.signal, stallMs, "GitHub");
     let response: Response;
     try {
-      response = await fetcher(url, { signal: ctx.signal, redirect: "follow" });
+      watch.arm();
+      response = await watch.race(fetcher(url, { signal: watch.signal, redirect: "follow" }));
     } catch (error) {
+      watch.stop();
       if (ctx.signal.aborted) throw error;
-      if (error instanceof Error && /network access/.test(error.message)) throw new CommandError("fatal: " + error.message, 128);
-      last = -1;
+      if (error instanceof Error && /network access|refused: this host/.test(error.message)) throw new CommandError("fatal: " + error.message, 128);
+      last = error instanceof Stalled ? -2 : -1;
       continue;
     }
-    if (response.ok && response.body) return response;
+    if (response.ok && response.body) return { response, watch };
+    watch.stop();
     last = response.status;
     await response.body?.cancel().catch(() => {});
   }
   if (last === 404) throw new CommandError("fatal: repository 'https://github.com/" + repository + ".git/' or ref '" + ref + "' not found (private repositories cannot be cloned here)", 128);
+  if (last === -2) throw new Stalled("GitHub did not start sending the archive within " + Math.round(stallMs / 1000) + " s");
   throw new CommandError("fatal: unable to download https://github.com/" + repository + " at " + ref + (last > 0 ? " (HTTP " + last + ")" : ""), 128);
 }
 
@@ -147,7 +190,6 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
   const ref = options.ref ?? "HEAD";
   if (!ctx.fetch) throw new CommandError("fatal: network access is not available in this shell", 128);
   if (!options.quiet) ctx.stderr.write("Cloning into '" + directory + "'...\n");
-  const response = await fetchArchive(ctx, github, options.repository, ref);
   const known = new Set<string>();
   const ensure = async (path: string) => {
     if (known.has(path)) return;
@@ -158,76 +200,102 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
     else if (stat.kind !== "directory") throw new FsError("ENOTDIR", path);
     known.add(path);
   };
-  const files: Record<string, [number, number]> = {};
   const maxBytes = github.maxBytes ?? MAX_BYTES;
   const maxFiles = github.maxFiles ?? MAX_FILES;
   const maxFileBytes = github.maxFileBytes ?? MAX_FILE_BYTES;
   const maxDownload = github.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES;
-  const reader = new TarReader(maxFileBytes);
-  const omitted: { path: string; bytes: number; reason: string }[] = [];
+  const created = !existing;
+  let files: Record<string, [number, number]> = {};
+  let reader = new TarReader(maxFileBytes);
+  let omitted: { path: string; bytes: number; reason: string }[] = [];
   let written = 0;
-  const stream = response.body!.pipeThrough(new DecompressionStream("gzip")).getReader();
-  let root: string | undefined;
-  let bytes = 0;
   let count = 0;
   let skipped = 0;
-  let created = !existing;
-  try {
-    await ensure(target);
-    for (;;) {
-      if (ctx.signal.aborted) throw new CommandError("fatal: clone aborted", 130);
-      const next = await stream.read();
-      if (next.done) break;
-      bytes += next.value.length;
-      if (bytes > maxDownload) throw new CommandError("fatal: repository archive is larger than " + Math.round(maxDownload / 1024 / 1024) + " MiB uncompressed; clone a smaller repository or fetch single files with curl", 128);
-      for (const entry of reader.push(next.value)) {
-        const parts = entry.name.split("/");
-        if (entry.name.startsWith("/") || entry.name.includes("\\") || entry.name.includes("\0") || parts.some(part => part === ".." || part === "." || part === "" || part === ".git")) throw new CommandError("fatal: repository archive contains an unsafe path: " + entry.name, 128);
-        root ??= parts[0];
-        if (parts[0] !== root) throw new CommandError("fatal: repository archive must contain one root directory", 128);
-        if (parts.length === 1) continue;
-        const relative = parts.slice(1).join("/");
-        const path = target + "/" + relative;
-        if (entry.type === "directory") {
-          await ensure(path);
-          continue;
+  for (let attempt = 1; ; attempt++) {
+    files = {};
+    reader = new TarReader(maxFileBytes);
+    omitted = [];
+    written = 0;
+    count = 0;
+    skipped = 0;
+    known.clear();
+    let watch: Watch | undefined;
+    let stream: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let root: string | undefined;
+    let bytes = 0;
+    try {
+      const download = await fetchArchive(ctx, github, options.repository, ref);
+      watch = download.watch;
+      stream = download.response.body!.pipeThrough(new DecompressionStream("gzip")).getReader();
+      await ensure(target);
+      for (;;) {
+        if (ctx.signal.aborted) throw new CommandError("fatal: clone aborted", 130);
+        watch.arm();
+        const next = await watch.race(stream.read());
+        if (next.done) break;
+        bytes += next.value.length;
+        if (bytes > maxDownload) throw new CommandError("fatal: repository archive is larger than " + Math.round(maxDownload / 1024 / 1024) + " MiB uncompressed; clone a smaller repository or fetch single files with curl", 128);
+        watch.stop();
+        for (const entry of reader.push(next.value)) {
+          const parts = entry.name.split("/");
+          if (entry.name.startsWith("/") || entry.name.includes("\\") || entry.name.includes("\0") || parts.some(part => part === ".." || part === "." || part === "" || part === ".git")) throw new CommandError("fatal: repository archive contains an unsafe path: " + entry.name, 128);
+          root ??= parts[0];
+          if (parts[0] !== root) throw new CommandError("fatal: repository archive must contain one root directory", 128);
+          if (parts.length === 1) continue;
+          const relative = parts.slice(1).join("/");
+          const path = target + "/" + relative;
+          if (entry.type === "directory") {
+            await ensure(path);
+            continue;
+          }
+          if (entry.type !== "file") {
+            skipped++;
+            continue;
+          }
+          const reason = entry.omitted !== undefined ? "larger than " + size(maxFileBytes) : count >= maxFiles ? "past the " + maxFiles + "-file limit" : written + entry.data.length > maxBytes ? "past the " + size(maxBytes) + " limit" : undefined;
+          if (reason) {
+            omitted.push({ path: relative, bytes: entry.omitted ?? entry.data.length, reason });
+            continue;
+          }
+          count++;
+          written += entry.data.length;
+          await breathe();
+          await ensure(parentOf(path));
+          try {
+            await ctx.fs.write(path, entry.data);
+          } catch (error) {
+            if (!(error instanceof FsError) || error.code !== "EFBIG") throw error;
+            omitted.push({ path: relative, bytes: entry.data.length, reason: "larger than this filesystem stores" });
+            count--;
+            written -= entry.data.length;
+            continue;
+          }
+          const stat = await ctx.fs.stat(path);
+          files[relative] = [entry.data.length, stat?.mtime ?? 0];
         }
-        if (entry.type !== "file") {
-          skipped++;
-          continue;
-        }
-        const reason = entry.omitted !== undefined ? "larger than " + size(maxFileBytes) : count >= maxFiles ? "past the " + maxFiles + "-file limit" : written + entry.data.length > maxBytes ? "past the " + size(maxBytes) + " limit" : undefined;
-        if (reason) {
-          omitted.push({ path: relative, bytes: entry.omitted ?? entry.data.length, reason });
-          continue;
-        }
-        count++;
-        written += entry.data.length;
-        await breathe();
-        await ensure(parentOf(path));
-        try {
-          await ctx.fs.write(path, entry.data);
-        } catch (error) {
-          if (!(error instanceof FsError) || error.code !== "EFBIG") throw error;
-          omitted.push({ path: relative, bytes: entry.data.length, reason: "larger than this filesystem stores" });
-          count--;
-          written -= entry.data.length;
-          continue;
-        }
-        const stat = await ctx.fs.stat(path);
-        files[relative] = [entry.data.length, stat?.mtime ?? 0];
+        if (reader.done) break;
       }
-      if (reader.done) break;
+      if (!root) throw new CommandError("fatal: repository archive is empty", 128);
+      watch.stop();
+      await stream.cancel().catch(() => {});
+      break;
+    } catch (error) {
+      watch?.stop();
+      await stream?.cancel().catch(() => {});
+      if (created) await removeTree(ctx.fs, target).catch(() => {});
+      else for (const name of await ctx.fs.list(target).catch(() => [] as string[])) await removeTree(ctx.fs, target + "/" + name).catch(() => {});
+      if (!ctx.signal.aborted && lost(error)) {
+        const reason = error instanceof Error ? error.message.replace(/\.$/, "") : String(error);
+        if (attempt < ATTEMPTS) {
+          if (!options.quiet) ctx.stderr.write("warning: the download of " + options.repository + (bytes ? " broke off after " + size(bytes) : " did not start") + " (" + reason + "); retrying\n");
+          continue;
+        }
+        throw new CommandError("fatal: could not download https://github.com/" + options.repository + " at " + ref + ": " + reason + " (" + ATTEMPTS + " attempts); try again later, clone with -b <tag> for a smaller ref, or fetch single files with curl", 128);
+      }
+      if (error instanceof Error && !(error instanceof CommandError) && /exceeds the limit/.test(error.message)) throw new CommandError("fatal: " + error.message, 128);
+      throw error;
     }
-    if (!root) throw new CommandError("fatal: repository archive is empty", 128);
-  } catch (error) {
-    await stream.cancel().catch(() => {});
-    if (created) await removeTree(ctx.fs, target).catch(() => {});
-    else for (const name of await ctx.fs.list(target).catch(() => [] as string[])) await removeTree(ctx.fs, target + "/" + name).catch(() => {});
-    if (error instanceof Error && !(error instanceof CommandError) && /exceeds the limit/.test(error.message)) throw new CommandError("fatal: " + error.message, 128);
-    throw error;
   }
-  await stream.cancel().catch(() => {});
   const pax = reader.global["comment"];
   const commit = pax && /^[0-9a-f]{40}$/.test(pax) ? pax : null;
   const info = github.details === false ? { branch: ref === "HEAD" ? null : ref, author: null, date: null, message: null, commit } : await details(ctx, options.repository, ref, commit);

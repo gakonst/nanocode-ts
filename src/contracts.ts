@@ -55,6 +55,7 @@ export type AgentConfiguration = {
   code_mode?: boolean;
   event_coalesce_ms?: number;
   stream_tool_input?: boolean;
+  auto_compact_window_tokens?: number;
   environment?: { cwd?: string; shell?: string; timezone?: string };
   tools?: HostTool[];
   web_search?: boolean | Partial<Record<ModelProvider, boolean>>;
