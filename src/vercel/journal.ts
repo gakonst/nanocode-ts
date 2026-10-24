@@ -10,15 +10,23 @@ type Batch = { transactions: Transaction[] };
 
 type Committed = { writer: string };
 
-type Entry = { transaction?: Transaction; resolve(): void; reject(error: unknown): void };
+type Entry = { transaction?: Transaction; bytes: number; resolve(): void; reject(error: unknown): void };
 
 export type Durability = "on" | "strict";
 
 export const DEFAULT_BATCH_MS = 500;
 
+const BATCH_BYTES = 4 * 1024 * 1024;
+
 export type JournalStats = { replayed_batches: number; replayed_transactions: number; batches: number; transactions: number; reads: number; batch_wait_ms: number };
 
 export const batchKey = (n: number) => `sql:${n}`;
+
+function weight(transaction: Transaction | undefined): number {
+  let bytes = 0;
+  for (const statement of transaction?.statements ?? []) for (const value of statement) bytes += value instanceof ArrayBuffer ? value.byteLength : ArrayBuffer.isView(value) ? value.byteLength : typeof value === "string" ? value.length : 8;
+  return bytes;
+}
 
 export function committedBatches(state: SessionState): Transaction[][] {
   const batches: Transaction[][] = [];
@@ -79,6 +87,7 @@ export class SqlJournal implements SqlHost {
   private readonly sql: LocalSql;
   private readonly writer = crypto.randomUUID();
   private queue: Entry[] = [];
+  private queued = 0;
   private flushing = false;
   private failure?: { error: unknown };
   private committed: number;
@@ -116,7 +125,7 @@ export class SqlJournal implements SqlHost {
     if (wrote) this.stats.transactions++;
     else this.stats.reads++;
     const durable = this.enqueue(wrote ? { kind, operation, statements } : undefined);
-    if (this.durability === "strict") return durable.then(() => rows);
+    if (this.durability === "strict" || this.queued > BATCH_BYTES) return durable.then(() => rows);
     durable.catch(() => undefined);
     return Promise.resolve(rows);
   }
@@ -135,14 +144,16 @@ export class SqlJournal implements SqlHost {
     if (this.failure) return Promise.reject(this.failure.error);
     if (!transaction && !this.flushing && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      this.queue.push({ transaction, resolve, reject });
+      const bytes = weight(transaction);
+      this.queued += bytes;
+      this.queue.push({ transaction, bytes, resolve, reject });
       if (!transaction) this.hurry?.();
       void this.flush();
     });
   }
 
   private pace(): Promise<void> {
-    const wait = this.queue.some(entry => !entry.transaction) ? 0 : this.lastBatch + this.batchMs - performance.now();
+    const wait = this.queued >= BATCH_BYTES || this.queue.some(entry => !entry.transaction) ? 0 : this.lastBatch + this.batchMs - performance.now();
     if (wait <= 0) return new Promise(resolve => setImmediate(resolve));
     return new Promise<void>(resolve => {
       const timer = setTimeout(done, wait);
@@ -162,15 +173,21 @@ export class SqlJournal implements SqlHost {
         await this.pace();
         if (this.closed) {
           const error = new Error("the SQL journal closed with writes that were not committed");
+          this.queued = 0;
           for (const entry of this.queue.splice(0)) entry.reject(error);
           return;
         }
-        const entries = this.queue.splice(0);
+        let count = 0;
+        let bytes = 0;
+        while (count < this.queue.length && (count === 0 || bytes + this.queue[count]!.bytes <= BATCH_BYTES)) bytes += this.queue[count++]!.bytes;
+        const entries = this.queue.splice(0, count);
+        this.queued -= bytes;
         const transactions = entries.flatMap(entry => entry.transaction ? [entry.transaction] : []);
         try {
           if (transactions.length) await this.commit(transactions);
         } catch (error) {
           this.failure = { error };
+          this.queued = 0;
           for (const entry of [...entries, ...this.queue.splice(0)]) entry.reject(error);
           this.ctx.halt?.(error);
           return;
