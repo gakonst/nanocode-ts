@@ -46,7 +46,7 @@ async function model(ai: Ai, gateway: string, serviceTier: string, request: Requ
   } else {
     const opened = ai.gateway(gateway);
     try {
-      upstream = await opened.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal: request.signal });
+      upstream = await opened.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : dispatch.endpoint.endsWith("/alpha/search") ? { provider: "openai", endpoint: "alpha/search", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal: request.signal });
     } finally {
       (opened as Partial<Disposable>)[Symbol.dispose]?.();
     }

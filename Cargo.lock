@@ -1844,6 +1844,7 @@ dependencies = [
 name = "nanocode-types-core"
 version = "0.6.7"
 dependencies = [
+ "nanocode-sync",
  "serde",
  "serde_json",
  "smallvec",

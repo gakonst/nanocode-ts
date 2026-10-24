@@ -140,6 +140,8 @@ struct Configuration {
     environment: Option<Environment>,
     #[serde(default)]
     tools: Vec<tools::HostTool>,
+    #[serde(default = "enabled")]
+    web_search: bool,
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
@@ -490,6 +492,10 @@ thread_local! {
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
+const fn enabled() -> bool {
+    true
+}
+
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -551,7 +557,7 @@ fn claude_harness(
     stream_tool_input: bool,
     environment: Option<ClaudeEnvironment>,
     instructions: &dyn Fn(Option<&str>) -> String,
-) -> ClaudeHarness {
+) -> (ClaudeHarness, ClaudeClient) {
     let http = nanocode::claude::transport::HttpClient::new(
         nanocode::claude::transport::SenderTransport(transport::WorkerTransport::CLAUDE),
     );
@@ -561,7 +567,7 @@ fn claude_harness(
         client = client.subscription_compatibility();
     }
     let max_tokens = endpoint.max_tokens;
-    let harness = ClaudeHarness::new(client).configure(move |claude| {
+    let harness = ClaudeHarness::new(client.clone()).configure(move |claude| {
         let mut claude = claude.tool_input_deltas(stream_tool_input);
         if let Some(environment) = &environment {
             claude = claude.environment(environment.clone());
@@ -571,10 +577,11 @@ fn claude_harness(
             None => claude,
         })
     });
-    match endpoint.instructions.as_deref() {
+    let harness = match endpoint.instructions.as_deref() {
         Some(application) => harness.instructions(instructions(Some(application))),
         None => harness,
-    }
+    };
+    (harness, client)
 }
 
 fn codex_harness(
@@ -679,6 +686,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .transpose()
         .map_err(configuration)?;
     let (claude, codex) = config.endpoints().map_err(configuration)?;
+    let claude_search_tokens = claude.as_ref().map(|endpoint| endpoint.max_tokens);
     let claude = claude.map(|endpoint| {
         claude_harness(
             endpoint,
@@ -687,6 +695,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             &instructions,
         )
     });
+    let codex_search = codex
+        .as_ref()
+        .filter(|endpoint| endpoint.gateway.is_none())
+        .map(|endpoint| endpoint.endpoint.clone());
     let codex = match codex {
         Some(endpoint) => {
             let default = match config.provider {
@@ -724,7 +736,28 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
+    let claude_client = claude.as_ref().map(|(_, client)| client.clone());
+    let host_search = config.tools.iter().any(|tool| tool.name() == "web_search");
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
+    let search = |family: Provider| -> Option<Arc<dyn Tool>> {
+        if !config.web_search || host_search {
+            return None;
+        }
+        match family {
+            Provider::Claude => claude_client.as_ref().map(|client| {
+                Arc::new(nanocode::claude::web_search_tool(
+                    client.clone(),
+                    claude_search_tokens.flatten(),
+                )) as Arc<dyn Tool>
+            }),
+            Provider::Codex => codex_search.as_deref().map(|endpoint| {
+                Arc::new(nanocode::codex_tools::web_search_tool(
+                    endpoint,
+                    Arc::new(transport::WorkerTransport::CODEX),
+                )) as Arc<dyn Tool>
+            }),
+        }
+    };
     let selected = |family: Provider| -> Result<Tools, Opening> {
         let base = match config.workspace.as_deref() {
             Some(root) => match family {
@@ -744,7 +777,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .map_err(configuration)?;
         let tools = shared
             .iter()
-            .try_fold(base, |tools, tool| tools.add_shared_tool(Arc::clone(tool)))
+            .cloned()
+            .chain(search(family))
+            .try_fold(base, |tools, tool| tools.add_shared_tool(tool))
             .map_err(configuration)?;
         if !(placement || local) {
             return Ok(tools);
@@ -757,7 +792,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .map_err(configuration)
     };
     let mut builder = Nanocode::builder();
-    if let Some(harness) = claude {
+    if let Some((harness, _)) = claude {
         builder = builder.claude(harness.tools(selected(Provider::Claude)?));
     }
     if let Some(harness) = codex {
@@ -1209,7 +1244,15 @@ fn executed<T: Serialize>(future: impl Future<Output = Result<T, String>> + 'sta
 
 fn execute(command: Command) -> Executed {
     match command {
-        Command::HandOpen { name, workspace, max_frame_bytes, tools, mcp_servers } => executed(async move { hand::open(name, workspace, max_frame_bytes, tools, mcp_servers).await }),
+        Command::HandOpen {
+            name,
+            workspace,
+            max_frame_bytes,
+            tools,
+            mcp_servers,
+        } => executed(async move {
+            hand::open(name, workspace, max_frame_bytes, tools, mcp_servers).await
+        }),
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
         Command::HandClosed {} => executed(async move {
             hand::closed();
