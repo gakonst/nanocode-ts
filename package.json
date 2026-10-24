@@ -80,6 +80,10 @@
       "types": "./dist/machines/local.d.ts",
       "default": "./dist/machines/local.js"
     },
+    "./machines/server": {
+      "types": "./dist/machines/account.d.ts",
+      "default": "./dist/machines/account.js"
+    },
     "./machines/react": {
       "types": "./dist/react/machines.d.ts",
       "default": "./dist/react/machines.js"
@@ -87,6 +91,10 @@
     "./machines/cloudflare": {
       "types": "./dist/machines/cloudflare/index.d.ts",
       "default": "./dist/machines/cloudflare/index.js"
+    },
+    "./machines/vercel": {
+      "types": "./dist/machines/vercel.d.ts",
+      "default": "./dist/machines/vercel.js"
     },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm"
   },

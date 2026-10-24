@@ -1,62 +1,49 @@
-import { createNanocode, type NanocodeOptions } from "../../cloudflare/runtime.ts";
-import { type Address, isAddressEqual, isHex } from "viem";
-import { Account, Actions, createClient, http } from "viem/tempo";
-import { tempo } from "viem/tempo/chains";
+import { createNanocode, type NanocodeOptions, type SessionAuthority } from "../../cloudflare/runtime.ts";
+import { githubArchives } from "../../bash/index.ts";
 import * as Payment from "../payment.ts";
+import { device, type Holder, keys } from "../account.ts";
 import { egress } from "./egress.ts";
 import { json, type MachinesEnv, paying, wallet } from "./env.ts";
 import { tools } from "./tools.ts";
-import { digest, type KeyRecord, RPC, walletClass } from "./wallet.ts";
+import { walletClass } from "./wallet.ts";
 
 export { egress, PROXIES } from "./egress.ts";
 export { json, type MachinesEnv, paying, wallet } from "./env.ts";
 export { tools } from "./tools.ts";
 export { digest, type KeyRecord, MACH, RPC, Wallet, walletClass } from "./wallet.ts";
+export { visitor, VISITOR } from "../account.ts";
 
-const TOKEN = /^(0x[0-9a-f]{40})\.[0-9a-f]{64}$/;
 const SECRET_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/;
 
+type Account<E> = (request: Request, env: E) => Promise<string | null | undefined> | string | null | undefined;
+
+function keyHandlers<E extends MachinesEnv>(account?: Account<E>) {
+  return keys<E>({ holder: (owner, env) => wallet(env, owner) as unknown as Holder, rpc: env => env.TEMPO_RPC, extra: async (owner, env) => ({ secrets: await wallet(env, owner).secretNames() }), ...(account ? { account } : {}) });
+}
+
+const machinesKeys = keyHandlers<MachinesEnv>();
+
 export async function principal(request: Request, env: MachinesEnv) {
-  const header = request.headers.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : new URL(request.url).searchParams.get("token") ?? "";
-  const match = TOKEN.exec(token);
-  if (!match) return null;
-  const expires = await wallet(env, match[1]!).authenticate(await digest(token));
-  return expires ? { account: match[1]!, expires_at: expires } : null;
+  return machinesKeys.principal(request, env);
 }
 
 export async function register(request: Request, env: MachinesEnv): Promise<Response> {
-  const body = await request.json().catch(() => undefined) as { address?: string; key_type?: string; private_key?: string } | undefined;
-  const address = body?.address;
-  const key = body?.private_key;
-  const types: ("secp256k1" | "p256")[] = body?.key_type === "p256" ? ["p256"] : body?.key_type === "secp256k1" ? ["secp256k1"] : ["secp256k1", "p256"];
-  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address) || !key || !isHex(key) || key.length !== 66) return json({ error: "send {address, private_key, key_type?: secp256k1 | p256}" }, 400);
-  const client = createClient({ chain: tempo, transport: http(RPC) });
-  let found: { keyType: "secp256k1" | "p256"; keyAddress: Address; expiry: bigint; spendPolicy: string } | undefined;
-  for (const keyType of types) {
-    const keyAddress = (keyType === "p256" ? Account.fromP256(key, { access: address as Address }) : Account.fromSecp256k1(key, { access: address as Address })).accessKeyAddress;
-    const metadata = await Actions.accessKey.getMetadata(client, { account: address as Address, accessKey: keyAddress }).catch(() => undefined);
-    if (metadata && isAddressEqual(metadata.address, keyAddress) && !metadata.isRevoked) {
-      found = { keyType, keyAddress, expiry: metadata.expiry, spendPolicy: metadata.spendPolicy };
-      break;
-    }
-  }
-  if (!found) return json({ error: `this key is not an active access key of ${address} on Tempo; publish it first` }, 403);
-  const { keyType, keyAddress, spendPolicy } = found;
-  const metadata = { expiry: found.expiry, spendPolicy };
-  const expiry = Number(metadata.expiry);
-  if (expiry * 1000 <= Date.now()) return json({ error: "the access key has expired" }, 403);
-  const record: KeyRecord = { address: address.toLowerCase() as Address, keyAddress, keyType, key, expiry };
-  const token = await wallet(env, address).register(record);
-  return json({ token, address: record.address, key_address: keyAddress, expires_at: expiry * 1000, spend_policy: metadata.spendPolicy });
+  return machinesKeys.register(request, env);
 }
 
-export async function api(request: Request, env: MachinesEnv, pathname: string): Promise<Response> {
-  if (pathname === "/v1/keys" && request.method === "POST") return register(request, env);
-  const caller = await principal(request, env);
-  if (!caller) return json({ error: "send Authorization: Bearer <token> from POST /v1/keys" }, 401);
-  const stub = wallet(env, caller.account);
-  if (pathname === "/v1/me" && request.method === "GET") return json({ ...(await stub.status()), secrets: await stub.secretNames() });
+async function routes<E extends MachinesEnv>(handlers: ReturnType<typeof keyHandlers<E>>, request: Request, env: E, pathname: string): Promise<Response | undefined> {
+  if (pathname === "/v1/keys" && request.method === "POST") return handlers.register(request, env);
+  if (pathname === "/v1/keys" && request.method === "DELETE") return handlers.logout(request, env);
+  if ((pathname === "/v1/me" || pathname === "/v1/keys") && request.method === "GET") return handlers.me(request, env);
+  return undefined;
+}
+
+export async function api<E extends MachinesEnv>(request: Request, env: E, pathname: string, handlers = keyHandlers<E>()): Promise<Response> {
+  const answered = await routes(handlers, request, env, pathname);
+  if (answered) return answered;
+  const owner = await handlers.caller(request, env);
+  if (!owner) return json({ error: "send Authorization: Bearer <token> from POST /v1/keys" }, 401);
+  const stub = wallet(env, owner);
   const secret = /^\/v1\/secrets\/([^/]+)$/.exec(pathname);
   if (secret) {
     const name = decodeURIComponent(secret[1]!);
@@ -77,8 +64,6 @@ export async function api(request: Request, env: MachinesEnv, pathname: string):
   return json({ error: "not_found" }, 404);
 }
 
-const DEVICE = "https://wallet.tempo.xyz/api/auth/device";
-
 const ARCHIVE = /^\/api\/github\/([\w.-]+)\/([\w.-]+)\/(.+)$/;
 
 async function archive(pathname: string): Promise<Response> {
@@ -88,26 +73,24 @@ async function archive(pathname: string): Promise<Response> {
   return new Response(upstream.body, { headers: { "cache-control": "public, max-age=300", "content-type": upstream.headers.get("content-type") ?? "application/x-gzip" }, status: upstream.status });
 }
 
-async function relay(request: Request, pathname: string): Promise<Response> {
-  const response = await fetch(`${DEVICE}${pathname.slice("/api/device".length)}`, {
-    body: await request.text(),
-    headers: { accept: "application/json", "content-type": "application/json" },
-    method: "POST",
-  });
-  return new Response(response.body, { headers: { "cache-control": "no-store", "content-type": response.headers.get("content-type") ?? "application/json" }, status: response.status });
+function relay(request: Request, pathname: string): Promise<Response> | undefined {
+  if (request.method !== "POST" || (pathname !== "/api/device/register" && pathname !== "/api/device/token")) return undefined;
+  return device(request, pathname.slice("/api/device/".length));
 }
 
 export type MachinesOptions<E extends MachinesEnv> = Partial<NanocodeOptions<E>> & {
   payment?: Payment.Config;
+  account?: Account<E>;
   fallback?(request: Request, env: E): Promise<Response> | Response;
 };
 
 export function createMachines<E extends MachinesEnv = MachinesEnv>(options: MachinesOptions<E> = {}) {
-  const { fallback, payment, ...rest } = options;
+  const { fallback, payment, account, ...rest } = options;
   const { inference, servers, tools: paid } = Payment.resolve(payment);
   if (inference === "apiKey" && !rest.egress) throw new Error("payment.inference apiKey needs the host's egress");
+  const handlers = keyHandlers<E>(account);
   const nanocode = createNanocode<E>({
-    authenticate: principal,
+    authenticate: async (request, env) => account ? await account(request, env) ?? null : handlers.principal(request, env),
     egress,
     tools,
     subagents: true,
@@ -119,13 +102,37 @@ export function createMachines<E extends MachinesEnv = MachinesEnv>(options: Mac
 
   async function fetch(request: Request, env: E): Promise<Response> {
     const { pathname } = new URL(request.url);
-    if (request.method === "POST" && (pathname === "/api/device/register" || pathname === "/api/device/token")) return relay(request, pathname);
+    const relayed = relay(request, pathname);
+    if (relayed) return relayed;
     if (request.method === "GET" && pathname.startsWith("/api/github/")) return archive(pathname);
-    if (pathname.startsWith("/v1/")) return api(request, env, pathname);
+    if (pathname.startsWith("/v1/")) return api(request, env, pathname, handlers);
     if (pathname.startsWith("/sessions/") || pathname === "/health") return nanocode.fetch(request, env);
     if (fallback) return fallback(request, env);
     return env.ASSETS ? env.ASSETS.fetch(request) : json({ error: "not_found" }, 404);
   }
 
   return { AgentSession: nanocode.AgentSession, Wallet: walletClass(servers), fetch, nanocode };
+}
+
+export type WalletsOptions<E extends MachinesEnv> = {
+  account: Account<E>;
+  payment?: Payment.Config;
+  scripts?: boolean;
+};
+
+export function createWallets<E extends MachinesEnv>(options: WalletsOptions<E>) {
+  const { servers } = Payment.resolve({ inference: "apiKey", ...options.payment });
+  const scripts = options.scripts ?? false;
+  const handlers = keyHandlers<E>(options.account);
+  const nanocode: Pick<NanocodeOptions<E>, "codeMode" | "mcp"> = {
+    ...(scripts ? { codeMode: { fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id) } } : { codeMode: { fetch: () => githubArchives() } }),
+    ...(servers.length ? { mcp: { servers: [...servers], fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id) } } : {}),
+  };
+
+  async function fetch(request: Request, env: E): Promise<Response | undefined> {
+    const { pathname } = new URL(request.url);
+    return relay(request, pathname) ?? routes(handlers, request, env, pathname);
+  }
+
+  return { Wallet: walletClass(servers, scripts), fetch, nanocode, servers, scripts };
 }
