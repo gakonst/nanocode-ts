@@ -6,7 +6,7 @@ import { allInput, device, eachInput, last, linked, linkOf, lstatOf, options, pa
 import { mkdirs } from "./files.ts";
 import { make } from "./make.ts";
 import { yq } from "./yaml.ts";
-import { gunzip, gzip, pack, unpack, type TarEntry } from "./archive.ts";
+import { gunzip, gzip, pack, unpack, untar, type TarEntry } from "./archive.ts";
 
 const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
@@ -292,18 +292,10 @@ const tar: CommandHandler = async ctx => {
   if (raw[0] === 0x42 && raw[1] === 0x5a && raw[2] === 0x68) throw unsupported("bzip2");
   if (raw[0] === 0xfd && raw[1] === 0x37 && raw[2] === 0x7a && raw[3] === 0x58) throw unsupported("xz");
   if (raw[0] === 0x28 && raw[1] === 0xb5 && raw[2] === 0x2f && raw[3] === 0xfd) throw unsupported("zstd");
-  let entries: TarEntry[];
-  try {
-    entries = unpack(raw[0] === 0x1f && raw[1] === 0x8b ? await gunzip(raw) : raw);
-  } catch (error) {
-    if (error instanceof CommandError) throw error;
-    throw new CommandError("This does not look like a tar archive\ntar: Exiting with failure status due to previous errors", 2);
-  }
-  if (raw.length && !entries.length && raw.length >= 512 && raw.subarray(0, 512).some(byte => byte !== 0) && decode(raw.subarray(257, 262)) !== "ustar") throw new CommandError("This does not look like a tar archive\ntar: Exiting with failure status due to previous errors", 2);
   const wanted = operands.map(operand => operand.replace(/\/+$/, ""));
   const globbing = wildcards || (mode[0] !== "c" && wanted.some(name => /[*?[]/.test(name)) && wildcards);
   const matched = new Set<string>();
-  const selected = entries.filter(entry => {
+  const select = (entry: TarEntry) => {
     if (!(entry.type === "file" || entry.type === "directory" || entry.type === "symlink" || entry.type === "link")) return false;
     if (excludedBy(entry.name)) return false;
     if (!wanted.length) return true;
@@ -311,9 +303,25 @@ const tar: CommandHandler = async ctx => {
     const hit = wanted.find(want => (globbing ? globRegExp(want, ignoreCase ? "i" : "").test(name) || name.startsWith(want + "/") : name === want || name.startsWith(want + "/")));
     if (hit !== undefined) matched.add(hit);
     return hit !== undefined;
-  });
+  };
+  const notTar = () => new CommandError("This does not look like a tar archive\ntar: Exiting with failure status due to previous errors", 2);
+  const archive = untar(raw)[Symbol.asyncIterator]();
+  let count = 0;
   let status = 0;
-  for (const entry of selected) {
+  for (;;) {
+    let next: IteratorResult<TarEntry>;
+    try {
+      next = await archive.next();
+    } catch (error) {
+      if (error instanceof CommandError || error instanceof LimitError) throw error;
+      if (!count) throw notTar();
+      ctx.stderr.write("tar: Unexpected EOF in archive\ntar: Error is not recoverable: exiting now\n");
+      return 2;
+    }
+    if (next.done) break;
+    count++;
+    const entry = next.value;
+    if (!select(entry)) continue;
     let name = entry.name;
     for (const [pattern, replacement] of transforms) name = name.replace(pattern, replacement);
     if (strip) {
@@ -380,6 +388,7 @@ const tar: CommandHandler = async ctx => {
     const bits = flags.has("p") ? entry.mode & 0o7777 : entry.mode & 0o777 & ~ctx.umask;
     if (ctx.fs.chmod && (await ctx.fs.stat(target))?.mode !== bits) await ctx.fs.chmod(target, bits);
   }
+  if (raw.length && !count && raw.length >= 512 && raw.subarray(0, 512).some(byte => byte !== 0) && decode(raw.subarray(257, 262)) !== "ustar") throw notTar();
   for (const want of wanted) {
     if (!matched.has(want)) {
       ctx.stderr.write("tar: " + want + ": Not found in archive\n");

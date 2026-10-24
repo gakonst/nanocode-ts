@@ -198,6 +198,33 @@ export class TarReader {
   }
 }
 
+const SLICE_BYTES = 64 * 1024;
+
+export async function* untar(archive: Uint8Array, maxEntry?: number): AsyncGenerator<TarEntry> {
+  const reader = new TarReader(maxEntry);
+  if (archive[0] !== 0x1f || archive[1] !== 0x8b) {
+    yield* reader.push(archive);
+    return;
+  }
+  let offset = 0;
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= archive.length) controller.close();
+      else controller.enqueue(archive.slice(offset, (offset += SLICE_BYTES)));
+    },
+  });
+  const stream = source.pipeThrough(new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>).getReader();
+  try {
+    while (!reader.done) {
+      const next = await stream.read();
+      if (next.done) break;
+      yield* reader.push(next.value);
+    }
+  } finally {
+    stream.cancel().catch(() => {});
+  }
+}
+
 export function unpack(archive: Uint8Array): TarEntry[] {
   return new TarReader().push(archive);
 }

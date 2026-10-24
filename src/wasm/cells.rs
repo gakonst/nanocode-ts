@@ -8,8 +8,29 @@ use super::bridge::call;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
+const LAZY: [(&str, &str); 4] = [
+    ("crypto", include_str!("prelude/crypto.js")),
+    ("extra", include_str!("prelude/extra.js")),
+    ("intl", include_str!("prelude/intl.js")),
+    ("web", include_str!("prelude/web.js")),
+];
+
+fn prelude() -> String {
+    let sources = LAZY
+        .iter()
+        .map(|(name, source)| {
+            format!(
+                "{name}: function () {{/*{}*/}}",
+                source.replace("*/", "*\u{1}/")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("const lazySources = {{\n{sources}\n}};\n{PRELUDE}")
+}
+
 pub fn host(workspace: Option<&str>) -> LocalCells {
-    LocalCells::new().prelude(PRELUDE).host_tools(
+    LocalCells::new().prelude(prelude()).host_tools(
         tools(workspace)
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),

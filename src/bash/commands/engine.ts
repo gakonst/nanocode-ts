@@ -467,7 +467,9 @@ type Raw = {
 
 type Bound = { functions: readonly (HostFunction | undefined)[]; imports: readonly ImportEntry[] };
 
-type Machine = { raw: Raw; bound: Map<number, Bound>; pending: Bound | undefined; thrown: { error: unknown } | undefined; slots: number; capacity: number; broken: boolean };
+type Machine = { raw: Raw; bound: Map<number, Bound>; pending: Bound | undefined; thrown: { error: unknown } | undefined; slots: number; capacity: number; broken: boolean; live: number; release: () => void };
+
+const RELEASE_BYTES = 16 * 1024 * 1024;
 
 const MACHINES = new WeakMap<WebAssembly.Module, Promise<Machine>>();
 
@@ -485,6 +487,11 @@ function machine(module: WebAssembly.Module): Promise<Machine> {
     state.capacity = 64;
     state.slots = state.raw.alloc(state.capacity * 8);
     state.broken = false;
+    state.live = 0;
+    state.release = () => {
+      if (state.live > 0 || state.raw.memory.buffer.byteLength <= RELEASE_BYTES) return;
+      if (MACHINES.get(module) === found) MACHINES.delete(module);
+    };
     return state;
   })();
   MACHINES.set(module, found);
@@ -575,6 +582,8 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
   const raw = state.raw;
   const id = guard(state, () => withBytes(raw, bytes, pointer => raw.load(pointer, bytes.length)));
   if (id < 0) throw new Trap(text(raw));
+  state.live++;
+  let dropped = false;
   const imports: ImportEntry[] = lines(raw, raw.imports(id)).map(([module = "", name = "", kind = "", params, results]) => ({ module, name, kind: KINDS[kind] ?? "tag", ...(kind === "func" ? { signature: signature(params, results) } : {}) }));
   const exports: ExportEntry[] = lines(raw, raw.exports(id)).map(([name = "", kind = "", params, results]) => ({ name, kind: KINDS[kind] ?? "tag", ...(kind === "func" ? { signature: signature(params, results) } : {}) }));
   const budget = options.fuel ?? Number.POSITIVE_INFINITY;
@@ -584,7 +593,11 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
     imports,
     exports,
     dispose: () => {
+      if (dropped) return;
+      dropped = true;
       if (!state.broken) raw.module_drop(id);
+      state.live--;
+      state.release();
     },
     instantiate: (functions, callOptions = {}) => {
       const bound: Bound = { functions, imports };
@@ -602,6 +615,7 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
         throw failure;
       }
       state.bound.set(instance, bound);
+      state.live++;
       callOptions.check?.();
       let disposed = false;
       const memory = () => {
@@ -626,6 +640,8 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
           disposed = true;
           state.bound.delete(instance);
           if (!state.broken) raw.instance_drop(instance);
+          state.live--;
+          state.release();
         },
         call: (name, args, call = {}) => {
           const entry = exports.find(item => item.name === name);

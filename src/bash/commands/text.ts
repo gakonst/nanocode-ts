@@ -1579,7 +1579,10 @@ const base64: CommandHandler = async ctx => {
     } catch {
       binary = "";
     }
-    ctx.stdout.write(decode(Uint8Array.from(binary, c => c.charCodeAt(0))));
+    const decoded = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) decoded[index] = binary.charCodeAt(index);
+    binary = "";
+    ctx.stdout.write(decode(decoded));
     const trailing = padding < 0 ? "" : valid.slice(padding);
     const complete = bad < 0 && body.length % 4 === 0 ? trailing === "" : bad < 0 && ((body.length % 4 === 2 && /^==$/.test(trailing)) || (body.length % 4 === 3 && trailing === "=") || (trailing === "" && body.length % 4 === 0));
     if (!complete) throw new CommandError("invalid input");
