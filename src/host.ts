@@ -545,16 +545,17 @@ export class AgentRuntime {
         return await workspace.wasm(request.request, controller.signal);
       }
       case "cell_fetch": {
-        const input = request.request as { url: string; method?: string; headers?: Record<string, string>; body?: string; body_base64?: string };
+        const input = request.request as { url: string; method?: string; headers?: Record<string, string>; body?: string };
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        const body = input.body_base64 !== undefined ? Uint8Array.from(atob(input.body_base64), character => character.charCodeAt(0)) : input.body;
-        const response = await (this.options.fetch ?? globalThis.fetch)(input.url, { method: input.method ?? "GET", ...(input.headers ? { headers: input.headers } : {}), ...(body !== undefined ? { body } : {}), signal: controller.signal });
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const textual = /^(text\/|application\/(.*\+)?(json|xml|javascript|x-www-form-urlencoded))/i.test(response.headers.get("content-type") ?? "text/plain");
-        let encoded = "";
-        if (!textual) for (let index = 0; index < bytes.length; index += 0x8000) encoded += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-        return { status: response.status, status_text: response.statusText, url: response.url, headers: [...response.headers], ...(textual ? { body: this.decoder.decode(bytes) } : { body_base64: btoa(encoded) }) };
+        const body: Uint8Array | string | undefined = request.body instanceof Uint8Array ? request.body : input.body;
+        const response = await (this.options.fetch ?? globalThis.fetch)(input.url, { method: input.method ?? "GET", ...(input.headers ? { headers: input.headers } : {}), ...(body !== undefined ? { body: body as BodyInit } : {}), signal: controller.signal });
+        return framed({ status: response.status, status_text: response.statusText, url: response.url, headers: [...response.headers] }, new Uint8Array(await response.arrayBuffer()));
+      }
+      case "cell_read": return await readBytes(this.workspace(), cellPath(request.cwd, request.path));
+      case "cell_write": {
+        await writeBytes(this.workspace(), cellPath(request.cwd, request.path), request.body, request.append === true);
+        return null;
       }
       case "socket_open": {
         if (!this.options.socket) throw new Error("model sockets are not configured");
@@ -757,7 +758,8 @@ export class AgentRuntime {
     }
     this.inflight.delete(id);
     this.enter(() => {
-      if ("ok" in reply && reply.ok instanceof Uint8Array) this.wasm.complete_bytes(id, ...this.writeBytes(reply.ok));
+      if ("ok" in reply && isFramed(reply.ok)) this.wasm.complete_bytes(id, ...this.writeFramed(reply.ok));
+      else if ("ok" in reply && reply.ok instanceof Uint8Array) this.wasm.complete_bytes(id, ...this.writeBytes(reply.ok));
       else this.wasm.complete(id, ...this.write(reply));
     });
   }
@@ -831,6 +833,20 @@ export class AgentRuntime {
     return [pointer, bytes.length] as const;
   }
 
+  private writeFramed(reply: Framed) {
+    const started = performance.now();
+    const head = this.encoder.encode(JSON.stringify(reply.head));
+    const length = reply.body.byteLength + head.byteLength + 4;
+    this.counters.bridge_reply_bytes += length;
+    const pointer = this.wasm.allocate(length);
+    const target = new Uint8Array(this.wasm.memory.buffer, pointer, length);
+    target.set(reply.body);
+    target.set(head, reply.body.byteLength);
+    new DataView(this.wasm.memory.buffer, pointer + length - 4, 4).setUint32(0, head.byteLength, true);
+    this.timings.record("bridge.copy", performance.now() - started);
+    return [pointer, length] as const;
+  }
+
   private static encodeError(error: unknown) {
     return { detail: error instanceof Error ? error.message : String(error), ...(error instanceof RemoteRefusal ? { unsent: true } : {}) };
   }
@@ -842,4 +858,56 @@ export class AgentRuntime {
     timing.outcome = outcome;
     timing.duration_ms = this.elapsed() - timing.started_ms;
   }
+}
+
+const FRAMED = Symbol("framed");
+
+type Framed = { [FRAMED]: true; head: unknown; body: Uint8Array };
+
+function framed(head: unknown, body: Uint8Array): Framed {
+  return { [FRAMED]: true, head, body };
+}
+
+function isFramed(value: unknown): value is Framed {
+  return typeof value === "object" && value !== null && FRAMED in value;
+}
+
+function cellPath(cwd: string, path: string): string {
+  return path.startsWith("/") ? path : cwd.replace(/\/+$/, "") + "/" + path;
+}
+
+function shellQuote(text: string): string {
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+const FILE_CHUNK = 600_000;
+
+async function shellBytes(workspace: WorkspaceHost, command: string): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  const result = await workspace.run({ command, cwd: "/", timeout_ms: null }, new AbortController().signal);
+  if (result.exit_code !== 0) throw new Error(result.stderr.trim() || command.split(" ")[0] + " exited with " + result.exit_code);
+  return { bytes: Uint8Array.from(atob(result.stdout.trim()), character => character.charCodeAt(0)), truncated: result.truncated };
+}
+
+export async function readBytes(workspace: WorkspaceHost, path: string): Promise<Uint8Array> {
+  if (workspace.readBytes) return workspace.readBytes(path);
+  const whole = await workspace.run({ command: "base64 -w0 -- " + shellQuote(path), cwd: "/", timeout_ms: null }, new AbortController().signal);
+  if (whole.exit_code !== 0) throw new Error(whole.stderr.trim() || "base64 exited with " + whole.exit_code);
+  if (!whole.truncated) return Uint8Array.from(atob(whole.stdout.trim()), character => character.charCodeAt(0));
+  const size = await workspace.run({ command: "wc -c < " + shellQuote(path), cwd: "/", timeout_ms: null }, new AbortController().signal);
+  const total = parseInt(size.stdout, 10);
+  const out = new Uint8Array(total);
+  for (let offset = 0; offset < total; offset += FILE_CHUNK) {
+    const chunk = await shellBytes(workspace, "tail -c +" + (offset + 1) + " -- " + shellQuote(path) + " | head -c " + FILE_CHUNK + " | base64 -w0");
+    if (chunk.truncated) throw new Error("reading " + path + " was truncated");
+    out.set(chunk.bytes, offset);
+  }
+  return out;
+}
+
+export async function writeBytes(workspace: WorkspaceHost, path: string, data: Uint8Array, append: boolean): Promise<void> {
+  if (workspace.writeBytes) return workspace.writeBytes(path, data, append);
+  let encoded = "";
+  for (let index = 0; index < data.length; index += 0x8000) encoded += String.fromCharCode(...data.subarray(index, index + 0x8000));
+  const result = await workspace.run({ command: "mkdir -p -- \"$(dirname -- " + shellQuote(path) + ")\" && base64 -d " + (append ? ">>" : ">") + " " + shellQuote(path), cwd: "/", timeout_ms: null, stdin: btoa(encoded) }, new AbortController().signal);
+  if (result.exit_code !== 0) throw new Error(result.stderr.trim() || "write exited with " + result.exit_code);
 }

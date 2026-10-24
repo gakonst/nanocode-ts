@@ -1,7 +1,11 @@
 const callFetch = (input) => call("fetch", input);
 const callBash = (input) => call("bash", input);
+const callFile = (input) => call("file", input);
+const nativeBytes = globalThis.__nanocodeBytes;
+delete globalThis.__nanocodeBytes;
 const callWasm = (input) => call("wasm", input).catch((error) => { throw new Error(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
-const host = { setTimeout: undefined, clearTimeout: undefined, text: undefined, exit: undefined };
+const host = {};
+const hostFunction = (name) => host[name] ??= globalThis[name];
 const toLatin1 = (bytes) => {
   let out = "";
   for (let index = 0; index < bytes.length; index += 8192) out += String.fromCharCode.apply(null, bytes.subarray(index, index + 8192));
@@ -12,14 +16,8 @@ const fromLatin1 = (text) => {
   for (let index = 0; index < text.length; index++) bytes[index] = text.charCodeAt(index) & 255;
   return bytes;
 };
-const toBase64 = (bytes) => btoa(toLatin1(bytes));
-const fromBase64 = (text) => {
-  let clean = String(text).replace(/-/g, "+").replace(/_/g, "/").replace(/[^A-Za-z0-9+/]/g, "");
-  const extra = clean.length % 4;
-  if (extra === 1) clean = clean.slice(0, -1);
-  else if (extra) clean += "==".slice(0, 4 - extra);
-  return fromLatin1(atob(clean));
-};
+const toBase64 = (bytes) => nativeBytes.toBase64(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+const fromBase64 = (text) => new Uint8Array(nativeBytes.fromBase64(String(text)));
 const toHex = (bytes) => {
   let out = "";
   for (let index = 0; index < bytes.length; index++) out += (bytes[index] < 16 ? "0" : "") + bytes[index].toString(16);
@@ -37,7 +35,7 @@ const fromHex = (text) => {
   return bytes.subarray(0, at);
 };
 const utf8 = (text) => {
-  try { return fromLatin1(unescape(encodeURIComponent(text))); } catch {}
+  try { return new Uint8Array(nativeBytes.encode(text)); } catch {}
   const bytes = new Uint8Array(text.length * 3);
   let at = 0;
   for (let index = 0; index < text.length; index++) {
@@ -52,9 +50,7 @@ const utf8 = (text) => {
   return bytes.slice(0, at);
 };
 const fromUtf8 = (bytes, fatal = false) => {
-  const binary = toLatin1(bytes);
-  if (!/[\x80-\xff]/.test(binary)) return binary;
-  try { return decodeURIComponent(escape(binary)); } catch {}
+  if (bytes instanceof Uint8Array) return nativeBytes.decode(bytes.buffer, bytes.byteOffset, bytes.byteLength, fatal);
   const parts = [];
   let units = [];
   for (let index = 0; index < bytes.length;) {
@@ -96,6 +92,12 @@ const incompleteTail = (bytes) => {
   return 0;
 };
 const byteView = (value) => value instanceof Uint8Array ? value : value instanceof ArrayBuffer ? new Uint8Array(value) : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : undefined;
+const putBytes = (data) => {
+  if (typeof data !== "string") return nativeBytes.put(data.buffer, data.byteOffset, data.byteLength);
+  try { return nativeBytes.put(data); } catch { return putBytes(utf8(data)); }
+};
+const takeBytes = (id) => new Uint8Array(nativeBytes.take(id));
+const ownedBodies = new WeakSet();
 const joinBytes = (chunks) => {
   const out = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let at = 0;
@@ -153,7 +155,7 @@ class TextDecoder {
 }
 const setTimeoutWithArgs = (callback, delay, ...args) => {
   if (typeof callback !== "function") throw new TypeError("setTimeout expects a function callback, got " + typeof callback);
-  return host.setTimeout(args.length ? () => callback(...args) : callback, delay);
+  return hostFunction("setTimeout")(args.length ? () => callback(...args) : callback, delay);
 };
 const intervals = new Map();
 let nextInterval = 1 << 30;
@@ -163,62 +165,19 @@ const setInterval = (callback, delay, ...args) => {
   const period = Math.max(1, Number(delay) || 0);
   const tick = () => {
     if (!intervals.has(id)) return;
-    intervals.set(id, host.setTimeout(tick, period));
+    intervals.set(id, hostFunction("setTimeout")(tick, period));
     callback(...args);
   };
-  intervals.set(id, host.setTimeout(tick, period));
+  intervals.set(id, hostFunction("setTimeout")(tick, period));
   return id;
 };
 const clearAnyTimer = (id) => {
-  if (intervals.has(id)) { host.clearTimeout(intervals.get(id)); intervals.delete(id); }
-  else if (id !== undefined && id !== null) host.clearTimeout(id);
+  if (intervals.has(id)) { hostFunction("clearTimeout")(intervals.get(id)); intervals.delete(id); }
+  else if (id !== undefined && id !== null) hostFunction("clearTimeout")(id);
 };
 const clearInterval = clearAnyTimer;
 const setImmediate = (callback, ...args) => setTimeoutWithArgs(callback, 0, ...args);
 const clearImmediate = clearAnyTimer;
-const errorString = (error, depth = 0) => {
-  const label = error.message !== undefined && error.message !== "" ? (error.name ?? "Error") + ": " + error.message : String(error.name ?? "Error");
-  let out = typeof error.stack === "string" && error.stack ? (error.stack.startsWith(label) ? error.stack : label + "\n" + error.stack) : label;
-  out = out.replace(/\n$/, "");
-  if (error.cause !== undefined && depth < 5) out += "\nCaused by: " + (error.cause instanceof Error ? errorString(error.cause, depth + 1) : show(error.cause));
-  return out;
-};
-const replacer = () => {
-  const stack = [];
-  return function (key, value) {
-    if (stack.length) {
-      const at = stack.indexOf(this);
-      if (at >= 0) stack.splice(at + 1); else stack.push(this);
-      if (value !== null && typeof value === "object" && stack.includes(value)) return "[Circular]";
-    } else stack.push(value);
-    if (typeof value === "bigint") return value + "n";
-    if (typeof value === "function") return "[Function: " + (value.name || "anonymous") + "]";
-    if (typeof value === "symbol") return value.toString();
-    if (value === undefined) return key === "" ? "undefined" : value;
-    if (value === null || typeof value !== "object") return value;
-    if (value instanceof Error) return errorString(value);
-    if (value instanceof Map) return [...value.keys()].every((entry) => typeof entry === "string" || typeof entry === "number") ? Object.fromEntries(value) : [...value.entries()];
-    if (value instanceof Set) return [...value];
-    if (value instanceof RegExp) return String(value);
-    if (value instanceof ArrayBuffer) return "ArrayBuffer(" + value.byteLength + ")";
-    if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return value.length <= 1000 ? Array.from(value, (entry) => typeof entry === "bigint" ? entry + "n" : entry) : value.constructor.name + "(" + value.length + ")";
-    if (value instanceof Headers) return Object.fromEntries(value);
-    if (modules.web && value instanceof modules.web.URLSearchParams) return value.toString();
-    if (modules.web && value instanceof modules.web.Blob) return (value instanceof modules.web.File ? "File(" + value.name + ", " : "Blob(") + value.size + " bytes" + (value.type ? ", " + value.type : "") + ")";
-    if (value instanceof Promise) return "Promise";
-    return value;
-  };
-};
-const show = (value) => {
-  if (typeof value === "string") return value;
-  if (value === null || (typeof value !== "object" && typeof value !== "function" && typeof value !== "bigint" && typeof value !== "symbol")) return String(value);
-  if (typeof value === "bigint") return value + "n";
-  if (value instanceof Error) return errorString(value);
-  if (Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype) {
-    try { const plain = JSON.stringify(value); if (plain !== undefined) return plain; } catch {}
-  }
-  try { return JSON.stringify(value, replacer()) ?? String(value); } catch { return String(value); }
-};
 const encodeText = (text, encoding = "utf8") => {
   const name = String(encoding).toLowerCase().replace("-", "");
   if (name === "utf8") return utf8(text);
@@ -295,7 +254,7 @@ class Body {
     try { return JSON.parse(text); }
     catch { throw new SyntaxError("response from " + (this.url || "fetch") + (this.status === undefined ? "" : " (HTTP " + this.status + ")") + " is not JSON: " + (text.trim().slice(0, 300) || "empty body")); }
   }
-  async bytes() { const state = await this.#take(); return state.bytes ? state.bytes.slice() : utf8(state.text ?? ""); }
+  async bytes() { const state = await this.#take(); return state.bytes ? (ownedBodies.delete(this) ? state.bytes : state.bytes.slice()) : utf8(state.text ?? ""); }
   async arrayBuffer() { return (await this.bytes()).buffer; }
   async blob() { return new (load("web").Blob)([await this.bytes()], { type: this.headers.get("content-type") ?? "" }); }
   async formData() {
@@ -340,7 +299,7 @@ class Response extends Body {
     this.type = init.type ?? "default";
     this.redirected = false;
   }
-  clone() { return new Response(this.bodyInit(), { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, type: this.type }); }
+  clone() { ownedBodies.delete(this); return new Response(this.bodyInit(), { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url, type: this.type }); }
   static json(data, init = {}) { const headers = new Headers(init.headers); if (!headers.has("content-type")) headers.set("content-type", "application/json"); return new Response(JSON.stringify(data), { ...init, headers }); }
   static error() { return new Response(null, { status: 0, type: "error" }); }
   static redirect(url, status = 302) { return new Response(null, { status, headers: { location: String(url) } }); }
@@ -362,13 +321,15 @@ const fetch = async (input, init = {}) => {
   const message = { url, method: String(init.method ?? request?.method ?? input?.method ?? "GET").toUpperCase(), headers: Object.fromEntries(headers) };
   if (body.bytes) {
     let decoded;
-    try { decoded = fromUtf8(body.bytes, true); } catch {}
-    if (decoded !== undefined && body.bytes.length < 65536) message.body = decoded;
-    else message.body_base64 = toBase64(body.bytes);
-  } else if (body.text !== undefined) message.body = body.text;
-  const pending = callFetch(message).catch((error) => { throw new TypeError(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
+    if (body.bytes.length < 65536) try { decoded = fromUtf8(body.bytes, true); } catch {}
+    if (decoded !== undefined) message.body = decoded;
+    else message.body_ref = putBytes(body.bytes);
+  } else if (body.text !== undefined && body.text.length < 65536) message.body = body.text;
+  else if (body.text !== undefined) message.body_ref = putBytes(body.text);
+  const pending = callFetch(message).then((reply) => ({ ...reply, bytes: takeBytes(reply.body_ref) }), (error) => { throw new TypeError(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
   const reply = signal ? await Promise.race([pending, aborted(signal)]) : await pending;
-  const response = new Response(reply.body_base64 !== undefined ? fromBase64(reply.body_base64) : reply.body ?? null, { status: reply.status, statusText: reply.status_text ?? "", headers: reply.headers, url: reply.url || url, type: "basic" });
+  const response = new Response(reply.bytes, { status: reply.status, statusText: reply.status_text ?? "", headers: reply.headers, url: reply.url || url, type: "basic" });
+  ownedBodies.add(response);
   return response;
 };
 const foldBase = (text) => String(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -455,32 +416,12 @@ const shell = async (input, options = {}) => {
 const bash = (script, ...values) => Array.isArray(script) && Array.isArray(script.raw)
   ? run(template(unescape(script), values))
   : shell(script, values[0] !== null && typeof values[0] === "object" ? values[0] : {});
-const failed = (result, what) => new Error(result.stderr.trim() || what + " exited with " + result.exitCode);
-const fileChunk = 600000;
-const readBytes = async (path) => {
-  const whole = await run("base64 -w0 -- " + quote(path));
-  if (whole.exitCode !== 0) throw failed(whole, "base64");
-  if (!whole.truncated) return fromBase64(whole.stdout);
-  const size = await run("wc -c < " + quote(path));
-  if (size.exitCode !== 0) throw failed(size, "wc");
-  const total = parseInt(size.stdout, 10);
-  const chunks = [];
-  for (let offset = 0; offset < total; offset += fileChunk) {
-    const chunk = await run("tail -c +" + (offset + 1) + " -- " + quote(path) + " | head -c " + fileChunk + " | base64 -w0");
-    if (chunk.exitCode !== 0 || chunk.truncated) throw failed(chunk, "reading " + path);
-    chunks.push(fromBase64(chunk.stdout));
-  }
-  return joinBytes(chunks);
-};
+const readBytes = async (path) => takeBytes((await callFile({ op: "read", path: String(path) })).bytes_ref);
 bash.readFile = async (path, options) => {
   const encoding = typeof options === "string" ? options : options !== null && typeof options === "object" ? (options.encoding === undefined ? "utf8" : options.encoding) : options === null ? null : "utf8";
   const name = encoding === null ? "buffer" : String(encoding).toLowerCase().replace("-", "");
-  if (name === "utf8") {
-    const result = await run("cat -- " + quote(path));
-    if (result.exitCode !== 0) throw failed(result, "cat");
-    if (!result.truncated) return result.stdout;
-  }
   const bytes = await readBytes(path);
+  if (name === "utf8") return fromUtf8(bytes);
   if (name === "buffer" || name === "bytes" || name === "uint8array") return load("web").Buffer.wrap(bytes);
   return decodeBytes(bytes, name);
 };
@@ -491,15 +432,12 @@ const contentOf = async (content) => {
   if (content !== null && typeof content === "object" && !(content instanceof String)) return JSON.stringify(content, null, 2);
   return String(content);
 };
-const writeTo = async (path, content, redirect) => {
+const writeTo = async (path, content, op) => {
   const data = await contentOf(content);
-  const binary = typeof data !== "string";
-  const target = "mkdir -p -- \"$(dirname -- " + quote(path) + ")\" && " + (binary ? "base64 -d " : "cat ") + redirect + " " + quote(path);
-  const result = await run(target, binary ? toBase64(data) : data);
-  if (result.exitCode !== 0) throw failed(result, "write");
+  await callFile({ op, path: String(path), bytes_ref: putBytes(data) });
 };
-bash.writeFile = (path, content) => writeTo(path, content, ">");
-bash.appendFile = (path, content) => writeTo(path, content, ">>");
+bash.writeFile = (path, content) => writeTo(path, content, "write");
+bash.appendFile = (path, content) => writeTo(path, content, "append");
 const aliases = {};
 for (const name of ["exec_command", "write_stdin", "apply_patch"]) {
   if (!Object.keys(tools).includes(name)) continue;
@@ -508,7 +446,7 @@ for (const name of ["exec_command", "write_stdin", "apply_patch"]) {
     : name === "apply_patch" ? (input) => tools.apply_patch(typeof input === "string" ? input : input?.input ?? input?.patch ?? input)
     : (input) => tools[name](input);
 }
-const core = { TextDecoder, TextEncoder, byteView, callWasm, errorString, host, setTimeoutWithArgs, show, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
+const core = { TextDecoder, TextEncoder, byteView, callWasm, hostFunction, setTimeoutWithArgs, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
 const modules = {};
 const lazyBody = (name) => {
   const source = lazySources[name].toString();
@@ -535,8 +473,4 @@ const lazyObject = (module, name) => new Proxy({}, {
 const webClasses = Object.fromEntries(["Blob", "Buffer", "File", "FormData", "ReadableStream", "TextDecoderStream", "TextEncoderStream", "TransformStream", "URL", "URLSearchParams", "WritableStream"].map((name) => [name, lazyClass("web", name)]));
 const extraClasses = Object.fromEntries(["AbortController", "AbortSignal", "CustomEvent", "Event", "EventTarget"].map((name) => [name, lazyClass("extra", name)]));
 const globals = { ...webClasses, ...extraClasses, Headers, Intl: lazyObject("intl", "Intl"), Request, Response, TextDecoder, TextEncoder, WebAssembly: lazyObject("extra", "WebAssembly"), bash, clearImmediate, clearInterval, crypto: lazyObject("crypto", "crypto"), fetch, process: lazyObject("extra", "process"), require: (name) => load("extra").require(name), setImmediate, setInterval, structuredClone: (value, options) => load("web").structuredClone(value, options), wasm: lazyObject("extra", "wasm"), ...aliases };
-const __nanocode = (nativeSetTimeout, nativeClearTimeout, nativeText, nativeExit) => {
-  Object.assign(host, { setTimeout: nativeSetTimeout, clearTimeout: nativeClearTimeout, text: nativeText, exit: nativeExit });
-  for (const [name, value] of Object.entries({ ...globals, clearTimeout: clearAnyTimer, console: lazyObject("extra", "console"), setTimeout: setTimeoutWithArgs })) Object.defineProperty(globalThis, name, { value, writable: true, configurable: true, enumerable: false });
-};
-return { __nanocode, "__nanocodeHost = __nanocode(setTimeout, clearTimeout, text, exit)": undefined, ...globals };
+return globals;

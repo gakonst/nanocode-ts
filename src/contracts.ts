@@ -202,6 +202,8 @@ export interface WorkspaceHost {
   instructions?: string;
   read(path: string): Promise<string | null>;
   write(path: string, contents: string): Promise<void>;
+  readBytes?(path: string): Promise<Uint8Array>;
+  writeBytes?(path: string, data: Uint8Array, append: boolean): Promise<void>;
   remove(path: string): Promise<void>;
   run(request: ShellRun, signal: AbortSignal): Promise<ShellOutput>;
   wasm?(request: unknown, signal: AbortSignal): Promise<unknown>;

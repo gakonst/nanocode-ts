@@ -178,6 +178,12 @@ export class Bash {
         return display(decode(await this.fs.read(target)));
       },
       write: (path, contents) => this.writeFile(path, contents),
+      readBytes: path => this.fs.read(resolvePath(this.cwd, path)),
+      writeBytes: async (path, data, append) => {
+        const target = resolvePath(this.cwd, path);
+        await mkdirs(this.fs, parentOf(target));
+        await this.fs.write(target, data, append);
+      },
       remove: async path => this.fs.remove(resolvePath(this.cwd, path)),
       run: async (request, signal) => {
         const result = await this.exec(request.command, { cwd: request.cwd, signal, timeoutMs: request.timeout_ms ?? WORKSPACE_TIMEOUT_MS, ...(request.stdin !== undefined ? { stdin: request.stdin } : {}) });
