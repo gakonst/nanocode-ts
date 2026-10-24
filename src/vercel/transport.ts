@@ -11,6 +11,7 @@ export type VercelTransportOptions = {
   headers?(): Record<string, string>;
   session?: { load(): VercelSession; save(session: VercelSession): void };
   reconnectMs?: number;
+  hand?(): Promise<string | undefined>;
 };
 
 export type VercelTransport = Transport & {
@@ -95,8 +96,9 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       warmed = undefined;
       const existing = session.id ?? started;
       try {
+        const hand = await options.hand?.();
         if (signal?.aborted) return;
-        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), text: prompt }), signal }).catch((error: unknown) => {
+        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), ...(hand ? { hand } : {}), text: prompt }), signal }).catch((error: unknown) => {
           if (signal?.aborted) return undefined;
           throw error;
         });

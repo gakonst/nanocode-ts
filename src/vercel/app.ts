@@ -1,5 +1,5 @@
 import { durableAgent, type HostTool } from "durable-harness";
-import { nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, type ServiceTier, type Thinking } from "./harness.ts";
+import { HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, type ServiceTier, type Thinking } from "./harness.ts";
 import { nanocodeModule } from "./module.ts";
 import type { ModelProvider } from "../index.ts";
 
@@ -33,7 +33,7 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
   return { model: found.id, provider: entry.id, thinking, ...(found.maxTokens ? { max_tokens: found.maxTokens } : {}), ...(found.serviceTier ? { service_tier: found.serviceTier } : {}) };
 }
 
-type Body = { effort?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
+type Body = { effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
 
 export function createNanocode(options: NanocodeAppOptions) {
   const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, defaultSelection: chosenDefault, ...harness } = options;
@@ -76,7 +76,8 @@ export function createNanocode(options: NanocodeAppOptions) {
     if (!selection) return new Response(`harness, model and effort must name one of ${harnesses.map(entry => `${entry.id} (${entry.models.map(model => `${model.id}: ${model.efforts.join("|")}`).join(", ")})`).join(" or ")}`, { status: 400 });
     const refused = await admit(request);
     if (refused) return refused;
-    const config = { durability: kernel === "on" ? "run-ahead" : "strict", nanocode: selection satisfies Omit<NanocodeSession, "session_id">, traceAudience: traceAudience ?? (authorize === "public" ? "public" : "unknown") };
+    const hand = harness.hands && typeof body.hand === "string" && HAND_CHANNEL.test(body.hand) ? { hand: body.hand } : {};
+    const config = { ...hand, durability: kernel === "on" ? "run-ahead" : "strict", nanocode: selection satisfies Omit<NanocodeSession, "session_id">, traceAudience: traceAudience ?? (authorize === "public" ? "public" : "unknown") };
     const { sessionId } = await agent.sessions.start({ config });
     return sessionId;
   };
