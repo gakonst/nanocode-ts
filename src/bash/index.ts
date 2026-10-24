@@ -7,6 +7,7 @@ import { sed } from "./commands/sed.ts";
 import { awk } from "./commands/awk.ts";
 import { jq } from "./commands/jq.ts";
 import { curl } from "./commands/curl.ts";
+import { patch } from "./commands/patch.ts";
 import { extraCommands } from "./commands/extra.ts";
 import { gitCommands, type GitHubOptions } from "./commands/git.ts";
 import { wasmCommands, wasmHost, type WasmOptions } from "./commands/wasm.ts";
@@ -55,7 +56,7 @@ export const DEFAULT_LIMITS: Limits = {
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, patch };
 
 export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
 
