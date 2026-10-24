@@ -392,26 +392,27 @@ function within(path: string, dir: string): boolean {
 
 async function snapshot(fs: FileSystem, roots: string[], maxBytes: number, maxFiles: number): Promise<Snapshot> {
   const result: Snapshot = { files: new Map(), dirs: new Set(), partial: new Set(), bytes: 0, entries: 0 };
-  const visit = async (path: string): Promise<void> => {
-    if (reserved(path) || result.files.has(path) || result.dirs.has(path)) return;
+  const queue = [...roots];
+  for (let index = 0; index < queue.length; index++) {
+    const path = queue[index];
+    if (reserved(path) || result.files.has(path) || result.dirs.has(path)) continue;
     await breathe();
     const stat = await fs.stat(path);
-    if (!stat) return;
+    if (!stat) continue;
     if (result.entries >= maxFiles || (stat.kind === "file" && result.bytes + stat.size > maxBytes)) {
       result.partial.add(stat.kind === "file" ? parentOf(path) : path);
-      return;
+      continue;
     }
     result.entries++;
     if (stat.kind === "file") {
       const data = await fs.read(path);
       result.bytes += data.length;
       result.files.set(path, data);
-      return;
+      continue;
     }
     result.dirs.add(path);
-    for (const name of await fs.list(path)) await visit(join(path, name));
-  };
-  for (const root of roots) await visit(root);
+    for (const name of await fs.list(path)) queue.push(join(path, name));
+  }
   return result;
 }
 
