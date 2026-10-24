@@ -1498,6 +1498,7 @@ dependencies = [
 name = "nanocode-durability-core"
 version = "0.6.7"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "nanocode-platform",
  "serde",
@@ -1539,6 +1540,7 @@ dependencies = [
  "image",
  "image-webp",
  "memchr",
+ "nanocode-durability-core",
  "nanocode-types-core",
  "png",
  "sha1",
