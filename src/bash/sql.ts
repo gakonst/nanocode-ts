@@ -3,13 +3,23 @@ import { baseOf, decode, encode, FsError, normalize, parentOf, resolvePath, type
 
 const TABLE = "nanocode_files";
 
+const CHUNKS = "nanocode_file_chunks";
+
 const SCHEMA = `CREATE TABLE IF NOT EXISTS ${TABLE} (scope TEXT NOT NULL, path TEXT NOT NULL, parent TEXT NOT NULL, kind TEXT NOT NULL, data BLOB, mtime INTEGER NOT NULL, mode INTEGER NOT NULL, PRIMARY KEY (scope, path))`;
 
 const INDEX = `CREATE INDEX IF NOT EXISTS ${TABLE}_parent ON ${TABLE} (scope, parent)`;
 
+const CHUNK_SCHEMA = `CREATE TABLE IF NOT EXISTS ${CHUNKS} (scope TEXT NOT NULL, path TEXT NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (scope, path, seq))`;
+
+const CHUNK_BYTES = 1 << 20;
+
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+
 type Kind = "file" | "directory" | "link";
 
-type Row = { kind: Kind; data: Uint8Array; mtime: number; mode: number };
+type Meta = { kind: Kind; size: number; chunked: boolean; mtime: number; mode: number; inline?: Uint8Array };
+
+type Row = Meta & { data: Uint8Array };
 
 function kindOf(value: SqlValue): Kind {
   return value === "directory" ? "directory" : value === "link" ? "link" : "file";
@@ -26,31 +36,61 @@ function blob(data: Uint8Array): ArrayBuffer {
   return data.slice().buffer as ArrayBuffer;
 }
 
+function joined(parts: Uint8Array[], size: number): Uint8Array {
+  if (parts.length === 1) return parts[0]!;
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
 export class SqlFileSystem implements FileSystem {
   readonly sql: SqlHost;
   readonly scope: string;
   readonly maxFileBytes: number;
+  readonly chunkBytes: number;
   #ready: Promise<void> | undefined;
   #links: Promise<boolean> | undefined;
 
-  constructor(sql: SqlHost, scope = "", maxFileBytes = Math.min(sql.value_limit ?? 8 * 1024 * 1024, 64 * 1024 * 1024)) {
+  constructor(sql: SqlHost, scope = "", maxFileBytes = MAX_FILE_BYTES) {
     this.sql = sql;
     this.scope = scope;
     this.maxFileBytes = maxFileBytes;
+    this.chunkBytes = Math.min(CHUNK_BYTES, Math.max(4096, Math.floor((sql.value_limit ?? CHUNK_BYTES) / 2)));
   }
 
   async #run(operation: string, statements: Statement[]): Promise<SqlValue[][][]> {
-    this.#ready ??= Promise.resolve(this.sql.transaction("store", "files.schema", [[SCHEMA], [INDEX]])).then(() => undefined);
+    this.#ready ??= Promise.resolve(this.sql.transaction("store", "files.schema", [[SCHEMA], [INDEX], [CHUNK_SCHEMA]])).then(() => undefined);
     await this.#ready;
     return await this.sql.transaction("store", `files.${operation}`, statements);
   }
 
-  async #row(path: string): Promise<Row | undefined> {
-    if (path === "/") return { kind: "directory", data: new Uint8Array(), mtime: 0, mode: 0o755 };
-    const [rows] = await this.#run("get", [[`SELECT kind, data, mtime, mode FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, path]]);
+  async #meta(path: string, inline = false): Promise<Meta | undefined> {
+    if (path === "/") return { kind: "directory", size: 4096, chunked: false, mtime: 0, mode: 0o755 };
+    const [rows] = await this.#run("stat", [[`SELECT kind, CASE WHEN data IS NULL AND kind = 'file' THEN (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${CHUNKS} c WHERE c.scope = f.scope AND c.path = f.path) ELSE length(data) END, data IS NULL, mtime, mode, CASE WHEN ? THEN data END FROM ${TABLE} f WHERE scope = ? AND path = ?`, inline ? 1 : 0, this.scope, path]]);
     const row = rows?.[0];
     if (!row) return undefined;
-    return { kind: kindOf(row[0] ?? null), data: bytes(row[1] ?? null), mtime: Number(row[2]), mode: Number(row[3]) };
+    const kind = kindOf(row[0] ?? null);
+    const chunked = kind === "file" && Number(row[2]) === 1;
+    return { kind, size: Number(row[1] ?? 0), chunked, mtime: Number(row[3]), mode: Number(row[4]), ...(inline && !chunked ? { inline: bytes(row[5] ?? null) } : {}) };
+  }
+
+  async #row(path: string): Promise<Row | undefined> {
+    if (path === "/") return { kind: "directory", size: 4096, chunked: false, data: new Uint8Array(), mtime: 0, mode: 0o755 };
+    const [rows, chunks] = await this.#run("get", [
+      [`SELECT kind, data, mtime, mode FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, path],
+      [`SELECT data FROM ${CHUNKS} WHERE scope = ? AND path = ? ORDER BY seq`, this.scope, path],
+    ]);
+    const row = rows?.[0];
+    if (!row) return undefined;
+    const kind = kindOf(row[0] ?? null);
+    const chunked = kind === "file" && row[1] === null && Boolean(chunks?.length);
+    const parts = chunked ? chunks!.map(chunk => bytes(chunk[0] ?? null)) : [bytes(row[1] ?? null)];
+    const size = parts.reduce((total, part) => total + part.length, 0);
+    return { kind, size, chunked, data: joined(parts, size), mtime: Number(row[2]), mode: Number(row[3]) };
   }
 
   async #real(path: string, follow = true): Promise<string> {
@@ -83,7 +123,7 @@ export class SqlFileSystem implements FileSystem {
   }
 
   async #directory(path: string): Promise<void> {
-    const row = await this.#row(await this.#real(path));
+    const row = await this.#meta(await this.#real(path));
     if (!row) throw new FsError("ENOENT", path);
     if (row.kind !== "directory") throw new FsError("ENOTDIR", path);
   }
@@ -92,11 +132,21 @@ export class SqlFileSystem implements FileSystem {
     return [`INSERT OR REPLACE INTO ${TABLE} (scope, path, parent, kind, data, mtime, mode) VALUES (?, ?, ?, ?, ?, ?, ?)`, this.scope, path, parentOf(path), kind, data ? blob(data) : null, mtime, mode];
   }
 
+  #drop(path: string): Statement {
+    return [`DELETE FROM ${CHUNKS} WHERE scope = ? AND path = ?`, this.scope, path];
+  }
+
+  #chunks(path: string, data: Uint8Array, first: number): Statement[] {
+    const statements: Statement[] = [];
+    for (let offset = 0, seq = first; offset < data.length; offset += this.chunkBytes, seq++) statements.push([`INSERT OR REPLACE INTO ${CHUNKS} (scope, path, seq, data) VALUES (?, ?, ?, ?)`, this.scope, path, seq, blob(data.subarray(offset, offset + this.chunkBytes))]);
+    return statements;
+  }
+
   async stat(path: string): Promise<FileStat | null> {
     const target = await this.#resolved(path);
-    const row = target === null ? undefined : await this.#row(target);
+    const row = target === null ? undefined : await this.#meta(target);
     if (!row || row.kind === "link") return null;
-    return { kind: row.kind, size: row.kind === "file" ? row.data.length : 4096, mtime: row.mtime, mode: row.mode };
+    return { kind: row.kind, size: row.kind === "file" ? row.size : 4096, mtime: row.mtime, mode: row.mode };
   }
 
   async read(path: string): Promise<Uint8Array> {
@@ -110,17 +160,30 @@ export class SqlFileSystem implements FileSystem {
     const target = await this.#real(path);
     if (target === "/") throw new FsError("EISDIR", path);
     await this.#directory(parentOf(target));
-    const existing = await this.#row(target);
+    const existing = await this.#meta(target, append);
     if (existing?.kind === "directory") throw new FsError("EISDIR", path);
     if (existing?.kind === "link") throw new FsError("ENOENT", path);
-    let content = data;
-    if (append && existing) {
-      content = new Uint8Array(existing.data.length + data.length);
-      content.set(existing.data);
-      content.set(data, existing.data.length);
+    const mode = existing?.mode ?? 0o644;
+    if (!append || !existing) {
+      if (data.length > this.maxFileBytes) throw new FsError("EFBIG", path);
+      if (data.length <= this.chunkBytes) await this.#run("write", [this.#drop(target), this.#insert(target, "file", data, mode)]);
+      else await this.#run("write", [this.#drop(target), this.#insert(target, "file", null, mode), ...this.#chunks(target, data, 0)]);
+      return;
     }
-    if (content.length > this.maxFileBytes) throw new FsError("EFBIG", path);
-    await this.#run("write", [this.#insert(target, "file", content, existing?.mode ?? 0o644)]);
+    if (!data.length) return;
+    if (existing.size + data.length > this.maxFileBytes) throw new FsError("EFBIG", path);
+    if (!existing.chunked) {
+      const current = existing.inline ?? new Uint8Array();
+      const content = joined([current, data], current.length + data.length);
+      if (content.length <= this.chunkBytes) await this.#run("write", [this.#insert(target, "file", content, mode)]);
+      else await this.#run("append", [this.#insert(target, "file", null, mode), ...this.#chunks(target, content, 0)]);
+      return;
+    }
+    const [last] = await this.#run("tail", [[`SELECT seq, data FROM ${CHUNKS} WHERE scope = ? AND path = ? ORDER BY seq DESC LIMIT 1`, this.scope, target]]);
+    const seq = last?.[0] ? Number(last[0][0]) : 0;
+    const tail = last?.[0] ? bytes(last[0][1] ?? null) : new Uint8Array();
+    const fill = tail.length < this.chunkBytes;
+    await this.#run("append", [[`UPDATE ${TABLE} SET mtime = ? WHERE scope = ? AND path = ?`, Date.now(), this.scope, target], ...this.#chunks(target, fill ? joined([tail, data], tail.length + data.length) : data, fill ? seq : seq + 1)]);
   }
 
   async list(path: string): Promise<string[]> {
@@ -133,32 +196,32 @@ export class SqlFileSystem implements FileSystem {
   async mkdir(path: string): Promise<void> {
     const target = await this.#real(path, false);
     await this.#directory(parentOf(target));
-    if (await this.#row(target)) throw new FsError("EEXIST", path);
+    if (await this.#meta(target)) throw new FsError("EEXIST", path);
     await this.#run("mkdir", [this.#insert(target, "directory", null, 0o755)]);
   }
 
   async remove(path: string): Promise<void> {
     const target = await this.#real(path, false);
     if (target === "/") throw new FsError("EINVAL", path);
-    const row = await this.#row(target);
+    const row = await this.#meta(target);
     if (!row) throw new FsError("ENOENT", path);
     if (row.kind === "directory") {
       const [children] = await this.#run("children", [[`SELECT 1 FROM ${TABLE} WHERE scope = ? AND parent = ? LIMIT 1`, this.scope, target]]);
       if (children?.length) throw new FsError("ENOTEMPTY", path);
     }
-    await this.#run("remove", [[`DELETE FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, target]]);
+    await this.#run("remove", [[`DELETE FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, target], this.#drop(target)]);
   }
 
   async chmod(path: string, mode: number): Promise<void> {
     const target = await this.#real(path);
-    const row = await this.#row(target);
+    const row = await this.#meta(target);
     if (!row || row.kind === "link") throw new FsError("ENOENT", path);
     await this.#run("chmod", [[`UPDATE ${TABLE} SET mode = ? WHERE scope = ? AND path = ?`, mode & 0o7777, this.scope, target]]);
   }
 
   async utimes(path: string, mtime: number): Promise<void> {
     const target = await this.#real(path);
-    const row = await this.#row(target);
+    const row = await this.#meta(target);
     if (!row || row.kind === "link") throw new FsError("ENOENT", path);
     await this.#run("utimes", [[`UPDATE ${TABLE} SET mtime = ? WHERE scope = ? AND path = ?`, Math.floor(mtime), this.scope, target]]);
   }
@@ -167,7 +230,7 @@ export class SqlFileSystem implements FileSystem {
     const link = await this.#real(path, false);
     if (link === "/") throw new FsError("EEXIST", path);
     await this.#directory(parentOf(link));
-    if (await this.#row(link)) throw new FsError("EEXIST", path);
+    if (await this.#meta(link)) throw new FsError("EEXIST", path);
     await this.#run("symlink", [this.#insert(link, "link", encode(target), 0o777)]);
     this.#links = Promise.resolve(true);
   }
@@ -183,7 +246,7 @@ export class SqlFileSystem implements FileSystem {
     const row = link === null ? undefined : await this.#row(link);
     if (!row) return null;
     if (row.kind === "link") return { kind: "symlink", size: row.data.length, mtime: row.mtime, mode: 0o777, target: decode(row.data) };
-    return { kind: row.kind, size: row.kind === "file" ? row.data.length : 4096, mtime: row.mtime, mode: row.mode };
+    return { kind: row.kind, size: row.kind === "file" ? row.size : 4096, mtime: row.mtime, mode: row.mode };
   }
 
   async rename(from: string, to: string): Promise<void> {
@@ -191,19 +254,19 @@ export class SqlFileSystem implements FileSystem {
     const target = await this.#real(to, false);
     if (target === source) return;
     if (target.startsWith(source + "/") || source === "/") throw new FsError("EINVAL", to);
-    const node = await this.#row(source);
+    const node = await this.#meta(source);
     if (!node) throw new FsError("ENOENT", from);
     await this.#directory(parentOf(target));
-    const existing = await this.#row(target);
+    const existing = await this.#meta(target);
     if (existing?.kind === "directory") throw new FsError("EISDIR", to);
-    const [rows] = await this.#run("subtree", [[`SELECT path, kind, data, mtime, mode FROM ${TABLE} WHERE scope = ? AND (path = ? OR substr(path, 1, ?) = ?)`, this.scope, source, source.length + 1, source + "/"]]);
-    const moves: Statement[] = [[`DELETE FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, target]];
-    for (const row of rows ?? []) {
-      const path = String(row[0]);
-      moves.push([`DELETE FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, path]);
-      const kind = kindOf(row[1] ?? null);
-      moves.push(this.#insert(target + path.slice(source.length), kind, kind === "directory" ? null : bytes(row[2] ?? null), Number(row[4]), Number(row[3])));
-    }
-    await this.#run("rename", moves);
+    const within = "(path = ? OR substr(path, 1, ?) = ?)";
+    const subtree = [source, source.length + 1, source + "/"];
+    const tail = source.length + 1;
+    await this.#run("rename", [
+      [`DELETE FROM ${TABLE} WHERE scope = ? AND path = ?`, this.scope, target],
+      this.#drop(target),
+      [`UPDATE ${TABLE} SET parent = CASE WHEN path = ? THEN ? ELSE ? || substr(parent, ?) END, path = ? || substr(path, ?) WHERE scope = ? AND ${within}`, source, parentOf(target), target, tail, target, tail, this.scope, ...subtree],
+      [`UPDATE ${CHUNKS} SET path = ? || substr(path, ?) WHERE scope = ? AND ${within}`, target, tail, this.scope, ...subtree],
+    ]);
   }
 }
