@@ -137,6 +137,8 @@ struct Configuration {
     #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
+    auto_compact_window_tokens: Option<u64>,
+    #[serde(default)]
     environment: Option<Environment>,
     #[serde(default)]
     tools: Vec<tools::HostTool>,
@@ -589,9 +591,14 @@ fn described(record: &TurnRecord) -> Result<Value, String> {
     }))
 }
 
+const CLAUDE_AUTO_COMPACT_WINDOW_TOKENS: u64 = 200_000;
+
+const CLAUDE_COMPACT_RESERVE_TOKENS: u64 = 33_000;
+
 fn claude_harness(
     endpoint: Endpoint,
     stream_tool_input: bool,
+    auto_compact_window_tokens: u64,
     environment: Option<ClaudeEnvironment>,
     instructions: &dyn Fn(Option<&str>) -> String,
 ) -> (ClaudeHarness, ClaudeClient) {
@@ -605,7 +612,9 @@ fn claude_harness(
     }
     let max_tokens = endpoint.max_tokens;
     let harness = ClaudeHarness::new(client.clone()).configure(move |claude| {
-        let mut claude = claude.tool_input_deltas(stream_tool_input);
+        let mut claude = claude
+            .tool_input_deltas(stream_tool_input)
+            .auto_compact_window_tokens(auto_compact_window_tokens);
         if let Some(environment) = &environment {
             claude = claude.environment(environment.clone());
         }
@@ -728,6 +737,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         claude_harness(
             endpoint,
             config.stream_tool_input,
+            config
+                .auto_compact_window_tokens
+                .unwrap_or(CLAUDE_AUTO_COMPACT_WINDOW_TOKENS),
             environment.as_ref().map(Environment::claude),
             &instructions,
         )
@@ -1271,7 +1283,11 @@ fn models() -> Value {
                 model.clone(),
                 vec!["direct", "vercel"],
                 window,
-                None,
+                Some(
+                    window
+                        .min(CLAUDE_AUTO_COMPACT_WINDOW_TOKENS)
+                        .saturating_sub(CLAUDE_COMPACT_RESERVE_TOKENS),
+                ),
             )
         })
         .collect::<Vec<_>>();
