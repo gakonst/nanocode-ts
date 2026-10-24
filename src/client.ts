@@ -560,6 +560,8 @@ type Queued = { event: LiveEvent } | { run: () => void } | { aside: Entry };
 
 const TOOL_EVENTS = new Set(["tool_input", "tool_start", "tool_output", "tool_end"]);
 
+const ENDED_LIMIT = 1024;
+
 export class Transcript {
   private readonly options: TranscriptOptions;
   private stream: Stream = { posted: 0, shown: 0, text: "" };
@@ -573,6 +575,7 @@ export class Transcript {
   private readonly links = new Map<string, { cell: string; latest: string }>();
   private held: Entry[] = [];
   private readonly orphans = new Map<string, ToolCell[]>();
+  private readonly ended = new Set<string>();
 
   constructor(options: TranscriptOptions) {
     this.options = options;
@@ -601,6 +604,7 @@ export class Transcript {
     this.inputs.clear();
     this.links.clear();
     this.orphans.clear();
+    this.ended.clear();
     this.held = [];
     this.clock = 0;
     this.options.live([]);
@@ -694,6 +698,8 @@ export class Transcript {
     let cell = this.calls.get(id);
     if (!cell) {
       if (event.type === "tool_output") return;
+      const parentId = typeof event.parent === "string" ? this.resolve(event.parent) : undefined;
+      if (this.ended.has(id) || (parentId !== undefined && this.ended.has(parentId) && !this.calls.has(parentId) && !this.links.has(String(event.parent)))) return;
       cell = toolCell(id, typeof event.name === "string" ? event.name : "tool", at(event));
       this.calls.set(id, cell);
       const parent = typeof event.parent === "string" ? this.calls.get(this.resolve(event.parent)) : undefined;
@@ -750,6 +756,8 @@ export class Transcript {
     if (cell.status === "running" && [...this.orphans.values()].some(cells => cells.includes(cell))) return;
     this.calls.delete(cell.call_id);
     this.inputs.delete(cell.call_id);
+    this.ended.add(cell.call_id);
+    if (this.ended.size > ENDED_LIMIT) this.ended.delete(this.ended.values().next().value!);
     for (const child of cell.children) this.forget(child);
   }
 
