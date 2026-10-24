@@ -1,9 +1,11 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
 import { baseOf, byte, decode, encode, FsError, parentOf } from "../fs.ts";
-import { escapeRegExp, format, globRegExp, globSource, lines } from "../text.ts";
+import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from "../text.ts";
 import { checksum, perlSource, scan } from "./text.ts";
-import { allInput, device, eachInput, last, options, readInput } from "./util.ts";
+import { allInput, device, eachInput, last, linked, linkOf, lstatOf, options, pause, put, readInput } from "./util.ts";
 import { mkdirs } from "./files.ts";
+import { make } from "./make.ts";
+import { yq } from "./yaml.ts";
 import { gunzip, gzip, pack, unpack, type TarEntry } from "./archive.ts";
 
 const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
@@ -60,9 +62,13 @@ function compressor(mode: "gzip" | "gunzip" | "zcat"): CommandHandler {
 
 async function collect(ctx: CommandContext, root: string, operand: string, entries: TarEntry[]): Promise<void> {
   const path = ctx.resolve(root === "." ? operand : root + "/" + operand);
-  const stat = await ctx.fs.stat(path);
+  const stat = await lstatOf(ctx, path);
   if (!stat) throw new CommandError(operand + ": Cannot stat: No such file or directory");
   const name = operand.replace(/(.)\/+$/, "$1");
+  if (stat.kind === "symlink") {
+    entries.push({ name, type: "symlink", data: new Uint8Array(), mode: 0o777, mtime: stat.mtime, linkname: stat.target ?? "" });
+    return;
+  }
   if (stat.kind === "file") {
     entries.push({ name, type: "file", data: await ctx.fs.read(path), mode: stat.mode, mtime: stat.mtime, linkname: "" });
     return;
@@ -127,18 +133,37 @@ const tar: CommandHandler = async ctx => {
     for (const operand of parsed.operands) await collect(ctx, root, operand, entries);
     if (parsed.flags.has("v")) for (const entry of entries) (file === "-" ? ctx.stderr : ctx.stdout).write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
     const archive = zipped ? await gzip(pack(entries)) : pack(entries);
-    if (file === "-") ctx.stdout.write(decode(archive));
+    if (file === "-") await put(ctx, decode(archive));
     else await ctx.fs.write(ctx.resolve(file), archive);
     return 0;
   }
   const raw = file && file !== "-" ? await ctx.fs.read(ctx.resolve(file)) : encode(ctx.stdin.read());
   const entries = unpack(zipped || (raw[0] === 0x1f && raw[1] === 0x8b) ? await gunzip(raw) : raw);
   const wanted = parsed.operands.map(operand => operand.replace(/\/+$/, ""));
-  const selected = entries.filter(entry => (entry.type === "file" || entry.type === "directory") && (!wanted.length || wanted.some(name => entry.name === name || entry.name.startsWith(name + "/"))));
+  const selected = entries.filter(entry => (entry.type === "file" || entry.type === "directory" || entry.type === "symlink") && (!wanted.length || wanted.some(name => entry.name === name || entry.name.startsWith(name + "/"))));
   for (const entry of selected) {
-    if (mode[0] === "t" || parsed.flags.has("v")) ctx.stdout.write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
+    if (mode[0] === "t" && parsed.flags.has("v")) {
+      const date = new Date(entry.mtime);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const bits = entry.type === "symlink" ? 0o777 : entry.mode;
+      let text = entry.type === "directory" ? "d" : entry.type === "symlink" ? "l" : "-";
+      for (const shift of [6, 3, 0]) text += (bits >> shift & 4 ? "r" : "-") + (bits >> shift & 2 ? "w" : "-") + (bits >> shift & 1 ? "x" : "-");
+      ctx.stdout.write(text + " user/user " + String(entry.type === "file" ? entry.data.length : 0).padStart(9) + " " + date.getUTCFullYear() + "-" + pad(date.getUTCMonth() + 1) + "-" + pad(date.getUTCDate()) + " " + pad(date.getUTCHours()) + ":" + pad(date.getUTCMinutes()) + " " + entry.name + (entry.type === "directory" ? "/" : "") + (entry.type === "symlink" ? " -> " + entry.linkname : "") + "\n");
+      await pause(ctx);
+    } else if (mode[0] === "t" || parsed.flags.has("v")) {
+      ctx.stdout.write(entry.name + (entry.type === "directory" ? "/" : "") + "\n");
+      await pause(ctx);
+    }
     if (mode[0] !== "x") continue;
     const target = ctx.resolve((root === "." ? "" : root + "/") + entry.name);
+    const fs = linked(ctx);
+    if (entry.type === "symlink") {
+      if (!fs.symlink) continue;
+      await mkdirs(ctx.fs, parentOf(target));
+      if (await lstatOf(ctx, target)) await ctx.fs.remove(target);
+      await fs.symlink(entry.linkname, target);
+      continue;
+    }
     if (entry.type === "directory") await mkdirs(ctx.fs, target);
     else {
       await mkdirs(ctx.fs, parentOf(target));
@@ -234,6 +259,10 @@ const tree: CommandHandler = async ctx => {
   return status;
 };
 
+const BINARIES = new Set(["echo", "printf", "test", "[", "pwd", "true", "false", "kill", "sleep", "env", "time", "timeout", "nice", "nohup", "stty", "tty", "sh", "bash", "dash"]);
+
+const SHELL_ONLY = new Set(["cd", "pushd", "popd", "dirs", "export", "unset", "set", "shift", "exit", "return", "local", "declare", "typeset", "readonly", "eval", "source", ".", "alias", "unalias", "read", "type", "command", "hash", "history", "jobs", "fg", "bg", "wait", "ulimit", "umask", "trap", "let", "getopts", "mapfile", "readarray", "builtin", "enable", "help", "logout", "shopt", "times", "compgen", "complete", "disown", "suspend", "break", "continue", ":"]);
+
 const which: CommandHandler = async ctx => {
   const parsed = options(ctx.args, { flags: "as" });
   let status = 0;
@@ -244,7 +273,11 @@ const which: CommandHandler = async ctx => {
       status = 1;
       continue;
     }
-    if (!parsed.flags.has("s")) ctx.stdout.write((kind === "builtin" ? name + ": shell built-in command" : "/usr/bin/" + name) + "\n");
+    if ((kind === "builtin" && !BINARIES.has(name)) || SHELL_ONLY.has(name)) {
+      status = 1;
+      continue;
+    }
+    if (!parsed.flags.has("s")) ctx.stdout.write((name.startsWith("/") ? name : "/usr/bin/" + name) + "\n");
   }
   return status;
 };
@@ -296,10 +329,15 @@ const timeout: CommandHandler = async ctx => {
   }
 };
 
-const yes: CommandHandler = ctx => {
+const yes: CommandHandler = async ctx => {
   const line = (ctx.args.length ? ctx.args.join(" ") : "y") + "\n";
-  const count = Math.max(1, Math.min(10_000, Math.floor(ctx.limits.maxOutputLength / line.length) - 1));
-  ctx.stdout.write(line.repeat(count));
+  if (!ctx.stdout.piped) {
+    const count = Math.max(1, Math.min(10_000, Math.floor(ctx.limits.maxOutputLength / line.length) - 1));
+    ctx.stdout.write(line.repeat(count));
+    return;
+  }
+  const block = line.repeat(Math.max(1, Math.floor(8192 / line.length)));
+  for (;;) await put(ctx, block);
 };
 
 const strings: CommandHandler = async ctx => {
@@ -368,12 +406,27 @@ const xxd: CommandHandler = async ctx => {
 };
 
 const od: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "cxbd", values: "AtN" });
-  const data = await bytesOf(ctx, parsed.operands[0] ?? "-");
-  const type = last(parsed, "t") ?? (parsed.flags.has("c") ? "c" : parsed.flags.has("x") ? "x2" : "o2");
+  const parsed = options(ctx.args, { flags: "cxbdos", values: "AtNj" });
+  let data = await bytesOf(ctx, parsed.operands[0] ?? "-");
+  const skip = Number(last(parsed, "j") ?? 0);
+  const limit = last(parsed, "N");
+  data = data.slice(skip, limit === undefined ? undefined : skip + Number(limit));
+  const f = parsed.flags;
+  const raw = last(parsed, "t") ?? (f.has("c") ? "c" : f.has("b") ? "o1" : f.has("x") ? "x2" : f.has("d") ? "u2" : f.has("s") ? "d2" : "o2");
+  const type = /^[doux]$/.test(raw) ? raw + "4" : raw.replace(/C$/, "1").replace(/S$/, "2").replace(/I$/, "4").replace(/L$/, "8");
   const address = last(parsed, "A") ?? "o";
-  const width = type.endsWith("1") || type === "c" ? 1 : 2;
+  const width = type === "c" || type === "a" ? 1 : Number(type.slice(1)) || 2;
   const cell = (offset: number) => {
+    if (width !== 2 || type[0] === "d") {
+      if (type !== "c" && type !== "a") {
+        let value = 0n;
+        for (let i = width - 1; i >= 0; i--) value = (value << 8n) | BigInt(data[offset + i] ?? 0);
+        if (type[0] === "d" && value >= 1n << BigInt(width * 8 - 1)) value -= 1n << BigInt(width * 8);
+        const base = type[0] === "x" ? 16 : type[0] === "o" ? 8 : 10;
+        const digits = { x: width * 2, o: Math.ceil((width * 8) / 3), u: String(2 ** (width * 8) - 1).length, d: String(2 ** (width * 8 - 1)).length + 1 }[type[0] as "x"] ?? 3;
+        return " " + value.toString(base).padStart(digits, base === 10 ? " " : "0");
+      }
+    }
     if (type === "c") {
       const byte = data[offset];
       const named: Record<number, string> = { 0: "\\0", 7: "\\a", 8: "\\b", 9: "\\t", 10: "\\n", 11: "\\v", 12: "\\f", 13: "\\r" };
@@ -405,9 +458,10 @@ const split: CommandHandler = async ctx => {
     const count = Number(parts.replace(/^[lr]\//, ""));
     if (!Number.isInteger(count) || count < 1) throw new CommandError("invalid number of chunks: '" + parts + "'");
     const base = Math.floor(data.length / count);
+    const extra = data.length % count;
     let offset = 0;
     for (let i = 0; i < count; i++) {
-      const length = i === count - 1 ? data.length - offset : base;
+      const length = base + (i < extra ? 1 : 0);
       chunks.push(data.slice(offset, offset + length));
       offset += length;
     }
@@ -422,12 +476,12 @@ const split: CommandHandler = async ctx => {
     let suffix = "";
     if (parsed.flags.has("d")) suffix = String(index).padStart(width, "0");
     else for (let value = index, i = 0; i < width; i++, value = Math.floor(value / 26)) suffix = String.fromCharCode(97 + (value % 26)) + suffix;
-    await ctx.fs.write(ctx.resolve(prefix + suffix), chunk);
+    await ctx.fs.write(ctx.resolve(prefix + suffix + (last(parsed, "additional-suffix") ?? "")), chunk);
   }
 };
 
 const join: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "i", values: "t12a" });
+  const parsed = options(ctx.args, { flags: "i", values: "t12aveoj", long: { "ignore-case": "i", nocheck: "", "check-order": "", header: "" } });
   const [left, right] = parsed.operands;
   if (!left || !right) throw new CommandError("missing operand", 1);
   const sep = last(parsed, "t");
@@ -438,18 +492,29 @@ const join: CommandHandler = async ctx => {
   const a = await lines(left);
   const b = await lines(right);
   const key = (value: string | undefined) => parsed.flags.has("i") ? (value ?? "").toLowerCase() : value ?? "";
-  const unpaired = parsed.values.get("a") ?? [];
+  const only = parsed.values.get("v") ?? [];
+  const unpaired = [...(parsed.values.get("a") ?? []), ...only];
   const out = sep ?? " ";
+  const empty = last(parsed, "e") ?? "";
+  const spec = last(parsed, "o");
+  const fields = spec === undefined || spec === "auto" ? undefined : spec.split(/[,\s]+/).filter(Boolean).map(item => (item === "0" ? [0, 0] : item.split(".").map(Number)) as [number, number]);
+  const render = (left: string[] | undefined, right: string[] | undefined) => {
+    if (fields) return fields.map(([file, field]) => (file === 0 ? (left ? left[f1] : right?.[f2]) : (file === 1 ? left : right)?.[field - 1]) ?? empty).join(out);
+    if (left && right) return [left[f1], ...left.filter((_, i) => i !== f1), ...right.filter((_, i) => i !== f2)].join(out);
+    const row = (left ?? right)!;
+    const index = left ? f1 : f2;
+    return [row[index], ...row.filter((_, i) => i !== index)].join(out);
+  };
   const matched = new Set<number>();
   for (const row of a) {
     const hits = b.map((other, index) => [other, index] as const).filter(([other]) => key(other[f2]) === key(row[f1]));
-    if (!hits.length && unpaired.includes("1")) ctx.stdout.write(row.join(out) + "\n");
+    if (!hits.length && unpaired.includes("1")) ctx.stdout.write(render(row, undefined) + "\n");
     for (const [other, index] of hits) {
       matched.add(index);
-      ctx.stdout.write([row[f1], ...row.filter((_, i) => i !== f1), ...other.filter((_, i) => i !== f2)].join(out) + "\n");
+      if (!only.length) ctx.stdout.write(render(row, other) + "\n");
     }
   }
-  if (unpaired.includes("2")) for (const [index, other] of b.entries()) if (!matched.has(index)) ctx.stdout.write(other.join(out) + "\n");
+  if (unpaired.includes("2")) for (const [index, other] of b.entries()) if (!matched.has(index)) ctx.stdout.write(render(undefined, other) + "\n");
 };
 
 const expand: CommandHandler = async ctx => {
@@ -479,7 +544,9 @@ const file: CommandHandler = async ctx => {
     const stat = await ctx.fs.stat(path);
     let kind: string;
     const mime = parsed.flags.has("i") || parsed.flags.has("M");
-    if (!stat) kind = "cannot open \x60" + operand + "' (No such file or directory)";
+    const link = parsed.flags.has("L") ? null : await linkOf(ctx, path);
+    if (link !== null) kind = mime ? "inode/symlink" : "symbolic link to " + link;
+    else if (!stat) kind = "cannot open \x60" + operand + "' (No such file or directory)";
     else if (stat.kind === "directory") kind = mime ? "inode/directory" : "directory";
     else {
       const data = await ctx.fs.read(path);
@@ -491,22 +558,37 @@ const file: CommandHandler = async ctx => {
         return counts[0]! > 0 && counts.every(count => count === counts[0]);
       })();
       const ascii = !/[^\x00-\x7f]/.test(text);
-      const encoding = ascii ? "ASCII text" : "Unicode text, UTF-8 text";
+      const bom = starts(0xef, 0xbb, 0xbf);
+      const longest = textLines.reduce((max, line) => Math.max(max, line.replace(/\r$/, "").length), 0);
+      const terminators = [longest > 300 ? "with very long lines (" + longest + ")" : "", !/[\r\n]/.test(text) ? "with no line terminators" : /\r\n/.test(text) ? "with CRLF line terminators" : /\r/.test(text) ? "with CR line terminators" : ""].filter(Boolean);
+      const encoding = (ascii ? "ASCII text" : bom ? "Unicode text, UTF-8 (with BOM) text" : "Unicode text, UTF-8 text") + terminators.map(item => ", " + item).join("");
+      const word = (offset: number) => data[offset]! | (data[offset + 1]! << 8);
+      const long = (offset: number) => ((data[offset]! << 24) | (data[offset + 1]! << 16) | (data[offset + 2]! << 8) | data[offset + 3]!) >>> 0;
       if (!data.length) kind = mime ? "inode/x-empty" : "empty";
       else if (starts(0x1f, 0x8b)) kind = mime ? "application/gzip" : "gzip compressed data";
-      else if (starts(0x89, 0x50, 0x4e, 0x47)) kind = mime ? "image/png" : "PNG image data";
-      else if (starts(0xff, 0xd8, 0xff)) kind = mime ? "image/jpeg" : "JPEG image data";
-      else if (starts(0x47, 0x49, 0x46, 0x38)) kind = mime ? "image/gif" : "GIF image data";
-      else if (starts(0x25, 0x50, 0x44, 0x46)) kind = mime ? "application/pdf" : "PDF document";
-      else if (starts(0x50, 0x4b, 0x03, 0x04)) kind = mime ? "application/zip" : "Zip archive data";
-      else if (starts(0x7f, 0x45, 0x4c, 0x46)) kind = mime ? "application/x-executable" : "ELF executable";
-      else if (starts(0x00, 0x61, 0x73, 0x6d)) kind = mime ? "application/wasm" : "WebAssembly (wasm) binary module";
+      else if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) && data.length >= 29 && decode(data.slice(12, 16)) === "IHDR") {
+        const color = ({ 0: "grayscale", 2: "/color RGB", 3: " colormap", 4: " gray+alpha", 6: "/color RGBA" } as Record<number, string>)[data[25]!] ?? "";
+        kind = mime ? "image/png" : "PNG image data, " + long(16) + " x " + long(20) + ", " + data[24] + "-bit" + (color === "grayscale" ? " grayscale" : color) + ", " + (data[28] ? "interlaced" : "non-interlaced");
+      } else if (starts(0xff, 0xd8, 0xff)) kind = mime ? "image/jpeg" : "JPEG image data";
+      else if (starts(0x47, 0x49, 0x46, 0x38) && (data[4] === 0x37 || data[4] === 0x39) && data[5] === 0x61) kind = mime ? "image/gif" : "GIF image data, version 8" + String.fromCharCode(data[4]!) + "a," + (data.length >= 10 ? " " + word(6) + " x " + word(8) : "");
+      else if (starts(0x25, 0x50, 0x44, 0x46, 0x2d)) kind = mime ? "application/pdf" : "PDF document" + (/^%PDF-(\d+\.\d+)/.test(text) ? ", version " + text.match(/^%PDF-(\d+\.\d+)/)![1] : "");
+      else if (starts(0x50, 0x4b, 0x03, 0x04) && data.length >= 30) kind = mime ? "application/zip" : "Zip archive data, at least v" + (word(4) / 10).toFixed(1) + " to extract, compression method=" + ({ 0: "store", 8: "deflate" } as Record<number, string>)[word(8)]!;
+      else if (starts(0x7f, 0x45, 0x4c, 0x46) && data.length >= 7) {
+        const types: Record<number, string> = { 1: "relocatable", 2: "executable", 3: "pie executable", 4: "core file" };
+        const machines: Record<number, string> = { 3: "Intel 80386", 0x28: "ARM", 0x3e: "x86-64", 0xb7: "ARM aarch64", 0xf3: "UCB RISC-V" };
+        kind = mime ? "application/x-executable" : "ELF " + (data[4] === 2 ? "64" : "32") + "-bit " + (data[5] === 2 ? "MSB" : "LSB") + (data.length >= 20 ? " " + (types[word(16)] ?? "unknown") + ", " + (machines[word(18)] ?? "unknown arch") : "");
+      } else if (starts(0x00, 0x61, 0x73, 0x6d)) kind = mime ? "application/wasm" : "WebAssembly (wasm) binary module" + (data.length >= 8 ? " version 0x" + (data[4]! | (data[5]! << 8)).toString(16) + (data[4] === 1 ? " (MVP)" : "") : "");
       else if (data.length > 262 && decode(data.slice(257, 262)) === "ustar") kind = mime ? "application/x-tar" : "POSIX tar archive";
-      else if (data.includes(0)) kind = mime ? "application/octet-stream" : "data";
+      else if (data.includes(0) || /[\uDC80-\uDCFF\x01-\x06\x0e-\x1a\x1c-\x1f]/.test(text)) kind = mime ? "application/octet-stream" : "data";
       else if (/^\s*[[{]/.test(text) && (() => { try { JSON.parse(decode(data)); return true; } catch { return false; } })()) kind = mime ? "application/json" : "JSON text data";
-      else if (/^#!.*\b(bash|sh)\b/.test(text)) kind = mime ? "text/x-shellscript" : "Bourne-Again shell script, " + encoding + " executable";
+      else if (/^#!.*\bbash\b/.test(text)) kind = mime ? "text/x-shellscript" : "Bourne-Again shell script, " + encoding + " executable";
+      else if (/^#!.*\b(sh|dash)\b/.test(text)) kind = mime ? "text/x-shellscript" : "POSIX shell script, " + encoding + " executable";
       else if (/^#!.*\bpython/.test(text)) kind = mime ? "text/x-script.python" : "Python script, " + encoding + " executable";
-      else if (/^#!.*\bnode/.test(text)) kind = mime ? "application/javascript" : "Node.js script, " + encoding + " executable";
+      else if (/^#!.*\bnode/.test(text)) kind = mime ? "application/javascript" : "Node.js script executable, " + encoding;
+      else if (/^\s*<svg[\s>]/.test(text) || /^\s*<\?xml[^>]*>\s*<svg[\s>]/.test(text)) kind = mime ? "image/svg+xml" : "SVG Scalable Vector Graphics image";
+      else if (/^diff --git |^--- \S.*\n\+\+\+ /m.test(text)) kind = mime ? "text/x-diff" : "diff output, " + encoding;
+      else if (/^(import|export)\s|^module\.exports\b/m.test(text)) kind = mime ? "application/javascript" : "JavaScript source, " + encoding;
+      else if (/^#include\s*[<"]|\bmain\s*\(\s*\)\s*\{/m.test(text)) kind = mime ? "text/x-c" : "C source, " + encoding;
       else if (/^\s*<\?xml/.test(text)) kind = mime ? "text/xml" : "XML 1.0 document, " + encoding;
       else if (/^\s*<!doctype html|^\s*<html/i.test(text)) kind = mime ? "text/html" : "HTML document, " + encoding;
       else if (csv) kind = mime ? "text/csv" : "CSV " + encoding;
@@ -826,17 +908,53 @@ const rg: CommandHandler = async ctx => {
 };
 
 const ln: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "sfnvr" });
-  const [source, destination] = parsed.operands;
-  if (!source) throw new CommandError("missing file operand", 1);
-  const target = ctx.resolve(destination ?? baseOf(source));
-  const from = ctx.resolve(parsed.flags.has("s") && !source.startsWith("/") ? parentOf(target) + "/" + source : source);
-  const stat = await ctx.fs.stat(from);
-  if (!stat) throw new CommandError("failed to access '" + source + "': No such file or directory", 1);
-  if (stat.kind === "directory") throw new CommandError(source + ": links to directories are not supported", 1);
-  if (await ctx.fs.stat(target) && !parsed.flags.has("f")) throw new CommandError("failed to create link '" + (destination ?? baseOf(source)) + "': File exists", 1);
-  await ctx.fs.write(target, await ctx.fs.read(from));
-  ctx.stderr.write("ln: this filesystem has no links; copied '" + source + "' instead\n");
+  const parsed = options(ctx.args, { flags: "sfnvrTiL", values: "t", long: { symbolic: "s", force: "f", "no-dereference": "n", verbose: "v", relative: "r", "target-directory": "t", "no-target-directory": "T" } });
+  const fs = linked(ctx);
+  const f = parsed.flags;
+  const operands = [...parsed.operands];
+  if (!operands.length) throw new CommandError("missing file operand", 1);
+  let directory = last(parsed, "t");
+  if (directory === undefined && operands.length > 1) {
+    const candidate = operands[operands.length - 1]!;
+    const stat = f.has("n") || f.has("T") ? (await linkOf(ctx, ctx.resolve(candidate))) === null ? await fs.stat(ctx.resolve(candidate)) : null : await fs.stat(ctx.resolve(candidate));
+    if (stat?.kind === "directory" || operands.length > 2) directory = operands.pop();
+  }
+  const pairs: [string, string][] = directory !== undefined ? operands.map(source => [source, directory.replace(/\/+$/, "") + "/" + baseOf(source.replace(/\/+$/, ""))]) : operands.length === 1 ? [[operands[0]!, baseOf(operands[0]!.replace(/\/+$/, ""))]] : [[operands[0]!, operands[1]!]];
+  let status = 0;
+  for (const [source, destination] of pairs) {
+    const target = ctx.resolve(destination);
+    const fail = (message: string) => {
+      ctx.stderr.write("ln: " + message + "\n");
+      status = 1;
+    };
+    const exists = (await fs.stat(target)) !== null || (await linkOf(ctx, target)) !== null;
+    if (exists && !f.has("f")) {
+      fail("failed to create " + (f.has("s") ? "symbolic " : "hard ") + "link '" + destination + "': File exists");
+      continue;
+    }
+    if (f.has("s") && fs.symlink) {
+      if (exists) await fs.remove(target);
+      await fs.symlink(source, target);
+      if (f.has("v")) ctx.stdout.write("'" + destination + "' -> '" + source + "'\n");
+      continue;
+    }
+    const from = ctx.resolve(f.has("s") && !source.startsWith("/") ? parentOf(target) + "/" + source : source);
+    const stat = await fs.stat(from);
+    if (!stat) {
+      fail((f.has("s") ? "failed to access '" : "failed to access '") + source + "': No such file or directory");
+      continue;
+    }
+    if (stat.kind === "directory") {
+      fail(source + ": hard link not allowed for directory");
+      continue;
+    }
+    if (exists) await fs.remove(target);
+    await fs.write(target, await fs.read(from));
+    if (fs.chmod) await fs.chmod(target, stat.mode);
+    if (f.has("s")) ctx.stderr.write("ln: this filesystem has no symbolic links; copied '" + source + "' instead\n");
+    if (f.has("v")) ctx.stdout.write("'" + destination + "' => '" + source + "'\n");
+  }
+  return status;
 };
 
 const truncate: CommandHandler = async ctx => {
@@ -915,7 +1033,8 @@ const shuf: CommandHandler = async ctx => {
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j]!, pool[i]!];
     }
-    out.push(...pool.slice(0, count ?? pool.length));
+    if (count !== undefined) pool.length = Math.min(pool.length, count);
+    for (const item of pool) out.push(item);
   }
   const text = out.map(item => item + separator).join("");
   const target = last(parsed, "o");
@@ -2132,19 +2251,230 @@ const id: CommandHandler = ctx => {
   return 0;
 };
 
+const SIGNALS = ["HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS"];
+
+function signalTable(): [number, string][] {
+  const table: [number, string][] = SIGNALS.map((name, index) => [index + 1, name]);
+  for (let n = 34; n <= 64; n++) table.push([n, n === 34 ? "RTMIN" : n === 64 ? "RTMAX" : n < 50 ? "RTMIN+" + (n - 34) : "RTMAX-" + (64 - n)]);
+  return table;
+}
+
 const kill: CommandHandler = ctx => {
   if (ctx.args[0] === "-l" || ctx.args[0] === "-L") {
-    ctx.stdout.write("HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM\n");
+    const table = signalTable();
+    if (ctx.args.length > 1) {
+      for (const arg of ctx.args.slice(1)) {
+        const number = Number(arg);
+        const found = Number.isInteger(number) ? table.find(([n]) => n === (number > 128 ? number - 128 : number)) : table.find(([, name]) => name === arg.toUpperCase().replace(/^SIG/, ""));
+        if (!found) throw new CommandError(arg + ": invalid signal specification", 1);
+        ctx.stdout.write((Number.isInteger(number) ? found[1] : String(found[0])) + "\n");
+      }
+      return 0;
+    }
+    let text = "";
+    table.forEach(([n, name], index) => {
+      text += String(n).padStart(2) + ") SIG" + name + (index % 5 === 4 || index === table.length - 1 ? "\n" : "\t");
+    });
+    ctx.stdout.write(text);
     return 0;
   }
   if (!ctx.args.some(arg => !arg.startsWith("-"))) throw new CommandError("usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", 2);
   return 0;
 };
 
+const envsubst: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "vh", long: { variables: "v", help: "h", version: "V" } });
+  const reference = /\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})/g;
+  const named = (text: string) => [...text.matchAll(reference)].map(match => match[1] ?? match[2]!);
+  if (parsed.flags.has("v")) {
+    if (!parsed.operands.length) throw new CommandError("missing arguments", 1);
+    ctx.stdout.write(named(parsed.operands.join(" ")).map(name => name + "\n").join(""));
+    return 0;
+  }
+  const allowed = parsed.operands.length ? new Set(named(parsed.operands.join(" "))) : undefined;
+  ctx.stdout.write(ctx.stdin.read().replace(reference, (whole, plain: string | undefined, braced: string | undefined) => {
+    const name = plain ?? braced!;
+    if (allowed && !allowed.has(name)) return whole;
+    return ctx.env[name] ?? "";
+  }));
+  return 0;
+};
+
+const csplit: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "skzq", values: "fnb", long: { prefix: "f", digits: "n", "suffix-format": "b", silent: "s", quiet: "s", "keep-files": "k", "elide-empty-files": "z", "suppress-matched": "suppress" } });
+  const [input, ...patterns] = parsed.operands;
+  if (input === undefined) throw new CommandError("missing operand", 1);
+  if (!patterns.length) throw new CommandError("missing operand after '" + input + "'", 1);
+  const prefix = last(parsed, "f") ?? "xx";
+  const digits = Number(last(parsed, "n") ?? 2);
+  const suffix = last(parsed, "b");
+  const text = await readInput(ctx, input);
+  const rows = text.split(/(?<=\n)/).filter(row => row !== "");
+  const pieces: string[] = [];
+  const written: string[] = [];
+  let position = 0;
+  let split = false;
+  let error: string | undefined;
+  const emit = (end: number) => {
+    pieces.push(rows.slice(position, end).join(""));
+    position = end;
+    split = true;
+  };
+  const steps: { spec: string; repeat: number | "*" }[] = [];
+  for (const pattern of patterns) {
+    const repeat = pattern.match(/^\{(\d+|\*)\}$/);
+    if (repeat) {
+      const previous = steps.at(-1);
+      if (!previous) throw new CommandError("‘" + pattern + "’: invalid pattern", 1);
+      steps.push({ spec: previous.spec, repeat: repeat[1] === "*" ? "*" : Number(repeat[1]) });
+    } else steps.push({ spec: pattern, repeat: 1 });
+  }
+  const run = (spec: string, attempt: number): boolean => {
+    const regex = spec.match(/^([/%])(.*)\1([+-]\d+)?$/);
+    if (regex) {
+      const re = posixRegExp(regex[2]!, false);
+      const offset = Number(regex[3] ?? 0);
+      let found = -1;
+      for (let i = position + (split || position > 0 ? 1 : 0); i < rows.length; i++) {
+        if (re.test(rows[i]!.replace(/\n$/, ""))) {
+          found = i;
+          break;
+        }
+      }
+      if (found < 0) {
+        error = "‘" + spec + "’: match not found" + (attempt ? " on repetition " + attempt : "");
+        return false;
+      }
+      const end = Math.max(position, Math.min(rows.length, found + offset));
+      if (regex[1] === "%") {
+        position = end;
+        split = true;
+      } else emit(end);
+      return true;
+    }
+    if (/^\d+$/.test(spec)) {
+      const line = Number(spec) * (attempt + 1);
+      if (line > rows.length || line - 1 < position) {
+        error = "‘" + spec + "’: line number out of range" + (attempt ? " on repetition " + attempt : "");
+        return false;
+      }
+      emit(line - 1);
+      return true;
+    }
+    throw new CommandError("‘" + spec + "’: invalid pattern", 1);
+  };
+  outer: for (let index = 0; index < steps.length; index++) {
+    const step = steps[index]!;
+    const first = index > 0 && steps[index - 1]!.spec === step.spec && step.repeat !== 1 ? 1 : 0;
+    const count = step.repeat === "*" ? Infinity : step.repeat;
+    for (let attempt = 0; attempt < count; attempt++) {
+      const before = /^\d+$/.test(step.spec) && first ? Number(step.spec) * (attempt + 1) : 0;
+      void before;
+      if (!run(step.spec, attempt + first)) {
+        if (step.repeat === "*" && /^[/%]/.test(step.spec)) {
+          error = undefined;
+          break;
+        }
+        break outer;
+      }
+    }
+  }
+  pieces.push(rows.slice(position).join(""));
+  let count = 0;
+  for (const piece of pieces) {
+    if (parsed.flags.has("z") && piece === "") continue;
+    const name = prefix + (suffix ? format(suffix, [count], false).text : String(count).padStart(digits, "0"));
+    count++;
+    await ctx.fs.write(ctx.resolve(name), encode(piece));
+    written.push(name);
+    if (!parsed.flags.has("s")) ctx.stdout.write(encode(piece).length + "\n");
+  }
+  if (error !== undefined) {
+    ctx.stderr.write("csplit: " + error + "\n");
+    if (!parsed.flags.has("k")) for (const name of written) await ctx.fs.remove(ctx.resolve(name));
+    return 1;
+  }
+  return 0;
+};
+
+const install: CommandHandler = async ctx => {
+  const parsed = options(ctx.args, { flags: "dDcCpsvTb", values: "mtgoS", long: { directory: "d", mode: "m", "target-directory": "t", group: "g", owner: "o", verbose: "v", "preserve-timestamps": "p", strip: "s", compare: "C", "no-target-directory": "T", suffix: "S", backup: "b" } });
+  const fs = linked(ctx);
+  const f = parsed.flags;
+  const spec = last(parsed, "m");
+  const bits = spec === undefined ? 0o755 : /^[0-7]+$/.test(spec) ? parseInt(spec, 8) : undefined;
+  if (bits === undefined) throw new CommandError("invalid mode '" + spec + "'", 1);
+  const operands = [...parsed.operands];
+  let status = 0;
+  const fail = (message: string) => {
+    ctx.stderr.write("install: " + message + "\n");
+    status = 1;
+  };
+  const makeDirs = async (path: string) => {
+    let current = "";
+    for (const part of path.split("/").filter(Boolean)) {
+      current += "/" + part;
+      const stat = await fs.stat(current);
+      if (!stat) {
+        await fs.mkdir(current);
+        if (fs.chmod) await fs.chmod(current, 0o755);
+      } else if (stat.kind !== "directory") throw new CommandError("cannot create directory '" + path + "': File exists", 1);
+    }
+  };
+  if (f.has("d")) {
+    if (!operands.length) throw new CommandError("missing file operand", 1);
+    for (const operand of operands) {
+      await makeDirs(ctx.resolve(operand));
+      if (spec !== undefined && fs.chmod) await fs.chmod(ctx.resolve(operand), bits);
+      if (f.has("v")) ctx.stdout.write("install: creating directory '" + operand + "'\n");
+    }
+    return 0;
+  }
+  let directory = last(parsed, "t");
+  if (directory === undefined) {
+    if (operands.length < 2) throw new CommandError(operands.length ? "missing destination file operand after '" + operands[0] + "'" : "missing file operand", 1);
+    const candidate = operands[operands.length - 1]!;
+    const stat = await fs.stat(ctx.resolve(candidate));
+    if ((stat?.kind === "directory" && !f.has("T")) || operands.length > 2) directory = operands.pop();
+  }
+  if (directory !== undefined && f.has("D")) await makeDirs(ctx.resolve(directory));
+  const pairs: [string, string][] = directory !== undefined ? operands.map(source => [source, directory.replace(/\/+$/, "") + "/" + baseOf(source)]) : [[operands[0]!, operands[1]!]];
+  if (directory !== undefined && (await fs.stat(ctx.resolve(directory)))?.kind !== "directory") throw new CommandError("target '" + directory + "' is not a directory", 1);
+  for (const [source, destination] of pairs) {
+    const from = ctx.resolve(source);
+    const to = ctx.resolve(destination);
+    const stat = await fs.stat(from);
+    if (!stat) {
+      fail("cannot stat '" + source + "': No such file or directory");
+      continue;
+    }
+    if (stat.kind === "directory") {
+      fail("omitting directory '" + source + "'");
+      continue;
+    }
+    if (f.has("D") && directory === undefined) await makeDirs(parentOf(to));
+    if (!(await fs.stat(parentOf(to)))) {
+      fail("cannot create regular file '" + destination + "': No such file or directory");
+      continue;
+    }
+    if ((await fs.stat(to))?.kind === "directory") {
+      fail("cannot overwrite directory '" + destination + "' with non-directory");
+      continue;
+    }
+    await fs.write(to, await fs.read(from));
+    if (fs.chmod) await fs.chmod(to, bits);
+    if (f.has("p") && fs.utimes) await fs.utimes(to, stat.mtime);
+    if (f.has("v")) ctx.stdout.write("'" + source + "' -> '" + destination + "'\n");
+  }
+  return status;
+};
+
 export const extraCommands: Record<string, CommandHandler> = {
   bc,
   cmp,
+  csplit,
   env,
+  envsubst,
   expand,
   file,
   fmt,
@@ -2153,9 +2483,11 @@ export const extraCommands: Record<string, CommandHandler> = {
   hexdump,
   iconv,
   id,
+  install,
   join,
   kill,
   ln,
+  make,
   md5sum,
   numfmt,
   od,
@@ -2172,5 +2504,6 @@ export const extraCommands: Record<string, CommandHandler> = {
   which,
   xxd,
   yes,
+  yq,
   zcat: compressor("zcat"),
 };

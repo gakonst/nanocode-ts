@@ -2,6 +2,8 @@ export type FileKind = "file" | "directory";
 
 export type FileStat = { kind: FileKind; size: number; mtime: number; mode: number };
 
+export type LinkStat = { kind: FileKind | "symlink"; size: number; mtime: number; mode: number; target?: string };
+
 export interface FileSystem {
   stat(path: string): Promise<FileStat | null>;
   read(path: string): Promise<Uint8Array>;
@@ -10,6 +12,11 @@ export interface FileSystem {
   mkdir(path: string): Promise<void>;
   remove(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  chmod?(path: string, mode: number): Promise<void>;
+  utimes?(path: string, mtime: number): Promise<void>;
+  symlink?(target: string, path: string): Promise<void>;
+  readlink?(path: string): Promise<string | null>;
+  lstat?(path: string): Promise<LinkStat | null>;
 }
 
 export type FileInput = string | Uint8Array;
@@ -30,6 +37,7 @@ const FS_MESSAGES: Record<string, string> = {
   ENOTEMPTY: "Directory not empty",
   EFBIG: "File too large",
   EINVAL: "Invalid argument",
+  ELOOP: "Too many levels of symbolic links",
 };
 
 const encoder = new TextEncoder();
@@ -159,10 +167,11 @@ export function baseOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-type Node = { kind: "file"; data: Uint8Array; mtime: number; mode: number } | { kind: "directory"; children: Map<string, Node>; mtime: number; mode: number };
+type Node = { kind: "file"; data: Uint8Array; buffer?: Uint8Array; mtime: number; mode: number } | { kind: "directory"; children: Map<string, Node>; mtime: number; mode: number } | { kind: "link"; target: string; mtime: number; mode: number };
 
 export class MemoryFileSystem implements FileSystem {
   #root: Node = { kind: "directory", children: new Map(), mtime: Date.now(), mode: 0o755 };
+  #links = 0;
   readonly maxFileBytes: number;
 
   constructor(files: Record<string, FileInput> = {}, maxFileBytes = 64 * 1024 * 1024) {
@@ -192,6 +201,23 @@ export class MemoryFileSystem implements FileSystem {
     return node;
   }
 
+  #real(path: string, follow = true): string {
+    if (!this.#links) return normalize(path);
+    let parts = normalize(path).split("/").filter(Boolean);
+    let hops = 0;
+    for (let i = 0; i < parts.length; i++) {
+      if (!follow && i === parts.length - 1) break;
+      const node = this.#find("/" + parts.slice(0, i + 1).join("/"));
+      if (!node) break;
+      if (node.kind !== "link") continue;
+      if (++hops > 40) throw new FsError("ELOOP", path);
+      const target = resolvePath("/" + parts.slice(0, i).join("/"), node.target);
+      parts = [...target.split("/").filter(Boolean), ...parts.slice(i + 1)];
+      i = -1;
+    }
+    return "/" + parts.join("/");
+  }
+
   #directory(path: string): Map<string, Node> {
     const node = this.#find(path);
     if (!node) throw new FsError("ENOENT", path);
@@ -200,48 +226,65 @@ export class MemoryFileSystem implements FileSystem {
   }
 
   async stat(path: string): Promise<FileStat | null> {
-    const node = this.#find(path);
-    if (!node) return null;
+    let real: string;
+    try {
+      real = this.#real(path);
+    } catch (error) {
+      if (error instanceof FsError && error.code === "ELOOP") return null;
+      throw error;
+    }
+    const node = this.#find(real);
+    if (!node || node.kind === "link") return null;
     return { kind: node.kind, size: node.kind === "file" ? node.data.length : 4096, mtime: node.mtime, mode: node.mode };
   }
 
   async read(path: string): Promise<Uint8Array> {
-    const node = this.#find(path);
-    if (!node) throw new FsError("ENOENT", path);
+    const node = this.#find(this.#real(path));
+    if (!node || node.kind === "link") throw new FsError("ENOENT", path);
     if (node.kind !== "file") throw new FsError("EISDIR", path);
     return node.data;
   }
 
   async write(path: string, data: Uint8Array, append = false): Promise<void> {
-    const target = normalize(path);
+    const target = this.#real(path);
     const parent = this.#directory(parentOf(target));
     const name = baseOf(target);
     if (!name) throw new FsError("EISDIR", path);
     const existing = parent.get(name);
     if (existing?.kind === "directory") throw new FsError("EISDIR", path);
-    let bytes = data;
-    if (append && existing) {
-      bytes = new Uint8Array(existing.data.length + data.length);
-      bytes.set(existing.data);
-      bytes.set(data, existing.data.length);
+    if (existing?.kind === "link") throw new FsError("ENOENT", path);
+    if (append && existing && data.length) {
+      const length = existing.data.length + data.length;
+      if (length > this.maxFileBytes) throw new FsError("EFBIG", path);
+      let buffer = existing.buffer;
+      if (!buffer || buffer.length < length || buffer.subarray(0, existing.data.length).byteOffset !== existing.data.byteOffset || buffer.buffer !== existing.data.buffer) {
+        buffer = new Uint8Array(Math.min(this.maxFileBytes, Math.max(length, existing.data.length * 2, 4096)));
+        buffer.set(existing.data);
+      }
+      buffer.set(data, existing.data.length);
+      existing.buffer = buffer;
+      existing.data = buffer.subarray(0, length);
+      existing.mtime = Date.now();
+      return;
     }
+    const bytes = append && existing ? existing.data : data;
     if (bytes.length > this.maxFileBytes) throw new FsError("EFBIG", path);
     parent.set(name, { kind: "file", data: bytes, mtime: Date.now(), mode: existing?.mode ?? 0o644 });
   }
 
   async list(path: string): Promise<string[]> {
-    return [...this.#directory(path).keys()].sort();
+    return [...this.#directory(this.#real(path)).keys()].sort();
   }
 
   async mkdir(path: string): Promise<void> {
-    const target = normalize(path);
+    const target = this.#real(path, false);
     const parent = this.#directory(parentOf(target));
     if (parent.has(baseOf(target))) throw new FsError("EEXIST", path);
     parent.set(baseOf(target), { kind: "directory", children: new Map(), mtime: Date.now(), mode: 0o755 });
   }
 
   async remove(path: string): Promise<void> {
-    const target = normalize(path);
+    const target = this.#real(path, false);
     if (target === "/") throw new FsError("EINVAL", path);
     const parent = this.#directory(parentOf(target));
     const node = parent.get(baseOf(target));
@@ -250,9 +293,48 @@ export class MemoryFileSystem implements FileSystem {
     parent.delete(baseOf(target));
   }
 
+  async chmod(path: string, mode: number): Promise<void> {
+    const node = this.#find(this.#real(path));
+    if (!node || node.kind === "link") throw new FsError("ENOENT", path);
+    node.mode = mode & 0o7777;
+  }
+
+  async utimes(path: string, mtime: number): Promise<void> {
+    const node = this.#find(this.#real(path));
+    if (!node || node.kind === "link") throw new FsError("ENOENT", path);
+    node.mtime = mtime;
+  }
+
+  async symlink(target: string, path: string): Promise<void> {
+    const link = this.#real(path, false);
+    const parent = this.#directory(parentOf(link));
+    if (link === "/" || parent.has(baseOf(link))) throw new FsError("EEXIST", path);
+    parent.set(baseOf(link), { kind: "link", target, mtime: Date.now(), mode: 0o777 });
+    this.#links++;
+  }
+
+  async readlink(path: string): Promise<string | null> {
+    const node = this.#find(this.#real(path, false));
+    return node?.kind === "link" ? node.target : null;
+  }
+
+  async lstat(path: string): Promise<LinkStat | null> {
+    let real: string;
+    try {
+      real = this.#real(path, false);
+    } catch (error) {
+      if (error instanceof FsError && error.code === "ELOOP") return null;
+      throw error;
+    }
+    const node = this.#find(real);
+    if (!node) return null;
+    if (node.kind === "link") return { kind: "symlink", size: encode(node.target).length, mtime: node.mtime, mode: 0o777, target: node.target };
+    return { kind: node.kind, size: node.kind === "file" ? node.data.length : 4096, mtime: node.mtime, mode: node.mode };
+  }
+
   async rename(from: string, to: string): Promise<void> {
-    const source = normalize(from);
-    const target = normalize(to);
+    const source = this.#real(from, false);
+    const target = this.#real(to, false);
     if (target === source) return;
     if (target.startsWith(source + "/")) throw new FsError("EINVAL", to);
     const sourceParent = this.#directory(parentOf(source));

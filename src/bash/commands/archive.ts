@@ -11,7 +11,7 @@ export const gzip = (data: Uint8Array) => transform(data, new CompressionStream(
 
 export const gunzip = (data: Uint8Array) => transform(data, new DecompressionStream("gzip"));
 
-export function header(name: string, size: number, mode: number, mtime: number, type: "0" | "5"): Uint8Array {
+export function header(name: string, size: number, mode: number, mtime: number, type: "0" | "2" | "5", linkname = ""): Uint8Array {
   const block = new Uint8Array(512);
   const put = (offset: number, length: number, text: string) => block.set(encode(text).slice(0, length), offset);
   const octal = (value: number, length: number) => value.toString(8).padStart(length - 1, "0") + "\0";
@@ -30,6 +30,7 @@ export function header(name: string, size: number, mode: number, mtime: number, 
   put(136, 12, octal(Math.floor(mtime / 1000), 12));
   put(148, 8, "        ");
   put(156, 1, type);
+  put(157, 100, linkname);
   put(257, 6, "ustar\0");
   put(263, 2, "00");
   put(265, 32, "user");
@@ -43,6 +44,10 @@ export function header(name: string, size: number, mode: number, mtime: number, 
 export function pack(entries: TarEntry[]): Uint8Array {
   const parts: Uint8Array[] = [];
   for (const entry of entries) {
+    if (entry.type === "symlink") {
+      parts.push(header(entry.name, 0, 0o777, entry.mtime, "2", entry.linkname));
+      continue;
+    }
     if (entry.type !== "file" && entry.type !== "directory") continue;
     parts.push(header(entry.type === "directory" ? entry.name.replace(/\/?$/, "/") : entry.name, entry.type === "file" ? entry.data.length : 0, entry.mode, entry.mtime, entry.type === "file" ? "0" : "5"));
     if (entry.type === "file") {

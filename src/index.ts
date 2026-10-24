@@ -1,6 +1,6 @@
 export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
 export { EventHub } from "./events.ts";
-export { connectHand, handKeeper, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus } from "./hand.ts";
+export { compileModule, connectHand, handKeeper, prepareHand, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus, type PreparedHand } from "./hand.ts";
 export { DESCRIBE_TOOLS, deferMcp, type McpPolicy } from "./mcp.ts";
 export { RemoteExecutor, type RemotePolicy } from "./remote.ts";
 export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from "./timing.ts";

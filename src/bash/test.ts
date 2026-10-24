@@ -1,9 +1,10 @@
-import type { FileStat } from "./fs.ts";
+import type { FileStat, LinkStat } from "./fs.ts";
 
 export type TestArg = { text: string; op?: boolean; pattern?: string; regex?: string };
 
 export type TestHost = {
   stat(path: string): Promise<FileStat | null>;
+  lstat?(path: string): Promise<LinkStat | null>;
   isSet(name: string): boolean;
   match(text: string, pattern: string): boolean;
   regex(text: string, source: string): boolean;
@@ -77,6 +78,7 @@ export async function evaluateTest(args: TestArg[], double: boolean, host: TestH
     if (op === "-z") return operand === "";
     if (op === "-v") return host.isSet(operand);
     if (op === "-t") return false;
+    if (op === "-L" || op === "-h") return (await host.lstat?.(operand))?.kind === "symlink";
     const stat = await host.stat(operand);
     switch (op) {
       case "-e":
@@ -94,7 +96,13 @@ export async function evaluateTest(args: TestArg[], double: boolean, host: TestH
       case "-G":
         return stat !== null;
       case "-x":
-        return stat !== null && (stat.kind === "directory" || (stat.mode & 0o111) !== 0);
+        return stat !== null && (stat.mode & 0o111) !== 0;
+      case "-k":
+        return stat !== null && (stat.mode & 0o1000) !== 0;
+      case "-u":
+        return stat !== null && (stat.mode & 0o4000) !== 0;
+      case "-g":
+        return stat !== null && (stat.mode & 0o2000) !== 0;
       default:
         return false;
     }

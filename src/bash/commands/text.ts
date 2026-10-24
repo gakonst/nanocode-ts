@@ -1,7 +1,7 @@
-import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
+import { CommandError, PipeError, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, decode, encode } from "../fs.ts";
 import { escapeRegExp, escapes, format, globRegExp, joinLines, lines, posixRegExp } from "../text.ts";
-import { allInput, device, eachInput, last, options, readInput } from "./util.ts";
+import { allInput, batches, device, eachBatch, eachInput, last, options, pause, put, readInput } from "./util.ts";
 
 const echo: CommandHandler = ctx => {
   let newline = true;
@@ -53,22 +53,29 @@ function count(value: string | undefined, fallback: number): number {
   return Number(match[1]) * scale;
 }
 
+function lastLines(text: string, n: number): string {
+  let pos = text.length - 1;
+  for (let k = 0; k < n && pos >= 0; k++) pos = text.lastIndexOf("\n", pos - 1);
+  return pos < 0 ? text : text.slice(pos + 1);
+}
+
 async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
   const parsed = options(ctx.args, { flags: "qvfFz", values: "nc", numeric: true, long: { lines: "n", bytes: "c", quiet: "q", silent: "q", verbose: "v", follow: "f" } });
   const lineSpec = last(parsed, "n");
   const byteSpec = last(parsed, "c");
   const headers = (parsed.operands.length > 1 || parsed.flags.has("v")) && !parsed.flags.has("q");
   let first = true;
-  return eachInput(ctx, parsed.operands, (text, name) => {
-    if (headers) {
-      ctx.stdout.write((first ? "" : "\n") + "==> " + (name === "-" ? "standard input" : name) + " <==\n");
-      first = false;
-    }
+  const header = (name: string) => {
+    if (!headers) return;
+    ctx.stdout.write((first ? "" : "\n") + "==> " + (name === "-" ? "standard input" : name) + " <==\n");
+    first = false;
+  };
+  const render = async (text: string) => {
     if (byteSpec !== undefined) {
       const n = count(byteSpec, 0);
       const bytes = encode(text);
-      if (tail) ctx.stdout.write(byteSpec.startsWith("+") ? decode(bytes.subarray(Math.max(0, n - 1))) : n === 0 ? "" : decode(bytes.subarray(-n)));
-      else ctx.stdout.write(decode(bytes.subarray(0, n)));
+      if (tail) await put(ctx, byteSpec.startsWith("+") ? decode(bytes.subarray(Math.max(0, n - 1))) : n === 0 ? "" : decode(bytes.subarray(-n)));
+      else await put(ctx, decode(bytes.subarray(0, n)));
       return;
     }
     const n = count(lineSpec, 10);
@@ -85,34 +92,122 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
       end = n < 0 ? Math.max(0, all.length + n) : Math.min(all.length, n);
     }
     if (end <= start) return;
-    ctx.stdout.write(all.slice(start, end).join("\n") + (end < all.length || trailing ? "\n" : ""));
-  }, byteSpec !== undefined && !tail && !byteSpec.startsWith("-") ? Math.max(0, count(byteSpec, 0)) : undefined);
+    await put(ctx, all.slice(start, end).join("\n") + (end < all.length || trailing ? "\n" : ""));
+  };
+  const size = byteSpec !== undefined && !tail && !byteSpec.startsWith("-") ? Math.max(0, count(byteSpec, 0)) : undefined;
+  let status = 0;
+  for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+    if (operand !== "-" && operand !== "/dev/stdin") {
+      status |= await eachInput(ctx, [operand], async (text, name) => {
+        header(name);
+        await render(text);
+      }, size);
+      continue;
+    }
+    header(operand);
+    const n = count(byteSpec ?? lineSpec, 10);
+    if (!tail && byteSpec !== undefined && !byteSpec.startsWith("-")) {
+      const text = await ctx.stdin.readChars(n);
+      const bytes = encode(text);
+      await put(ctx, bytes.length > n ? decode(bytes.subarray(0, n)) : text);
+      ctx.stdin.close();
+    } else if (!tail && byteSpec === undefined && !lineSpec?.startsWith("-")) {
+      let out = "";
+      for (let i = 0; i < n; i++) {
+        const line = await ctx.stdin.readLine();
+        if (!line) break;
+        out += line.text + (line.complete ? "\n" : "");
+        if (out.length > 65536) {
+          await put(ctx, out);
+          out = "";
+        }
+      }
+      await put(ctx, out);
+      ctx.stdin.close();
+    } else if (tail && byteSpec === undefined && !lineSpec?.startsWith("+")) {
+      let text = "";
+      for (let chunk = await ctx.stdin.chunk(); chunk !== null; chunk = await ctx.stdin.chunk()) {
+        text += chunk;
+        if (text.length > 1 << 22) text = lastLines(text, Math.abs(n));
+      }
+      await render(text);
+    } else await render(await ctx.stdin.text());
+  }
+  return status;
 }
 
-const wc: CommandHandler = async ctx => {
+function byteLength(text: string): number {
+  let n = text.length;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) continue;
+    if (code < 0x800) n += 1;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      n += 2;
+      i++;
+    } else if (code < 0xdc80 || code > 0xdcff) n += 2;
+  }
+  return n;
+}
+
+const wc: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, { flags: "lwcmL", long: { lines: "l", words: "w", bytes: "c", chars: "m", "max-line-length": "L" } });
   const f = parsed.flags;
   const fields = f.size ? ["l", "w", "m", "c", "L"].filter(flag => f.has(flag)) : ["l", "w", "c"];
   const rows: { counts: number[]; name: string; bytes: number }[] = [];
   const totals = fields.map(() => 0);
-  const status = await eachInput(ctx, parsed.operands, (text, name) => {
+  const tally = (text: string) => {
+    let bytes = 0;
     const counts = fields.map(field => {
-      if (field === "l") return (text.match(/\n/g) ?? []).length;
+      if (field === "l") {
+        let n = 0;
+        for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) n++;
+        return n;
+      }
       if (field === "w") return (text.match(/\S+/g) ?? []).length;
-      if (field === "m") return [...text].length;
-      if (field === "c") return encode(text).length;
-      return Math.max(0, ...text.split("\n").map(line => line.length));
+      if (field === "m") {
+        let n = text.length;
+        for (let i = 0; i < text.length; i++) {
+          const code = text.charCodeAt(i);
+          if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+            const next = text.charCodeAt(i + 1);
+            if (next >= 0xdc00 && next <= 0xdfff) {
+              n--;
+              i++;
+            }
+          }
+        }
+        return n;
+      }
+      if (field === "c") return (bytes = byteLength(text));
+      let max = 0;
+      for (const line of text.split("\n")) max = Math.max(max, line.length);
+      return max;
     });
-    counts.forEach((value, index) => (totals[index] = fields[index] === "L" ? Math.max(totals[index], value) : totals[index] + value));
-    rows.push({ counts, name: parsed.operands.length ? name : "", bytes: encode(text).length });
-  });
+    return { counts, bytes: fields.includes("c") ? bytes : byteLength(text) };
+  };
+  let status = 0;
+  for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+    const row = { counts: fields.map(() => 0), name: parsed.operands.length ? operand : "", bytes: 0 };
+    const failed = await eachBatch(ctx, [operand], text => {
+      const { counts, bytes } = tally(text);
+      row.counts = row.counts.map((value, index) => (fields[index] === "L" ? Math.max(value, counts[index]) : value + counts[index]));
+      row.bytes += bytes;
+    });
+    if (failed) {
+      status = failed;
+      continue;
+    }
+    row.counts.forEach((value, index) => (totals[index] = fields[index] === "L" ? Math.max(totals[index], value) : totals[index] + value));
+    rows.push(row);
+  }
   if (parsed.operands.length > 1) rows.push({ counts: totals, name: "total", bytes: 0 });
   const stdin = !parsed.operands.length || parsed.operands.includes("-");
   const bytes = rows.slice(0, parsed.operands.length || 1).reduce((sum, row) => sum + row.bytes, 0);
   const width = fields.length === 1 && rows.length === 1 ? 0 : Math.max(stdin ? 7 : 1, String(bytes).length);
   for (const row of rows) ctx.stdout.write(row.counts.map(value => String(value).padStart(width)).join(" ") + (row.name ? " " + row.name : "") + "\n");
   return status;
-};
+});
 
 export type ScanState = { printed: boolean };
 
@@ -127,6 +222,7 @@ export type ScanOptions = {
   offsets?: boolean;
   column?: boolean;
   name?: string | undefined;
+  base?: number;
   separator?: string;
   terminator: string;
   replace?: string | undefined;
@@ -148,7 +244,7 @@ export function scan(text: string, options: ScanOptions): number {
       offset += encode(line).length + 1;
     }
   }
-  const prefix = (n: number, mark: string, column?: number) => (options.name !== undefined ? options.name + mark : "") + (options.numbers ? n + 1 + mark : "") + (options.offsets ? (starts[n] ?? 0) + (column !== undefined && !options.column ? encode(all[n].slice(0, column)).length : 0) + mark : "") + (options.column && column !== undefined ? column + 1 + mark : "");
+  const prefix = (n: number, mark: string, column?: number) => (options.name !== undefined ? options.name + mark : "") + (options.numbers ? n + 1 + (options.base ?? 0) + mark : "") + (options.offsets ? (starts[n] ?? 0) + (column !== undefined && !options.column ? encode(all[n].slice(0, column)).length : 0) + mark : "") + (options.column && column !== undefined ? column + 1 + mark : "");
   const replaced = (line: string) => (options.replace === undefined ? line : line.replace(regex, options.replace));
   let matches = 0;
   let lastPrinted = -1;
@@ -209,7 +305,7 @@ export function perlSource(pattern: string): { source: string; flags: string } {
   return { source, flags };
 }
 
-const grep: CommandHandler = async ctx => {
+const grep: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, {
     flags: "ivncLlrRhHqsoxwEFGPZaIUzb",
     values: "eABCmfd",
@@ -221,7 +317,7 @@ const grep: CommandHandler = async ctx => {
   const patterns: string[] = [...(parsed.values.get("e") ?? [])];
   for (const file of parsed.values.get("f") ?? []) {
     try {
-      patterns.push(...lines(file === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(file)))));
+      patterns.push(...lines(file === "-" ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(file)))));
     } catch (error) {
       if (!(error instanceof FsError)) throw error;
       throw new CommandError(file + ": No such file or directory", 2);
@@ -311,13 +407,25 @@ const grep: CommandHandler = async ctx => {
   const nameEnd = f.has("Z") ? "\0" : ":";
   const state: ScanState = { printed: false };
   const listing = f.has("q") || f.has("l") || f.has("L") || f.has("c");
-  const search = (text: string, name: string): boolean => {
-    const binary = !f.has("a") && !f.has("z") && text.includes("\0");
-    const silent = listing || binary || last(parsed, "binary-files") === "without-match";
-    let output = "";
-    const matches = scan(text, { regex, invert: f.has("v"), max, before, after, only: f.has("o"), numbers: f.has("n"), offsets: f.has("b"), name: named ? name + (f.has("Z") ? "\0" : "") : undefined, separator: f.has("z") ? "\0" : "\n", terminator, silent, state, write: chunk => void (output += chunk) });
-    if (f.has("Z") && named) output = output.replace(/\0[:-]/g, "\0");
-    ctx.stdout.write(output);
+  const separator = f.has("z") ? "\0" : "\n";
+  const search = async (source: () => Promise<string | null>, name: string, stream: boolean): Promise<boolean> => {
+    let matches = 0;
+    let binary = false;
+    let base = 0;
+    for (let text = await source(); text !== null; text = await source()) {
+      binary ||= !f.has("a") && !f.has("z") && text.includes("\0");
+      const silent = listing || binary || last(parsed, "binary-files") === "without-match";
+      let output = "";
+      matches += scan(text, { regex, invert: f.has("v"), max: max - matches, before, after, only: f.has("o"), numbers: f.has("n"), offsets: f.has("b"), name: named ? name + (f.has("Z") ? "\0" : "") : undefined, base, separator, terminator, silent, state, write: chunk => void (output += chunk) });
+      if (f.has("Z") && named) output = output.replace(/\0[:-]/g, "\0");
+      await put(ctx, output);
+      if (!stream) continue;
+      if (f.has("n")) for (let i = text.indexOf(separator); i >= 0; i = text.indexOf(separator, i + 1)) base++;
+      if ((f.has("q") && matches) || matches >= max) {
+        ctx.stdin.close();
+        break;
+      }
+    }
     if (binary && matches && !listing && last(parsed, "binary-files") !== "without-match") ctx.stderr.write("grep: " + name + ": binary file matches\n");
     if (f.has("q")) return matches > 0;
     if (f.has("c")) ctx.stdout.write((named ? name + nameEnd : "") + matches + "\n");
@@ -325,37 +433,56 @@ const grep: CommandHandler = async ctx => {
     if (f.has("L") && !matches) ctx.stdout.write(name + (f.has("Z") ? "\0" : "\n"));
     return matches > 0;
   };
+  const once = (text: string) => {
+    let done = false;
+    return async () => {
+      if (done) return null;
+      done = true;
+      return text;
+    };
+  };
+  const stdin = (): [() => Promise<string | null>, boolean] => {
+    if (!before && !after && !f.has("b")) return [batches(ctx.stdin, separator), true];
+    let done = false;
+    return [async () => {
+      if (done) return null;
+      done = true;
+      return ctx.stdin.text();
+    }, false];
+  };
   const stdinName = last(parsed, "label") ?? "(standard input)";
   if (!operands.length && !recursive) {
-    if (search(ctx.stdin.read(), stdinName)) status = 0;
+    const [source, stream] = stdin();
+    if (await search(source, stdinName, stream)) status = 0;
   } else {
     let stdinUsed = false;
     for (const target of targets) {
-      let text: string;
+      let source: () => Promise<string | null>;
+      let stream = false;
       let display: string;
       if (target === "-") {
         if (stdinUsed) continue;
         stdinUsed = true;
-        text = ctx.stdin.read();
+        [source, stream] = stdin();
         display = stdinName;
       } else {
         display = target.display;
         try {
-          text = device(target.path) ?? decode(await ctx.fs.read(target.path));
+          source = once(device(target.path) ?? decode(await ctx.fs.read(target.path)));
         } catch (error) {
           if (!(error instanceof FsError)) throw error;
           errors = true;
           continue;
         }
       }
-      if (search(text, display)) {
+      if (await search(source, display, stream)) {
         status = 0;
         if (f.has("q")) return 0;
       }
     }
   }
   return errors && !(f.has("q") && status === 0) ? 2 : status;
-};
+});
 
 type SortKey = { start: number; startChar: number; end: number; endChar: number; flags: string };
 
@@ -405,67 +532,79 @@ const sort: CommandHandler = async ctx => {
     const endOffset = key.endChar ? trimmed.length - (fields[key.end - 1] ?? "").replace(/^\s+/, "").length + key.endChar : trimmed.length;
     return trimmed.slice(key.startChar - 1, endOffset);
   };
-  const compareWith = (a: string, b: string, flags: string): number => {
-    const has = (flag: string) => flags.includes(flag);
-    if (has("f")) {
-      a = a.toUpperCase();
-      b = b.toUpperCase();
-    }
-    if (has("b")) {
-      a = a.trimStart();
-      b = b.trimStart();
-    }
-    let result: number;
-    if (has("n") || has("g")) {
-      const x = parseFloat(a.trim()) || 0;
-      const y = parseFloat(b.trim()) || 0;
-      result = x - y;
-    } else if (has("h")) result = humanValue(a) - humanValue(b);
-    else if (has("V")) result = versionCompare(a, b);
-    else if (has("M")) result = MONTHS.indexOf(a.trim().slice(0, 3).toUpperCase()) - MONTHS.indexOf(b.trim().slice(0, 3).toUpperCase());
-    else result = a < b ? -1 : a > b ? 1 : 0;
-    return has("r") ? -result : result;
+  type Order = { numeric: boolean; human: boolean; version: boolean; month: boolean; fold: boolean; blanks: boolean; reverse: boolean };
+  const orderOf = (flags: string): Order => ({ numeric: flags.includes("n") || flags.includes("g"), human: flags.includes("h"), version: flags.includes("V"), month: flags.includes("M"), fold: flags.includes("f"), blanks: flags.includes("b"), reverse: flags.includes("r") });
+  const prepare = (text: string, order: Order): string | number => {
+    if (order.fold) text = text.toUpperCase();
+    if (order.blanks) text = text.trimStart();
+    if (order.numeric) return parseFloat(text.trim()) || 0;
+    if (order.human) return humanValue(text);
+    if (order.month) return MONTHS.indexOf(text.trim().slice(0, 3).toUpperCase());
+    return text;
+  };
+  const comparator = (order: Order): ((a: string | number, b: string | number) => number) => {
+    const sign = order.reverse ? -1 : 1;
+    if (order.numeric || order.human || order.month) return (a, b) => sign * ((a as number) - (b as number));
+    if (order.version) return (a, b) => sign * versionCompare(a as string, b as string);
+    return (a, b) => (a < b ? -sign : a > b ? sign : 0);
   };
   const global = [...f].join("");
-  const compare = (a: string, b: string): number => {
-    for (const key of keys) {
-      const flags = key.flags || global;
-      const result = compareWith(extract(a, key), extract(b, key), flags.replace(/[usz]/g, ""));
+  const globalOrder = orderOf(global);
+  const keyOrders = keys.map(key => orderOf((key.flags || global).replace(/[usz]/g, "")));
+  const keyCompare = keyOrders.map(comparator);
+  const globalCompare = comparator(globalOrder);
+  const lineSign = f.has("r") ? -1 : 1;
+  const stable = f.has("s");
+  const unique = f.has("u");
+  type Item = { line: string; index: number; rank: number; keys: (string | number)[] };
+  const decorate = (line: string, index: number): Item => ({ line, index, rank: 0, keys: keys.length ? keys.map((key, k) => prepare(extract(line, key), keyOrders[k])) : [prepare(line, globalOrder)] });
+  const compare = (a: Item, b: Item): number => {
+    for (let k = 0; k < keyCompare.length; k++) {
+      const result = keyCompare[k](a.keys[k], b.keys[k]);
       if (result) return result;
     }
-    if (keys.length && f.has("s")) return 0;
+    if (keys.length && stable) return 0;
     if (!keys.length) {
-      const result = compareWith(a, b, global);
-      if (result || f.has("s") || f.has("u")) return result;
+      const result = globalCompare(a.keys[0], b.keys[0]);
+      if (result || stable || unique) return result;
     }
-    if (f.has("u")) return 0;
-    const result = a < b ? -1 : a > b ? 1 : 0;
-    return f.has("r") ? -result : result;
+    if (unique) return 0;
+    if (a.rank !== b.rank) return (a.rank - b.rank) * lineSign;
+    return a.line < b.line ? -lineSign : a.line > b.line ? lineSign : 0;
   };
   if (f.has("c") || f.has("C")) {
     for (let i = 1; i < items.length; i++) {
-      if (compare(items[i - 1], items[i]) > 0) {
+      if (compare(decorate(items[i - 1], i - 1), decorate(items[i], i)) > 0) {
         if (f.has("c")) ctx.stderr.write("sort: -:" + (i + 1) + ": disorder: " + items[i] + "\n");
         return 1;
       }
     }
     return 0;
   }
-  let sorted = items.map((line, index) => ({ line, index }));
-  if (f.has("R")) sorted.sort(() => Math.random() - 0.5);
-  else sorted.sort((a, b) => compare(a.line, b.line) || a.index - b.index);
-  if (f.has("u")) sorted = sorted.filter((item, index) => index === 0 || compare(sorted[index - 1].line, item.line) !== 0);
+  let sorted = items.map(decorate);
+  if (f.has("R")) {
+    for (let i = sorted.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
+    }
+  } else {
+    if (keys.length && !stable && !unique && sorted.length > 1000) {
+      const order = sorted.slice().sort((a, b) => (a.line < b.line ? -1 : a.line > b.line ? 1 : 0));
+      for (let i = 1; i < order.length; i++) order[i].rank = order[i].line === order[i - 1].line ? order[i - 1].rank : i;
+    }
+    sorted.sort(compare);
+  }
+  if (f.has("u")) sorted = sorted.filter((item, index) => index === 0 || compare(sorted[index - 1], item) !== 0);
   const output = f.has("z") ? sorted.map(item => item.line + "\0").join("") : joinLines(sorted.map(item => item.line));
   const out = last(parsed, "o");
   if (out !== undefined) await ctx.fs.write(ctx.resolve(out), encode(output));
-  else ctx.stdout.write(output);
+  else await put(ctx, output);
   return status;
 };
 
-const uniq: CommandHandler = async ctx => {
+const uniq: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, { flags: "cdui", values: "fsw", long: { count: "c", repeated: "d", unique: "u", "ignore-case": "i", "skip-fields": "f", "skip-chars": "s", "check-chars": "w" } });
   const f = parsed.flags;
-  const { text, status } = await allInput(ctx, parsed.operands.slice(0, 1));
   const skipFields = Number(last(parsed, "f") ?? 0);
   const skipChars = Number(last(parsed, "s") ?? 0);
   const width = last(parsed, "w") === undefined ? undefined : Number(last(parsed, "w"));
@@ -476,18 +615,32 @@ const uniq: CommandHandler = async ctx => {
     if (width !== undefined) value = value.slice(0, width);
     return f.has("i") ? value.toLowerCase() : value;
   };
-  const groups: { line: string; count: number }[] = [];
-  for (const line of lines(text)) {
-    const previous = groups[groups.length - 1];
-    if (previous && key(previous.line) === key(line)) previous.count++;
-    else groups.push({ line, count: 1 });
-  }
-  const out = groups.filter(group => (f.has("d") ? group.count > 1 : true) && (f.has("u") ? group.count === 1 : true)).map(group => (f.has("c") ? String(group.count).padStart(7) + " " : "") + group.line);
-  const result = joinLines(out);
-  if (parsed.operands[1]) await ctx.fs.write(ctx.resolve(parsed.operands[1]), encode(result));
-  else ctx.stdout.write(result);
+  let current: { line: string; key: string; count: number } | undefined;
+  let out = "";
+  const target = parsed.operands[1];
+  const flush = (group: { line: string; count: number }) => {
+    if ((f.has("d") && group.count < 2) || (f.has("u") && group.count !== 1)) return;
+    out += (f.has("c") ? String(group.count).padStart(7) + " " : "") + group.line + "\n";
+  };
+  const status = await eachBatch(ctx, parsed.operands.slice(0, 1), async text => {
+    for (const line of lines(text)) {
+      const value = key(line);
+      if (current && current.key === value) current.count++;
+      else {
+        if (current) flush(current);
+        current = { line, key: value, count: 1 };
+      }
+    }
+    if (target === undefined && out.length > 65536) {
+      await put(ctx, out);
+      out = "";
+    }
+  });
+  if (current) flush(current);
+  if (target !== undefined) await ctx.fs.write(ctx.resolve(target), encode(out));
+  else await put(ctx, out);
   return status;
-};
+});
 
 function ranges(spec: string): (n: number) => boolean {
   const parts = spec.split(",").map(part => {
@@ -500,7 +653,22 @@ function ranges(spec: string): (n: number) => boolean {
   return n => parts.some(([from, to]) => n >= from && n <= to);
 }
 
-const cut: CommandHandler = async ctx => {
+function merged(spec: string): [number, number][] {
+  const parts = spec.split(",").map(part => {
+    const match = part.match(/^(\d*)(-?)(\d*)$/)!;
+    const from = match[1] ? Number(match[1]) : 1;
+    return [from, match[2] ? (match[3] ? Number(match[3]) : Infinity) : from] as [number, number];
+  }).sort((a, b) => a[0] - b[0]);
+  const spans: [number, number][] = [];
+  for (const part of parts) {
+    const previous = spans[spans.length - 1];
+    if (previous && part[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], part[1]);
+    else spans.push(part);
+  }
+  return spans;
+}
+
+const cut: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, { flags: "sn", values: "dfcb", long: { delimiter: "d", fields: "f", characters: "c", bytes: "b", "only-delimited": "s", complement: "C", "output-delimiter": "output-delimiter", "zero-terminated": "z" } });
   const fields = last(parsed, "f");
   const chars = last(parsed, "c") ?? last(parsed, "b");
@@ -512,7 +680,8 @@ const cut: CommandHandler = async ctx => {
   const delimiter = last(parsed, "d") ?? "\t";
   if (delimiter.length !== 1) throw new CommandError("the delimiter must be a single character");
   const output = last(parsed, "output-delimiter") ?? (fields ? delimiter : "");
-  const { text, status } = await allInput(ctx, parsed.operands);
+  const spans = !fields && !complement && output === "" ? merged((fields ?? chars)!) : undefined;
+  const status = await eachBatch(ctx, parsed.operands, text => {
   const out: string[] = [];
   for (const line of lines(text)) {
     if (fields) {
@@ -521,11 +690,16 @@ const cut: CommandHandler = async ctx => {
         continue;
       }
       out.push(line.split(delimiter).filter((_, index) => pick(index + 1)).join(output));
+    } else if (spans && !/[\uD800-\uDFFF]/.test(line)) {
+      let picked = "";
+      for (const [from, to] of spans) picked += line.slice(from - 1, to);
+      out.push(picked);
     } else out.push([...line].filter((_, index) => pick(index + 1)).join(output));
   }
-  ctx.stdout.write(joinLines(out));
+  return put(ctx, joinLines(out));
+  });
   return status;
-};
+});
 
 const CLASS_CHARS: Record<string, string> = {
   lower: "abcdefghijklmnopqrstuvwxyz",
@@ -567,7 +741,7 @@ function trSet(spec: string): string[] {
   return out;
 }
 
-const tr: CommandHandler = ctx => {
+const tr: CommandHandler = streaming(async ctx => {
   const parsed = options(ctx.args, { flags: "dscCt", long: { delete: "d", "squeeze-repeats": "s", complement: "c", truncate: "t" } });
   const f = parsed.flags;
   const [first, second] = parsed.operands;
@@ -577,10 +751,45 @@ const tr: CommandHandler = ctx => {
   const list1 = f.has("t") && second !== undefined ? trSet(first).slice(0, set2.length) : trSet(first);
   const set1 = new Set(list1);
   const inSet1 = (c: string) => set1.has(c) !== complement;
-  const input = ctx.stdin.read();
-  let out = "";
   let previous = "";
+  let last = -1;
+  let map: Int32Array | undefined;
+  let squeezable: Uint8Array | undefined;
   const squeeze = f.has("s") ? new Set(f.has("d") || second === undefined ? (second === undefined ? [...set1] : set2) : set2) : undefined;
+  const translate = (c: string): string | undefined => {
+    if (f.has("d")) return inSet1(c) ? undefined : c;
+    if (second === undefined || !inSet1(c)) return c;
+    if (complement) return set2[set2.length - 1] ?? c;
+    const index = list1.lastIndexOf(c);
+    return index < set2.length ? set2[index] : set2[set2.length - 1] ?? c;
+  };
+  const squeezes = (value: string) => squeeze !== undefined && (second === undefined && !f.has("d") ? inSet1(value) : squeeze.has(value));
+  const simple = [...list1, ...set2].every(c => c.length === 1 && !/[\uD800-\uDFFF]/.test(c));
+  const convert = (input: string): string => {
+  if (simple && (!complement || !/[\uD800-\uDFFF]/.test(input))) {
+    if (!map || !squeezable) {
+      map = new Int32Array(65536);
+      squeezable = new Uint8Array(65536);
+      for (let code = 0; code < 65536; code++) {
+        const value = translate(String.fromCharCode(code));
+        map[code] = value === undefined ? -1 : value.charCodeAt(0);
+        if (value !== undefined && squeezes(value)) squeezable[map[code]] = 1;
+      }
+    }
+    const codes = new Uint16Array(input.length);
+    let n = 0;
+    for (let i = 0; i < input.length; i++) {
+      const value = map[input.charCodeAt(i)];
+      if (value < 0 || (value === last && squeezable[value])) continue;
+      codes[n++] = value;
+      last = value;
+    }
+    previous = last < 0 ? previous : String.fromCharCode(last);
+    const chunks: string[] = [];
+    for (let i = 0; i < n; i += 8192) chunks.push(String.fromCharCode.apply(null, codes.subarray(i, Math.min(n, i + 8192)) as unknown as number[]));
+    return chunks.join("");
+  }
+  let out = "";
   for (const c of input) {
     let value: string | undefined = c;
     if (f.has("d")) {
@@ -596,11 +805,21 @@ const tr: CommandHandler = ctx => {
     out += value;
     previous = value;
   }
-  ctx.stdout.write(out);
+  last = previous.length === 1 ? previous.charCodeAt(0) : -1;
+  return out;
+  };
+  for (let chunk = await ctx.stdin.chunk(); chunk !== null; chunk = await ctx.stdin.chunk()) {
+    const code = chunk.charCodeAt(chunk.length - 1);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = await ctx.stdin.readChars(1);
+      chunk += next;
+    }
+    await put(ctx, convert(chunk));
+  }
   return 0;
-};
+});
 
-const seq: CommandHandler = ctx => {
+const seq: CommandHandler = async ctx => {
   const parsed = options(ctx.args.map(arg => (/^-\d/.test(arg) ? "\u0000" + arg : arg)), { flags: "w", values: "sf", long: { separator: "s", "equal-width": "w", format: "f" } });
   const numbers = parsed.operands.map(arg => arg.replace("\u0000", ""));
   if (!numbers.length || numbers.length > 3) throw new CommandError("missing operand");
@@ -610,6 +829,24 @@ const seq: CommandHandler = ctx => {
   const [a, inc, b] = values;
   if (inc === 0) throw new CommandError("invalid Zero increment value: '0'");
   const decimals = Math.max(...[first, step].map(text => (text.includes(".") ? text.split(".")[1].length : 0)));
+  const spec = last(parsed, "f");
+  if (!parsed.flags.has("w")) {
+    const separator = last(parsed, "s") ?? "\n";
+    let buffer = "";
+    let written = 0;
+    let i = 0;
+    for (; ; i++) {
+      const value = a + i * inc;
+      if (inc > 0 ? value > b + 1e-10 : value < b - 1e-10) break;
+      buffer += (i ? separator : "") + (spec ? format(spec, [value], false).text : value.toFixed(decimals));
+      if (buffer.length < 65536) continue;
+      if (!ctx.stdout.piped && (written += buffer.length) > ctx.limits.maxBufferLength) throw new CommandError("output exceeded " + ctx.limits.maxBufferLength + " characters");
+      await put(ctx, buffer);
+      buffer = "";
+    }
+    await put(ctx, buffer + (i ? "\n" : ""));
+    return 0;
+  }
   const out: string[] = [];
   let length = 0;
   for (let i = 0; ; i++) {
@@ -628,24 +865,51 @@ const seq: CommandHandler = ctx => {
 
 const rev: CommandHandler = async ctx => {
   const { text, status } = await allInput(ctx, ctx.args);
-  ctx.stdout.write(joinLines(lines(text).map(line => [...line].reverse().join(""))));
+  const reversed = lines(text).map(line => (/[\uD800-\uDFFF]/.test(line) ? [...line].reverse().join("") : line.split("").reverse().join("")));
+  ctx.stdout.write(text === "" || text.endsWith("\n") ? joinLines(reversed) : reversed.join("\n"));
   return status;
 };
 
 const tac: CommandHandler = async ctx => {
-  const { text, status } = await allInput(ctx, ctx.args);
-  ctx.stdout.write(joinLines(lines(text).reverse()));
-  return status;
+  const parsed = options(ctx.args, { flags: "br", values: "s", long: { before: "b", regex: "r", separator: "s" } });
+  const [separator] = escapes(last(parsed, "s") ?? "\n");
+  if (separator === "") throw new CommandError("separator cannot be empty");
+  return eachInput(ctx, parsed.operands, text => {
+    const parts = text.split(separator);
+    const tail = parts.pop()!;
+    const records = parsed.flags.has("b") ? parts.map((part, index) => (index ? separator : "") + part) : parts.map(part => part + separator);
+    if (parsed.flags.has("b")) {
+      if (parts.length) records.push(separator + tail);
+      else if (tail !== "") records.push(tail);
+    } else if (tail !== "") records.push(tail);
+    ctx.stdout.write(records.reverse().join(""));
+  });
 };
 
 const nl: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { values: "bwsv", long: { "body-numbering": "b", "number-width": "w", "number-separator": "s" } });
+  const parsed = options(ctx.args, { values: "bwsvinh", long: { "body-numbering": "b", "number-width": "w", "number-separator": "s", "starting-line-number": "v", "line-increment": "i", "number-format": "n", "header-numbering": "h" } });
   const { text, status } = await allInput(ctx, parsed.operands);
-  const all = last(parsed, "b") === "a";
+  const style = last(parsed, "b") ?? "t";
   const width = Number(last(parsed, "w") ?? 6);
   const separator = last(parsed, "s") ?? "\t";
+  const increment = Number(last(parsed, "i") ?? 1);
+  const formatting = last(parsed, "n") ?? "rn";
+  if (!["ln", "rn", "rz"].includes(formatting)) throw new CommandError("invalid line numbering format: '" + formatting + "'");
+  const pattern = style.startsWith("p") ? posixRegExp(style.slice(1), false) : undefined;
   let n = Number(last(parsed, "v") ?? 1);
-  ctx.stdout.write(joinLines(lines(text).map(line => (line === "" && !all ? " ".repeat(width + separator.length) : String(n++).padStart(width) + separator + line))));
+  const number = (value: number) => {
+    const digits = String(value);
+    if (formatting === "ln") return digits.padEnd(width);
+    if (formatting === "rz") return value < 0 ? "-" + String(-value).padStart(width - 1, "0") : digits.padStart(width, "0");
+    return digits.padStart(width);
+  };
+  ctx.stdout.write(joinLines(lines(text).map(line => {
+    const numbered = style === "a" || (style === "t" && line !== "") || (pattern !== undefined && pattern.test(line));
+    if (!numbered) return " ".repeat(width + separator.length) + line;
+    const result = number(n) + separator + line;
+    n += increment;
+    return result;
+  })));
   return status;
 };
 
@@ -682,7 +946,7 @@ const paste: CommandHandler = async ctx => {
   return status;
 };
 
-const xargs: CommandHandler = async ctx => {
+const xargs: CommandHandler = streaming(async ctx => {
   const args = ctx.args;
   let i = 0;
   let max: number | undefined;
@@ -725,15 +989,20 @@ const xargs: CommandHandler = async ctx => {
     if (max !== undefined && (!Number.isInteger(max) || max < 1)) throw new CommandError("value " + max + " for -n option should be >= 1", 1);
   }
   const command = args.slice(i).length ? args.slice(i) : ["echo"];
-  let input: string;
+  let next: () => Promise<string | null>;
   if (file !== undefined) {
+    let input: string | null;
     try {
       input = await readInput(ctx, file);
     } catch {
       throw new CommandError("Cannot open input file '" + file + "': No such file or directory", 1);
     }
-  } else input = ctx.stdin.read();
-  const groups: string[][] = [];
+    next = async () => {
+      const text = input;
+      input = null;
+      return text;
+    };
+  } else next = batches(ctx.stdin, delimiter ?? "\n");
   const unquote = (text: string): string[] => {
     const out: string[] = [];
     for (const match of text.matchAll(/(?:"([^"]*)"|'([^']*)'|\\([\s\S])|([^\s"'\\]+))+|\s+/g)) {
@@ -742,61 +1011,117 @@ const xargs: CommandHandler = async ctx => {
     }
     return out;
   };
-  if (replace !== undefined) {
-    const items = delimiter !== undefined ? input.split(delimiter) : input.split("\n").map(line => line.replace(/^[ \t]+/, ""));
-    if (items[items.length - 1] === "") items.pop();
-    for (const item of items) {
-      if (delimiter === undefined && item === "") continue;
-      if (eof !== undefined && item === eof) break;
-      groups.push([item]);
-    }
-  } else if (maxLines !== undefined && delimiter === undefined) {
-    let current: string[] = [];
-    let count = 0;
-    for (const line of input.split("\n")) {
-      const words = unquote(line);
-      if (eof !== undefined && words[0] === eof) break;
-      if (!words.length) continue;
-      current.push(...words);
-      if (/[ \t]$/.test(line)) continue;
-      if (++count >= maxLines) {
-        groups.push(current);
-        current = [];
-        count = 0;
-      }
-    }
-    if (current.length) groups.push(current);
-  } else {
-    let items: string[];
-    if (delimiter !== undefined) {
-      items = input.split(delimiter);
-      if (items[items.length - 1] === "" || (delimiter !== "\n" && items[items.length - 1] === "\n" && delimiter !== "\0")) items.pop();
-    } else items = unquote(input);
-    if (eof !== undefined && delimiter === undefined) {
-      const stop = items.indexOf(eof);
-      if (stop >= 0) items = items.slice(0, stop);
-    }
-    const size = max ?? maxLines ?? items.length;
-    for (let start = 0; start < items.length; start += Math.max(1, size)) groups.push(items.slice(start, start + Math.max(1, size)));
-  }
-  if (!groups.length) {
-    if (skipEmpty || replace !== undefined) return 0;
-    groups.push([]);
-  }
   let status = 0;
-  for (const group of groups) {
+  let ran = 0;
+  let stopped = false;
+  const execute = async (group: string[]): Promise<number | undefined> => {
+    ran++;
     const argv = replace !== undefined ? command.map(word => word.split(replace!).join(group[0] ?? "")) : [...command, ...group];
     if (trace) ctx.stderr.write(argv.join(" ") + "\n");
-    const code = await ctx.run(argv, "");
+    let code: number;
+    try {
+      code = await ctx.run(argv, "");
+    } catch (error) {
+      if (!(error instanceof PipeError)) throw error;
+      code = 141;
+    }
+    if (code === 141) {
+      ctx.stderr.write("xargs: " + argv[0] + ": terminated by signal 13\n");
+      return 125;
+    }
     if (code === 255) {
       ctx.stderr.write("xargs: " + argv[0] + ": exited with status 255; aborting\n");
       return 124;
     }
     if (code === 127 || code === 126) return code;
     if (code !== 0) status = 123;
+    return undefined;
+  };
+  const base = command.reduce((sum, word) => sum + word.length + 1, 0);
+  let pending: string[] = [];
+  let length = base;
+  let current: string[] = [];
+  let count = 0;
+  let text = await next();
+  while (text !== null && !stopped) {
+    const following = await next();
+    const final = following === null;
+    const groups: string[][] = [];
+    if (replace !== undefined) {
+      const items = delimiter !== undefined ? text.split(delimiter) : text.split("\n").map(line => line.replace(/^[ \t]+/, ""));
+      if (items[items.length - 1] === "") items.pop();
+      for (const item of items) {
+        if (delimiter === undefined && item === "") continue;
+        if (eof !== undefined && item === eof) {
+          stopped = true;
+          break;
+        }
+        groups.push([item]);
+      }
+    } else if (maxLines !== undefined && delimiter === undefined) {
+      const parts = text.split("\n");
+      if (parts[parts.length - 1] === "" && parts.length > 1) parts.pop();
+      for (const line of parts) {
+        const words = unquote(line);
+        if (eof !== undefined && words[0] === eof) {
+          stopped = true;
+          break;
+        }
+        if (!words.length) continue;
+        current.push(...words);
+        if (/[ \t]$/.test(line)) continue;
+        if (++count >= maxLines) {
+          groups.push(current);
+          current = [];
+          count = 0;
+        }
+      }
+    } else {
+      let items: string[];
+      if (delimiter !== undefined) {
+        items = text.split(delimiter);
+        if (items[items.length - 1] === "" || (final && delimiter !== "\n" && items[items.length - 1] === "\n" && delimiter !== "\0")) items.pop();
+      } else items = unquote(text);
+      if (eof !== undefined && delimiter === undefined) {
+        const stop = items.indexOf(eof);
+        if (stop >= 0) {
+          items = items.slice(0, stop);
+          stopped = true;
+        }
+      }
+      const size = max ?? maxLines;
+      for (const item of items) {
+        if (size === undefined && pending.length && length + item.length + 1 > 131072) {
+          groups.push(pending);
+          pending = [];
+          length = base;
+        }
+        pending.push(item);
+        length += item.length + 1;
+        if (size !== undefined && pending.length >= Math.max(1, size)) {
+          groups.push(pending);
+          pending = [];
+        }
+      }
+    }
+    for (const group of groups) {
+      const code = await execute(group);
+      if (code !== undefined) return code;
+    }
+    text = following;
+  }
+  const rest = current.length ? current : pending;
+  if (rest.length) {
+    const code = await execute(rest);
+    if (code !== undefined) return code;
+  }
+  if (!ran) {
+    if (skipEmpty || replace !== undefined) return 0;
+    const code = await execute([]);
+    if (code !== undefined) return code;
   }
   return status;
-};
+});
 
 const STRFTIME_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const STRFTIME_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -832,6 +1157,18 @@ export function strftime(spec: string, date: Date): string {
       case "j": value = String(day).padStart(3, "0"); break;
       case "u": value = String(date.getUTCDay() || 7); break;
       case "w": value = String(date.getUTCDay()); break;
+      case "U": value = two(Math.floor((day - 1 + 7 - date.getUTCDay()) / 7)); break;
+      case "W": value = two(Math.floor((day - 1 + 7 - ((date.getUTCDay() + 6) % 7)) / 7)); break;
+      case "V":
+      case "G":
+      case "g": {
+        const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+        target.setUTCDate(target.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
+        const year = target.getUTCFullYear();
+        const week = Math.ceil(((target.getTime() - Date.UTC(year, 0, 1)) / 86400000 + 1) / 7);
+        value = c === "V" ? two(week) : c === "G" ? String(year) : two(year % 100);
+        break;
+      }
       case "Z": value = "UTC"; break;
       case "z": value = "+0000"; break;
       case "F": value = strftime("%Y-%m-%d", date); break;
@@ -853,37 +1190,72 @@ export function strftime(spec: string, date: Date): string {
   });
 }
 
-const date: CommandHandler = ctx => {
+const UNITS: Record<string, number> = { second: 1000, sec: 1000, minute: 60000, min: 60000, hour: 3600000, day: 86400000, week: 604800000, fortnight: 1209600000 };
+
+function absolute(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "" || trimmed === "now" || trimmed === "today") return trimmed === "today" ? Date.now() : Date.now();
+  if (trimmed === "yesterday") return Date.now() - 86400000;
+  if (trimmed === "tomorrow") return Date.now() + 86400000;
+  if (/^@-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed.slice(1)) * 1000;
+  const iso = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(\.\d+)?)?)?\s*(Z|UTC|GMT|[+-]\d{2}:?\d{2})?$/i);
+  if (iso) {
+    const [, y, mo, d, h = "0", mi = "0", s = "0", fraction = "", zone = ""] = iso;
+    let ms = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s), Math.round(Number(fraction || 0) * 1000));
+    const offset = zone.match(/^([+-])(\d{2}):?(\d{2})$/);
+    if (offset) ms -= (offset[1] === "-" ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3])) * 60000;
+    return ms;
+  }
+  const time = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (time) {
+    const now = new Date();
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), Number(time[1]), Number(time[2]), Number(time[3] ?? 0));
+  }
+  const parsed = Date.parse(/[a-z]{3}/i.test(trimmed) && !/(Z|GMT|UTC|[+-]\d{4})$/i.test(trimmed) ? trimmed + " UTC" : trimmed);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+export function parseDate(input: string): number | undefined {
+  let rest = input.trim();
+  const shifts: [number, string][] = [];
+  for (;;) {
+    const match = rest.match(/(?:^|\s+)([+-]?\s*\d+)?\s*(second|sec|minute|min|hour|day|week|fortnight|month|year)s?(\s+ago)?$/i);
+    if (!match) break;
+    const amount = (match[1] === undefined ? 1 : Number(match[1].replace(/\s+/g, ""))) * (match[3] ? -1 : 1);
+    shifts.unshift([amount, match[2]!.toLowerCase()]);
+    rest = rest.slice(0, rest.length - match[0].length).trim();
+    if (!rest) break;
+  }
+  const relativeDay = rest.match(/^(next|last)\s+(second|minute|hour|day|week|month|year)$/i);
+  if (relativeDay) {
+    shifts.unshift([relativeDay[1]!.toLowerCase() === "next" ? 1 : -1, relativeDay[2]!.toLowerCase()]);
+    rest = "";
+  }
+  const start = absolute(rest);
+  if (start === undefined) return undefined;
+  const date = new Date(start);
+  for (const [amount, unit] of shifts) {
+    if (unit === "month") date.setUTCMonth(date.getUTCMonth() + amount);
+    else if (unit === "year") date.setUTCFullYear(date.getUTCFullYear() + amount);
+    else date.setTime(date.getTime() + amount * UNITS[unit]!);
+  }
+  return date.getTime();
+}
+
+const date: CommandHandler = async ctx => {
   const parsed = options(ctx.args, { flags: "uRI", values: "dr", long: { utc: "u", universal: "u", date: "d", "rfc-email": "R", "iso-8601": "iso", reference: "r" } });
   let when = new Date();
+  const reference = last(parsed, "r");
+  if (reference !== undefined) {
+    const stat = await ctx.fs.stat(ctx.resolve(reference));
+    if (!stat) throw new CommandError(reference + ": No such file or directory");
+    when = new Date(stat.mtime);
+  }
   const input = last(parsed, "d");
   if (input !== undefined) {
-    const trimmed = input.trim();
-    if (trimmed.startsWith("@")) when = new Date(Number(trimmed.slice(1)) * 1000);
-    else if (trimmed === "now" || trimmed === "") when = new Date();
-    else if (trimmed === "yesterday" || trimmed === "tomorrow") when = new Date(Date.now() + (trimmed === "yesterday" ? -86400000 : 86400000));
-    else {
-      const offset = trimmed.match(/^(.*?\S)\s*([+-])\s*(\d+)\s*(second|minute|hour|day|week|month|year)s?$/);
-      const relative = trimmed.match(/^([+-]?\d+)\s*(second|minute|hour|day|week)s?(\s+ago)?$/);
-      if (offset) {
-        const base = offset[1]!;
-        const start = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(base) ? base + "T00:00:00Z" : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(base) ? base.replace(" ", "T") + "Z" : base);
-        if (Number.isNaN(start)) throw new CommandError("invalid date '" + input + "'");
-        const amount = Number(offset[3]) * (offset[2] === "-" ? -1 : 1);
-        const date = new Date(start);
-        if (offset[4] === "month") date.setUTCMonth(date.getUTCMonth() + amount);
-        else if (offset[4] === "year") date.setUTCFullYear(date.getUTCFullYear() + amount);
-        else date.setTime(start + amount * { second: 1000, minute: 60000, hour: 3600000, day: 86400000, week: 604800000 }[offset[4] as "day"]);
-        when = date;
-      } else if (relative) {
-        const unit = { second: 1000, minute: 60000, hour: 3600000, day: 86400000, week: 604800000 }[relative[2]]!;
-        when = new Date(Date.now() + Number(relative[1]) * unit * (relative[3] ? -1 : 1));
-      } else {
-        const parsedDate = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed + "T00:00:00Z" : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed) ? trimmed.replace(" ", "T") + "Z" : trimmed);
-        if (Number.isNaN(parsedDate)) throw new CommandError("invalid date '" + input + "'");
-        when = new Date(parsedDate);
-      }
-    }
+    const parsedDate = parseDate(input);
+    if (parsedDate === undefined) throw new CommandError("invalid date '" + input + "'");
+    when = new Date(parsedDate);
   }
   const spec = parsed.operands.find(operand => operand.startsWith("+"));
   if (spec) ctx.stdout.write(strftime(spec.slice(1), when) + "\n");
@@ -1215,7 +1587,7 @@ function myers(a: string[], b: string[]): Edit[] {
       x--;
       y--;
     }
-    middle.push(...reversed.reverse());
+    for (const item of reversed.reverse()) middle.push(item);
   }
   const out: Edit[] = [];
   for (let i = 0; i < head; i++) out.push({ op: " ", a: i, b: i });
@@ -1241,13 +1613,15 @@ function stamp(mtime: number): string {
 const NO_NEWLINE = "\\ No newline at end of file";
 
 const diff: CommandHandler = async ctx => {
-  const parsed = options(ctx.args, { flags: "uqiwbBNrsatTpdE", values: "UxXL", long: { unified: "U", brief: "q", "ignore-case": "i", "ignore-all-space": "w", "ignore-space-change": "b", "ignore-blank-lines": "B", "new-file": "N", recursive: "r", "report-identical-files": "s", text: "a", exclude: "x", "exclude-from": "X", label: "L", "strip-trailing-cr": "Z", "ignore-tab-expansion": "E", "show-c-function": "p", minimal: "d", "expand-tabs": "t", color: "", "no-dereference": "", "speed-large-files": "" } });
+  const parsed = options(ctx.args, { flags: "uqiwbBNrsatTpdEcyYl", values: "UxXLCW", long: { "side-by-side": "y", "suppress-common-lines": "Y", "left-column": "l", width: "W", context: "c", unified: "U", brief: "q", "ignore-case": "i", "ignore-all-space": "w", "ignore-space-change": "b", "ignore-blank-lines": "B", "new-file": "N", recursive: "r", "report-identical-files": "s", text: "a", exclude: "x", "exclude-from": "X", label: "L", "strip-trailing-cr": "Z", "ignore-tab-expansion": "E", "show-c-function": "p", minimal: "d", "expand-tabs": "t", color: "", "no-dereference": "", "speed-large-files": "" } });
   const f = parsed.flags;
   const [left, right] = parsed.operands;
   if (left === undefined || right === undefined) throw new CommandError(left === undefined ? "missing operand after 'diff'" : "missing operand after '" + left + "'", 2);
   if (parsed.operands.length > 2) throw new CommandError("extra operand '" + parsed.operands[2] + "'", 2);
   const unified = f.has("u") || parsed.values.has("U");
-  const contextLines = Number(last(parsed, "U") ?? 3);
+  const context = !unified && (f.has("c") || parsed.values.has("C"));
+  const sideBySide = f.has("y");
+  const contextLines = Number(last(parsed, "U") ?? last(parsed, "C") ?? 3);
   const labels = parsed.values.get("L") ?? [];
   const switches = ctx.args.filter(arg => arg.startsWith("-") && arg !== "-" && arg !== "--").join(" ");
   const excludes = (parsed.values.get("x") ?? []).map(glob => globRegExp(glob));
@@ -1271,7 +1645,7 @@ const diff: CommandHandler = async ctx => {
   };
   const show = (line: string) => (line.endsWith("\u0000") ? line.slice(0, -1) + "\n" + NO_NEWLINE : line);
   const compare = async (a: { name: string; text: string; mtime: number }, b: { name: string; text: string; mtime: number }, header: boolean): Promise<void> => {
-    if (a.text === b.text) {
+    if (a.text === b.text && !sideBySide) {
       if (f.has("s")) ctx.stdout.write("Files " + a.name + " and " + b.name + " are identical\n");
       return;
     }
@@ -1283,18 +1657,128 @@ const diff: CommandHandler = async ctx => {
     const x = split(a.text);
     const y = split(b.text);
     const edits = myers(x.map(normal), y.map(normal));
-    if (edits.every(edit => edit.op === " ")) return;
+    const same = edits.every(edit => edit.op === " ");
+    if (same && !sideBySide) return;
     if (f.has("B")) {
       const changed = edits.filter(edit => edit.op !== " ");
       if (changed.every(edit => (edit.op === "-" ? x[edit.a] : y[edit.b])!.replace(/\u0000$/, "").trim() === "")) return;
     }
-    status = Math.max(status, 1);
+    if (!same) status = Math.max(status, 1);
     if (f.has("q")) {
       ctx.stdout.write("Files " + a.name + " and " + b.name + " differ\n");
       return;
     }
     if (header) ctx.stdout.write("diff " + (switches ? switches + " " : "") + a.name + " " + b.name + "\n");
     const line = (edit: Edit) => show(edit.op === "+" ? y[edit.b]! : x[edit.a]!);
+    if (sideBySide) {
+      const width = Number(last(parsed, "W") ?? 130);
+      const offset = Math.floor((width + 8 + 3) / 16) * 8;
+      const half = Math.max(0, Math.min(offset - 3, width - offset));
+      const column = half ? offset : width;
+      const pad = (from: number, to: number) => {
+        let text = "";
+        let at = from;
+        while (at + 8 - (at % 8) <= to) {
+          text += "\t";
+          at += 8 - (at % 8);
+        }
+        return text + " ".repeat(Math.max(0, to - at));
+      };
+      const clip = (text: string, size: number) => {
+        let out = "";
+        let at = 0;
+        for (const c of text.replace(/\u0000$/, "")) {
+          const next = c === "\t" ? at + 8 - (at % 8) : at + 1;
+          if (next > size) break;
+          out += c;
+          at = next;
+        }
+        return { text: out, at };
+      };
+      const row = (left: string | undefined, separator: string, right: string | undefined) => {
+        const l = clip(left ?? "", half);
+        if (separator === " ") {
+          if (right === undefined || (f.has("l") && left !== undefined)) return l.text + (f.has("l") ? pad(l.at, half + 1) + "(" : "") + "\n";
+          return l.text + pad(l.at, column) + clip(right, width - column).text + "\n";
+        }
+        let text = l.text + pad(l.at, half + 1) + separator;
+        if (right !== undefined) text += pad(half + 2, column) + clip(right, width - column).text;
+        return text + "\n";
+      };
+      let i = 0;
+      while (i < edits.length) {
+        const edit = edits[i]!;
+        if (edit.op === " ") {
+          if (!f.has("Y")) ctx.stdout.write(row(x[edit.a], " ", y[edit.b]));
+          i++;
+          continue;
+        }
+        let end = i;
+        while (end < edits.length && edits[end]!.op !== " ") end++;
+        const removed = edits.slice(i, end).filter(item => item.op === "-");
+        const added = edits.slice(i, end).filter(item => item.op === "+");
+        for (let k = 0; k < Math.max(removed.length, added.length); k++) {
+          const left = removed[k];
+          const right = added[k];
+          ctx.stdout.write(row(left ? x[left.a] : undefined, left && right ? "|" : left ? "<" : ">", right ? y[right.b] : undefined));
+        }
+        i = end;
+      }
+      return;
+    }
+    if (context) {
+      ctx.stdout.write("*** " + (labels[0] ?? a.name + "\t" + stamp(a.mtime)) + "\n--- " + (labels[1] ?? b.name + "\t" + stamp(b.mtime)) + "\n");
+      let i = 0;
+      while (i < edits.length) {
+        if (edits[i]!.op === " ") {
+          i++;
+          continue;
+        }
+        const start = Math.max(0, i - contextLines);
+        let end = i;
+        while (end < edits.length) {
+          if (edits[end]!.op !== " ") {
+            end++;
+            continue;
+          }
+          let run = end;
+          while (run < edits.length && edits[run]!.op === " ") run++;
+          if (run - end > contextLines * 2 || run === edits.length) {
+            end = Math.min(edits.length, end + contextLines);
+            break;
+          }
+          end = run;
+        }
+        const hunk = edits.slice(start, end);
+        const marks = new Map<Edit, string>();
+        for (let k = 0; k < hunk.length; ) {
+          if (hunk[k]!.op === " ") {
+            k++;
+            continue;
+          }
+          let stop = k;
+          while (stop < hunk.length && hunk[stop]!.op !== " ") stop++;
+          const block = hunk.slice(k, stop);
+          const changed = block.some(item => item.op === "-") && block.some(item => item.op === "+");
+          for (const item of block) marks.set(item, changed ? "! " : item.op === "-" ? "- " : "+ ");
+          k = stop;
+        }
+        const olds = hunk.filter(edit => edit.op !== "+");
+        const news = hunk.filter(edit => edit.op !== "-");
+        const range = (items: Edit[], key: "a" | "b") => {
+          if (!items.length) return String(hunk[0]![key]);
+          const first = items[0]![key] + 1;
+          const lastLine = items[items.length - 1]![key] + 1;
+          return first === lastLine ? String(first) : first + "," + lastLine;
+        };
+        ctx.stdout.write("***************\n*** " + range(olds, "a") + " ****\n");
+        if (olds.some(edit => edit.op === "-")) for (const edit of olds) ctx.stdout.write((marks.get(edit) ?? "  ") + line(edit) + "\n");
+        ctx.stdout.write("--- " + range(news, "b") + " ----\n");
+        if (news.some(edit => edit.op === "+")) for (const edit of news) ctx.stdout.write((marks.get(edit) ?? "  ") + line(edit) + "\n");
+        i = end;
+      }
+      return;
+    }
     if (unified) {
       ctx.stdout.write("--- " + (labels[0] ?? a.name + "\t" + stamp(a.mtime)) + "\n+++ " + (labels[1] ?? b.name + "\t" + stamp(b.mtime)) + "\n");
       let i = 0;
@@ -1452,8 +1936,8 @@ const comm: CommandHandler = async ctx => {
 export const textCommands: Record<string, CommandHandler> = {
   echo,
   printf,
-  head: ctx => headTail(ctx, false),
-  tail: ctx => headTail(ctx, true),
+  head: streaming(ctx => headTail(ctx, false)),
+  tail: streaming(ctx => headTail(ctx, true)),
   wc,
   grep,
   egrep: ctx => grep({ ...ctx, args: ["-E", ...ctx.args] }),

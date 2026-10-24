@@ -1,6 +1,7 @@
 import { CommandError, type CommandHandler } from "../shell.ts";
 import { FsError, decode } from "../fs.ts";
 import { strftime } from "./text.ts";
+import { pause } from "./util.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type PathKey = string | number | { start: number | null; end: number | null };
@@ -1160,8 +1161,9 @@ class Interpreter {
           for (let i = 0; i < node.patterns.length && !done; i++) {
             try {
               const names = node.patterns.flatMap(pattern => patternNames(pattern));
+              const bound = new Set(patternNames(node.patterns[i]));
               for (const scope of this.bind(node.patterns[i], value, env)) {
-                for (const name of names) if (!scope.vars.has(name)) scope.vars.set(name, null);
+                for (const name of names) if (!bound.has(name)) scope.vars.set(name, null);
                 yield* this.eval(node.body, input, scope);
               }
               done = true;
@@ -2077,6 +2079,42 @@ class Interpreter {
         if (ok) yield input;
         return;
       }
+      case "fromstream/1": {
+        const place = (target: Json, path: Json[], leaf: Json): Json => {
+          if (!path.length) return leaf;
+          const [key, ...rest] = path;
+          if (typeof key === "number") {
+            const list = Array.isArray(target) ? target.slice() : [];
+            while (list.length < key) list.push(null);
+            list[key] = place(list[key] ?? null, rest, leaf);
+            return list;
+          }
+          const object: Record<string, Json> = target !== null && typeof target === "object" && !Array.isArray(target) ? { ...(target as Record<string, Json>) } : {};
+          object[key as string] = place(object[key as string] ?? null, rest, leaf);
+          return object as Json;
+        };
+        let value: Json = null;
+        let emitted = false;
+        for (const event of this.eval(args[0], input, env)) {
+          if (emitted) {
+            value = null;
+            emitted = false;
+          }
+          if (!Array.isArray(event) || !Array.isArray(event[0])) throw new JqError("Invalid stream event");
+          const path = event[0] as Json[];
+          if (event.length === 2) {
+            if (!path.length) {
+              yield event[1] ?? null;
+              continue;
+            }
+            value = place(value, path, event[1] ?? null);
+          } else if (path.length === 1) {
+            yield value;
+            emitted = true;
+          }
+        }
+        return;
+      }
       case "tostream/0": {
         const stream = function* (value: Json, path: Json[]): Generator<Json> {
           const entries: [Json, Json][] = Array.isArray(value) ? value.map((child, index) => [index, child]) : value !== null && typeof value === "object" ? Object.entries(value) : [];
@@ -2482,7 +2520,10 @@ export const jq: CommandHandler = async ctx => {
     while (cursor < queue.length) {
       const input = queue[cursor++];
       try {
-        for (const value of interp.eval(program, input, env)) emit(value);
+        for (const value of interp.eval(program, input, env)) {
+          emit(value);
+          await pause(ctx);
+        }
       } catch (error) {
         if (error instanceof JqError) {
           const message = error.value !== null && typeof error.value === "object" ? toJson(error.value) + " (not a string)" : typeof error.value === "string" ? error.value : toJson(error.value) + " (not a string)";
