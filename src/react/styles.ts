@@ -386,11 +386,11 @@ export const suggestion = variants({
   defaultVariants: { quiet: false },
 });
 
-export const status = style({ borderTop: "1px solid", borderTopColor: "rule", display: "flex", gap: "indent", justifyContent: "space-between", margin: "0", paddingBlock: "xs", paddingInline: "md", whiteSpace: "nowrap" });
+export const status = style({ borderTop: "1px solid", borderTopColor: "rule", columnGap: "indent", display: "flex", flexWrap: "wrap", justifyContent: "space-between", margin: "0", paddingBlock: "xs", paddingInline: "md", rowGap: "xs", whiteSpace: "nowrap" });
 
-export const statusText = style({ flex: "1 !custom", opacity: "dim", overflow: "hidden", textOverflow: "ellipsis" });
+export const statusText = style({ flex: "1 !custom", minWidth: "0", opacity: "dim", overflow: "hidden", textOverflow: "ellipsis" });
 
-export const actions = style({ display: "flex", gap: "indent" });
+export const actions = style({ columnGap: "indent", display: "flex", flexWrap: "wrap", rowGap: "xs" });
 
 export const expand = style({
   backgroundColor: "transparent",

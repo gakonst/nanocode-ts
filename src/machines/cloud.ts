@@ -32,6 +32,11 @@ export function forget() {
   localStorage.removeItem(storageKey);
 }
 
+export async function logout(cloud: Cloud) {
+  const response = await fetch("v1/keys", { headers: headers(cloud), method: "DELETE" });
+  if (!response.ok && response.status !== 401) throw await failure(response);
+}
+
 function headers(cloud: Cloud, extra: Record<string, string> = {}) {
   return { ...extra, authorization: `Bearer ${cloud.token}` };
 }
@@ -196,7 +201,7 @@ export function meter(cloud: Cloud, interval = 1000) {
         const index = services.findIndex(service => service.name === name);
         const previous = index >= 0 ? services[index]! : { calls: 0, charges: [], name, spent: 0n };
         const amount = current.spent - before.spent;
-        if (!first && amount <= 0n && current.calls === before.calls) continue;
+        if (!first && amount === 0n && current.calls === before.calls) continue;
         changed = true;
         const service: Payments.Service = {
           calls: current.calls,

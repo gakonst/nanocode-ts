@@ -277,6 +277,7 @@ export function account(options: AccountOptions) {
       polyfill: false,
     });
     mppx.onPaymentResponse(payment => {
+      void payment.response.body?.cancel().catch(() => undefined);
       const url = String(payment.input instanceof Request ? payment.input.url : payment.input);
       if (Mcp.server(url, servers)) return;
       void describe(url, (payment.challenge as { description?: string }).description);

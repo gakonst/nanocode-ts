@@ -48,35 +48,73 @@ export function locked(servers: readonly Mcp.Server[], send: typeof fetch = glob
 const RECEIPT = /^event: ?payment-receipt\r?$/m;
 const DATA = /^data: ?(.*?)\r?$/m;
 const SEPARATOR = /\r?\n\r?\n/g;
+const FINAL = /^(event: ?(response\.(completed|failed|incomplete)|message_stop)|data: ?\[DONE\])\r?$/m;
+const DRAIN_MS = 10_000;
 
 export function receipts(body: ReadableStream<Uint8Array>, onReceipt: (data: string) => unknown): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
+  const reader = body.getReader();
   let buffer = "";
+  let final = false;
   let pending: Promise<unknown> = Promise.resolve();
   const take = (event: string) => {
+    if (FINAL.test(event)) final = true;
     if (!RECEIPT.test(event)) return false;
     const data = DATA.exec(event)?.[1];
     if (data) pending = pending.then(() => onReceipt(data)).catch(() => undefined);
     return true;
   };
-  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let out = "";
-      let start = 0;
-      for (const match of buffer.matchAll(SEPARATOR)) {
-        const end = match.index + match[0].length;
-        if (!take(buffer.slice(start, match.index))) out += buffer.slice(start, end);
-        start = end;
+  const scan = (chunk: Uint8Array | undefined) => {
+    buffer += chunk ? decoder.decode(chunk, { stream: true }) : decoder.decode();
+    let out = "";
+    let start = 0;
+    for (const match of buffer.matchAll(SEPARATOR)) {
+      const end = match.index + match[0].length;
+      if (!take(buffer.slice(start, match.index))) out += buffer.slice(start, end);
+      start = end;
+    }
+    buffer = buffer.slice(start);
+    if (!chunk && buffer && !take(buffer)) out += buffer;
+    if (!chunk) buffer = "";
+    return out;
+  };
+  const drain = async () => {
+    const timer = setTimeout(() => void reader.cancel().catch(() => undefined), DRAIN_MS);
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        scan(value);
       }
-      buffer = buffer.slice(start);
-      if (out) controller.enqueue(encoder.encode(out));
+      scan(undefined);
+    } catch {
+    } finally {
+      clearTimeout(timer);
+    }
+    await pending;
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          const rest = scan(undefined);
+          if (rest) controller.enqueue(encoder.encode(rest));
+          await pending;
+          controller.close();
+          return;
+        }
+        const out = scan(value);
+        if (out) {
+          controller.enqueue(encoder.encode(out));
+          return;
+        }
+      }
     },
-    async flush(controller) {
-      buffer += decoder.decode();
-      if (buffer && !take(buffer)) controller.enqueue(encoder.encode(buffer));
-      await pending;
+    cancel(reason) {
+      if (final) return drain();
+      return reader.cancel(reason);
     },
-  }));
+  });
 }
