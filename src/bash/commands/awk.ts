@@ -726,6 +726,7 @@ class Interpreter {
   outputs = new Map<string, { kind: "file" | "pipe"; text: string; append: boolean }>();
   readers = new Map<string, { lines: string[]; pos: number }>();
   records: string[] = [];
+  preload?: () => Promise<void>;
   recordIndex = 0;
   steps = 0;
   depth = 0;
@@ -1235,6 +1236,11 @@ class Interpreter {
       }
       line = reader.lines[reader.pos++];
     } else {
+      if (this.preload && this.recordIndex >= this.records.length) {
+        const preload = this.preload;
+        this.preload = undefined;
+        await preload();
+      }
       line = this.records[this.recordIndex];
       if (line !== undefined) {
         this.recordIndex++;
@@ -1448,6 +1454,20 @@ export const awk: CommandHandler = async ctx => {
   interp.globals.set("ARGC", operands.length + 1);
   let exitCode = 0;
   let exiting = false;
+  let preloaded: string | undefined;
+  interp.preload = async () => {
+    const operand = operands.find(operand => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(operand)) ?? "-";
+    let text = "";
+    try {
+      text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
+    } catch (error) {
+      if (!(error instanceof FsError)) throw error;
+    }
+    preloaded = operand;
+    interp.globals.set("FILENAME", operand === "-" ? "" : operand);
+    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
+    interp.recordIndex = 0;
+  };
   try {
     try {
       for (const block of program.begin) await interp.statements(block);
@@ -1466,6 +1486,15 @@ export const awk: CommandHandler = async ctx => {
           continue;
         }
         consumed = true;
+        if (preloaded === operand) {
+          preloaded = undefined;
+          if (await runFile(interp, program, undefined, operand)) {
+            exiting = true;
+            exitCode = interp.exitCode;
+            break;
+          }
+          continue;
+        }
         let text: string;
         try {
           text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
@@ -1481,7 +1510,7 @@ export const awk: CommandHandler = async ctx => {
           break;
         }
       }
-      if (!consumed && !exiting && await runFile(interp, program, ctx.stdin.read(), "")) {
+      if (!consumed && !exiting && await runFile(interp, program, preloaded === "-" ? undefined : ctx.stdin.read(), "")) {
         exiting = true;
         exitCode = interp.exitCode;
       }
@@ -1504,11 +1533,14 @@ export const awk: CommandHandler = async ctx => {
   return exitCode;
 };
 
-async function runFile(interp: Interpreter, program: Program, text: string, name: string): Promise<boolean> {
-  interp.globals.set("FILENAME", name);
-  interp.globals.set("FNR", 0);
-  interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
-  interp.recordIndex = 0;
+async function runFile(interp: Interpreter, program: Program, text: string | undefined, name: string): Promise<boolean> {
+  interp.preload = undefined;
+  interp.globals.set("FILENAME", name === "-" ? "" : name);
+  if (text !== undefined) {
+    interp.globals.set("FNR", 0);
+    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
+    interp.recordIndex = 0;
+  }
   while (interp.recordIndex < interp.records.length) {
     const record = interp.records[interp.recordIndex++];
     interp.globals.set("NR", toNum(interp.scalar("NR")) + 1);

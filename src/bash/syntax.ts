@@ -30,7 +30,7 @@ export type Command =
 
 export type Pipeline = { negate: boolean; commands: Command[] };
 
-export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[] };
+export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[]; background?: boolean };
 
 export type Script = AndOr[];
 
@@ -155,6 +155,7 @@ class Parser {
       this.blanks();
       if (this.starts(";;") || this.starts(";&")) break;
       const c = this.src[this.pos];
+      if (c === "&" && !this.starts("&&")) script[script.length - 1].background = true;
       if (c === ";" || (c === "&" && !this.starts("&&"))) this.pos++;
       else if (c === "\n") this.newline();
       else break;

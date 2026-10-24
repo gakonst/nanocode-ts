@@ -157,6 +157,7 @@ export class State {
   frames: Frame[] = [];
   maps = new Map<string, Map<string, string>>();
   readonly = new Set<string>();
+  jobs = new Map<string, number>();
   cases = new Map<string, "l" | "u">();
   stack: string[] = [];
   traps = new Map<string, string>();
@@ -378,7 +379,14 @@ export class Runner {
 
   async script(script: Script, io: IO): Promise<number> {
     let status = this.state.status;
-    for (const item of script) status = await this.andOr(item, io);
+    for (const item of script) {
+      if (item.background) {
+        const job = String(this.state.jobs.size + 1000);
+        this.state.jobs.set(job, await this.subshell(() => this.andOr(item, io)));
+        this.state.vars.set("!", [job]);
+        status = this.state.status = 0;
+      } else status = await this.andOr(item, io);
+    }
     return status;
   }
 
@@ -1111,7 +1119,7 @@ export class Runner {
       case "$":
         return ["1"];
       case "!":
-        return [""];
+        return state.vars.get("!") ?? [""];
       case "0":
         return [state.arg0];
       case "-":
@@ -1505,7 +1513,13 @@ export const BUILTINS: Record<string, Builtin> = {
   ":": noop,
   true: noop,
   false: async () => 1,
-  wait: noop,
+  async wait(args) {
+    const ids = args.filter(arg => !arg.startsWith("-"));
+    if (!ids.length) return args.includes("-n") ? [...this.state.jobs.values()].pop() ?? 127 : 0;
+    let status = 0;
+    for (const id of ids) status = this.state.jobs.get(id.replace(/^%/, "")) ?? 127;
+    return status;
+  },
   jobs: noop,
   alias: noop,
   unalias: noop,
