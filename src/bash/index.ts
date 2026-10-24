@@ -46,8 +46,8 @@ export type BashEvent =
 export type BashToolOptions = { name?: string; description?: string; maxOutputLength?: number };
 
 export const DEFAULT_LIMITS: Limits = {
-  maxCommands: 100_000,
-  maxLoopIterations: 10_000,
+  maxCommands: 1_000_000,
+  maxLoopIterations: 1_000_000,
   maxCallDepth: 64,
   maxOutputLength: 1_000_000,
   maxBufferLength: 16_000_000,

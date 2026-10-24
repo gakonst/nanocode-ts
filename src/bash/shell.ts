@@ -1,5 +1,5 @@
 import { FsError, decode, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
-import { DECLARATIONS, SyntaxError as ParseError, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
+import { DECLARATIONS, SyntaxError as ParseError, ansiEscape, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
 import { ArithError, evaluateArith } from "./arith.ts";
 import { escapeRegExp, globRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
 import { TestError, evaluateTest, type TestArg } from "./test.ts";
@@ -155,7 +155,14 @@ export class State {
   integers = new Set<string>();
   functions = new Map<string, Command>();
   frames: Frame[] = [];
+  maps = new Map<string, Map<string, string>>();
+  readonly = new Set<string>();
+  traps = new Map<string, string>();
+  shopt = new Set<string>();
   positional: string[] = [];
+  arg0 = "bash";
+  optind = 1;
+  optpos = 1;
   cwd = "/";
   status = 0;
   options = { errexit: false, nounset: false, pipefail: false, xtrace: false, noglob: false };
@@ -163,6 +170,12 @@ export class State {
   clone(): State {
     const state = new State();
     for (const [name, value] of this.vars) state.vars.set(name, value.slice());
+    for (const [name, map] of this.maps) state.maps.set(name, new Map(map));
+    state.readonly = new Set(this.readonly);
+    state.shopt = new Set(this.shopt);
+    state.arg0 = this.arg0;
+    state.optind = this.optind;
+    state.optpos = this.optpos;
     state.exported = new Set(this.exported);
     state.integers = new Set(this.integers);
     state.functions = new Map(this.functions);
@@ -281,6 +294,10 @@ export class Runner {
   readonly host: ShellHost;
   readonly signal: AbortSignal;
   failure: "syntax" | "limit" | undefined;
+  temporaries: string[] = [];
+  flushes: (() => Promise<void>)[] = [];
+  #deferred: { path: string; body: Script }[] = [];
+  #processes = 0;
   #steps = 0;
   #depth = 0;
   #condition = 0;
@@ -321,7 +338,27 @@ export class Runner {
   }
 
   set(name: string, value: string | string[]) {
+    if (this.state.readonly.has(name)) throw new FatalError(name + ": readonly variable");
     this.state.vars.set(name, typeof value === "string" ? [value] : value);
+  }
+
+  async exitTrap(io: IO, status: number): Promise<number> {
+    const action = this.state.traps.get("EXIT");
+    if (action === undefined) return status;
+    this.state.traps.delete("EXIT");
+    this.state.status = status;
+    try {
+      await this.script(parse(action), io);
+    } catch (error) {
+      if (error instanceof ExitSignal) return error.status;
+      if (!(error instanceof ReturnSignal || error instanceof LoopSignal || error instanceof ParseError)) throw error;
+    }
+    return status;
+  }
+
+  async cleanup() {
+    for (const flush of this.flushes.splice(0)) await flush();
+    for (const path of this.temporaries.splice(0)) await this.host.fs.remove(path).catch(() => undefined);
   }
 
   environment(): Record<string, string> {
@@ -357,7 +394,19 @@ export class Runner {
       if (guarded) this.#condition--;
     }
     this.state.status = status;
-    if (status !== 0 && !guarded && !pipeline.negate && this.#condition === 0 && this.state.options.errexit) throw new ExitSignal(status);
+    if (status !== 0 && !guarded && !pipeline.negate && this.#condition === 0) {
+      const trap = this.state.traps.get("ERR");
+      if (trap) {
+        this.state.traps.delete("ERR");
+        try {
+          await this.script(parse(trap), io);
+        } finally {
+          this.state.traps.set("ERR", trap);
+          this.state.status = status;
+        }
+      }
+      if (this.state.options.errexit) throw new ExitSignal(status);
+    }
     return status;
   }
 
@@ -370,14 +419,18 @@ export class Runner {
     }
   }
 
-  async subshell(run: () => Promise<number>): Promise<number> {
+  async subshell(run: () => Promise<number>, io?: IO): Promise<number> {
     const saved = this.state;
     this.state = saved.clone();
     try {
-      return await run();
-    } catch (error) {
-      if (error instanceof ExitSignal || error instanceof ReturnSignal) return error.status;
-      throw error;
+      let status: number;
+      try {
+        status = await run();
+      } catch (error) {
+        if (error instanceof ExitSignal || error instanceof ReturnSignal) status = error.status;
+        else throw error;
+      }
+      return io && this.state.traps.has("EXIT") ? await this.exitTrap(io, status) : status;
     } finally {
       this.state = saved;
     }
@@ -385,8 +438,10 @@ export class Runner {
 
   async pipeline(pipeline: Pipeline, io: IO): Promise<number> {
     let status: number;
-    if (pipeline.commands.length === 1) status = await this.command(pipeline.commands[0], io);
-    else {
+    if (pipeline.commands.length === 1) {
+      status = await this.command(pipeline.commands[0], io);
+      this.state.vars.set("PIPESTATUS", [String(status)]);
+    } else {
       let input = io.stdin;
       const statuses: number[] = [];
       for (let i = 0; i < pipeline.commands.length; i++) {
@@ -397,6 +452,7 @@ export class Runner {
         if (!last) input = new Input(stdout.text());
       }
       status = statuses[statuses.length - 1];
+      this.state.vars.set("PIPESTATUS", statuses.map(String));
       if (this.state.options.pipefail) status = [...statuses].reverse().find(code => code !== 0) ?? 0;
     }
     return pipeline.negate ? Number(status === 0) : status;
@@ -408,6 +464,7 @@ export class Runner {
       this.state.functions.set(command.name, command.body);
       return 0;
     }
+    const mark = this.#deferred.length;
     let redirected: { io: IO; flush(): Promise<void> };
     try {
       redirected = await this.redirect(command.redirects, io);
@@ -416,11 +473,41 @@ export class Runner {
       io.stderr.write("bash: " + message(error) + "\n");
       return 1;
     }
+    const head = command.type === "simple" && command.words.length === 1 ? command.words[0] : undefined;
+    if (Array.isArray(head) && head.length === 1 && head[0].type === "text" && !head[0].quoted && head[0].value === "exec" && command.redirects.length) {
+      Object.assign(io, redirected.io);
+      this.flushes.push(redirected.flush);
+      return 0;
+    }
     try {
       return await this.compound(command, redirected.io);
     } finally {
       await redirected.flush();
+      for (const { path, body } of this.#deferred.splice(mark)) {
+        const text = decode(await this.host.fs.read(path).catch(() => new Uint8Array(0)));
+        await this.subshell(() => this.script(body, { stdin: new Input(text), stdout: io.stdout, stderr: io.stderr }));
+      }
     }
+  }
+
+  async processPath(part: Part & { type: "process" }, io: IO): Promise<string> {
+    for (const dir of ["/dev", "/dev/fd"]) if (!(await this.host.fs.stat(dir))) await this.host.fs.mkdir(dir);
+    const path = "/dev/fd/" + (63 - (this.#processes++ % 54));
+    this.temporaries.push(path);
+    if (part.output) {
+      await this.host.fs.write(path, new Uint8Array(0));
+      this.#deferred.push({ path, body: part.body });
+      return path;
+    }
+    this.enter();
+    const out = this.buffer();
+    try {
+      await this.subshell(() => this.script(part.body, { stdin: io.stdin, stdout: out, stderr: io.stderr }));
+    } finally {
+      this.leave();
+    }
+    await this.host.fs.write(path, encode(out.text()));
+    return path;
   }
 
   async compound(command: Command, io: IO): Promise<number> {
@@ -493,8 +580,11 @@ export class Runner {
         }
         return status;
       }
-      case "group":
-        return command.subshell ? this.subshell(() => this.script(command.body, io)) : this.script(command.body, io);
+      case "group": {
+        if (!command.subshell) return this.script(command.body, io);
+        const inner = { ...io };
+        return this.subshell(() => this.script(command.body, inner), inner);
+      }
       case "arith":
         try {
           return (await this.arith(command.expr, io)) !== 0 ? 0 : 1;
@@ -536,7 +626,13 @@ export class Runner {
     try {
       const result = await evaluateTest(args, double, {
         stat: path => this.host.fs.stat(this.resolve(path)),
-        isSet: name => this.state.vars.has(name),
+        isSet: name => {
+          const element = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
+          if (!element) return this.state.vars.has(name) || this.state.maps.has(name);
+          const map = this.state.maps.get(element[1]);
+          if (map) return map.has(element[2]);
+          return this.state.vars.get(element[1])?.[Number(element[2])] !== undefined;
+        },
         match: (text, pattern) => globRegExp(pattern).test(text),
         regex: (text, source) => {
           const match = text.match(posixRegExp(source, true));
@@ -603,13 +699,41 @@ export class Runner {
 
   async assign(assign: Assign, io: IO) {
     const { name } = assign;
+    const map = this.state.maps.get(name);
     if (assign.items) {
-      const values: string[] = [];
-      for (const item of assign.items) values.push(...(await this.fields(item, io)));
-      this.set(name, assign.append ? [...(this.state.vars.get(name) ?? []), ...values] : values);
+      if (this.state.readonly.has(name)) throw new FatalError(name + ": readonly variable");
+      if (map) {
+        if (!assign.append) map.clear();
+        for (let i = 0; i < assign.items.length; i++) {
+          const key = assign.keys?.[i];
+          if (key) map.set(await this.string(key, io), await this.string(assign.items[i], io));
+          else {
+            const value = await this.string(assign.items[i], io);
+            const next = assign.items[++i];
+            map.set(value, next ? await this.string(next, io) : "");
+          }
+        }
+        return;
+      }
+      const array = assign.append ? (this.state.vars.get(name) ?? []).slice() : [];
+      let position = array.length;
+      for (let i = 0; i < assign.items.length; i++) {
+        const key = assign.keys?.[i];
+        if (key) {
+          position = await this.arith(key, io);
+          array[position++] = await this.string(assign.items[i], io);
+        } else for (const value of await this.fields(assign.items[i], io)) array[position++] = value;
+      }
+      this.set(name, array);
       return;
     }
     let value = assign.value ? await this.string(assign.value, io) : "";
+    if (map) {
+      if (this.state.readonly.has(name)) throw new FatalError(name + ": readonly variable");
+      const key = assign.index ? await this.string(assign.index, io) : "0";
+      map.set(key, assign.append ? (map.get(key) ?? "") + value : value);
+      return;
+    }
     if (this.state.integers.has(name)) {
       const number = await this.arith([{ type: "text", value: value || "0", quoted: true }], io);
       value = String(assign.append ? Number(this.get(name) ?? 0) + number : number);
@@ -653,10 +777,6 @@ export class Runner {
       io.stderr.write("bash: local: can only be used in a function\n");
       return 1;
     }
-    if (flags.has("A")) {
-      io.stderr.write("bash: " + builtin + ": associative arrays are not supported\n");
-      return 1;
-    }
     const exporting = builtin === "export" || flags.has("x");
     const scoped = builtin === "local" || ((builtin === "declare" || builtin === "typeset") && !flags.has("g") && this.state.frames.length > 0);
     if (!targets.length || flags.has("p")) {
@@ -664,8 +784,13 @@ export class Runner {
         for (const name of [...this.state.functions.keys()].sort()) io.stdout.write("declare -f " + name + "\n");
         return 0;
       }
-      const names = targets.length ? targets.map(target => (typeof target === "string" ? target : target.name)) : [...this.state.vars.keys()].sort();
+      const names = targets.length ? targets.map(target => (typeof target === "string" ? target : target.name)) : [...this.state.vars.keys(), ...this.state.maps.keys()].sort();
       for (const name of names) {
+        const map = this.state.maps.get(name);
+        if (map) {
+          io.stdout.write("declare -A " + name + "=(" + [...map].map(([key, value]) => "[" + key + "]=" + JSON.stringify(value) + " ").join("") + ")\n");
+          continue;
+        }
         if (exporting && !targets.length && !this.state.exported.has(name)) continue;
         const value = this.state.vars.get(name);
         if (!value) continue;
@@ -694,6 +819,10 @@ export class Runner {
       }
       if (scoped) this.local(name);
       if (flags.has("i")) this.state.integers.add(name);
+      if (flags.has("A") && !this.state.maps.has(name)) {
+        this.state.maps.set(name, new Map());
+        this.state.vars.delete(name);
+      }
       if (flags.has("f")) {
         if (!this.state.functions.has(name)) status = 1;
         continue;
@@ -703,6 +832,7 @@ export class Runner {
       else if (flags.has("a") && !this.state.vars.has(name)) this.set(name, []);
       if (exporting) this.state.exported.add(name);
       if (flags.has("+x") || flags.has("n")) this.state.exported.delete(name);
+      if (builtin === "readonly" || flags.has("r")) this.state.readonly.add(name);
     }
     return status;
   }
@@ -710,7 +840,7 @@ export class Runner {
   async dispatch(argv: string[], io: IO, functions = true): Promise<number> {
     const [name, ...args] = argv;
     const fn = functions ? this.state.functions.get(name) : undefined;
-    if (fn) return this.call(fn, args, io);
+    if (fn) return this.call(fn, args, io, name);
     const builtin = BUILTINS[name];
     if (builtin) {
       try {
@@ -734,7 +864,7 @@ export class Runner {
           const head = await this.host.fs.read(path);
           if (head[0] === 0 && head[1] === 0x61 && head[2] === 0x73 && head[3] === 0x6d) return this.external(name, wasm, [name, ...args], io);
         }
-        return this.source(path, args, io, true);
+        return this.source(path, args, io, true, name);
       }
       io.stderr.write("bash: " + name + ": " + (stat ? "Is a directory" : "No such file or directory") + "\n");
       return stat ? 126 : 127;
@@ -806,10 +936,12 @@ export class Runner {
     this.check();
   }
 
-  async call(body: Command, args: string[], io: IO): Promise<number> {
+  async call(body: Command, args: string[], io: IO, name: string): Promise<number> {
     this.enter();
     const positional = this.state.positional;
     const frame: Frame = new Map();
+    const names = this.state.vars.get("FUNCNAME");
+    this.state.vars.set("FUNCNAME", [name, ...(names ?? [])]);
     this.state.positional = args;
     this.state.frames.push(frame);
     try {
@@ -826,11 +958,13 @@ export class Runner {
         else this.state.exported.delete(name);
       }
       this.state.positional = positional;
+      if (names) this.state.vars.set("FUNCNAME", names);
+      else this.state.vars.delete("FUNCNAME");
       this.leave();
     }
   }
 
-  async source(path: string, args: string[], io: IO, isolated: boolean): Promise<number> {
+  async source(path: string, args: string[], io: IO, isolated: boolean, arg0?: string): Promise<number> {
     const text = decode(await this.host.fs.read(path));
     let script: Script;
     try {
@@ -844,6 +978,7 @@ export class Runner {
       this.enter();
       const positional = this.state.positional;
       if (args.length || isolated) this.state.positional = args;
+      if (arg0 !== undefined) this.state.arg0 = arg0;
       try {
         return await this.script(script, io);
       } catch (error) {
@@ -880,8 +1015,8 @@ export class Runner {
     try {
       for (const redirect of redirects) {
         const op = redirect.op;
-        if (op === "<<" || op === "<<<") {
-          const text = op === "<<" ? await this.string(redirect.body ?? [], io) : (await this.string(redirect.target, io)) + "\n";
+        if (op === "<<" || op === "<<-" || op === "<<<") {
+          const text = op !== "<<<" ? await this.string(redirect.body ?? [], io) : (await this.string(redirect.target, io)) + "\n";
           if ((redirect.fd ?? 0) === 0) fds[0] = new Input(text);
           continue;
         }
@@ -948,7 +1083,7 @@ export class Runner {
       case "!":
         return [""];
       case "0":
-        return ["bash"];
+        return [state.arg0];
       case "-":
         return [(state.options.errexit ? "e" : "") + (state.options.nounset ? "u" : "") + (state.options.xtrace ? "x" : "") + "hB"];
       case "RANDOM":
@@ -963,6 +1098,17 @@ export class Runner {
 
   async param(part: Part & { type: "param" }, io: IO): Promise<{ values: string[]; list: boolean; joined: boolean }> {
     let name = part.name;
+    if (part.op === "names") {
+      const names = [...new Set([...this.state.vars.keys(), ...this.state.maps.keys()])].filter(key => key.startsWith(name)).sort();
+      return { values: names, list: true, joined: false };
+    }
+    if (part.op === "indirect" && part.index) {
+      const key = await this.string(part.index, io);
+      if (key === "@" || key === "*") {
+        const map = this.state.maps.get(name);
+        return { values: map ? [...map.keys()] : Object.keys(this.state.vars.get(name) ?? []), list: true, joined: key === "*" };
+      }
+    }
     if (part.op === "indirect") {
       name = this.special(name)?.[0] ?? "";
       const bracket = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
@@ -977,7 +1123,14 @@ export class Runner {
     const all = name === "@" || name === "*" || index === "@" || index === "*";
     const joined = name === "*" || index === "*";
     let values: string[] | undefined;
-    if (name === "@" || name === "*") values = this.state.positional;
+    const map = this.state.maps.get(name);
+    if (map) {
+      if (index === "@" || index === "*") values = [...map.values()];
+      else {
+        const value = map.get(index ?? "0");
+        values = value === undefined ? undefined : [value];
+      }
+    } else if (name === "@" || name === "*") values = this.state.positional;
     else if (index === "@" || index === "*") values = this.state.vars.get(name)?.filter(() => true);
     else if (index !== undefined) {
       const array = this.state.vars.get(name);
@@ -1052,6 +1205,25 @@ export class Runner {
     else if (op === ",,") result = result.map(value => value.toLowerCase());
     else if (op === "^") result = result.map(value => value.charAt(0).toUpperCase() + value.slice(1));
     else if (op === ",") result = result.map(value => value.charAt(0).toLowerCase() + value.slice(1));
+    else if (op === "@Q" || op === "@K") result = result.map(shellQuote);
+    else if (op === "@U") result = result.map(value => value.toUpperCase());
+    else if (op === "@u") result = result.map(value => value.charAt(0).toUpperCase() + value.slice(1));
+    else if (op === "@L") result = result.map(value => value.toLowerCase());
+    else if (op === "@A") result = [name + "=" + shellQuote(result[0] ?? "")];
+    else if (op === "@a") result = [(map ? "A" : (this.state.vars.get(name)?.length ?? 0) > 1 ? "a" : "") + (this.state.integers.has(name) ? "i" : "") + (this.state.readonly.has(name) ? "r" : "") + (this.state.exported.has(name) ? "x" : "")];
+    else if (op === "@E")
+      result = result.map(value => {
+        let out = "";
+        for (let i = 0; i < value.length; i++) {
+          if (value[i] !== "\\") out += value[i];
+          else {
+            const [text, length] = ansiEscape(value, i + 1);
+            out += text;
+            i += length;
+          }
+        }
+        return out;
+      });
     return { values: result, list: all, joined };
   }
 
@@ -1088,6 +1260,9 @@ export class Runner {
           pieces.push({ text: String(value), quoted: part.quoted, split: !part.quoted });
           break;
         }
+        case "process":
+          pieces.push({ text: await this.processPath(part, io), quoted: true, split: false });
+          break;
       }
     }
     return pieces;
@@ -1155,6 +1330,8 @@ export class Runner {
             out.push(...matches);
             continue;
           }
+          if (this.state.shopt.has("nullglob")) continue;
+          if (this.state.shopt.has("failglob")) throw new CommandError("no match: " + field.text);
         }
         out.push(field.text);
       }
@@ -1165,16 +1342,41 @@ export class Runner {
   async glob(pattern: string): Promise<string[]> {
     const absolute = pattern.startsWith("/");
     const segments = pattern.split("/").filter(Boolean);
+    const dot = this.state.shopt.has("dotglob");
+    const star = this.state.shopt.has("globstar");
+    const join = (base: string, name: string) => (base === "" ? name : base === "/" ? "/" + name : base + "/" + name);
     let paths: string[] = [absolute ? "/" : ""];
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
+      const last = i === segments.length - 1;
       const next: string[] = [];
+      if (star && segment === "**") {
+        const walk = async (base: string) => {
+          const dir = this.resolve(base || ".");
+          if ((await this.host.fs.stat(dir))?.kind !== "directory") return;
+          for (const name of (await this.host.fs.list(dir)).sort()) {
+            if (name.startsWith(".") && !dot) continue;
+            const path = join(base, name);
+            if ((await this.host.fs.stat(this.resolve(path)))?.kind === "directory") {
+              next.push(path);
+              await walk(path);
+            } else if (last) next.push(path);
+          }
+        };
+        for (const base of paths) {
+          if (!last) next.push(base);
+          await walk(base);
+        }
+        paths = next;
+        if (!paths.length) break;
+        continue;
+      }
       for (const base of paths) {
         const dir = this.resolve(base || ".");
         if (!hasGlob(segment)) {
           const literal = segment.replace(/\\([\s\S])/g, "$1");
-          const path = base === "" ? literal : base === "/" ? "/" + literal : base + "/" + literal;
-          if (i === segments.length - 1 ? await this.host.fs.stat(this.resolve(path)) : (await this.host.fs.stat(this.resolve(path)))?.kind === "directory") next.push(path);
+          const path = join(base, literal);
+          if (last ? await this.host.fs.stat(this.resolve(path)) : (await this.host.fs.stat(this.resolve(path)))?.kind === "directory") next.push(path);
           continue;
         }
         const stat = await this.host.fs.stat(dir);
@@ -1182,19 +1384,29 @@ export class Runner {
         const regex = new RegExp("^" + globSource(segment, true) + "$");
         const hidden = segment.startsWith(".") || segment.startsWith("\\.");
         for (const name of await this.host.fs.list(dir)) {
-          if (name.startsWith(".") && !hidden) continue;
+          if (name.startsWith(".") && !hidden && !dot) continue;
           if (!regex.test(name)) continue;
-          const path = base === "" ? name : base === "/" ? "/" + name : base + "/" + name;
-          if (i < segments.length - 1 && (await this.host.fs.stat(this.resolve(path)))?.kind !== "directory") continue;
+          const path = join(base, name);
+          if (!last && (await this.host.fs.stat(this.resolve(path)))?.kind !== "directory") continue;
           next.push(path);
         }
       }
       paths = next;
       if (!paths.length) break;
     }
-    if (pattern.endsWith("/")) paths = paths.map(path => path + "/");
-    return paths.filter(path => path !== "" && path !== "/").sort();
+    paths = paths.filter(path => path !== "" && path !== "/");
+    if (pattern.endsWith("/")) {
+      const directories: string[] = [];
+      for (const path of paths) if ((await this.host.fs.stat(this.resolve(path)))?.kind === "directory") directories.push(path + "/");
+      paths = directories;
+    }
+    return [...new Set(paths)].sort();
   }
+}
+
+function shellQuote(value: string): string {
+  if (/[\x00-\x1f\x7f]/.test(value)) return "$'" + value.replace(/[\\']/g, "\\$&").replace(/[\x00-\x1f\x7f]/g, c => ({ "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c] ?? "\\" + c.charCodeAt(0).toString(8).padStart(3, "0")) + "'";
+  return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
 function joinPieces(pieces: Piece[], mode: "text" | "pattern" | "regex"): string {
@@ -1243,13 +1455,15 @@ function readFields(text: string, names: number, ifs: string): string[] {
 
 const noop: Builtin = async () => 0;
 
+const SHELL_BUILTINS = new Set(["echo", "printf", "kill", "test", "[", "pwd", "read", "true", "false", "type", "command", "ulimit", "umask", "wait", "jobs", "fg", "bg", "help", "history", "times"]);
+
+const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do", "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc"]);
+
 export const BUILTINS: Record<string, Builtin> = {
   ":": noop,
   true: noop,
   false: async () => 1,
-  trap: noop,
   wait: noop,
-  shopt: noop,
   alias: noop,
   unalias: noop,
   hash: noop,
@@ -1269,6 +1483,96 @@ export const BUILTINS: Record<string, Builtin> = {
     if (target === "-") io.stdout.write(path + "\n");
     return 0;
   },
+  async trap(args, io) {
+    if (!args.length || args[0] === "-p") {
+      for (const [signal, action] of this.state.traps) if (args.length < 2 || args.includes(signal)) io.stdout.write("trap -- " + shellQuote(action) + " " + signal + "\n");
+      return 0;
+    }
+    if (args[0] === "-l") return 0;
+    const rest = args[0] === "--" ? args.slice(1) : args;
+    const reset = rest.length === 1 || /^(-|\d+)$/.test(rest[0]) && rest[0] !== "0";
+    const action = reset ? "-" : rest[0];
+    for (const raw of reset && rest[0] !== "-" ? rest : rest.slice(1)) {
+      let signal = raw.toUpperCase().replace(/^SIG/, "");
+      if (signal === "0") signal = "EXIT";
+      if (action === "-") this.state.traps.delete(signal);
+      else this.state.traps.set(signal, action);
+    }
+    return 0;
+  },
+  async shopt(args, io) {
+    let mode = "";
+    const names: string[] = [];
+    for (const arg of args) {
+      if (/^-[supqo]+$/.test(arg)) mode = arg.replace(/[op-]/g, "").slice(-1) || mode;
+      else names.push(arg);
+    }
+    if (mode === "s" || mode === "u") {
+      for (const name of names) {
+        if (mode === "s") this.state.shopt.add(name);
+        else this.state.shopt.delete(name);
+      }
+      return 0;
+    }
+    let status = 0;
+    for (const name of names.length ? names : ["dotglob", "extglob", "failglob", "globstar", "nocaseglob", "nocasematch", "nullglob"]) {
+      const on = this.state.shopt.has(name);
+      if (!on) status = 1;
+      if (mode !== "q") io.stdout.write(name.padEnd(15) + "\t" + (on ? "on" : "off") + "\n");
+    }
+    return status;
+  },
+  async getopts(args, io) {
+    const [spec, name, ...rest] = args;
+    if (spec === undefined || name === undefined) throw new CommandError("usage: getopts optstring name [arg ...]", 2);
+    const argv = rest.length ? rest : this.state.positional;
+    const silent = spec.startsWith(":");
+    const letters = silent ? spec.slice(1) : spec;
+    let index = Number(this.get("OPTIND") ?? "1") || 1;
+    if (index !== this.state.optind) this.state.optpos = 1;
+    const arg = argv[index - 1];
+    this.state.vars.delete("OPTARG");
+    if (arg === undefined || arg === "-" || !arg.startsWith("-") || arg === "--") {
+      if (arg === "--") index++;
+      this.state.optind = index;
+      this.state.optpos = 1;
+      this.set("OPTIND", String(index));
+      this.set(name, "?");
+      return 1;
+    }
+    const letter = arg[this.state.optpos] ?? "";
+    let next = this.state.optpos + 1;
+    const position = letter === ":" ? -1 : letters.indexOf(letter);
+    if (position < 0) {
+      this.set(name, "?");
+      if (silent) this.set("OPTARG", letter);
+      else io.stderr.write("bash: illegal option -- " + letter + "\n");
+    } else if (letters[position + 1] === ":") {
+      if (next < arg.length) {
+        this.set("OPTARG", arg.slice(next));
+        this.set(name, letter);
+      } else if (argv[index] !== undefined) {
+        this.set("OPTARG", argv[index]);
+        this.set(name, letter);
+        index++;
+      } else if (silent) {
+        this.set(name, ":");
+        this.set("OPTARG", letter);
+      } else {
+        io.stderr.write("bash: option requires an argument -- " + letter + "\n");
+        this.set(name, "?");
+      }
+      next = arg.length;
+    } else this.set(name, letter);
+    if (next >= arg.length) {
+      index++;
+      next = 1;
+    }
+    this.state.optpos = next;
+    this.state.optind = index;
+    this.set("OPTIND", String(index));
+    return 0;
+  },
   async pwd(_args, io) {
     io.stdout.write(this.state.cwd + "\n");
     return 0;
@@ -1282,11 +1586,22 @@ export const BUILTINS: Record<string, Builtin> = {
       else {
         const element = arg.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
         if (element) {
-          const array = this.state.vars.get(element[1]);
-          if (array) array.splice(Number(element[2]), 1);
+          const map = this.state.maps.get(element[1]);
+          if (map) {
+            map.delete(element[2]);
+            continue;
+          }
+          const array = this.state.vars.get(element[1])?.slice();
+          if (array) {
+            const index = evaluateArith(element[2], { get: n => this.get(n) ?? "", set: () => undefined });
+            delete array[index < 0 ? array.length + index : index];
+            this.state.vars.set(element[1], array);
+          }
           continue;
         }
+        if (this.state.readonly.has(arg)) throw new CommandError(arg + ": cannot unset: readonly variable");
         this.local(arg);
+        this.state.maps.delete(arg);
         this.state.vars.delete(arg);
         this.state.exported.delete(arg);
       }
@@ -1449,12 +1764,12 @@ export const BUILTINS: Record<string, Builtin> = {
     let status = 0;
     const terse = args[0] === "-t";
     for (const name of args.filter(arg => !arg.startsWith("-"))) {
-      const kind = this.state.functions.has(name) ? "function" : BUILTINS[name] ? "builtin" : this.host.commands.has(name) ? "file" : undefined;
+      const kind = KEYWORDS.has(name) ? "keyword" : this.state.functions.has(name) ? "function" : BUILTINS[name] || SHELL_BUILTINS.has(name) ? "builtin" : this.host.commands.has(name) ? "file" : undefined;
       if (!kind) {
         if (!terse) io.stderr.write("bash: type: " + name + ": not found\n");
         status = 1;
       } else if (terse) io.stdout.write(kind + "\n");
-      else io.stdout.write(kind === "function" ? name + " is a function\n" : kind === "builtin" ? name + " is a shell builtin\n" : name + " is /usr/bin/" + name + "\n");
+      else io.stdout.write(kind === "function" ? name + " is a function\n" : kind === "builtin" ? name + " is a shell builtin\n" : kind === "keyword" ? name + " is a shell keyword\n" : name + " is /usr/bin/" + name + "\n");
     }
     return status;
   },
@@ -1462,7 +1777,7 @@ export const BUILTINS: Record<string, Builtin> = {
     if (args[0] === "-v" || args[0] === "-V") {
       let status = 0;
       for (const name of args.slice(1)) {
-        if (this.state.functions.has(name) || BUILTINS[name]) io.stdout.write(name + "\n");
+        if (this.state.functions.has(name) || BUILTINS[name] || SHELL_BUILTINS.has(name) || KEYWORDS.has(name)) io.stdout.write(name + "\n");
         else if (this.host.commands.has(name)) io.stdout.write("/usr/bin/" + name + "\n");
         else status = 1;
       }
@@ -1566,6 +1881,7 @@ export const BUILTINS: Record<string, Builtin> = {
           io.stderr.write("bash: -c: " + error.message + "\n");
           return 2;
         }
+        if (args[i + 1] !== undefined) this.state.arg0 = args[i + 1];
         this.state.positional = args.slice(i + 2);
         this.enter();
         try {
@@ -1583,7 +1899,7 @@ export const BUILTINS: Record<string, Builtin> = {
           this.leave();
         }
       }
-      return this.source(this.resolve(args[i]), args.slice(i + 1), io, false);
+      return this.source(this.resolve(args[i]), args.slice(i + 1), io, false, args[i]);
     });
   },
   async timeout(args, io) {
@@ -1606,8 +1922,19 @@ BUILTINS.readarray = BUILTINS.mapfile;
 BUILTINS.sh = BUILTINS.bash;
 
 export async function run(runner: Runner, source: string, io: IO): Promise<number> {
+  let status = await guard(runner, io, () => runner.script(parse(source), io));
+  if (runner.state.traps.has("EXIT")) status = await guard(runner, io, () => runner.exitTrap(io, status));
   try {
-    return await runner.script(parse(source), io);
+    await runner.cleanup();
+  } catch (error) {
+    io.stderr.write("bash: " + message(error) + "\n");
+  }
+  return status;
+}
+
+async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promise<number> {
+  try {
+    return await body();
   } catch (error) {
     if (error instanceof ExitSignal || error instanceof ReturnSignal) return error.status;
     if (error instanceof LoopSignal) return 0;
@@ -1621,9 +1948,9 @@ export async function run(runner: Runner, source: string, io: IO): Promise<numbe
       io.stderr.write("bash: " + error.message + "\n");
       return error.status;
     }
-    if (error instanceof FatalError || error instanceof ArithError) {
+    if (error instanceof FatalError || error instanceof ArithError || error instanceof CommandError) {
       io.stderr.write("bash: " + error.message + "\n");
-      return error instanceof FatalError ? error.status : 1;
+      return error instanceof FatalError || error instanceof CommandError ? error.status : 1;
     }
     throw error;
   }

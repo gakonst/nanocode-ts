@@ -5,13 +5,14 @@ export type Part =
   | { type: "param"; name: string; index?: Word; op: string; arg?: Word; arg2?: Word; quoted: boolean }
   | { type: "command"; body: Script; quoted: boolean }
   | { type: "arith"; expr: Word; quoted: boolean }
-  | { type: "tilde"; user: string };
+  | { type: "tilde"; user: string }
+  | { type: "process"; body: Script; output: boolean };
 
 export type Word = Part[];
 
 export type Redirect = { fd: number | null; op: string; target: Word; body?: Word };
 
-export type Assign = { name: string; index?: Word; value?: Word; items?: Word[]; append: boolean };
+export type Assign = { name: string; index?: Word; value?: Word; items?: Word[]; keys?: (Word | undefined)[]; append: boolean };
 
 export type TestToken = { op: string } | { word: Word };
 
@@ -394,6 +395,10 @@ class Parser {
       this.blanks();
       if (this.done()) break;
       const c = this.src[this.pos];
+      if ((c === "<" || c === ">") && this.src[this.pos + 1] === "(") {
+        command.words.push(this.word());
+        continue;
+      }
       if (this.redirect(command.redirects)) continue;
       if (c === "\n" || c === ";" || c === "|" || c === "&" || c === ")" || c === "(") break;
       const declaring = command.words.length > 0 && isDeclaration(command.words[0]);
@@ -413,6 +418,16 @@ class Parser {
                 break;
               }
               if (this.done()) this.fail();
+              const key = this.src.slice(this.pos, this.pos + 4096).match(/^\[([^\]\n]*)\]=/);
+              if (key) {
+                entry.keys ??= [];
+                entry.keys[entry.items.length] = new Parser(key[1]).text();
+                this.pos += key[0].length;
+                if (this.done() || " \t\n)".includes(this.src[this.pos])) {
+                  entry.items.push([{ type: "text", value: "", quoted: true }]);
+                  continue;
+                }
+              }
               entry.items.push(this.word());
             }
           } else entry.value = this.word();
@@ -441,7 +456,8 @@ class Parser {
       const expand = !/['"\\]/.test(raw);
       this.pending.push({ redirect, delimiter: raw.replace(/['"\\]/g, ""), strip: match[2] === "<<-", expand });
     } else {
-      if (this.done() || META.includes(this.src[this.pos])) this.fail();
+      const process = this.starts("<(") || this.starts(">(");
+      if (!process && (this.done() || META.includes(this.src[this.pos]))) this.fail();
       redirect.target = this.word();
     }
     redirects.push(redirect);
@@ -451,6 +467,18 @@ class Parser {
   word(regex = false): Word {
     const meta = regex ? " \t\n" : META;
     const parts: Part[] = [];
+    if ((this.src[this.pos] === "<" || this.src[this.pos] === ">") && this.src[this.pos + 1] === "(") {
+      const output = this.src[this.pos] === ">";
+      this.pos += 2;
+      const outer = this.pending;
+      this.pending = [];
+      const body = this.list(new Set());
+      this.separators();
+      this.pending = outer;
+      if (!this.starts(")")) this.fail();
+      this.pos++;
+      parts.push({ type: "process", body, output });
+    }
     if (this.src[this.pos] === "~") {
       const user = this.src.slice(this.pos + 1).match(/^[A-Za-z0-9_-]*(?=[\/\s;&|()<>]|$)/);
       if (user) {
@@ -565,6 +593,10 @@ class Parser {
       this.pos++;
       return this.braced(quoted);
     }
+    if (this.starts("[")) {
+      this.pos++;
+      return { type: "arith", expr: new Parser(this.until("]")).text(), quoted };
+    }
     const name = this.src.slice(this.pos).match(NAME)?.[0];
     if (name) {
       this.pos += name.length;
@@ -599,7 +631,17 @@ class Parser {
       this.pos++;
       return part;
     }
+    if (op === "indirect" && (this.starts("*}") || this.starts("@}"))) {
+      this.pos += 2;
+      part.op = "names";
+      return part;
+    }
     if (op) this.fail();
+    if (this.starts("@") && /^@[QEPAaULuK]}/.test(this.src.slice(this.pos, this.pos + 3))) {
+      part.op = "@" + this.src[this.pos + 1];
+      this.pos += 3;
+      return part;
+    }
     const operator = ["//", "/#", "/%", "/", ":-", ":=", ":+", ":?", "-", "=", "+", "?", "##", "#", "%%", "%", "^^", "^", ",,", ","].find(op => this.starts(op));
     if (operator) {
       this.pos += operator.length;
