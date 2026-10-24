@@ -292,6 +292,7 @@ export function account(options: AccountOptions) {
 
   async function send(kind: "model" | "pay", target: string, init: Init): Promise<Response> {
     if (kind === "pay" && !publicTarget(target)) return json({ error: "fetch reaches only public http(s) hosts" }, 403);
+    if (kind === "pay" && !new Headers(init.headers).has("user-agent")) init = { ...init, headers: [...new Headers(init.headers), ["user-agent", "nanocode-ts"]] };
     if (kind === "pay" && !(await record())) return Payment.locked(servers, undefined, options.scripts)(target, { method: init.method, headers: init.headers, body: init.body, signal: init.signal });
     try {
       const current = await pay();
