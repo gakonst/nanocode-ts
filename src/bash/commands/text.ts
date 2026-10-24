@@ -130,7 +130,7 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
         text += chunk;
         if (text.length > 1 << 22) text = lastLines(text, Math.abs(n));
       }
-      await render(text);
+      await render(lastLines(text, Math.abs(n)));
     } else await render(await ctx.stdin.text());
   }
   return status;
