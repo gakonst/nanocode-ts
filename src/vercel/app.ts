@@ -1,10 +1,10 @@
 import { durableAgent, getWorld, type HostTool } from "durable-harness";
 import { handRoute } from "./hands.ts";
-import { ATTACHMENT_PATH, type CarriedFile, carryAttachments, HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, SCOPE, type ServiceTier, type Thinking } from "./harness.ts";
+import { ATTACHMENT_PATH, CANCEL, type CarriedFile, carryAttachments, HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, SCOPE, type ServiceTier, type Thinking } from "./harness.ts";
 import { committedBatches, LocalSql } from "./journal.ts";
 import { SqlFileSystem } from "../bash/index.ts";
 import { fileResponse } from "../files.ts";
-import { VERCEL_ATTACHMENT_BYTES } from "./transport.ts";
+import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from "./transport.ts";
 import { nanocodeModule } from "./module.ts";
 import type { ModelProvider } from "../index.ts";
 
@@ -40,7 +40,7 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
   return { model: found.id, provider: entry.id, thinking, ...(found.maxTokens ? { max_tokens: found.maxTokens } : {}), ...(found.serviceTier ? { service_tier: found.serviceTier } : {}) };
 }
 
-type Body = { attachments?: unknown; effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
+type Body = { attachments?: unknown; effort?: unknown; hand?: unknown; harness?: unknown; kind?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
 
 function carried(value: unknown): CarriedFile[] | string {
   if (!Array.isArray(value) || value.length > 8) return "attachments must be at most 8 files";
@@ -130,6 +130,10 @@ export function createNanocode(options: NanocodeAppOptions) {
     const params = new URL(request.url).searchParams;
     if (params.has("file")) return file(request, params);
     if (streamsHands && params.has("hand")) return handRoutes.GET(request);
+    if (params.get("cursor") === FIRST_CURSOR && params.get("sessionId")) {
+      const state = await agent.sessions.inspect(params.get("sessionId")!).catch(() => undefined);
+      if (state && !state.submissions.length) return new Response("event: end\ndata: {}\n\n", { headers: { "content-type": "text/event-stream", "cache-control": "no-store" } });
+    }
     if (!params.has("keepwarm")) return chat.GET(request);
     await nanocodeModule();
     return new Response(null, { status: 204 });
@@ -139,6 +143,14 @@ export function createNanocode(options: NanocodeAppOptions) {
     if (streamsHands && new URL(original.url).searchParams.has("hand")) return handRoutes.POST(original);
     const sent = await original.clone().json().catch(() => undefined) as Body | undefined;
     if (!sent || typeof sent !== "object") return chat.POST(original);
+    if (sent.kind === "cancel") {
+      if (typeof sent.sessionId !== "string") return new Response("sessionId is required", { status: 400 });
+      const refused = await admit(original);
+      if (refused) return refused;
+      const state = await agent.sessions.inspect(sent.sessionId).catch(() => undefined);
+      if (!state) return Response.json({ error: "no such session" }, { status: 404 });
+      return Response.json({ submission: await agent.sessions.send(sent.sessionId, CANCEL, "steer") }, { status: 202 });
+    }
     if (maxPromptCharacters && typeof sent.text === "string" && sent.text.length > maxPromptCharacters) return new Response(`A prompt is at most ${maxPromptCharacters} characters.`, { status: 413 });
     let body = sent;
     let request = original;

@@ -10,6 +10,7 @@ export type HandOptions = {
   fetch?(input: string, init: RequestInit): Promise<Response>;
   tools?: { definitions: HostTool[]; call(name: string, input: unknown, signal: AbortSignal): Promise<unknown> };
   mcpServers?: McpServer[];
+  mcp?: RuntimeOptions["mcp"];
   protocols?: string | string[];
   maxFrameBytes?: number;
   WebSocket?: typeof WebSocket;
@@ -75,6 +76,7 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
       dispatch,
       ...(options.tools ? { tools: { definitions: options.tools.definitions, call: (name, input, signal) => options.tools!.call(name, input, signal) } } : {}),
       ...(options.mcpServers?.length ? { mcp_servers: options.mcpServers } : {}),
+      ...(options.mcp ? { mcp: options.mcp } : {}),
       ...(options.name ? { name: options.name } : {}),
       ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
       send: text => link?.send(text),

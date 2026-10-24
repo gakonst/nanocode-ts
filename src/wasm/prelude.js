@@ -33,18 +33,62 @@ const utf8 = (text) => {
   }
   return new Uint8Array(bytes);
 };
-const fromUtf8 = (bytes) => {
+const fromUtf8 = (bytes, fatal = false) => {
   let out = "";
   for (let index = 0; index < bytes.length;) {
-    const a = bytes[index++];
-    let code = a;
-    if (a >= 0xf0) code = ((a & 7) << 18) | ((bytes[index++] & 63) << 12) | ((bytes[index++] & 63) << 6) | (bytes[index++] & 63);
-    else if (a >= 0xe0) code = ((a & 15) << 12) | ((bytes[index++] & 63) << 6) | (bytes[index++] & 63);
-    else if (a >= 0xc0) code = ((a & 31) << 6) | (bytes[index++] & 63);
+    const a = bytes[index];
+    const size = a < 0x80 ? 1 : a >= 0xc2 && a < 0xe0 ? 2 : a >= 0xe0 && a < 0xf0 ? 3 : a >= 0xf0 && a < 0xf5 ? 4 : 0;
+    let code = size === 1 ? a : size === 2 ? a & 31 : size === 3 ? a & 15 : a & 7;
+    let valid = size > 0 && index + size <= bytes.length;
+    for (let next = 1; valid && next < size; next++) {
+      const b = bytes[index + next];
+      if ((b & 0xc0) !== 0x80) valid = false;
+      else code = (code << 6) | (b & 63);
+    }
+    if (valid && ((size === 3 && (code < 0x800 || (code >= 0xd800 && code < 0xe000))) || (size === 4 && (code < 0x10000 || code > 0x10ffff)))) valid = false;
+    if (!valid) {
+      if (fatal) throw new TypeError("The encoded data was not valid utf-8");
+      out += "�";
+      index++;
+      continue;
+    }
     out += String.fromCodePoint(code);
+    index += size;
   }
   return out;
 };
+const byteView = (value) => value instanceof Uint8Array ? value : value instanceof ArrayBuffer ? new Uint8Array(value) : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : undefined;
+class TextEncoder {
+  get encoding() { return "utf-8"; }
+  encode(text = "") { return utf8(String(text)); }
+  encodeInto(text, target) {
+    const bytes = utf8(String(text));
+    let read = 0, written = 0;
+    for (const character of String(text)) {
+      const size = utf8(character).length;
+      if (written + size > target.length) break;
+      target.set(bytes.subarray(written, written + size), written);
+      written += size;
+      read += character.length;
+    }
+    return { read, written };
+  }
+}
+class TextDecoder {
+  constructor(label = "utf-8", options = {}) {
+    if (!/^(utf-?8|unicode-1-1-utf-8)$/i.test(String(label).trim())) throw new RangeError("TextDecoder supports only utf-8 here, not " + label);
+    this.fatal = Boolean(options.fatal);
+    this.ignoreBOM = Boolean(options.ignoreBOM);
+  }
+  get encoding() { return "utf-8"; }
+  decode(input) {
+    if (input === undefined) return "";
+    const bytes = byteView(input);
+    if (!bytes) throw new TypeError("TextDecoder.decode expects an ArrayBuffer or a typed array");
+    const text = fromUtf8(bytes, this.fatal);
+    return !this.ignoreBOM && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  }
+}
 const headerList = (headers) => {
   if (!headers) return [];
   if (Array.isArray(headers)) return headers.map(([name, value]) => [String(name), String(value)]);
@@ -105,7 +149,9 @@ bash.readFile = async (path) => {
   return result.stdout;
 };
 bash.writeFile = async (path, content) => {
-  const result = await run("mkdir -p -- \"$(dirname -- " + quote(path) + ")\" && cat > " + quote(path), String(content));
+  const bytes = byteView(content);
+  const target = "mkdir -p -- \"$(dirname -- " + quote(path) + ")\" && " + (bytes ? "base64 -d > " : "cat > ") + quote(path);
+  const result = await run(target, bytes ? toBase64(bytes) : String(content));
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "write exited with " + result.exitCode);
 };
 const callWasm = (input) => call("wasm", input).catch((error) => { throw new Error(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
@@ -169,4 +215,4 @@ const wasm = {
   invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wasmSource(source), name, args: args.map(toWire) })).result),
   instantiate: async (source) => (await instantiate(source instanceof Module ? source : new Module(source))),
 };
-return { fetch, bash, Headers, Response, wasm, WebAssembly };
+return { fetch, bash, Headers, Response, TextEncoder, TextDecoder, wasm, WebAssembly };

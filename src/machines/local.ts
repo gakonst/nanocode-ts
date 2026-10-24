@@ -74,7 +74,7 @@ export async function create(options: Options): Promise<Agent> {
           thinking: model.thinking,
           workspace: shell.cwd,
         },
-        { dispatch: (request, signal) => model.dispatch(request, signal), fetch: options.fetch, workspace: shell.workspace() },
+        { dispatch: (request, signal) => model.dispatch(request, signal), fetch: options.fetch, workspace: shell.workspace(), mcp: { core: Mcp.core } },
       );
     } catch (error) {
       await runtime.dispose();

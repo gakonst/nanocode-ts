@@ -868,7 +868,7 @@ export type Conversation = { id: string; title: string; updated: number };
 
 export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined; conversations: readonly Conversation[]; conversation: string | undefined };
 
-export type TransportParameters = { prompt: string; attachments?: readonly Attachment[]; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void; signal: AbortSignal };
+export type TransportParameters = { prompt: string; attachments?: readonly Attachment[]; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void; changed?(): void; signal: AbortSignal };
 
 export type Transport = {
   send(parameters: TransportParameters): Promise<void>;
@@ -1111,6 +1111,7 @@ export function createConfig(options: ConfigOptions): Config {
     signal,
     push: event => { if (id === generation) push(event); },
     note: (kind, text) => { if (id === generation) note(kind, text); },
+    changed: () => { if (id === generation) saveTransport(); },
   });
   const detachable = () => Boolean(history && options.transport.resume);
   const detach = () => {

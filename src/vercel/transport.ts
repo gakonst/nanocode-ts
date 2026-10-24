@@ -3,6 +3,8 @@ import { safeName, sniff } from "../files.ts";
 
 export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
+export const FIRST_CURSOR = "0.0";
+
 export type VercelSession = { id?: string; cursor?: string; open?: boolean };
 
 export type VercelSelection = { harness: string; model: string; effort?: string };
@@ -98,7 +100,8 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
   const reconnect = async (id: string, parameters: Omit<TransportParameters, "prompt">, session: VercelSession) => {
     const { signal } = parameters;
     let delay = reconnectMs;
-    while (session.cursor && !signal?.aborted) {
+    session.cursor ??= FIRST_CURSOR;
+    while (!signal?.aborted) {
       const response = await fetch(`${url}?sessionId=${encodeURIComponent(id)}&cursor=${encodeURIComponent(session.cursor)}`, { headers: headers(), signal }).catch(() => undefined);
       if (response && (response.status === 408 || response.status === 429 || response.status >= 500)) {
         const after = Number(response.headers.get("retry-after"));
@@ -149,7 +152,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         return await response.blob();
       },
     },
-    async send({ prompt: typed, attachments, push, note, signal }: TransportParameters) {
+    async send({ prompt: typed, attachments, push, note, changed, signal }: TransportParameters) {
       const prompt = attachedPrompt(typed, attachments);
       const total = (attachments ?? []).reduce((sum, item) => sum + (pending.get(item.path)?.bytes.length ?? 0), 0);
       if (total > VERCEL_ATTACHMENT_BYTES) throw new Error(`a message carries at most ${VERCEL_ATTACHMENT_BYTES} bytes of attachments here`);
@@ -163,14 +166,15 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       try {
         let hand = await options.hand?.(existing);
         if (signal?.aborted) return;
-        if (!existing && hand) {
+        if (!existing) {
           existing = await begin(hand, signal).catch(() => undefined);
           if (signal?.aborted) return;
-          if (existing) {
-            session.id = existing;
-            save(session);
-            hand = await options.hand!(existing);
-          }
+          if (existing && hand) hand = await options.hand!(existing);
+        }
+        if (existing && existing !== session.id) {
+          session.id = existing;
+          save(session);
+          changed?.();
         }
         const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt, ...carried } : { ...chosen(), ...(hand ? { hand } : {}), text: prompt, ...carried }), signal }).catch((error: unknown) => {
           if (signal?.aborted) return undefined;
@@ -197,6 +201,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
       void response.body?.cancel();
       return false;
+    },
+    async cancel() {
+      if (!state.open || !state.id) return;
+      const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ kind: "cancel", sessionId: state.id }) });
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
     },
     async resume({ push, note, signal }) {
       const session = state;
