@@ -256,7 +256,7 @@ async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: b
             cells.cancel_with_updates(&session_id, &mut observer).await.map_err(|error| error.to_string())?;
             Ok(None)
         }
-        RemoteOperation::CancelTurn { session_id } => {
+        RemoteOperation::CancelTurn { session_id, .. } => {
             cells.cancel_turn_with_updates(&session_id, &mut observer).await.map_err(|error| error.to_string())?;
             Ok(None)
         }
