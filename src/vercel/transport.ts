@@ -144,7 +144,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     },
     warm() {
       if (state.id || warmed?.key === key()) return;
-      const session = fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), warm: true }) }).then(async response => response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined, () => undefined);
+      const session = (async () => {
+        const hand = await options.hand?.().catch(() => undefined);
+        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), ...(hand ? { hand } : {}), warm: true }) });
+        return response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
+      })().catch(() => undefined);
       warmed = { key: key(), session };
     },
     crash(crash = {}) {
