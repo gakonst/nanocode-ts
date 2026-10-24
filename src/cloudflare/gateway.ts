@@ -22,11 +22,50 @@ function modelError(provider: ModelProvider, status: number, type: string, messa
   return json({ type: "error", error: { type, message } }, status);
 }
 
+async function firstByte(start: (signal: AbortSignal) => Promise<Response>, signal: AbortSignal, firstByteMs: number): Promise<{ response: Response; first?: Uint8Array; reader?: ReadableStreamDefaultReader<Uint8Array> } | undefined> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<undefined>(resolve => { timer = setTimeout(() => { controller.abort("first byte timeout"); resolve(undefined); }, firstByteMs); });
+  try {
+    return await Promise.race([expired, (async () => {
+      const response = await start(controller.signal);
+      if (!response.body) return { response };
+      const reader = response.body.getReader();
+      const chunk = await reader.read();
+      return chunk.done ? { response, reader } : { response, first: chunk.value, reader };
+    })()]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+function replay(first: Uint8Array | undefined, reader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
+  let pending = first;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (pending) {
+        controller.enqueue(pending);
+        pending = undefined;
+        return;
+      }
+      const chunk = await reader.read();
+      if (chunk.done) controller.close();
+      else controller.enqueue(chunk.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 function catalogModel(model: string): string {
   return `anthropic/${model.replace(/-(\d+)-(\d+)$/, "-$1.$2")}`;
 }
 
-async function model(ai: Ai, gateway: string, serviceTier: string, request: Request): Promise<Response> {
+async function model(ai: Ai, gateway: string, serviceTier: string, firstByteMs: number, request: Request): Promise<Response> {
   let dispatch: ModelDispatch;
   try { dispatch = JSON.parse(request.headers.get("x-nanocode-model") ?? ""); } catch { return modelError("claude", 400, "invalid_request_error", "invalid model dispatch"); }
   const provider = dispatch.provider ?? "claude";
@@ -38,23 +77,32 @@ async function model(ai: Ai, gateway: string, serviceTier: string, request: Requ
   const body = await request.arrayBuffer();
   let query: Record<string, unknown>;
   try { query = JSON.parse(new TextDecoder().decode(body)); } catch { return modelError(provider, 400, "invalid_request_error", "model request body is not JSON"); }
-  let upstream: Response;
-  if (provider === "claude") {
-    if (typeof query.model !== "string") return modelError(provider, 400, "invalid_request_error", "model request names no model");
-    const catalog = catalogModel(query.model);
-    upstream = await ai.run(catalog, { ...query, model: catalog }, { gateway: { id: gateway }, returnRawResponse: true, extraHeaders: headers, signal: request.signal }) as unknown as Response;
-  } else {
-    const opened = ai.gateway(gateway);
-    try {
-      upstream = await opened.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal: request.signal });
-    } finally {
-      (opened as Partial<Disposable>)[Symbol.dispose]?.();
+  if (provider === "claude" && typeof query.model !== "string") return modelError(provider, 400, "invalid_request_error", "model request names no model");
+  const start = async (signal: AbortSignal): Promise<Response> => {
+    if (provider === "claude") {
+      const catalog = catalogModel(String(query.model));
+      return await ai.run(catalog, { ...query, model: catalog }, { gateway: { id: gateway }, returnRawResponse: true, extraHeaders: headers, signal }) as unknown as Response;
     }
+    const gatewayRun = ai.gateway(gateway);
+    try {
+      return await gatewayRun.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal });
+    } finally {
+      (gatewayRun as Partial<Disposable>)[Symbol.dispose]?.();
+    }
+  };
+  const started = Date.now();
+  const first = await firstByte(start, request.signal, firstByteMs);
+  if (!first) {
+    const response = modelError(provider, 504, "timeout_error", "the model sent no response within " + Math.round(firstByteMs / 1000) + " s; retrying");
+    response.headers.set("x-should-retry", "true");
+    response.headers.set("x-nanocode-model-diagnostic", JSON.stringify({ provider, transport: provider === "claude" ? "unified" : "gateway", status: 504, first_byte_timeout_ms: firstByteMs, waited_ms: Date.now() - started, body_bytes: body.byteLength, ...shape(query) }));
+    return response;
   }
+  const upstream = first.response;
   const forwarded = new Headers({ "cache-control": "no-store" });
   for (const [name, value] of upstream.headers) if (RESPONSE_HEADER.test(name)) forwarded.set(name, value);
   forwarded.set("x-nanocode-model-diagnostic", JSON.stringify({ provider, transport: provider === "claude" ? "unified" : "gateway", status: upstream.status, body_bytes: body.byteLength, ...shape(query) }));
-  return new Response(upstream.body, { status: upstream.status, headers: forwarded });
+  return new Response(first.reader ? replay(first.first, first.reader) : upstream.body, { status: upstream.status, headers: forwarded });
 }
 
 async function warm(ai: Ai, gateway: string, serviceTier: string, request: Request): Promise<Response> {
@@ -77,11 +125,11 @@ async function warm(ai: Ai, gateway: string, serviceTier: string, request: Reque
   return new Response(null, { status: upstream.ok ? 204 : 502, headers: { "cache-control": "no-store" } });
 }
 
-export function aiGateway(ai: Ai, gateway: string, serviceTier = ""): PrivateBinding {
+export function aiGateway(ai: Ai, gateway: string, serviceTier = "", firstByteMs = 45_000): PrivateBinding {
   return {
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url);
-      if (pathname === "/model" && request.method === "POST") return model(ai, gateway, serviceTier, request);
+      if (pathname === "/model" && request.method === "POST") return model(ai, gateway, serviceTier, firstByteMs, request);
       if (pathname === "/warm" && request.method === "POST") return warm(ai, gateway, serviceTier, request);
       if (pathname === "/socket") return json({ error: { type: "invalid_request_error", message: "AI Gateway carries model requests over HTTPS only" } }, 426);
       if (pathname === "/remote") return json({ error: "this deployment has no remote executors; attach a hand instead" }, 501);

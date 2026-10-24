@@ -15,6 +15,28 @@ const CHUNK_BYTES = 1 << 20;
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 
+const BREATH_OPERATIONS = 64;
+
+const BREATH_BYTES = 4 * 1024 * 1024;
+
+let operations = 0;
+
+let moved = 0;
+
+function weight(value: SqlValue | undefined): number {
+  return value instanceof ArrayBuffer ? value.byteLength : typeof value === "string" ? value.length : 0;
+}
+
+async function breathe(statements: Statement[], results: SqlValue[][][]): Promise<void> {
+  operations++;
+  for (const statement of statements) for (let index = 1; index < statement.length; index++) moved += weight(statement[index]);
+  for (const rows of results) for (const row of rows ?? []) for (const value of row) moved += weight(value);
+  if (operations < BREATH_OPERATIONS && moved < BREATH_BYTES) return;
+  operations = 0;
+  moved = 0;
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
 type Kind = "file" | "directory" | "link";
 
 type Meta = { kind: Kind; size: number; chunked: boolean; mtime: number; mode: number; inline?: Uint8Array };
@@ -65,7 +87,9 @@ export class SqlFileSystem implements FileSystem {
   async #run(operation: string, statements: Statement[]): Promise<SqlValue[][][]> {
     this.#ready ??= Promise.resolve(this.sql.transaction("store", "files.schema", [[SCHEMA], [INDEX], [CHUNK_SCHEMA]])).then(() => undefined);
     await this.#ready;
-    return await this.sql.transaction("store", `files.${operation}`, statements);
+    const results = await this.sql.transaction("store", `files.${operation}`, statements);
+    await breathe(statements, results);
+    return results;
   }
 
   async #meta(path: string, inline = false): Promise<Meta | undefined> {
