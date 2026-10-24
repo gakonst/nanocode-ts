@@ -54,7 +54,7 @@ function directory(path) {
 }
 for (const file of ["Cargo.toml", "Cargo.lock", "scripts/build.mjs", "src/wasm/prelude.js", "../nanocodex/Cargo.toml", "../nanocodex/Cargo.lock"]) include(file);
 for (const root of [".", "../nanocodex"]) for (const name of ["rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml", "build.rs"]) if (existsSync(join(root, name))) include(join(root, name));
-for (const file of readdirSync("src", { recursive: true }).filter(file => file.endsWith(".rs")).sort()) include(join("src", file));
+for (const file of readdirSync("src", { recursive: true }).filter(file => file.endsWith(".rs") || /^wasm[\\/].*\.js$/.test(file)).sort()) include(join("src", file));
 directory("../nanocodex/crates");
 const compiler = spawnSync("rustc", ["--version", "--verbose"], { encoding: "utf8" });
 if (compiler.error) throw compiler.error;

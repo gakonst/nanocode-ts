@@ -11,6 +11,8 @@ const SNAPSHOT_ENTRIES = 20_000;
 
 const MODULES = new Map<string, { loaded: Loaded; interpreter: WasmOptions["interpreter"] }>();
 
+const INTERPRETED_CACHE_BYTES = 4 * 1024 * 1024;
+
 const E = { SUCCESS: 0, ACCES: 2, BADF: 8, EXIST: 20, FBIG: 22, INVAL: 28, IO: 29, ISDIR: 31, NOENT: 44, NOSYS: 52, NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, PERM: 63, SPIPE: 70, NOTCAPABLE: 76, NAMETOOLONG: 37, NOTSOCK: 57 } as const;
 
 const FILETYPE = { CHAR: 2, DIRECTORY: 3, FILE: 4 } as const;
@@ -150,8 +152,14 @@ export async function compile(bytes: Uint8Array, options: WasmOptions = {}): Pro
     MODULES.get(oldest)?.loaded.dispose();
     MODULES.delete(oldest);
   }
+  if (loaded.engine === "interpreter" && bytes.length > INTERPRETED_CACHE_BYTES) return loaded;
   MODULES.set(key, { loaded, interpreter: options.interpreter });
   return loaded;
+}
+
+export function release(loaded: Loaded): void {
+  for (const entry of MODULES.values()) if (entry.loaded === loaded) return;
+  loaded.dispose();
 }
 
 export function isWasm(bytes: Uint8Array): boolean {
@@ -222,6 +230,7 @@ const handler = (options: WasmOptions): CommandHandler => async ctx => {
   await tree.load(ctx.fs, ctx.cwd, ctx.cwd === "/" ? 0 : 64, false);
   await tree.load(ctx.fs, "/", 2, false);
   const result = execute(ctx, module, tree, run);
+  release(module);
   await writeBack(ctx.fs, tree);
   if (result.error !== undefined) throw result.error;
   return result.code;
@@ -914,7 +923,12 @@ export function wasmHost(shell: CellShell, options: WasmOptions = {}): (request:
         }
         case "instantiate": {
           const module = await loaded(request);
-          const live = module.instantiate([], { check: checker(signal) });
+          let live: Live;
+          try {
+            live = module.instantiate([], { check: checker(signal) });
+          } finally {
+            release(module);
+          }
           const id = ++next;
           instances.set(id, live);
           if (instances.size > CELL_INSTANCES) {
@@ -927,7 +941,12 @@ export function wasmHost(shell: CellShell, options: WasmOptions = {}): (request:
         case "invoke": {
           const module = await loaded(request);
           const check = checker(signal);
-          const live = module.instantiate([], { check });
+          let live: Live;
+          try {
+            live = module.instantiate([], { check });
+          } finally {
+            release(module);
+          }
           try {
             return { result: toWire(live.call(String(request.name), args(request), { check })) ?? null, engine: live.engine };
           } finally {

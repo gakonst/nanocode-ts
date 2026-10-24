@@ -98,11 +98,30 @@ def _interrupt(signum, frame):
 
 signal.signal(signal.SIGINT, _interrupt)
 
+_NETWORK = ("socket", "ssl", "http.client", "urllib.error", "urllib3", "requests", "httpx", "aiohttp")
+
+def _offline(error):
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        kind = type(error)
+        if isinstance(error, (ConnectionError, TimeoutError)) or kind.__module__.split(".")[0] in _NETWORK or kind.__module__ in _NETWORK or "TLS not supported" in str(error):
+            return True
+        tb = error.__traceback__
+        while isinstance(error, OSError) and tb is not None:
+            if tb.tb_frame.f_code.co_filename.endswith(("/socket.py", "/ssl.py", "/http/client.py", "/urllib/request.py")):
+                return True
+            tb = tb.tb_next
+        error = error.__cause__ or error.__context__
+    return False
+
 def _report(error):
     tb = error.__traceback__
     while tb is not None and _internal(tb.tb_frame.f_code):
         tb = tb.tb_next
     traceback.print_exception(type(error), error, tb)
+    if _offline(error):
+        print("python3: Python here runs on Pyodide (WebAssembly) and cannot open network connections. Download the file with curl in bash first (curl -sL -o data.json URL), then read it from Python.", file=sys.stderr)
 
 def _streams():
     sys.stdin = open("/dev/stdin", "r", encoding="utf-8", errors="surrogateescape")

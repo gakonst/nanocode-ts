@@ -15,6 +15,10 @@ const CHUNK_BYTES = 1 << 20;
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 
+const STAGED_BYTES = 4 * 1024 * 1024;
+
+const STAGING = "//staging";
+
 const BREATH_OPERATIONS = 64;
 
 const BREATH_BYTES = 4 * 1024 * 1024;
@@ -166,6 +170,19 @@ export class SqlFileSystem implements FileSystem {
     return statements;
   }
 
+  async #staged(target: string, data: Uint8Array, mode: number): Promise<void> {
+    const staging = STAGING + target;
+    await this.#run("write.stage", [this.#drop(staging)]);
+    try {
+      const step = Math.max(1, Math.floor(STAGED_BYTES / this.chunkBytes)) * this.chunkBytes;
+      for (let offset = 0; offset < data.length; offset += step) await this.#run("write.chunk", this.#chunks(staging, data.subarray(offset, offset + step), offset / this.chunkBytes));
+      await this.#run("write", [this.#drop(target), this.#insert(target, "file", null, mode), [`UPDATE ${CHUNKS} SET path = ? WHERE scope = ? AND path = ?`, target, this.scope, staging]]);
+    } catch (error) {
+      await this.#run("write.unstage", [this.#drop(staging)]).catch(() => {});
+      throw error;
+    }
+  }
+
   async stat(path: string): Promise<FileStat | null> {
     const target = await this.#resolved(path);
     const row = target === null ? undefined : await this.#meta(target);
@@ -191,7 +208,8 @@ export class SqlFileSystem implements FileSystem {
     if (!append || !existing) {
       if (data.length > this.maxFileBytes) throw new FsError("EFBIG", path);
       if (data.length <= this.chunkBytes) await this.#run("write", [this.#drop(target), this.#insert(target, "file", data, mode)]);
-      else await this.#run("write", [this.#drop(target), this.#insert(target, "file", null, mode), ...this.#chunks(target, data, 0)]);
+      else if (data.length <= STAGED_BYTES) await this.#run("write", [this.#drop(target), this.#insert(target, "file", null, mode), ...this.#chunks(target, data, 0)]);
+      else await this.#staged(target, data, mode);
       return;
     }
     if (!data.length) return;

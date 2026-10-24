@@ -13,7 +13,7 @@ function sources() {
   for (const directory of ["src", "interpreter/src"]) {
     for (const file of readdirSync(join(root, directory), { recursive: true })) {
       const path = directory + "/" + String(file).split("\\").join("/");
-      if (path.endsWith(".rs")) files.push(path);
+      if (path.endsWith(".rs") || (path.startsWith("src/wasm/") && path.endsWith(".js"))) files.push(path);
     }
   }
   return [...new Set(files)].filter(path => existsSync(join(root, path))).sort();
