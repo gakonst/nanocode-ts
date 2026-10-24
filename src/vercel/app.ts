@@ -2,7 +2,6 @@ import { durableAgent, getWorld, type HostTool } from "durable-harness";
 import { handRoute } from "./hands.ts";
 import { HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, type ServiceTier, type Thinking } from "./harness.ts";
 import { nanocodeModule } from "./module.ts";
-import { gatewaySearch } from "./gateway.ts";
 import type { ModelProvider } from "../index.ts";
 
 export type Selection = { provider: ModelProvider; model: string; thinking: Thinking; max_tokens?: number; service_tier?: ServiceTier };
@@ -50,7 +49,6 @@ export function createNanocode(options: NanocodeAppOptions) {
       codeMode: true,
       subagents: true,
       streamToolInput: true,
-      webSearch: gatewaySearch(),
       ...harness,
       provider: defaultSelection.provider,
       model: defaultSelection.model,

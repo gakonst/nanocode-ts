@@ -1,6 +1,5 @@
 import type { ModelProvider } from "../index.ts";
 import type { ModelDispatch, PrivateBinding } from "./contracts.ts";
-import { answerSearch, firstOf, messagesSearch, type Post, responsesSearch, searchKind, type WebSearch } from "../search.ts";
 
 const HEADERS: Record<ModelProvider, RegExp> = {
   claude: /^(accept|content-type|anthropic-version|anthropic-beta)$/,
@@ -27,40 +26,7 @@ function catalogModel(model: string): string {
   return `anthropic/${model.replace(/-(\d+)-(\d+)$/, "-$1.$2")}`;
 }
 
-export type GatewaySearch = "openai" | "anthropic" | "upstream" | WebSearch;
-
-export type AiGatewayOptions = { webSearch?: GatewaySearch; searchModels?: { openai?: string; anthropic?: string } };
-
-function searches(ai: Ai, gateway: string, options: AiGatewayOptions): { openai: WebSearch; anthropic: WebSearch } {
-  const openai: Post = async (query, signal) => {
-    const opened = ai.gateway(gateway);
-    try {
-      return await opened.run({ provider: "openai", endpoint: "responses", headers: { "content-type": "application/json" }, query }, { signal });
-    } finally {
-      (opened as Partial<Disposable>)[Symbol.dispose]?.();
-    }
-  };
-  const anthropic: Post = async (query, signal) => {
-    const catalog = catalogModel(String(query.model));
-    return await ai.run(catalog, { ...query, model: catalog }, { gateway: { id: gateway }, returnRawResponse: true, extraHeaders: { "anthropic-version": "2023-06-01", "content-type": "application/json" }, signal }) as unknown as Response;
-  };
-  return {
-    openai: responsesSearch({ post: openai, model: options.searchModels?.openai ?? "gpt-5.4-mini" }),
-    anthropic: messagesSearch({ post: anthropic, model: options.searchModels?.anthropic ?? "claude-haiku-5-5" }),
-  };
-}
-
-function searchFor(ai: Ai, gateway: string, options: AiGatewayOptions): { codex?: WebSearch; claude?: WebSearch } {
-  const chosen = options.webSearch;
-  if (chosen === "upstream") return {};
-  if (typeof chosen === "function") return { codex: chosen, claude: chosen };
-  const built = searches(ai, gateway, options);
-  if (chosen === "openai") return { codex: firstOf(built.openai, built.anthropic), claude: firstOf(built.openai, built.anthropic) };
-  if (chosen === "anthropic") return { codex: firstOf(built.anthropic, built.openai), claude: built.anthropic };
-  return { codex: firstOf(built.openai, built.anthropic) };
-}
-
-async function model(ai: Ai, gateway: string, serviceTier: string, request: Request, search: { codex?: WebSearch; claude?: WebSearch } = {}): Promise<Response> {
+async function model(ai: Ai, gateway: string, serviceTier: string, request: Request): Promise<Response> {
   let dispatch: ModelDispatch;
   try { dispatch = JSON.parse(request.headers.get("x-nanocode-model") ?? ""); } catch { return modelError("claude", 400, "invalid_request_error", "invalid model dispatch"); }
   const provider = dispatch.provider ?? "claude";
@@ -70,13 +36,6 @@ async function model(ai: Ai, gateway: string, serviceTier: string, request: Requ
   const headers: Record<string, string> = {};
   for (const [name, value] of dispatch.headers) if (allowed.test(name.toLowerCase())) headers[name.toLowerCase()] = value;
   const body = await request.arrayBuffer();
-  const nested = { provider, endpoint: dispatch.endpoint, method: "POST", headers: dispatch.headers, body: new Uint8Array(body) };
-  const kind = (search.codex || search.claude) ? searchKind(nested) : undefined;
-  const answering = kind === "codex" ? search.codex : kind === "claude" ? search.claude : undefined;
-  if (answering) {
-    const answered = await answerSearch(nested, answering, request.signal);
-    if (answered) return answered;
-  }
   let query: Record<string, unknown>;
   try { query = JSON.parse(new TextDecoder().decode(body)); } catch { return modelError(provider, 400, "invalid_request_error", "model request body is not JSON"); }
   let upstream: Response;
@@ -118,12 +77,11 @@ async function warm(ai: Ai, gateway: string, serviceTier: string, request: Reque
   return new Response(null, { status: upstream.ok ? 204 : 502, headers: { "cache-control": "no-store" } });
 }
 
-export function aiGateway(ai: Ai, gateway: string, serviceTier = "", options: AiGatewayOptions = {}): PrivateBinding {
-  const search = searchFor(ai, gateway, options);
+export function aiGateway(ai: Ai, gateway: string, serviceTier = ""): PrivateBinding {
   return {
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url);
-      if (pathname === "/model" && request.method === "POST") return model(ai, gateway, serviceTier, request, search);
+      if (pathname === "/model" && request.method === "POST") return model(ai, gateway, serviceTier, request);
       if (pathname === "/warm" && request.method === "POST") return warm(ai, gateway, serviceTier, request);
       if (pathname === "/socket") return json({ error: { type: "invalid_request_error", message: "AI Gateway carries model requests over HTTPS only" } }, 426);
       if (pathname === "/remote") return json({ error: "this deployment has no remote executors; attach a hand instead" }, 501);

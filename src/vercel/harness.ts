@@ -2,7 +2,6 @@ import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, h
 import { liveEvent } from "../client.ts";
 import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type McpServer, type ModelProvider, RemoteExecutor, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
-import { type WebSearch, withSearch } from "../search.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
 import { Bash, SqlFileSystem } from "../bash/index.ts";
@@ -49,7 +48,7 @@ export interface NanocodeHarnessOptions {
   fetch?: typeof fetch;
   hands?: false | NanocodeHands;
   mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch; deferred?: boolean };
-  webSearch?: WebSearch | "upstream" | false;
+  webSearch?: false;
 }
 
 export type NanocodeHands = { relay?(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
@@ -75,8 +74,7 @@ export function isIdle(state: SessionState, batches: number): boolean {
 export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   const tools = new Map((options.tools ?? []).map(tool => [tool.name, tool]));
   const definitions = [...tools.values()].map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema as Record<string, unknown> }));
-  const search = typeof options.webSearch === "function" ? options.webSearch : undefined;
-  const dispatch = search ? withSearch(options.dispatch ?? gatewayDispatch(), search) : options.dispatch ?? gatewayDispatch();
+  const dispatch = options.dispatch ?? gatewayDispatch();
   const gateway = options.endpoint ? options.gateway : "vercel";
   const module = options.module ?? nanocodeModule;
   const durability = options.durability ?? "on";
