@@ -217,7 +217,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           applied = wanted;
         }
         const driving = runtime.drive(next.report.request_id);
-        const steering = steer(ctx, journal, runtime, driving, options.maxPrompts);
+        const steering = steer(ctx, journal, runtime, driving, next.report.request_id, options.maxPrompts);
         const driven = await driving;
         await steering;
         if (ctx.signal.aborted) return;
@@ -310,12 +310,16 @@ export function exceeds(state: SessionState, id: string, limit: number | undefin
   let index = 0;
   for (const submission of state.submissions) {
     if (submission.id === id) return index >= limit;
-    if (submission.kind !== "chaos" && submission.kind !== "withdraw") index++;
+    if (submission.kind !== "chaos" && submission.kind !== "withdraw" && !cancels(submission)) index++;
   }
   return false;
 }
 
 async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined, limit: number | undefined, hand?: string, workspace?: FileSystem, seesImages = true): Promise<Thinking | undefined> {
+  if (cancels(submission)) {
+    await cancel(ctx, journal, runtime, submission, (await runtime.pending(SCOPE))[0]?.report.request_id);
+    return thinking;
+  }
   if (exceeds(ctx.state(), submission.id, limit)) {
     await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.refused", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ refused: "limit" }));
     ctx.live({ type: "error", message: `this session takes at most ${limit} prompts; start a new session`, request_id: submission.id });
@@ -344,7 +348,7 @@ async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
   return thinking;
 }
 
-async function steer(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, driving: Promise<unknown>, limit: number | undefined): Promise<void> {
+async function steer(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, driving: Promise<unknown>, active: string, limit: number | undefined): Promise<void> {
   let done = false;
   const finished = driving.then(() => { done = true; }, () => { done = true; });
   for (;;) {
@@ -352,12 +356,22 @@ async function steer(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
     if (done || ctx.signal.aborted) return;
     await ctx.refresh();
     for (const submission of ctx.pending()) {
+      if (cancels(submission)) {
+        await cancel(ctx, journal, runtime, submission, active);
+        continue;
+      }
       if (submission.kind !== "steer" || exceeds(ctx.state(), submission.id, limit) || !await runtime.steer(submission.id, attachmentsOf(submission.text ?? "").text)) continue;
       await journal.durable();
       await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.steer", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ steered: true }));
       ctx.live({ type: "steered", request_id: submission.id });
     }
   }
+}
+
+async function cancel(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, active: string | undefined): Promise<void> {
+  const turn = active ? (await runtime.cancel(SCOPE, active, { cancelled: true, error: "request cancelled" })).turn : null;
+  await journal.durable();
+  await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.cancel", replay: "safe", placed: [submission.id], input: { request_id: active ?? null } }, async () => ({ cancelled: turn?.report.status ?? null }));
 }
 
 function submitted(ctx: DriveContext): Promise<void> {
@@ -414,6 +428,12 @@ function modelCall(logged: LoggedEvent): ModelCall | undefined {
 }
 
 export const STREAMED_WASM_CALLS = 20;
+
+export const CANCEL = "\u0000nanocode:cancel";
+
+function cancels(submission: Submission): boolean {
+  return submission.kind === "steer" && submission.text === CANCEL;
+}
 
 function publisher(ctx: DriveContext): (events: LoggedEvent[]) => void {
   const calls = new Map<string, number>();
