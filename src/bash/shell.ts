@@ -1499,7 +1499,7 @@ export class Runner {
       io.stderr.write("bash: " + name + ": " + (stat ? "Is a directory" : "No such file or directory") + "\n");
       return stat ? 126 : 127;
     }
-    io.stderr.write("bash: " + name + ": command not found\n");
+    io.stderr.write("bash: " + name + ": command not found" + missing(name) + "\n");
     return 127;
   }
 
@@ -3097,4 +3097,11 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
     }
     throw error;
   }
+}
+
+function missing(name: string): string {
+  if (/^(node|nodejs|npm|npx|pnpm|yarn|bun|bunx|deno|tsc|tsx|ts-node)$/.test(name)) return " (this simulated shell has no JavaScript runtime or package manager)";
+  if (/^(python[23]?(\.\d+)?|pip3?|pytest|ipython)$/.test(name)) return " (Python is not available on this host)";
+  if (/^(sqlite3|psql|mysql|gcc|cc|clang|g\+\+|cargo|rustc|go|java|javac|ruby|perl|php|docker|sudo|apt|apt-get|brew)$/.test(name)) return " (this simulated shell has no " + name + ")";
+  return "";
 }

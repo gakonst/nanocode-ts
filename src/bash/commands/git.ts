@@ -469,7 +469,10 @@ const ALLOWED = [/^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/(?:tar\.gz|leg
 export function githubArchives(fetcher: typeof fetch = globalThis.fetch): typeof fetch {
   return (input, init) => {
     const request = new Request(input, init);
-    if ((request.method === "GET" || request.method === "HEAD") && ALLOWED.some(pattern => pattern.test(request.url))) return fetcher(request);
-    return Promise.reject(new TypeError("network access is not available in this shell (only GitHub source archives can be downloaded, for git clone and gh repo clone)"));
+    if ((request.method === "GET" || request.method === "HEAD") && ALLOWED.some(pattern => pattern.test(request.url))) {
+      if (typeof (globalThis as { document?: unknown }).document === "undefined" && !request.headers.has("user-agent")) request.headers.set("user-agent", "nanocode-ts");
+      return fetcher(request);
+    }
+    return Promise.reject(new TypeError(request.method + " " + request.url + " refused: this host reaches only public GitHub repositories (GET https://api.github.com/repos/OWNER/REPO, its /commits and /tarball, and codeload.github.com archives, which git clone and gh repo clone use), so no other URL works from cells, curl or wget"));
   };
 }

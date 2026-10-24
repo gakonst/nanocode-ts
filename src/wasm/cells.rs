@@ -60,7 +60,7 @@ impl FunctionHandler for Shell {
                 "op": "shell_run",
                 "command": script,
                 "cwd": self.0,
-                "timeout_ms": null,
+                "timeout_ms": input.get("timeout_ms").and_then(Value::as_u64),
                 "stdin": input.get("stdin").and_then(Value::as_str),
             }))
             .await
@@ -111,7 +111,8 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
                 "type": "object",
                 "properties": {
                     "script": {"type": "string"},
-                    "stdin": {"type": "string"}
+                    "stdin": {"type": "string"},
+                    "timeout_ms": {"type": "integer"}
                 },
                 "required": ["script"],
                 "additionalProperties": false
