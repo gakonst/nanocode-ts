@@ -165,12 +165,14 @@ export async function allInput(ctx: CommandContext, operands: string[]): Promise
 
 const SLICE = 1 << 16;
 let yielded = 0;
+let paused = 0;
 
 export async function pause(ctx: CommandContext) {
   if (ctx.stdout.backlog) await ctx.stdout.drain();
   const now = Date.now();
-  if (now - yielded < 25) return;
+  if (now - yielded < 25 && ++paused < 64) return;
   yielded = now;
+  paused = 0;
   await new Promise<void>(resolve => setTimeout(resolve, 0));
   if (ctx.signal.aborted) throw new CommandError("aborted", 124);
 }
