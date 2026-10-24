@@ -1,7 +1,7 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
-import { Bash, SqlFileSystem, githubArchives, type Limits } from "../bash/index.ts";
+import { Bash, SqlFileSystem, githubArchives, type Limits, type PythonRemote } from "../bash/index.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
@@ -16,6 +16,7 @@ export { THINKING } from "./contracts.ts";
 const WORKSPACE_MEMORY_BYTES = 48 * 1024 * 1024;
 
 const WORKSPACE_FILE_BYTES = 32 * 1024 * 1024;
+const PYTHON_REMOTE_BYTES = 8 * 1024 * 1024;
 
 const WORKERS_AI_MODELS = new Set(["glm-5.3"]);
 
@@ -53,7 +54,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch; deferred?: boolean; core?: Record<string, readonly string[]> };
   instructions?: string;
   handInstructions?: string;
-  workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number };
+  workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number; python?(authority: SessionAuthority, env: E): PythonRemote | undefined };
   valueLimit?: number;
 };
 
@@ -592,9 +593,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             : undefined;
           void connecting?.catch(() => {});
           const cellFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives();
+          const pythonRemote = options.workspace ? options.workspace.python?.(authority, this.env) : undefined;
           const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
           const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
-          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope, options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter }, limits: { maxMemoryBytes: WORKSPACE_MEMORY_BYTES, ...options.workspace?.limits } });
+          const shell = options.workspace === false || enabled || this.handsMode(scope, descriptor) ? undefined : await Bash.create({ fs: new SqlFileSystem(this.store, scope, options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), fetch: cellFetch, wasm: { interpreter }, ...(pythonRemote ? { python: { remote: pythonRemote, maxBytes: PYTHON_REMOTE_BYTES } } : {}), limits: { maxMemoryBytes: WORKSPACE_MEMORY_BYTES, ...options.workspace?.limits } });
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);

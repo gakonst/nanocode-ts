@@ -19,7 +19,7 @@ export { SqlFileSystem } from "./sql.ts";
 export { CommandError, PipeError, streaming, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
 export { codeload, githubArchives, type GitHubOptions } from "./commands/git.ts";
 export { type WasmOptions } from "./commands/wasm.ts";
-export { preloadPython, PYODIDE_URL, PYODIDE_VERSION, pythonHint, type Pyodide, type PyodideFS, type PythonOptions } from "./commands/python.ts";
+export { preloadPython, PYODIDE_URL, PYODIDE_VERSION, pythonHint, type Pyodide, type PyodideFS, type PythonOptions, type PythonRemote, type PythonReply, type PythonRequest } from "./commands/python.ts";
 
 export type BashOptions = {
   files?: Record<string, FileInput>;
@@ -73,6 +73,7 @@ export class Bash {
   readonly fetch?: typeof fetch;
   readonly observe?: (event: BashEvent) => void;
   readonly #wasm: (request: unknown, signal: AbortSignal) => Promise<unknown>;
+  readonly #python: "remote" | "pyodide" | "none";
   #calls = 0;
 
   private constructor(options: BashOptions) {
@@ -81,7 +82,8 @@ export class Bash {
     this.env = { HOME: "/home/user", USER: "user", PATH: "/usr/local/bin:/usr/bin:/bin", SHELL: "/bin/bash", LANG: "C.UTF-8", TMPDIR: "/tmp", ...options.env };
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.commands = new Map(Object.entries({ ...COMMANDS, ...(options.github ? gitCommands(options.github) : {}), ...(options.wasm ? wasmCommands(options.wasm) : {}), ...(options.python ? pythonCommands(options.python) : {}), ...options.commands }));
-    if (!compiles()) for (const name of ["python", "python3", "pip", "pip3"]) if (!options.commands?.[name]) this.commands.delete(name);
+    this.#python = options.python?.remote ? "remote" : compiles() ? "pyodide" : "none";
+    if (this.#python === "none") for (const name of ["python", "python3", "pip", "pip3"]) if (!options.commands?.[name]) this.commands.delete(name);
     this.fetch = options.fetch;
     this.observe = options.observe;
     this.#wasm = wasmHost(this, options.wasm);
@@ -167,7 +169,7 @@ export class Bash {
 
   workspace(): WorkspaceHost {
     return {
-      instructions: compiles() ? BASH_CODE_MODE_INSTRUCTIONS : BASH_CODE_MODE_INSTRUCTIONS.replace(/Python 3 runs on Pyodide[^]*?for the rest of the session\./, "Python is not available on this host, because it cannot compile WebAssembly at runtime."),
+      instructions: this.#python === "pyodide" ? BASH_CODE_MODE_INSTRUCTIONS : BASH_CODE_MODE_INSTRUCTIONS.replace(/Python 3 runs on Pyodide[^]*?for the rest of the session\./, this.#python === "remote" ? BASH_REMOTE_PYTHON_INSTRUCTIONS : "Python is not available on this host, because it cannot compile WebAssembly at runtime."),
       read: async path => {
         const target = resolvePath(this.cwd, path);
         const stat = await this.fs.stat(target);
@@ -236,6 +238,8 @@ function device(path: string): Uint8Array {
 }
 
 export const BASH_SHELL_INSTRUCTIONS = "To get a public GitHub repository, run `git clone https://github.com/OWNER/REPO [DIR]` (or `gh repo clone OWNER/REPO [DIR]`, with `-b REF` for a branch, tag or commit): it downloads a source snapshot of the current files without history, so `git status`, `git log -1`, `git rev-parse HEAD`, `git branch`, `git remote -v` and `git ls-files` work on it, and commit, pull and push do not. WebAssembly programs built for WASI (wasm32-wasi) run directly: `./prog.wasm ARGS`, `wasm prog.wasm ARGS` or `wasmtime prog.wasm ARGS`, with stdin, stdout, exit codes, the environment and the files under the working directory (up to 64 MiB, written back when the program exits). There is no compiler, so download or write the .wasm file first. `wasm --invoke NAME FILE ARGS` calls one exported function and prints its result. Python 3 runs on Pyodide (CPython compiled to WebAssembly, loaded on first use): `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, numpy, pandas and the other packages Pyodide ships load when imported, and `pip install PKG` installs pure-Python wheels for the rest of the session.";
+
+export const BASH_REMOTE_PYTHON_INSTRUCTIONS = "Python 3 runs as CPython in a Linux container: `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, which are copied in before each run and written back after it, numpy, pandas, matplotlib, scipy, sympy, networkx and pillow are installed, and `pip install PKG` installs packages for the rest of the session.";
 
 export const BASH_CODE_MODE_INSTRUCTIONS = "The session already has a workspace: a persistent filesystem and a simulated bash over it, so use them for files, repositories, data and programs. When someone asks about a filesystem, VFS, shell or sandbox here, they mean this one: show it working rather than writing a new one in JavaScript. In Code Mode cells it is the global `bash`: `await bash(\"ls -la | wc -l\")`, or as a tagged template, await bash`grep -rn ${pattern} src`, which quotes each interpolated value and resolves to { stdout, stderr, exitCode }, and `bash.readFile(path)` and `bash.writeFile(path, text)` reach the same files from JavaScript. There is no node, npm or TypeScript compiler: run JavaScript in the cell itself. It has the usual file and text tools (cat, ls, find, tree, grep, rg, sed, awk, jq, sort, uniq, cut, tr, xargs, head, tail, wc, diff, tar, gzip, base64, xxd, sha256sum, ...), and its curl goes through the same fetch as the cells' `fetch`. " + BASH_SHELL_INSTRUCTIONS + " Variables and the working directory reset between calls; files persist for the session.";
 

@@ -48,6 +48,7 @@ export interface NanocodeHarnessOptions {
   codeMode?: boolean;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
+  sessionFetch?(sessionId: string): typeof fetch;
   hands?: false | NanocodeHands;
   mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch; deferred?: boolean; core?: Record<string, readonly string[]> };
   webSearch?: false;
@@ -134,8 +135,9 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       : undefined;
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;
+    const cellFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch;
     const files = options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE);
-    const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(cellFetch ? { fetch: cellFetch } : {}) });
     const mcpServers = options.mcp?.servers ?? [];
     const mcpFetch = options.mcp?.fetch?.(ctx.runId) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
     const stop = () => void runtime.dispose().catch(() => undefined);
@@ -166,7 +168,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.mcp ? { mcp: { ...(options.mcp.deferred === undefined ? {} : { deferred: options.mcp.deferred }), ...(options.mcp.core ? { core: options.mcp.core } : {}) } } : {}),
-          ...(options.fetch ? { fetch: options.fetch } : {}),
+          ...(cellFetch ? { fetch: cellFetch } : {}),
           ...(executor ? {
             remote: {
               failed: () => executor.failure !== undefined,
