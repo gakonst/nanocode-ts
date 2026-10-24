@@ -11,7 +11,7 @@ export type VercelTransportOptions = {
   headers?(): Record<string, string>;
   session?: { load(): VercelSession; save(session: VercelSession): void };
   reconnectMs?: number;
-  hand?(): Promise<string | undefined>;
+  hand?(session?: string): Promise<string | undefined>;
 };
 
 export type VercelTransport = Transport & {
@@ -79,6 +79,18 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     return false;
   };
 
+  const begin = async (hand: string | undefined, signal?: AbortSignal) => {
+    const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), ...(hand ? { hand } : {}), warm: true }), ...(signal ? { signal } : {}) });
+    return response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
+  };
+
+  const prepare = async () => {
+    const hand = await options.hand?.().catch(() => undefined);
+    const id = await begin(hand).catch(() => undefined);
+    if (id && hand) await options.hand!(id).catch(() => undefined);
+    return id;
+  };
+
   const reconnect = async (id: string, parameters: Omit<TransportParameters, "prompt">, session: VercelSession) => {
     const { signal } = parameters;
     while (session.cursor && !signal?.aborted) {
@@ -95,10 +107,19 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       save(session);
       const started = !session.id && warmed?.key === key() ? await warmed.session : undefined;
       warmed = undefined;
-      const existing = session.id ?? started;
+      let existing = session.id ?? started;
       try {
-        const hand = await options.hand?.();
+        let hand = await options.hand?.(existing);
         if (signal?.aborted) return;
+        if (!existing && hand) {
+          existing = await begin(hand, signal).catch(() => undefined);
+          if (signal?.aborted) return;
+          if (existing) {
+            session.id = existing;
+            save(session);
+            hand = await options.hand!(existing);
+          }
+        }
         const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), ...(hand ? { hand } : {}), text: prompt }), signal }).catch((error: unknown) => {
           if (signal?.aborted) return undefined;
           throw error;
@@ -145,17 +166,13 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     },
     warm() {
       if (state.id || warmed?.key === key()) return;
-      const session = (async () => {
-        const hand = await options.hand?.().catch(() => undefined);
-        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), ...(hand ? { hand } : {}), warm: true }) });
-        return response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
-      })().catch(() => undefined);
+      const session = prepare();
       warmed = { key: key(), session };
     },
     async open() {
       const session = state;
       if (session.id) return session.id;
-      const pending = warmed?.key === key() ? warmed.session : fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), warm: true }) }).then(async response => response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined, () => undefined);
+      const pending = warmed?.key === key() ? warmed.session : prepare();
       warmed = { key: key(), session: pending };
       const id = await pending;
       if (warmed?.session === pending) warmed = undefined;
