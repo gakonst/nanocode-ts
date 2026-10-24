@@ -1,12 +1,8 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
-<<<<<<< HEAD
 import { Bash, SqlFileSystem, githubArchives, type Limits } from "../bash/index.ts";
-=======
-import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
->>>>>>> origin/main
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
@@ -56,12 +52,8 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
   mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch; deferred?: boolean };
   instructions?: string;
-<<<<<<< HEAD
-  workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number };
-=======
   handInstructions?: string;
-  workspace?: false | { cwd?: string; files?: Record<string, string> };
->>>>>>> origin/main
+  workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number };
   valueLimit?: number;
 };
 

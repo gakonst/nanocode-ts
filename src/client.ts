@@ -1044,7 +1044,6 @@ export function createConfig(options: ConfigOptions): Config {
     const shown = id === current;
     const existing = conversations.find(item => item.id === id);
     if (!existing && !shown) return;
-<<<<<<< HEAD
     const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry.tool ? { ...entry, tool: clipCell(entry.tool, 65_536) } : entry].slice(-(options.keep ?? 500));
     while (!write(entriesKey(id!), entries)) {
       const oldest = [...conversations].reverse().find(item => item.id !== id && item.id !== current);
@@ -1052,12 +1051,7 @@ export function createConfig(options: ConfigOptions): Config {
       forget(oldest.id);
       conversations = conversations.filter(item => item.id !== oldest.id);
     }
-    const title = existing?.title || (entry.kind === "user" ? entry.text.replace(/\s+/g, " ").slice(0, 80) : "");
-=======
-    const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry].slice(-(options.keep ?? 500));
-    write(entriesKey(id!), entries);
     const title = existing?.title || (entry.kind === "user" ? (entry.text || entry.attachments?.map(item => item.name).join(", ") || "").replace(/\s+/g, " ").slice(0, 80) : "");
->>>>>>> origin/main
     conversations = [{ id: id!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
     for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
     conversations = conversations.slice(0, history.limit);
