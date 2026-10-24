@@ -1,6 +1,6 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
 import { liveEvent } from "../client.ts";
-import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
+import { AgentRuntime, type AgentConfiguration, HostFailure, RemoteExecutor, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
@@ -45,6 +45,19 @@ export interface NanocodeHarnessOptions {
   codeMode?: boolean;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
+  hands?: { relay(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number };
+}
+
+export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
+
+function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const fail = (reason: string) => { try { socket.close(); } catch {} reject(new Error(reason)); };
+    socket.addEventListener("open", () => resolve(socket), { once: true });
+    socket.addEventListener("error", () => fail("the hand relay refused the connection"), { once: true });
+    signal.addEventListener("abort", () => fail("the hand relay did not answer in time"), { once: true });
+  });
 }
 
 const settledKey = (batches: number) => `nanocode.settled:${batches}`;
@@ -72,7 +85,14 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         publish(ctx, events);
       },
     });
-    const shell = options.workspace === false ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    const channel = (ctx.config as { hand?: unknown } | undefined)?.hand;
+    const hands = options.hands;
+    const executor = hands && typeof channel === "string" && HAND_CHANNEL.test(channel)
+      ? await RemoteExecutor.connect(signal => openSocket(hands.relay(channel), signal), { max_frame_bytes: hands.maxFrameBytes ?? 1_048_576, timeout_ms: hands.timeoutMs ?? 5_000 }).catch(() => undefined)
+      : undefined;
+    const handName = hands?.name ?? "browser";
+    const connection = executor ? handName + "#" + sessionUuid() : undefined;
+    const shell = options.workspace === false || executor ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     const stop = () => void runtime.dispose().catch(() => undefined);
     ctx.signal.addEventListener("abort", stop, { once: true });
     try {
@@ -92,12 +112,24 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           gateway,
           event_coalesce_ms: options.eventCoalesceMs ?? DEFAULT_EVENT_COALESCE_MS,
           stream_tool_input: options.streamToolInput,
-          code_mode: options.codeMode,
+          code_mode: executor ? false : options.codeMode,
+          ...(executor ? { hands: true } : {}),
           tools: definitions,
           ...(shell ? { workspace: shell.cwd } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.fetch ? { fetch: options.fetch } : {}),
+          ...(executor ? {
+            remote: {
+              failed: () => executor.failure !== undefined,
+              execute: async (request: { op: string; durable?: boolean }, id: number) => {
+                if (request.op === "remote_send" && request.durable !== false) await journal.durable();
+                return executor.execute(request as Parameters<typeof executor.execute>[0], id);
+              },
+              cancel: (id: number) => executor.cancel(id),
+              dispose: () => executor.dispose(),
+            },
+          } : {}),
           dispatch: (request, signal) => {
             counts.model_requests++;
             return dispatch(request, signal);
@@ -113,13 +145,17 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         if (error instanceof HostFailure && error.permanent) throw new Fatal(`nanocode refused its configuration: ${error.message}`);
         throw error;
       }
+      if (executor && connection) {
+        executor.claim(runtime);
+        await runtime.attach(handName, connection);
+      }
       counts.open_ms = performance.now() - opening;
       let applied: Thinking | undefined;
       for (;;) {
         await ctx.refresh();
         const pending = ctx.pending();
         let thinking = pending[0] && effort(ctx.state(), pending[0].id, session.thinking);
-        for (const submission of pending) thinking = await place(ctx, journal, runtime, submission, thinking, options.maxPrompts);
+        for (const submission of pending) thinking = await place(ctx, journal, runtime, submission, thinking, options.maxPrompts, executor ? handName : undefined);
         const next = (await runtime.pending(SCOPE))[0];
         if (!next) {
           if (await runtime.settle()) return;
@@ -147,6 +183,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       throw error;
     } finally {
       ctx.signal.removeEventListener("abort", stop);
+      await executor?.dispose().catch(() => undefined);
       await runtime.dispose().catch(() => undefined);
     }
   }
@@ -229,7 +266,7 @@ export function exceeds(state: SessionState, id: string, limit: number | undefin
   return false;
 }
 
-async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined, limit: number | undefined): Promise<Thinking | undefined> {
+async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined, limit: number | undefined, hand?: string): Promise<Thinking | undefined> {
   if (exceeds(ctx.state(), submission.id, limit)) {
     await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.refused", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ refused: "limit" }));
     ctx.live({ type: "error", message: `this session takes at most ${limit} prompts; start a new session`, request_id: submission.id });
@@ -243,7 +280,7 @@ async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
     ctx.live(outcome.thinking ? { type: "effort", thinking: outcome.thinking, request_id: submission.id } : { type: "error", message: outcome.error, request_id: submission.id });
     return outcome.thinking ?? thinking;
   }
-  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: submission.text ?? "", metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) } });
+  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: submission.text ?? "", ...(hand ? { hand } : {}), metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) } });
   await journal.durable();
   await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.place", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ submitted: submitted.submitted }));
   if (submitted.submitted === "too_large") ctx.live({ type: "error", message: `the prompt needs ${submitted.bytes} bytes and the session log stores ${submitted.limit}` });

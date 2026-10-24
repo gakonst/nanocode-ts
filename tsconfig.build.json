@@ -19,6 +19,7 @@
     "src/cloudflare/gateway.ts",
     "src/cloudflare/index.ts",
     "src/cloudflare/limit.ts",
+    "src/cloudflare/relay.ts",
     "src/cloudflare/remote.ts",
     "src/cloudflare/runtime.ts",
     "src/cloudflare/store.ts",
