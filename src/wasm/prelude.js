@@ -98,7 +98,7 @@ const run = async (script, stdin) => {
   const result = await callBash(stdin === undefined ? { script } : { script, stdin });
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exit_code };
 };
-const bash = (script, ...values) => run(typeof script === "string" ? script : script.raw.reduce((out, part, index) => out + part + (index < values.length ? quote(values[index]) : ""), ""));
+const bash = (script, ...values) => run(typeof script === "string" ? script : script.reduce((out, part, index) => out + part + (index < values.length ? quote(values[index]) : ""), ""));
 bash.readFile = async (path) => {
   const result = await run("cat -- " + quote(path));
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "cat exited with " + result.exitCode);

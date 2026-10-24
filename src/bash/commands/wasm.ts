@@ -1,15 +1,15 @@
 import { CommandError, LimitError, type CommandContext, type CommandHandler } from "../shell.ts";
 import { decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
 import { mkdirs } from "./files.ts";
-import { load, Refused, Trap, type HostFunction, type Live, type Loaded } from "./engine.ts";
+import { load, Refused, Trap, type HostFunction, type Live, type Loaded, type WasmOptions } from "./engine.ts";
 
-export { browser } from "./engine.ts";
+export { type WasmOptions } from "./engine.ts";
 
 const SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 const SNAPSHOT_ENTRIES = 20_000;
 
-const MODULES = new Map<string, Loaded>();
+const MODULES = new Map<string, { loaded: Loaded; interpreter: WasmOptions["interpreter"] }>();
 
 const E = { SUCCESS: 0, ACCES: 2, BADF: 8, EXIST: 20, FBIG: 22, INVAL: 28, IO: 29, ISDIR: 31, NOENT: 44, NOSYS: 52, NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, PERM: 63, SPIPE: 70, NOTCAPABLE: 76, NAMETOOLONG: 37, NOTSOCK: 57 } as const;
 
@@ -131,24 +131,25 @@ async function sha256(bytes: Uint8Array): Promise<string> {
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export async function compile(bytes: Uint8Array): Promise<Loaded> {
-  const key = await sha256(bytes);
+export async function compile(bytes: Uint8Array, options: WasmOptions = {}): Promise<Loaded> {
+  const key = (await sha256(bytes)) + (options.force ? ":interpreter" : "");
   const cached = MODULES.get(key);
-  if (cached) return cached;
+  if (cached && cached.interpreter === options.interpreter) return cached.loaded;
   let loaded: Loaded;
   try {
-    loaded = await load(bytes);
+    loaded = await load(bytes, options);
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     if (error instanceof Refused) throw new CommandError(text, 126);
     throw new CommandError("invalid WebAssembly module: " + text, 126);
   }
+  if (cached) cached.loaded.dispose();
   if (MODULES.size >= 16) {
     const oldest = MODULES.keys().next().value!;
-    MODULES.get(oldest)?.dispose();
+    MODULES.get(oldest)?.loaded.dispose();
     MODULES.delete(oldest);
   }
-  MODULES.set(key, loaded);
+  MODULES.set(key, { loaded, interpreter: options.interpreter });
   return loaded;
 }
 
@@ -199,7 +200,7 @@ function parse(ctx: CommandContext): Run {
   return run;
 }
 
-const handler: CommandHandler = async ctx => {
+const handler = (options: WasmOptions): CommandHandler => async ctx => {
   const run = parse(ctx);
   const path = ctx.resolve(run.file);
   const stat = await ctx.fs.stat(path);
@@ -207,7 +208,7 @@ const handler: CommandHandler = async ctx => {
   if (stat.kind !== "file") throw new CommandError(run.file + ": Is a directory", 126);
   const bytes = await ctx.fs.read(path);
   if (!isWasm(bytes)) throw new CommandError(run.file + ": not a WebAssembly module (no \\0asm header)", 126);
-  const module = await compile(bytes);
+  const module = await compile(bytes, options);
   const tree = new Tree();
   for (const arg of [...run.dirs.map(dir => dir.host), ...run.args]) {
     if (!arg || arg.startsWith("-") || arg.length > 4096) continue;
@@ -809,8 +810,9 @@ async function removeTree(fs: FileSystem, path: string): Promise<void> {
   });
 }
 
-export function wasmCommands(): Record<string, CommandHandler> {
-  return { wasm: handler, wasmtime: handler };
+export function wasmCommands(options: WasmOptions = {}): Record<string, CommandHandler> {
+  const wasm = handler(options);
+  return { wasm, wasmtime: wasm };
 }
 
 type CellShell = { fs: FileSystem; cwd: string; limits: { timeoutMs: number }; exec(script: string, options: { stdin?: string; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number }> };
@@ -848,7 +850,7 @@ function fromWire(value: unknown): number | bigint | string {
   return Number(value);
 }
 
-export function wasmHost(shell: CellShell): (request: unknown, signal: AbortSignal) => Promise<unknown> {
+export function wasmHost(shell: CellShell, options: WasmOptions = {}): (request: unknown, signal: AbortSignal) => Promise<unknown> {
   const instances = new Map<number, Live>();
   let next = 0;
   const source = async (request: CellRequest): Promise<{ bytes: Uint8Array; path?: string }> => {
@@ -868,7 +870,7 @@ export function wasmHost(shell: CellShell): (request: unknown, signal: AbortSign
   const loaded = async (request: CellRequest) => {
     const found = await source(request);
     if (!isWasm(found.bytes)) throw new Error("not a WebAssembly module (no \\0asm header)");
-    return compile(found.bytes).catch(error => {
+    return compile(found.bytes, options).catch(error => {
       throw new Error(error instanceof Error ? error.message : String(error));
     });
   };
