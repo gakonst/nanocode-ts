@@ -296,7 +296,10 @@ async function loadDefault(options: PythonOptions): Promise<Pyodide> {
   for (const specifier of candidates) {
     let module: { loadPyodide?: (config: Record<string, unknown>) => Promise<Pyodide> };
     try {
-      module = await import(specifier);
+      module = await import(specifier).catch((error: unknown) => {
+        if (specifier === "pyodide") throw error;
+        return (new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<typeof module>)(specifier);
+      });
     } catch (error) {
       const required = specifier === "pyodide" ? requireFromCwd(specifier) : undefined;
       if (!required) {
