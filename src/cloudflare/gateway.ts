@@ -121,7 +121,6 @@ async function warm(ai: Ai, gateway: string, serviceTier: string, request: Reque
 export function aiGateway(ai: Ai, gateway: string, serviceTier = "", options: AiGatewayOptions = {}): PrivateBinding {
   const search = searchFor(ai, gateway, options);
   return {
-    ...(search.codex ? {} : { webSearch: { codex: false } }),
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url);
       if (pathname === "/model" && request.method === "POST") return model(ai, gateway, serviceTier, request, search);
