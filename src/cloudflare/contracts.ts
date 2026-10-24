@@ -38,7 +38,6 @@ export type SocketDispatch = Pick<ModelDispatch, "provider" | "authority" | "hea
 
 export interface PrivateBinding {
   fetch(request: Request): Promise<Response>;
-  webSearch?: Partial<Record<ModelProvider, boolean>>;
 }
 
 export type HostToolCall = { authority: SessionAuthority; name: string; input: unknown; context: ToolCallContext; grant?: unknown };
