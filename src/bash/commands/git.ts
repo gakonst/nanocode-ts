@@ -464,7 +464,7 @@ export function gitCommands(github: GitHubOptions = {}): Record<string, CommandH
   };
 }
 
-const ALLOWED = [/^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/(?:tar\.gz|legacy\.tar\.gz)\//, /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+(?:\/(?:tarball|commits)(?:\/[^?#]*)?)?(?:\?[^#]*)?$/];
+const ALLOWED = [/^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/(?:tar\.gz|legacy\.tar\.gz|zip|legacy\.zip)\//, /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:archive|releases\/download|raw)\//, /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\//, /^https:\/\/(?:objects|release-assets)\.githubusercontent\.com\//, /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+(?:\/(?:tarball|zipball|commits|releases)(?:\/[^?#]*)?)?(?:\?[^#]*)?$/];
 
 export function githubArchives(fetcher: typeof fetch = globalThis.fetch): typeof fetch {
   return (input, init) => {
@@ -473,6 +473,6 @@ export function githubArchives(fetcher: typeof fetch = globalThis.fetch): typeof
       if (typeof (globalThis as { document?: unknown }).document === "undefined" && !request.headers.has("user-agent")) request.headers.set("user-agent", "nanocode-ts");
       return fetcher(request);
     }
-    return Promise.reject(new TypeError(request.method + " " + request.url + " refused: this host reaches only public GitHub repositories (GET https://api.github.com/repos/OWNER/REPO, its /commits and /tarball, and codeload.github.com archives, which git clone and gh repo clone use), so no other URL works from cells, curl or wget"));
+    return Promise.reject(new TypeError(request.method + " " + request.url + " refused: this host reaches only public GitHub repositories (GET https://api.github.com/repos/OWNER/REPO with its /commits, /releases, /tarball and /zipball, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, and raw.githubusercontent.com), so no other URL works from cells, curl or wget"));
   };
 }
