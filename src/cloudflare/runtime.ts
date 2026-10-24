@@ -1,3 +1,4 @@
+import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
@@ -118,6 +119,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
   const tooLarge = `request bodies are limited to ${valueLimit} bytes`;
   class AgentSession extends DurableObject<E> {
     private readonly store: CheckpointStore;
+    private readonly blobs: DurableObjectBlobs;
     private readonly metadata: Metadata;
     private readonly instances = new Map<string, Promise<AgentRuntime>>();
     private readonly runtimes = new Map<string, Promise<AgentRuntime>>();
@@ -151,6 +153,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     constructor(ctx: DurableObjectState, env: E) {
       super(ctx, env);
       this.store = new CheckpointStore(ctx.storage, valueLimit);
+      this.blobs = new DurableObjectBlobs(ctx.storage, valueLimit);
       this.metadata = new Metadata(ctx.storage);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -1092,7 +1095,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.deleted) return Promise.reject(new Error("session deleted"));
       let current = this.instances.get(scope);
       if (!current) {
-        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: valueLimit, published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
+        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: valueLimit, blobs: this.blobs, published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
         const created = current;
         this.instances.set(scope, created);
         void created.catch(() => { if (this.instances.get(scope) === created) this.instances.delete(scope); });

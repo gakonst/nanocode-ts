@@ -104,6 +104,13 @@ pub async fn call_bytes_with(request: &impl serde::Serialize) -> Result<Vec<u8>,
     }
 }
 
+pub async fn call_optional_bytes(request: Value) -> Result<Option<Vec<u8>>, Value> {
+    match self::request(request).await {
+        Reply::Bytes(bytes) => Ok(Some(bytes)),
+        reply => settle(reply).map(|_| None),
+    }
+}
+
 pub async fn call_with_body(request: Value, body: &[u8]) -> Result<Value, Value> {
     settle(send(encode(&request), Some(body)).await)
 }

@@ -208,8 +208,15 @@ export interface WorkspaceHost {
 
 export type LogPageOptions = { request_id?: string; max_bytes?: number };
 
+export type BlobHost = {
+  threshold?: number;
+  put(key: string, bytes: Uint8Array): void | Promise<void>;
+  get(key: string): Uint8Array | null | Promise<Uint8Array | null>;
+};
+
 export type HostOptions = {
   log_logical_limit?: number;
+  blobs?: BlobHost;
   published(events: LoggedEvent[], bytes: number[]): void;
   wake?(): void;
 };

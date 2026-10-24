@@ -95,8 +95,8 @@ export class AgentRuntime {
     const instance = await WebAssembly.instantiate(module, { host: runtime.imports(), wasi_snapshot_preview1: runtime.libc() });
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
     runtime.wasm = instance.exports as unknown as Exports;
-    if (sql.value_limit !== undefined || options.log_logical_limit !== undefined) {
-      await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit });
+    if (sql.value_limit !== undefined || options.log_logical_limit !== undefined || options.blobs) {
+      await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit, blob_threshold: options.blobs ? options.blobs.threshold ?? sql.value_limit ?? Number.MAX_SAFE_INTEGER : undefined });
     }
     return runtime;
   }
@@ -116,7 +116,7 @@ export class AgentRuntime {
   async open(config: AgentConfiguration, options: RuntimeOptions): Promise<void> {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
-    this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, wake: this.options.wake };
+    this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, wake: this.options.wake, blobs: this.options.blobs };
     const extra = config.code_mode ? options.workspace?.instructions : undefined;
     if (extra && !config.instructions?.includes(extra)) config = { ...config, instructions: config.instructions ? config.instructions + "\n\n" + extra : extra };
     this.hands = config.hands ?? false;
@@ -651,12 +651,22 @@ export class AgentRuntime {
         try { return this.rows(await this.sql.transaction("store", request.operation, request.statements)); }
         finally { this.checkpointTimings.record(request.operation, performance.now() - started); }
       }
+      case "blob_put": {
+        await this.blobs().put(request.key, request.body);
+        return null;
+      }
+      case "blob_get": return await this.blobs().get(request.key);
       case "log": {
         this.counters.log_calls++;
         return this.rows(await this.sql.transaction("log", request.operation, request.statements));
       }
       default: throw new Error("unsupported host operation");
     }
+  }
+
+  private blobs() {
+    if (!this.options.blobs) throw new Error("the host blob store is not configured");
+    return this.options.blobs;
   }
 
   private workspace(): WorkspaceHost {
