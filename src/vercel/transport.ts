@@ -17,6 +17,7 @@ export type VercelTransportOptions = {
 export type VercelTransport = Transport & {
   session(): VercelSession;
   warm(): void;
+  open(): Promise<string | undefined>;
   crash(options?: { at?: "tool" | "any"; afterMs?: number }): Promise<Response>;
   forget(): void;
 };
@@ -150,6 +151,19 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         return response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
       })().catch(() => undefined);
       warmed = { key: key(), session };
+    },
+    async open() {
+      const session = state;
+      if (session.id) return session.id;
+      const pending = warmed?.key === key() ? warmed.session : fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), warm: true }) }).then(async response => response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined, () => undefined);
+      warmed = { key: key(), session: pending };
+      const id = await pending;
+      if (warmed?.session === pending) warmed = undefined;
+      if (id && !session.id) {
+        session.id = id;
+        save(session);
+      }
+      return session.id;
     },
     crash(crash = {}) {
       return fetch(options.chaosUrl ?? url.replace(/chat$/, "chaos"), { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ sessionId: state.id, at: crash.at ?? "tool", afterMs: crash.afterMs ?? 1500 }) });

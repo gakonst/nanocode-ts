@@ -2,7 +2,8 @@
 
 import { Fragment, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { type Entry, type ToolCell, liveEvent } from "../client.ts";
-import { commands, Cloud, limits, localKey, message, Models, Payment, Payments, type Runtime, until, Wallet } from "../machines/index.ts";
+import { commands, Cloud, type Keyring, limits, localKey, message, Models, Payment, Payments, type Runtime, until, unlockCommands, Wallet } from "../machines/index.ts";
+import type * as Mcp from "../machines/mcp.ts";
 import type * as Local from "../machines/local.ts";
 import { useConfig, useConversations, usePart, useSend, useTranscript } from "./index.tsx";
 
@@ -83,19 +84,10 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
 
   async function login() {
     if (connected) return note("tool", `Already logged in as ${Wallet.short(connected.address)}. Type /logout first to use another wallet.`);
-    let pending = Wallet.restore();
-    if (!pending) {
-      note("tool", Wallet.framed() ? "X's player cannot show Tempo Wallet, so Tempo Wallet gives you a code instead. ⌘-click the link below (Ctrl-click on Windows) to open it in a normal tab, or open it on your phone, and approve the key with your passkey." : "Opening Tempo Wallet. Approve the key with your passkey.");
-      pending = await Wallet.connect();
-      note("tool", `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${limits}, at ${until(pending)}.`);
-    }
-    note("tool", `Publishing the key on Tempo. Its one transaction pays its fee in ${Wallet.usdc.symbol} from your wallet.`);
-    const hash = await Wallet.publish(pending);
-    note("tool", hash ? `The key is on Tempo (transaction ${Wallet.short(hash)}).` : "The key is already on Tempo.");
+    const pending = await approve(note);
     setConnected(pending);
     if (!keyed && !cloud && localStorage.getItem(localKey) !== "1") await enableCloud(pending);
-    const { balance } = await Wallet.balances(pending);
-    note("tool", balance === 0n ? "Your wallet holds no MACH yet. Type /fund to buy some." : `Your wallet holds ${Wallet.format(balance)} MACH. ${keyed ? "Paid tools are unlocked. " : ""}Ask anything${runtime.options.suggestion ? `, or try "${runtime.options.suggestion}"` : ""}.`);
+    await greet(pending, note, keyed, runtime.options.suggestion);
   }
 
   async function logout() {
@@ -151,23 +143,11 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
   }
 
   async function fund() {
-    const saved = connected ?? Wallet.restore();
-    if (!saved) return note("tool", "Not logged in. Type /login first.");
-    if (Wallet.framed()) {
-      note("tool", "X's player cannot show Tempo Wallet. ⌘-click the link below (Ctrl-click on Windows) to buy MACH in a normal tab, then type /wallet to see your balance.");
-      return setCheckout({ address: saved.address, url: Wallet.fundingUrl(saved) });
-    }
-    note("tool", "Opening MACH checkout in Tempo Wallet.");
-    await Wallet.fund(saved);
+    await fundWallet(connected, note, setCheckout);
   }
 
   function open(event: MouseEvent<HTMLAnchorElement>) {
-    const pointer = (event.nativeEvent as PointerEvent).pointerType;
-    const mouse = pointer ? pointer === "mouse" : matchMedia("(pointer: fine)").matches;
-    if (!mouse || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if (!Wallet.framed() || !Wallet.sandboxed()) return;
-    event.preventDefault();
-    note("tool", "That link would open in a tab that keeps X's sandbox, where Tempo Wallet cannot sign you in. ⌘-click it (Ctrl-click on Windows) to open a normal tab, or open it on your phone.");
+    guard(event, note);
   }
 
   async function command(text: string, echo = true) {
@@ -230,6 +210,147 @@ function summary(agent: Local.Agent) {
   return `${agent.model} · ${requests} req · ${rows} rows`;
 }
 
+
+type Note = (kind: Entry["kind"], text: string) => void;
+
+async function approve(note: Note): Promise<Wallet.Wallet> {
+  let pending = Wallet.restore();
+  if (!pending) {
+    note("tool", Wallet.framed() ? "X's player cannot show Tempo Wallet, so Tempo Wallet gives you a code instead. ⌘-click the link below (Ctrl-click on Windows) to open it in a normal tab, or open it on your phone, and approve the key with your passkey." : "Opening Tempo Wallet. Approve the key with your passkey.");
+    pending = await Wallet.connect();
+    note("tool", `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${limits}, at ${until(pending)}.`);
+  }
+  note("tool", `Publishing the key on Tempo. Its one transaction pays its fee in ${Wallet.usdc.symbol} from your wallet.`);
+  const hash = await Wallet.publish(pending);
+  note("tool", hash ? `The key is on Tempo (transaction ${Wallet.short(hash)}).` : "The key is already on Tempo.");
+  return pending;
+}
+
+async function greet(connected: Wallet.Wallet, note: Note, keyed: boolean, suggestion?: string) {
+  const { balance } = await Wallet.balances(connected);
+  note("tool", balance === 0n ? "Your wallet holds no MACH yet. Type /fund to buy some." : `Your wallet holds ${Wallet.format(balance)} MACH. ${keyed ? "Paid tools are unlocked. " : ""}Ask anything${suggestion ? `, or try "${suggestion}"` : ""}.`);
+}
+
+async function fundWallet(connected: Wallet.Wallet | undefined, note: Note, setCheckout: (checkout: { address: string; url: string }) => void) {
+  const saved = connected ?? Wallet.restore();
+  if (!saved) return note("tool", "Not logged in. Type /login first.");
+  if (Wallet.framed()) {
+    note("tool", "X's player cannot show Tempo Wallet. ⌘-click the link below (Ctrl-click on Windows) to buy MACH in a normal tab, then type /wallet to see your balance.");
+    return setCheckout({ address: saved.address, url: Wallet.fundingUrl(saved) });
+  }
+  note("tool", "Opening MACH checkout in Tempo Wallet.");
+  await Wallet.fund(saved);
+}
+
+function guard(event: MouseEvent<HTMLAnchorElement>, note: Note) {
+  const pointer = (event.nativeEvent as PointerEvent).pointerType;
+  const mouse = pointer ? pointer === "mouse" : matchMedia("(pointer: fine)").matches;
+  if (!mouse || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!Wallet.framed() || !Wallet.sandboxed()) return;
+  event.preventDefault();
+  note("tool", "That link would open in a tab that keeps X's sandbox, where Tempo Wallet cannot sign you in. ⌘-click it (Ctrl-click on Windows) to open a normal tab, or open it on your phone.");
+}
+
+export type Keyed = { busy: boolean; command(text: string, echo?: boolean): Promise<void>; keyed: boolean; locked: boolean; scripts?: boolean; servers: readonly Mcp.Server[]; submit(text: string): void; working: boolean };
+
+export type Unlocking = Keyed & { checkout: { address: string; url: string } | undefined; connected: Wallet.Wallet | undefined; device: Wallet.Prompt | undefined; open(event: MouseEvent<HTMLAnchorElement>): void; commands: typeof unlockCommands; handles(text: string): boolean };
+
+export function useUnlock(keyring: Keyring.Keyring, options: { servers?: readonly Mcp.Server[]; scripts?: boolean } = {}): Unlocking {
+  const servers = options.servers ?? Payment.resolve({ inference: "apiKey" }).servers;
+  const config = useConfig();
+  const { send, isPending: busy } = useSend();
+  const { current: conversation } = useConversations();
+  const note = config.note;
+  const [connected, setConnected] = useState<Wallet.Wallet>();
+  const [working, setWorking] = useState(false);
+  const [device, setDevice] = useState<Wallet.Prompt>();
+  const [checkout, setCheckout] = useState<{ address: string; url: string }>();
+
+  useEffect(() => Wallet.onPrompt(setDevice), []);
+
+  useEffect(() => {
+    const saved = Wallet.restore();
+    if (!saved) return;
+    void Wallet.published(saved).then(async onChain => {
+      if (!onChain) return note("tool", "Tempo Wallet approved a key earlier, but it is not on Tempo yet. Type /login to publish it.");
+      await keyring.register(saved);
+      setConnected(saved);
+    }).catch((error: unknown) => note("error", message(error)));
+  }, []);
+
+  useEffect(() => {
+    if (connected) void keyring.register(connected).catch((error: unknown) => note("error", message(error)));
+  }, [conversation, connected]);
+
+  async function login() {
+    if (connected) return note("tool", `Connected as ${Wallet.short(connected.address)}. Type /logout first to use another wallet.`);
+    const pending = await approve(note);
+    await keyring.register(pending);
+    setConnected(pending);
+    await greet(pending, note, true);
+  }
+
+  async function logout() {
+    const saved = connected ?? Wallet.restore();
+    if (!saved) return note("tool", "Not connected.");
+    note("tool", "Opening Tempo Wallet to revoke the key.");
+    try {
+      await Wallet.revoke(saved);
+      note("tool", "Tempo Wallet revoked the key.");
+    } catch (error) {
+      note("error", `Tempo Wallet did not revoke the key (${message(error)}). It stays valid until ${until(saved)} with what is left of its limit, but this page no longer keeps it.`);
+    }
+    await keyring.logout().catch(() => undefined);
+    Wallet.forget();
+    setConnected(undefined);
+  }
+
+  async function wallet() {
+    if (!connected) return note("tool", "Not connected. Type /login.");
+    const { balance, fees, remaining } = await Wallet.balances(connected);
+    const spent = await keyring.status().catch(() => undefined);
+    const total = Object.values(spent?.spent ?? {}).reduce((sum, value) => sum + BigInt(value), 0n);
+    note("tool", `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${until(connected)}; this site's server has paid ${Wallet.format(total)} MACH for tools with it.`);
+  }
+
+  function handles(text: string) {
+    return unlockCommands.some(entry => entry.label === text.split(/\s/)[0]);
+  }
+
+  async function command(text: string, echo = true) {
+    setCheckout(undefined);
+    if (echo) note("user", text);
+    const name = text.split(/\s/)[0];
+    setWorking(true);
+    try {
+      if (name === "/login") await login();
+      else if (name === "/logout") await logout();
+      else if (name === "/wallet") await wallet();
+      else if (name === "/fund") await fundWallet(connected, note, setCheckout);
+    } catch (error) {
+      note("error", Models.explain(error).message);
+    }
+    setDevice(undefined);
+    setWorking(false);
+  }
+
+  return {
+    busy,
+    checkout,
+    command,
+    commands: unlockCommands,
+    connected,
+    device,
+    handles,
+    keyed: true,
+    locked: !connected,
+    open: event => guard(event, note),
+    scripts: options.scripts ?? false,
+    servers,
+    submit: text => void send(text),
+    working,
+  };
+}
 
 const bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
 
@@ -305,7 +426,7 @@ export function Meter(props: { source: Source; window?: number; chevron?: ReactN
   );
 }
 
-export function Prompts(props: { machine: Machine }) {
+export function Prompts(props: { machine: Pick<Machine, "checkout" | "device" | "open"> }) {
   const part = usePart();
   const { checkout, device, open } = props.machine;
   const link = device && (device.verificationUriFull ?? device.verificationUri);
@@ -354,13 +475,13 @@ export function Account(props: { machine: Machine }) {
   );
 }
 
-export function Unlock(props: { machine: Machine }) {
+export function Unlock(props: { machine: Keyed }) {
   const part = usePart();
   const { machine } = props;
   if (!machine.locked) return null;
   return (
     <p {...part("unlock")}>
-      <span>Connect Tempo Wallet to unlock tools: {Payment.unlocks(machine.servers)}.</span>
+      <span>Connect Tempo Wallet to unlock tools: {Payment.unlocks(machine.servers, machine.scripts)}.</span>
       <button disabled={machine.working} onClick={() => void machine.command("/login", false)} type="button" {...part("unlockButton")}>{machine.working ? "Waiting for Tempo Wallet…" : "Connect"}</button>
     </p>
   );
@@ -374,7 +495,7 @@ export function needsWallet(entry: Entry) {
   return blocked(entry.tool);
 }
 
-export function WalletCard(props: { machine: Machine; entry: Entry }) {
+export function WalletCard(props: { machine: Keyed; entry: Entry }) {
   const part = usePart();
   const { entries } = useTranscript();
   const { machine } = props;
@@ -396,7 +517,7 @@ export function WalletCard(props: { machine: Machine; entry: Entry }) {
   return (
     <div {...part("walletCard", { connected: false })}>
       <p {...part("walletCardTitle")}>This tool is paid with Tempo</p>
-      <p {...part("walletCardText")}>Connect Tempo Wallet to unlock {Payment.unlocks(machine.servers)}. You approve a key that may spend {limits}; the model still runs on this site&apos;s API key.</p>
+      <p {...part("walletCardText")}>Connect Tempo Wallet to unlock {Payment.unlocks(machine.servers, machine.scripts)}. You approve a key that may spend {limits}; the model still runs on this site&apos;s API key.</p>
       <div {...part("walletCardActions")}>
         <button disabled={machine.working} onClick={() => void machine.command("/login", false)} type="button" {...part("walletCardButton")}>{machine.working ? "Waiting for Tempo Wallet…" : "Connect Tempo Wallet"}</button>
       </div>
@@ -404,6 +525,6 @@ export function WalletCard(props: { machine: Machine; entry: Entry }) {
   );
 }
 
-export function walletCards(machine: Machine) {
+export function walletCards(machine: Keyed) {
   return (entry: Entry) => <Fragment>{needsWallet(entry) && <WalletCard entry={entry} machine={machine} />}</Fragment>;
 }

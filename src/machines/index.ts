@@ -1,5 +1,6 @@
 import { createConfig, type Entry, liveEvent, type Transport } from "../client.ts";
 import * as Cloud from "./cloud.ts";
+import * as Keyring from "./keyring.ts";
 import type * as Local from "./local.ts";
 import * as Mcp from "./mcp.ts";
 import * as Models from "./models.ts";
@@ -7,7 +8,7 @@ import * as Payment from "./payment.ts";
 import * as Payments from "./payments.ts";
 import * as Wallet from "./wallet.ts";
 
-export { Cloud, Mcp, Models, Payment, Payments, Wallet };
+export { Cloud, Keyring, Mcp, Models, Payment, Payments, Wallet };
 
 export type { Local };
 
@@ -20,6 +21,13 @@ export const commands = [
   { detail: "clear the conversation and start a new session", label: "/clear" },
   { detail: "revoke the key in Tempo Wallet and forget it here", label: "/logout" },
   { detail: "list the commands", label: "/help" },
+] as const;
+
+export const unlockCommands = [
+  { detail: "connect Tempo Wallet to unlock paid tools", label: "/login" },
+  { detail: "show your MACH and what the key may still spend", label: "/wallet" },
+  { detail: "buy MACH in Tempo Wallet", label: "/fund" },
+  { detail: "revoke the key in Tempo Wallet and forget it here", label: "/logout" },
 ] as const;
 
 export const localKey = "nanocode.machines.local";

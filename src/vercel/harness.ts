@@ -1,6 +1,6 @@
 import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, hostToolIO, Restart, type SessionState, type Submission } from "durable-harness";
 import { liveEvent } from "../client.ts";
-import { AgentRuntime, type AgentConfiguration, HostFailure, RemoteExecutor, type LoggedEvent, type ModelProvider, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
+import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type McpServer, type ModelProvider, RemoteExecutor, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
@@ -46,6 +46,7 @@ export interface NanocodeHarnessOptions {
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
   hands?: { relay(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number };
+  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch };
 }
 
 export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
@@ -93,6 +94,8 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;
     const shell = options.workspace === false || executor ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    const mcpServers = options.mcp?.servers ?? [];
+    const mcpFetch = options.mcp?.fetch?.(ctx.runId) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
     const stop = () => void runtime.dispose().catch(() => undefined);
     ctx.signal.addEventListener("abort", stop, { once: true });
     try {
@@ -115,6 +118,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           code_mode: executor ? false : options.codeMode,
           ...(executor ? { hands: true } : {}),
           tools: definitions,
+          ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
           ...(shell ? { workspace: shell.cwd } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
@@ -131,6 +135,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
             },
           } : {}),
           dispatch: (request, signal) => {
+            if (request.provider == null && mcpServers.length) return mcpFetch(request.endpoint, { method: request.method, headers: request.headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body as Uint8Array<ArrayBuffer>, signal });
             counts.model_requests++;
             return dispatch(request, signal);
           },
