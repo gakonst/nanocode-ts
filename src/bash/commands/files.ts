@@ -40,7 +40,7 @@ function when(mtime: number): string {
   return MONTHS[date.getUTCMonth()] + " " + String(date.getUTCDate()).padStart(2, " ") + " " + time;
 }
 
-async function copyTree(fs: LinkFileSystem, from: string, to: string, preserve = false, links = false) {
+async function copyTree(fs: LinkFileSystem, from: string, to: string, preserve = false, links = false, umask = 0o022) {
   const link = links && fs.readlink ? await fs.readlink(from) : null;
   if (link !== null && fs.symlink) {
     if (await fs.stat(to)) await fs.remove(to);
@@ -52,12 +52,12 @@ async function copyTree(fs: LinkFileSystem, from: string, to: string, preserve =
   if (stat.kind === "file") {
     const existed = await fs.stat(to);
     await fs.write(to, await fs.read(from));
-    if (fs.chmod && (preserve || !existed)) await fs.chmod(to, preserve ? stat.mode : stat.mode & ~0o022);
+    if (fs.chmod && (preserve || !existed)) await fs.chmod(to, preserve ? stat.mode : stat.mode & ~umask);
     if (preserve && fs.utimes) await fs.utimes(to, stat.mtime);
     return;
   }
   if (!(await fs.stat(to))) await fs.mkdir(to);
-  for (const name of await fs.list(from)) await copyTree(fs, from + "/" + name, (to === "/" ? "" : to) + "/" + name, preserve, links);
+  for (const name of await fs.list(from)) await copyTree(fs, from + "/" + name, (to === "/" ? "" : to) + "/" + name, preserve, links, umask);
   if (preserve && fs.chmod) await fs.chmod(to, stat.mode);
   if (preserve && fs.utimes) await fs.utimes(to, stat.mtime);
 }
@@ -221,6 +221,12 @@ const mkdir: CommandHandler = async ctx => {
     try {
       if (parsed.flags.has("p")) await mkdirs(ctx.fs, path);
       else await ctx.fs.mkdir(path);
+      const spec = last(parsed, "m");
+      if (spec !== undefined && ctx.fs.chmod) {
+        const bits = permBits(spec, 0o777, true);
+        if (bits === undefined) throw new CommandError("invalid mode '" + spec + "'");
+        await ctx.fs.chmod(path, bits);
+      }
       if (parsed.flags.has("v")) ctx.stdout.write("mkdir: created directory '" + operand + "'\n");
     } catch (error) {
       ctx.stderr.write("mkdir: cannot create directory '" + operand + "': " + failure(error) + "\n");
@@ -340,7 +346,7 @@ async function transfer(ctx: CommandContext, move: boolean): Promise<number> {
           continue;
         }
         if (stat.kind === "directory" && (to + "/").startsWith(from + "/")) throw new CommandError("cannot copy a directory, '" + source + "', into itself");
-        await copyTree(linked(ctx), from, to, parsed.flags.has("p") || parsed.flags.has("a"), links);
+        await copyTree(linked(ctx), from, to, parsed.flags.has("p") || parsed.flags.has("a"), links, ctx.umask);
       }
       if (parsed.flags.has("v")) ctx.stdout.write("'" + source + "' -> '" + to + "'\n");
     } catch (error) {

@@ -21,6 +21,32 @@ export interface FileSystem {
 
 export type FileInput = string | Uint8Array;
 
+export function masked(fs: FileSystem, umask: number): FileSystem {
+  const chmod = fs.chmod?.bind(fs);
+  if (umask === 0o022 || !chmod) return fs;
+  return {
+    stat: path => fs.stat(path),
+    read: path => fs.read(path),
+    write: async (path, data, append) => {
+      const existed = await fs.stat(path);
+      await fs.write(path, data, append);
+      if (!existed) await chmod(path, 0o666 & ~umask);
+    },
+    list: path => fs.list(path),
+    mkdir: async path => {
+      await fs.mkdir(path);
+      await chmod(path, 0o777 & ~umask);
+    },
+    remove: path => fs.remove(path),
+    rename: (from, to) => fs.rename(from, to),
+    chmod,
+    ...(fs.utimes ? { utimes: fs.utimes.bind(fs) } : {}),
+    ...(fs.symlink ? { symlink: fs.symlink.bind(fs) } : {}),
+    ...(fs.readlink ? { readlink: fs.readlink.bind(fs) } : {}),
+    ...(fs.lstat ? { lstat: fs.lstat.bind(fs) } : {}),
+  };
+}
+
 export class FsError extends Error {
   readonly code: string;
   constructor(code: string, path: string) {

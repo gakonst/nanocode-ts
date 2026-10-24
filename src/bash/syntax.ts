@@ -36,6 +36,22 @@ export type Script = AndOr[];
 
 export class SyntaxError extends Error {}
 
+export type Edit = { start: number; end: number; body?: Script; value?: string };
+
+export type Source = { text: string; start: number; edits: Edit[] };
+
+export type Heredoc = { delimiter: string; quoted: boolean; strip: boolean; body: string };
+
+export const sources = new WeakMap<Word, Source>();
+
+export const texts = new WeakMap<object, string | string[]>();
+
+export const heredocs = new WeakMap<Redirect, Heredoc>();
+
+export const forced = new WeakSet<Redirect>();
+
+export const newlines = new WeakSet<AndOr>();
+
 const META = " \t\n;&|()<>";
 const RESERVED_STOP = new Set(["then", "elif", "else", "fi", "do", "done", "esac", "}"]);
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*/;
@@ -59,6 +75,7 @@ class Parser {
   src: string;
   pos = 0;
   pending: Pending[] = [];
+  edits: Edit[] = [];
   #linePos = 0;
   #line = 1;
 
@@ -126,6 +143,7 @@ class Parser {
       lines.push(line + "\n");
     }
     const body = lines.join("");
+    heredocs.set(pending.redirect, { body, delimiter: pending.delimiter, quoted: !pending.expand, strip: pending.strip });
     pending.redirect.body = pending.expand ? new Parser(body).text() : [{ type: "text", value: body, quoted: true }];
   }
 
@@ -162,8 +180,10 @@ class Parser {
         item.source = this.src.slice(start, this.pos).trim();
       }
       if (c === ";" || (c === "&" && !this.starts("&&"))) this.pos++;
-      else if (c === "\n") this.newline();
-      else break;
+      else if (c === "\n") {
+        newlines.add(item);
+        this.newline();
+      } else break;
     }
     return script;
   }
@@ -220,7 +240,9 @@ class Parser {
       command = { type: "group", body, subshell: false, redirects: [] };
     } else if (this.starts("((")) {
       this.pos += 2;
-      command = { type: "arith", expr: new Parser(this.until("))")).text(), redirects: [] };
+      const text = this.until("))");
+      command = { type: "arith", expr: new Parser(text).text(), redirects: [] };
+      texts.set(command, text);
     } else if (this.starts("(")) {
       this.pos++;
       const body = this.list(new Set());
@@ -315,7 +337,9 @@ class Parser {
       const [init, cond, step] = parts.map(part => new Parser(part).text());
       this.blanks();
       if (this.starts(";")) this.pos++;
-      return { type: "cfor", init, cond, step, body: this.doBody(), redirects: [] };
+      const command: Command = { type: "cfor", init, cond, step, body: this.doBody(), redirects: [] };
+      texts.set(command, parts);
+      return command;
     }
     const name = this.src.slice(this.pos).match(NAME)?.[0];
     if (!name) this.fail();
@@ -428,7 +452,10 @@ class Parser {
         if (assign) {
           this.pos += assign[0].length;
           const entry: Assign = { name: assign[1], append: assign[3] === "+" };
-          if (assign[2]) entry.index = new Parser(assign[2].slice(1, -1)).text();
+          if (assign[2]) {
+            entry.index = new Parser(assign[2].slice(1, -1)).text();
+            texts.set(entry, assign[2]);
+          }
           if (this.starts("(")) {
             this.pos++;
             entry.items = [];
@@ -442,7 +469,9 @@ class Parser {
               const key = this.src.slice(this.pos, this.pos + 4096).match(/^\[([^\]\n]*)\]=/);
               if (key) {
                 entry.keys ??= [];
-                entry.keys[entry.items.length] = new Parser(key[1]).text();
+                const keyWord = new Parser(key[1]).text();
+                sources.set(keyWord, { edits: [], start: 0, text: key[1] });
+                entry.keys[entry.items.length] = keyWord;
                 this.pos += key[0].length;
                 if (this.done() || " \t\n)".includes(this.src[this.pos])) {
                   entry.items.push([{ type: "text", value: "", quoted: true }]);
@@ -470,6 +499,7 @@ class Parser {
     this.pos += match[0].length;
     this.blanks();
     const redirect: Redirect = { fd: match[1] ? Number(match[1]) : null, op: match[2] === ">|" ? ">" : match[2], target: [] };
+    if (match[2] === ">|") forced.add(redirect);
     if (match[2] === "<<" || match[2] === "<<-") {
       const raw = this.src.slice(this.pos).match(/^[^\s;&|()<>]+/)?.[0];
       if (!raw) this.fail();
@@ -486,6 +516,16 @@ class Parser {
   }
 
   word(regex = false): Word {
+    const start = this.pos;
+    const outer = this.edits;
+    this.edits = [];
+    const parts = this.wordParts(regex);
+    sources.set(parts, { edits: this.edits, start, text: this.src.slice(start, this.pos) });
+    this.edits = outer;
+    return parts;
+  }
+
+  wordParts(regex: boolean): Word {
     const meta = regex ? " \t\n" : META;
     const parts: Part[] = [];
     if ((this.src[this.pos] === "<" || this.src[this.pos] === ">") && this.src[this.pos + 1] === "(") {
@@ -528,6 +568,7 @@ class Parser {
         if (this.src[this.pos] !== '"') throw new SyntaxError("unexpected EOF while looking for matching `\"'");
         this.pos++;
       } else if (c === "$" && this.src[this.pos + 1] === "'") {
+        const start = this.pos;
         this.pos += 2;
         let value = "";
         while (!this.done() && this.src[this.pos] !== "'") {
@@ -539,6 +580,7 @@ class Parser {
         }
         if (this.done()) this.fail();
         this.pos++;
+        this.edits.push({ end: this.pos, start, value });
         push(parts, value, true);
       } else if (c === "$" || c === "`") parts.push(this.dollar(false));
       else {
@@ -601,6 +643,7 @@ class Parser {
       }
     }
     if (this.starts("(")) {
+      const start = this.pos - 1;
       this.pos++;
       const outer = this.pending;
       this.pending = [];
@@ -609,6 +652,7 @@ class Parser {
       this.pending = outer;
       if (!this.starts(")")) this.fail();
       this.pos++;
+      this.edits.push({ body, end: this.pos, start });
       return { type: "command", body, quoted };
     }
     if (this.starts("{")) {

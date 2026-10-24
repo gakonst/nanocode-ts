@@ -169,6 +169,8 @@ const tar: CommandHandler = async ctx => {
       await mkdirs(ctx.fs, parentOf(target));
       await ctx.fs.write(target, entry.data);
     }
+    const bits = parsed.flags.has("p") ? entry.mode & 0o7777 : entry.mode & 0o777 & ~ctx.umask;
+    if (ctx.fs.chmod && (await ctx.fs.stat(target))?.mode !== bits) await ctx.fs.chmod(target, bits);
   }
   return 0;
 };

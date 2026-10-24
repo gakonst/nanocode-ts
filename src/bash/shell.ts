@@ -1,5 +1,6 @@
-import { FsError, decode, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
+import { FsError, decode, masked, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
 import { DECLARATIONS, SyntaxError as ParseError, ansiEscape, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
+import { functionText } from "./print.ts";
 import { ArithError, evaluateArith, type ArithValue } from "./arith.ts";
 import { escapeRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
 import { TestError, evaluateTest, type TestArg } from "./test.ts";
@@ -77,6 +78,9 @@ class KillSignal {
 
 const PIPE_HIGH = 1 << 20;
 const SPILL = 1 << 20;
+const PIPE_TAKE = 1 << 16;
+const WHOLE_INPUT = 16;
+const PIPE_SLICE = 1 << 20;
 
 export class Pipe {
   #chunks: string[] = [];
@@ -108,7 +112,7 @@ export class Pipe {
 
   push(text: string) {
     if (this.closed) throw new PipeError();
-    if (this.size + text.length > this.limit) throw new LimitError("pipe buffer exceeded " + this.limit + " characters");
+    if (this.size > 0 && this.size + text.length > this.limit) throw new LimitError("pipe buffer exceeded " + this.limit + " characters");
     this.#chunks.push(text);
     this.size += text.length;
     const reader = this.#reader;
@@ -122,12 +126,33 @@ export class Pipe {
       this.#abort();
       await new Promise<void>(resolve => (this.#reader = resolve));
     }
-    const text = this.#chunks.length === 1 ? this.#chunks[0] : this.#chunks.join("");
-    this.#chunks = [];
-    this.size = 0;
-    const writer = this.#writer;
-    this.#writer = undefined;
-    writer?.();
+    const chunks = this.#chunks;
+    const head = chunks[0];
+    if (head.length > PIPE_SLICE) {
+      let cut = PIPE_SLICE;
+      const code = head.charCodeAt(cut - 1);
+      if (code >= 0xd800 && code <= 0xdbff) cut++;
+      chunks[0] = head.slice(cut);
+      this.size -= cut;
+      if (this.size <= PIPE_HIGH) {
+        const writer = this.#writer;
+        this.#writer = undefined;
+        writer?.();
+      }
+      return head.slice(0, cut);
+    }
+    let end = 0;
+    let length = 0;
+    while (end < chunks.length && length < PIPE_TAKE) length += chunks[end++].length;
+    const text = end === 1 ? chunks[0] : chunks.slice(0, end).join("");
+    if (end === chunks.length) this.#chunks = [];
+    else this.#chunks = chunks.slice(end);
+    this.size -= length;
+    if (this.size <= PIPE_HIGH) {
+      const writer = this.#writer;
+      this.#writer = undefined;
+      writer?.();
+    }
     return text;
   }
 
@@ -286,7 +311,8 @@ export class Input {
       return false;
     }
     const rest = this.#text.length - this.#pos;
-    if (rest + chunk.length > this.#pipe!.limit) throw new LimitError("input exceeded " + this.#pipe!.limit + " characters");
+    const cap = this.#pipe!.limit * WHOLE_INPUT;
+    if (rest + chunk.length > cap) throw new LimitError("input exceeded " + cap + " characters");
     this.#scan = Math.max(0, this.#scan - this.#pos);
     this.#text = rest ? this.#text.slice(this.#pos) + chunk : chunk;
     this.#pos = 0;
@@ -294,8 +320,19 @@ export class Input {
   }
 
   async fill() {
-    while (await this.#more());
-    if (this.#pos === 0 && this.#pipe) this.#text = rejoin(this.#text);
+    if (this.#done || !this.#pipe) return;
+    const pipe = this.#pipe;
+    const cap = pipe.limit * WHOLE_INPUT;
+    const parts = [this.#pos ? this.#text.slice(this.#pos) : this.#text];
+    let size = parts[0].length;
+    for (let chunk = await pipe.take(); chunk !== null; chunk = await pipe.take()) {
+      size += chunk.length;
+      if (size > cap) throw new LimitError("input exceeded " + cap + " characters");
+      parts.push(chunk);
+    }
+    this.#done = true;
+    this.#text = rejoin(parts.join(""));
+    this.#pos = this.#scan = 0;
   }
 
   async text(): Promise<string> {
@@ -383,6 +420,7 @@ export type CommandContext = {
   fetch?: typeof fetch;
   signal: AbortSignal;
   limits: Limits;
+  umask: number;
   resolve(path: string): string;
   run(argv: string[], stdin?: string): Promise<number>;
   exec(script: string, stdin?: string): Promise<{ status: number; stdout: string }>;
@@ -1208,7 +1246,7 @@ export class Runner {
     const scoped = builtin === "local" || ((builtin === "declare" || builtin === "typeset") && !flags.has("g") && this.state.frames.length > 0);
     if (!targets.length || flags.has("p")) {
       if (flags.has("f") || flags.has("F")) {
-        for (const name of [...this.state.functions.keys()].sort()) io.stdout.write("declare -f " + name + "\n");
+        for (const name of [...this.state.functions.keys()].sort()) io.stdout.write(flags.has("F") || builtin === "export" ? "declare -f " + name + "\n" : functionText(name, this.state.functions.get(name)!) + "\n");
         return 0;
       }
       const names = targets.length ? targets.map(target => (typeof target === "string" ? target : target.name)) : [...this.state.vars.keys(), ...this.state.maps.keys()].sort();
@@ -1243,6 +1281,12 @@ export class Runner {
       } else {
         assign = target;
         name = target.name;
+      }
+      if (flags.has("f") || flags.has("F")) {
+        const body = this.state.functions.get(name);
+        if (!body) status = 1;
+        else if (builtin === "declare" || builtin === "typeset") io.stdout.write(flags.has("F") ? name + "\n" : functionText(name, body) + "\n");
+        continue;
       }
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
         io.stderr.write("bash: " + builtin + ": `" + name + "': not a valid identifier\n");
@@ -1281,10 +1325,6 @@ export class Runner {
       if (flags.has("A") && !this.state.maps.has(name)) {
         this.state.maps.set(name, new Map());
         this.state.vars.delete(name);
-      }
-      if (flags.has("f")) {
-        if (!this.state.functions.has(name)) status = 1;
-        continue;
       }
       if (assign) await this.assign(assign, io);
       else if (scoped && builtin === "local") this.state.vars.delete(name);
@@ -1355,10 +1395,11 @@ export class Runner {
       set env(value) {
         env = value;
       },
-      fs: this.host.fs,
+      fs: masked(this.host.fs, this.state.umask),
       fetch: this.host.fetch,
       signal: this.signal,
       limits: this.host.limits,
+      umask: this.state.umask,
       resolve: path => resolvePath(cwd, path),
       run: async (argv, stdin) => {
         this.check();
@@ -1499,6 +1540,7 @@ export class Runner {
       const stat = await this.host.fs.stat(path);
       if (stat?.kind === "directory") throw new FsError("EISDIR", target);
       if (!append || !stat) await this.host.fs.write(path, new Uint8Array(0));
+      if (!stat && this.state.umask !== 0o022 && this.host.fs.chmod) await this.host.fs.chmod(path, 0o666 & ~this.state.umask);
       const out = Output.spill(this.host.limits.maxBufferLength, text => this.host.fs.write(path, encode(text), true));
       writes.push(out);
       return out;
@@ -2348,8 +2390,23 @@ export const BUILTINS: Record<string, Builtin> = {
       else io.stdout.write(["u", "g", "o"].map((who, index) => who + "=" + ["r", "w", "x"].filter((_, bit) => !(mask >> ((2 - index) * 3) & (4 >> bit))).join("")).join(",") + "\n");
       return 0;
     }
-    if (!/^[0-7]{1,4}$/.test(value)) throw new CommandError(value + ": octal number out of range");
-    this.state.umask = parseInt(value, 8);
+    if (/^[0-7]{1,4}$/.test(value)) {
+      this.state.umask = parseInt(value, 8);
+      return 0;
+    }
+    if (/^\d+$/.test(value)) throw new CommandError(value + ": octal number out of range");
+    let allowed = 0o777 & ~this.state.umask;
+    for (const clause of value.split(",")) {
+      const match = clause.match(/^([ugoa]*)([-+=])([rwx]*)$/);
+      if (!match) throw new CommandError("`" + clause.slice(-1) + "': invalid symbolic mode operator");
+      const who = match[1] === "" || match[1].includes("a") ? 0o777 : (match[1].includes("u") ? 0o700 : 0) | (match[1].includes("g") ? 0o070 : 0) | (match[1].includes("o") ? 0o007 : 0);
+      const perm = (match[3].includes("r") ? 0o444 : 0) | (match[3].includes("w") ? 0o222 : 0) | (match[3].includes("x") ? 0o111 : 0);
+      if (match[2] === "+") allowed |= perm & who;
+      else if (match[2] === "-") allowed &= ~(perm & who);
+      else allowed = (allowed & ~who) | (perm & who);
+    }
+    this.state.umask = 0o777 & ~allowed;
+    if (symbolic) io.stdout.write(["u", "g", "o"].map((who, index) => who + "=" + ["r", "w", "x"].filter((_, bit) => allowed >> ((2 - index) * 3) & (4 >> bit)).join("")).join(",") + "\n");
     return 0;
   },
   async unset(args) {
@@ -2568,7 +2625,7 @@ export const BUILTINS: Record<string, Builtin> = {
         }
         if (terse) io.stdout.write(kind + "\n");
         else if (kind === "file") for (const dir of every ? ["/usr/bin/", "/bin/"] : ["/usr/bin/"]) io.stdout.write(name + " is " + dir + name + "\n");
-        else io.stdout.write(kind === "function" ? name + " is a function\n" : kind === "builtin" ? name + " is a shell builtin\n" : name + " is a shell keyword\n");
+        else io.stdout.write(kind === "function" ? name + " is a function\n" + functionText(name, this.state.functions.get(name)!) + "\n" : kind === "builtin" ? name + " is a shell builtin\n" : name + " is a shell keyword\n");
       }
     }
     return status;
