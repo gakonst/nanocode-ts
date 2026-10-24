@@ -301,6 +301,29 @@ export const typing = variants({
 
 export const row = style({ alignItems: "center", borderTop: "1px solid", borderTopColor: "rule", display: "flex", gap: "sm", paddingBlock: "sm", paddingInline: "md" });
 
+export const attach = style({
+  alignSelf: "flex-start",
+  backgroundColor: "transparent",
+  border: "none",
+  color: "accent",
+  cursor: "pointer",
+  font: "inherit !custom",
+  padding: "0",
+  ":focus-visible": { outline: "2px solid", outlineColor: "text", outlineOffset: "2px" },
+});
+
+export const attachments = style({ display: "flex", flexWrap: "wrap", gap: "sm", paddingBlock: "xs", paddingInline: "md", selectors: { '[data-nc="turn"] > &': { paddingInline: "0" } } });
+
+export const attachment = style({ alignItems: "center", border: "1px solid", borderColor: "rule", display: "inline-flex", gap: "xs", maxWidth: "100% !custom", minWidth: "0", paddingInline: "xs" });
+
+export const attachmentThumb = style({ display: "inline-flex", height: "2rem !custom", maxWidth: "4rem !custom", objectFit: "cover", overflow: "hidden", selectors: { "& img": { border: "none", height: "2rem !custom", margin: "0", maxWidth: "4rem !custom", objectFit: "cover" } } });
+
+export const attachmentName = style({ maxWidth: "16rem !custom", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+
+export const attachmentSize = style({ color: "middle", whiteSpace: "nowrap" });
+
+export const attachmentRemove = style({ backgroundColor: "transparent", border: "none", color: "middle", cursor: "pointer", font: "inherit !custom", padding: "0", ":hover": { color: "text" } });
+
 export const chevron = style({ alignSelf: "flex-start", color: "accent", fontVariationSettings: '"wght" 700' });
 
 export const input = style({

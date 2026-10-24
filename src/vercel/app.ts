@@ -1,6 +1,10 @@
 import { durableAgent, getWorld, type HostTool } from "durable-harness";
 import { handRoute } from "./hands.ts";
-import { HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, type ServiceTier, type Thinking } from "./harness.ts";
+import { ATTACHMENT_PATH, type CarriedFile, carryAttachments, HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, SCOPE, type ServiceTier, type Thinking } from "./harness.ts";
+import { committedBatches, LocalSql } from "./journal.ts";
+import { SqlFileSystem } from "../bash/index.ts";
+import { fileResponse } from "../files.ts";
+import { VERCEL_ATTACHMENT_BYTES } from "./transport.ts";
 import { nanocodeModule } from "./module.ts";
 import type { ModelProvider } from "../index.ts";
 
@@ -36,7 +40,18 @@ export function selectionOf(harnesses: SelectionHarness[], harness: unknown, cho
   return { model: found.id, provider: entry.id, thinking, ...(found.maxTokens ? { max_tokens: found.maxTokens } : {}), ...(found.serviceTier ? { service_tier: found.serviceTier } : {}) };
 }
 
-type Body = { effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
+type Body = { attachments?: unknown; effort?: unknown; hand?: unknown; harness?: unknown; model?: unknown; sessionId?: unknown; text?: unknown; warm?: unknown };
+
+function carried(value: unknown): CarriedFile[] | string {
+  if (!Array.isArray(value) || value.length > 8) return "attachments must be at most 8 files";
+  let total = 0;
+  for (const item of value as Partial<CarriedFile>[]) {
+    if (typeof item?.path !== "string" || !ATTACHMENT_PATH.test(item.path) || typeof item.data !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(item.data)) return "each attachment needs a /workspace/uploads/ path and base64 data";
+    total += Math.floor(item.data.length * 3 / 4);
+  }
+  if (total > VERCEL_ATTACHMENT_BYTES) return `a message carries at most ${VERCEL_ATTACHMENT_BYTES} bytes of attachments`;
+  return value as CarriedFile[];
+}
 
 export function createNanocode(options: NanocodeAppOptions) {
   const { harnesses, authorize, maxPromptCharacters, chaos, marks, traceAudience, runAhead, directDriveMs, deadlineMarginMs, defaultSelection: chosenDefault, hands: chosenHands, ...rest } = options;
@@ -95,19 +110,47 @@ export function createNanocode(options: NanocodeAppOptions) {
     return sessionId;
   };
 
+  const file = async (request: Request, params: URLSearchParams): Promise<Response> => {
+    const refused = await admit(request);
+    if (refused) return refused;
+    const sessionId = params.get("sessionId");
+    if (!sessionId) return Response.json({ error: "sessionId is required" }, { status: 400 });
+    if (harness.workspace === false) return Response.json({ error: "this deployment has no workspace" }, { status: 404 });
+    const state = await agent.sessions.inspect(sessionId).catch(() => undefined);
+    if (!state) return Response.json({ error: "no such session" }, { status: 404 });
+    const sql = new LocalSql(committedBatches(state));
+    try {
+      return await fileResponse(new SqlFileSystem({ transaction: (_kind, _operation, statements) => sql.run(statements) }, SCOPE), params.get("file") ?? "", { root: harness.workspace?.cwd ?? "/workspace" });
+    } finally {
+      sql.close();
+    }
+  };
+
   async function GET(request: Request): Promise<Response> {
     const params = new URL(request.url).searchParams;
+    if (params.has("file")) return file(request, params);
     if (streamsHands && params.has("hand")) return handRoutes.GET(request);
     if (!params.has("keepwarm")) return chat.GET(request);
     await nanocodeModule();
     return new Response(null, { status: 204 });
   }
 
-  async function POST(request: Request): Promise<Response> {
-    if (streamsHands && new URL(request.url).searchParams.has("hand")) return handRoutes.POST(request);
-    const body = await request.clone().json().catch(() => undefined) as Body | undefined;
-    if (!body || typeof body !== "object") return chat.POST(request);
-    if (maxPromptCharacters && typeof body.text === "string" && body.text.length > maxPromptCharacters) return new Response(`A prompt is at most ${maxPromptCharacters} characters.`, { status: 413 });
+  async function POST(original: Request): Promise<Response> {
+    if (streamsHands && new URL(original.url).searchParams.has("hand")) return handRoutes.POST(original);
+    const sent = await original.clone().json().catch(() => undefined) as Body | undefined;
+    if (!sent || typeof sent !== "object") return chat.POST(original);
+    if (maxPromptCharacters && typeof sent.text === "string" && sent.text.length > maxPromptCharacters) return new Response(`A prompt is at most ${maxPromptCharacters} characters.`, { status: 413 });
+    let body = sent;
+    let request = original;
+    if (sent.attachments !== undefined) {
+      const files = carried(sent.attachments);
+      if (typeof files === "string") return new Response(files, { status: 400 });
+      const { attachments: _, ...rest } = sent;
+      body = { ...rest, text: carryAttachments(typeof sent.text === "string" ? sent.text : "", files) };
+      const headers = new Headers(original.headers);
+      headers.delete("content-length");
+      request = new Request(original.url, { body: JSON.stringify(body), headers, method: "POST", signal: original.signal });
+    }
     if (typeof body.sessionId === "string") return chat.POST(request);
     if (body.warm === true) {
       const sessionId = await start(request, body);

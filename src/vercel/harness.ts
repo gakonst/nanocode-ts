@@ -4,7 +4,8 @@ import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, t
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
-import { Bash, SqlFileSystem } from "../bash/index.ts";
+import { Bash, type FileSystem, SqlFileSystem } from "../bash/index.ts";
+import { dataUrl, MAX_PROMPT_IMAGES, PROMPT_IMAGE_TYPES, sniff, writeFile } from "../files.ts";
 import { dialHand } from "./hands.ts";
 
 export const SCOPE = "session";
@@ -31,6 +32,7 @@ export interface NanocodeHarnessOptions {
   model?: string;
   thinking?: AgentConfiguration["thinking"];
   instructions?: string;
+  handInstructions?: string;
   tools?: HostTool[];
   durability?: Durability;
   batchMs?: number;
@@ -49,11 +51,45 @@ export interface NanocodeHarnessOptions {
   hands?: false | NanocodeHands;
   mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch; deferred?: boolean };
   webSearch?: false;
+  promptImages?: (session: NanocodeSession) => boolean;
 }
 
 export type NanocodeHands = { relay?(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
 
 export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
+
+export const ATTACHMENTS_OPEN = "\n\n<nanocode-attachments>";
+
+export const ATTACHMENTS_CLOSE = "</nanocode-attachments>";
+
+export const ATTACHMENT_PATH = /^\/workspace\/uploads\/[\w.-]{1,100}$/;
+
+export type CarriedFile = { path: string; data: string };
+
+export function carryAttachments(text: string, files: readonly CarriedFile[]): string {
+  return files.length ? text + ATTACHMENTS_OPEN + JSON.stringify(files) + ATTACHMENTS_CLOSE : text;
+}
+
+export function attachmentsOf(text: string): { text: string; files: { path: string; bytes: Uint8Array }[] } {
+  const start = text.lastIndexOf(ATTACHMENTS_OPEN);
+  if (start < 0 || !text.endsWith(ATTACHMENTS_CLOSE)) return { text, files: [] };
+  let carried: unknown;
+  try {
+    carried = JSON.parse(text.slice(start + ATTACHMENTS_OPEN.length, -ATTACHMENTS_CLOSE.length));
+  } catch {
+    return { text, files: [] };
+  }
+  const files = (Array.isArray(carried) ? carried : []).flatMap(item => {
+    const file = item as Partial<CarriedFile>;
+    if (typeof file?.path !== "string" || !ATTACHMENT_PATH.test(file.path) || typeof file.data !== "string") return [];
+    try {
+      return [{ path: file.path, bytes: Uint8Array.from(atob(file.data), char => char.charCodeAt(0)) }];
+    } catch {
+      return [];
+    }
+  });
+  return { text: text.slice(0, start), files: files.slice(0, 8) };
+}
 
 function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -98,7 +134,8 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       : undefined;
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;
-    const shell = options.workspace === false || executor ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
+    const files = options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE);
+    const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     const mcpServers = options.mcp?.servers ?? [];
     const mcpFetch = options.mcp?.fetch?.(ctx.runId) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
     const stop = () => void runtime.dispose().catch(() => undefined);
@@ -114,7 +151,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           max_tokens: session.max_tokens,
           service_tier: session.service_tier,
           subagents: options.subagents,
-          instructions: options.instructions,
+          instructions: executor && options.handInstructions ? [options.instructions, options.handInstructions].filter(Boolean).join("\n\n") : options.instructions,
           subscription: false,
           endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
           gateway,
@@ -167,7 +204,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         await ctx.refresh();
         const pending = ctx.pending();
         let thinking = pending[0] && effort(ctx.state(), pending[0].id, session.thinking);
-        for (const submission of pending) thinking = await place(ctx, journal, runtime, submission, thinking, options.maxPrompts, executor ? handName : undefined);
+        for (const submission of pending) thinking = await place(ctx, journal, runtime, submission, thinking, options.maxPrompts, executor ? handName : undefined, files, options.promptImages?.(session) ?? true);
         const next = (await runtime.pending(SCOPE))[0];
         if (!next) {
           if (await runtime.settle()) return;
@@ -278,7 +315,7 @@ export function exceeds(state: SessionState, id: string, limit: number | undefin
   return false;
 }
 
-async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined, limit: number | undefined, hand?: string): Promise<Thinking | undefined> {
+async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRuntime, submission: Submission, thinking: Thinking | undefined, limit: number | undefined, hand?: string, workspace?: FileSystem, seesImages = true): Promise<Thinking | undefined> {
   if (exceeds(ctx.state(), submission.id, limit)) {
     await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.refused", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ refused: "limit" }));
     ctx.live({ type: "error", message: `this session takes at most ${limit} prompts; start a new session`, request_id: submission.id });
@@ -292,7 +329,14 @@ async function place(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
     ctx.live(outcome.thinking ? { type: "effort", thinking: outcome.thinking, request_id: submission.id } : { type: "error", message: outcome.error, request_id: submission.id });
     return outcome.thinking ?? thinking;
   }
-  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: submission.text ?? "", ...(hand ? { hand } : {}), metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) } });
+  const attached = attachmentsOf(submission.text ?? "");
+  const images: string[] = [];
+  for (const file of attached.files) {
+    if (workspace) await writeFile(workspace, file.path, file.bytes);
+    const type = sniff(file.bytes);
+    if (seesImages && PROMPT_IMAGE_TYPES.has(type) && images.length < MAX_PROMPT_IMAGES) images.push(dataUrl(file.bytes, type));
+  }
+  const submitted = await runtime.submit(SCOPE, { request_id: submission.id, prompt: attached.text, ...(images.length ? { images } : {}), ...(hand ? { hand } : {}), metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) } });
   await journal.durable();
   await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.place", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ submitted: submitted.submitted }));
   if (submitted.submitted === "too_large") ctx.live({ type: "error", message: `the prompt needs ${submitted.bytes} bytes and the session log stores ${submitted.limit}` });
@@ -308,7 +352,7 @@ async function steer(ctx: DriveContext, journal: SqlJournal, runtime: AgentRunti
     if (done || ctx.signal.aborted) return;
     await ctx.refresh();
     for (const submission of ctx.pending()) {
-      if (submission.kind !== "steer" || exceeds(ctx.state(), submission.id, limit) || !await runtime.steer(submission.id, submission.text ?? "")) continue;
+      if (submission.kind !== "steer" || exceeds(ctx.state(), submission.id, limit) || !await runtime.steer(submission.id, attachmentsOf(submission.text ?? "").text)) continue;
       await journal.durable();
       await ctx.effect(`nanocode.place:${submission.id}`, { name: "nanocode.steer", replay: "safe", placed: [submission.id], input: { request_id: submission.id } }, async () => ({ steered: true }));
       ctx.live({ type: "steered", request_id: submission.id });

@@ -24,7 +24,7 @@ use nanocode::{
     AgentId, ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost,
     CodexHarness, HarnessFamily, Model, ModelSelection, ModelTransport, Nanocode, NanocodeError,
     OpenAi, PromptRejection, ReasoningMode, ServiceTier, SubagentControl, Thinking, Tools,
-    agent::ExecutionEnvironment,
+    agent::{ExecutionEnvironment, input::UserInput},
     backend::Prompt,
     claude::ClaudeEnvironment,
     codex::{
@@ -316,6 +316,8 @@ enum Command {
         scope: String,
         request_id: String,
         prompt: String,
+        #[serde(default)]
+        images: Vec<String>,
         #[serde(default)]
         hand: Option<String>,
         metadata: Value,
@@ -1043,12 +1045,23 @@ async fn submit(
     scope: &str,
     request_id: String,
     prompt: String,
+    images: Vec<String>,
     hand: Option<String>,
     metadata: &Value,
 ) -> Result<Value, String> {
+    let prompt = if images.is_empty() {
+        Prompt::from(prompt)
+    } else {
+        Prompt::content(std::iter::once(UserInput::Text { text: prompt }).chain(
+            images.into_iter().map(|image_url| UserInput::Image {
+                image_url,
+                detail: None,
+            }),
+        ))
+    };
     let submission = Submission {
         request_id,
-        prompt: Prompt::from(prompt),
+        prompt,
         hand,
         metadata: serde_json::value::to_raw_value(metadata).map_err(text)?,
     };
@@ -1331,9 +1344,12 @@ fn execute(command: Command) -> Executed {
             scope,
             request_id,
             prompt,
+            images,
             hand,
             metadata,
-        } => executed(async move { submit(&scope, request_id, prompt, hand, &metadata).await }),
+        } => executed(
+            async move { submit(&scope, request_id, prompt, images, hand, &metadata).await },
+        ),
         Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {
             let record = log(&scope).turn(&request_id).await.map_err(text)?;

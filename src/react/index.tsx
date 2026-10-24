@@ -1,8 +1,8 @@
 "use client";
 
-import { createContext, Fragment, isValidElement, type JSX, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type ChangeEvent, type ClipboardEvent, createContext, type DragEvent, Fragment, isValidElement, type JSX, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { type Components, defaultRehypePlugins, Streamdown, type StreamdownProps, useIsCodeFenceIncomplete } from "streamdown";
-import { type Activity, activity, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type Turn, turns } from "../client.ts";
+import { type Activity, activity, type Attachment, bytes, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type TransportFiles, type Turn, turns, workspaceFile } from "../client.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
 
@@ -20,7 +20,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
+export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -104,7 +104,7 @@ export function useTranscript(): { entries: readonly Entry[]; live: readonly Ent
   return useMemo(() => ({ entries, live }), [entries, live]);
 }
 
-export function useSend(): { send(prompt: string): Promise<void>; cancel(): Promise<void>; canCancel: boolean; isPending: boolean; isIdle: boolean; error: Error | undefined } {
+export function useSend(): { send(prompt: string, attachments?: readonly Attachment[]): Promise<void>; cancel(): Promise<void>; canCancel: boolean; isPending: boolean; isIdle: boolean; error: Error | undefined } {
   const config = useConfig();
   const status = useChatState(state => state.status);
   const error = useChatState(state => state.error);
@@ -210,7 +210,7 @@ function trim() {
 
 const [sanitize, schema] = defaultRehypePlugins.sanitize as [Extract<Pluggable, (...args: never[]) => unknown>, { protocols?: Record<string, string[]> }];
 
-const REHYPE: PluggableList = [defaultRehypePlugins.raw!, [sanitize, { ...schema, protocols: { ...schema.protocols, src: [...(schema.protocols?.src ?? []), "data"] } }], defaultRehypePlugins.harden!, trim];
+const REHYPE: PluggableList = [defaultRehypePlugins.raw!, [sanitize, { ...schema, protocols: { ...schema.protocols, src: [...(schema.protocols?.src ?? []), "data", "workspace", "sandbox"] } }], defaultRehypePlugins.harden!, trim];
 
 const LINK = /^(https?:|mailto:)/i;
 
@@ -219,7 +219,52 @@ const IMAGE = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i;
 export function imageSource(src: unknown): string | undefined {
   if (typeof src !== "string") return undefined;
   const value = src.trim();
-  return IMAGE.test(value) ? value : undefined;
+  return IMAGE.test(value) || workspaceFile(value) ? value : undefined;
+}
+
+const FILE_TTL_MS = 15_000;
+
+const fileCache = new WeakMap<TransportFiles, Map<string, { at: number; url: Promise<{ url: string; type: string }> }>>();
+
+export function useWorkspaceFile(path: string | undefined): { url?: string; type?: string; failed: boolean } {
+  const files = useContext(ConfigContext)?.files;
+  const [state, setState] = useState<{ key?: string; url?: string; type?: string; failed: boolean }>({ failed: false });
+  const key = files && path ? (files.scope?.() ?? "") + "\0" + path : undefined;
+  useEffect(() => {
+    if (!files || !path || !key) return;
+    let cache = fileCache.get(files);
+    if (!cache) fileCache.set(files, cache = new Map());
+    let entry = cache.get(key);
+    if (!entry || Date.now() - entry.at > FILE_TTL_MS) {
+      const url = files.read(path).then(blob => ({ url: URL.createObjectURL(blob), type: blob.type }));
+      entry = { at: Date.now(), url };
+      cache.set(key, entry);
+      url.catch(() => { if (cache!.get(key)?.url === url) cache!.delete(key); });
+    }
+    let active = true;
+    entry.url.then(found => { if (active) setState({ key, url: found.url, type: found.type, failed: false }); }, () => { if (active) setState({ key, failed: true }); });
+    return () => { active = false; };
+  }, [files, path, key]);
+  if (!files || !path) return { failed: true };
+  return state.key === key ? { ...(state.url ? { url: state.url } : {}), ...(state.type ? { type: state.type } : {}), failed: state.failed } : { failed: false };
+}
+
+function WorkspaceImage(props: { path: string; alt?: string; title?: string }) {
+  const part = usePart();
+  const skin = useSkin();
+  const file = useWorkspaceFile(props.path);
+  const [broken, setBroken] = useState(false);
+  const failed = file.failed || broken;
+  const own = part("image", { failed, loading: !file.url && !failed, source: "workspace" });
+  const style = skin.parts?.image ? own.style : { height: "auto", maxWidth: "100%", ...own.style };
+  const label = props.alt || props.path;
+  if (!file.url || failed) return <span title={props.path} {...part("image", { failed, loading: !failed, source: "workspace" })}>{label}</span>;
+  const raster = /^image\/(?:png|jpeg|gif|webp|avif|bmp)$/.test(file.type ?? "");
+  return (
+    <a href={raster ? file.url : undefined} rel="noreferrer" target="_blank" title={props.title ?? props.alt ?? props.path} {...part("figure", { failed })}>
+      <img {...own} alt={props.alt ?? ""} decoding="async" onError={() => setBroken(true)} src={file.url} style={style} />
+    </a>
+  );
 }
 
 function openData(src: string) {
@@ -239,6 +284,8 @@ export function Image(props: { src: string; alt?: string; title?: string }) {
   const skin = useSkin();
   const [failed, setFailed] = useState(false);
   const src = imageSource(props.src);
+  const path = workspaceFile(src);
+  if (path) return <WorkspaceImage alt={props.alt} path={path} {...(props.title ? { title: props.title } : {})} />;
   if (!src) return props.alt ? <span {...part("image", { failed: true })}>{props.alt}</span> : null;
   const data = src.startsWith("data:");
   const own = part("image", { failed, source: data ? "data" : "url" });
@@ -435,6 +482,142 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; 
   );
 }
 
+export type PendingAttachment = { id: string; name: string; size: number; type: string; preview?: string; status: "uploading" | "ready" | "failed"; error?: string; attachment?: Attachment };
+
+export type Attachments = {
+  enabled: boolean;
+  items: readonly PendingAttachment[];
+  ready: Attachment[];
+  uploading: boolean;
+  dragging: boolean;
+  add(files: Iterable<File> | ArrayLike<File>): void;
+  remove(id: string): void;
+  clear(): void;
+  open(): void;
+  input: { ref: { current: HTMLInputElement | null }; type: "file"; multiple: true; hidden: true; tabIndex: -1; onChange(event: ChangeEvent<HTMLInputElement>): void };
+  onPaste(event: ClipboardEvent): void;
+  drop: { onDragOver(event: DragEvent): void; onDragLeave(event: DragEvent): void; onDrop(event: DragEvent): void };
+};
+
+export const MAX_ATTACHMENTS = 8;
+
+function pastedName(file: File): string {
+  if (file.name && file.name !== "image.png" && file.name !== "image.jpeg") return file.name;
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  return `pasted-${stamp}.${(file.type.split("/")[1] ?? "png").replace("jpeg", "jpg")}`;
+}
+
+export function useAttachments(options: { max?: number } = {}): Attachments {
+  const config = useConfig();
+  const files = config.files;
+  const max = Math.min(options.max ?? files?.maxFiles ?? MAX_ATTACHMENTS, MAX_ATTACHMENTS);
+  const [items, setItems] = useState<PendingAttachment[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const input = useRef<HTMLInputElement | null>(null);
+  const count = useRef(0);
+  count.current = items.length;
+  const update = (id: string, next: Partial<PendingAttachment>) => setItems(current => current.map(item => item.id === id ? { ...item, ...next } : item));
+
+  const add = useCallback((list: Iterable<File> | ArrayLike<File>) => {
+    if (!files) return;
+    for (const file of Array.from(list)) {
+      const id = Math.random().toString(36).slice(2);
+      const name = pastedName(file);
+      const base: PendingAttachment = { id, name, size: file.size, type: file.type, status: "uploading", ...(file.type.startsWith("image/") && file.type !== "image/svg+xml" ? { preview: URL.createObjectURL(file) } : {}) };
+      if (count.current >= max) {
+        setItems(current => [...current, { ...base, status: "failed", error: `at most ${max} attachments per message` }]);
+        continue;
+      }
+      if (files.maxBytes !== undefined && file.size > files.maxBytes) {
+        setItems(current => [...current, { ...base, status: "failed", error: `larger than ${bytes(files.maxBytes!)}` }]);
+        continue;
+      }
+      count.current++;
+      setItems(current => [...current, base]);
+      files.upload(file, name).then(
+        attachment => update(id, { status: "ready", attachment, name: attachment.name, type: attachment.type }),
+        (error: unknown) => update(id, { status: "failed", error: error instanceof Error ? error.message : String(error) }),
+      );
+    }
+  }, [files, max]);
+
+  const remove = useCallback((id: string) => setItems(current => {
+    const found = current.find(item => item.id === id);
+    if (found?.preview) URL.revokeObjectURL(found.preview);
+    return current.filter(item => item.id !== id);
+  }), []);
+
+  const clear = useCallback(() => setItems([]), []);
+
+  const ready = useMemo(() => items.flatMap(item => item.status === "ready" && item.attachment ? [item.attachment] : []), [items]);
+
+  return {
+    enabled: Boolean(files),
+    items,
+    ready,
+    uploading: items.some(item => item.status === "uploading"),
+    dragging,
+    add,
+    remove,
+    clear,
+    open: () => input.current?.click(),
+    input: {
+      ref: input,
+      type: "file",
+      multiple: true,
+      hidden: true,
+      tabIndex: -1,
+      onChange: event => {
+        if (event.target.files) add(event.target.files);
+        event.target.value = "";
+      },
+    },
+    onPaste: event => {
+      const pasted = Array.from(event.clipboardData?.files ?? []);
+      if (!files || !pasted.length) return;
+      event.preventDefault();
+      add(pasted);
+    },
+    drop: {
+      onDragOver: event => {
+        if (!files || !Array.from(event.dataTransfer?.types ?? []).includes("Files")) return;
+        event.preventDefault();
+        setDragging(true);
+      },
+      onDragLeave: () => setDragging(false),
+      onDrop: event => {
+        setDragging(false);
+        if (!files || !event.dataTransfer?.files.length) return;
+        event.preventDefault();
+        add(event.dataTransfer.files);
+      },
+    },
+  };
+}
+
+export function AttachmentList(props: { items: readonly (PendingAttachment | Attachment)[]; onRemove?(id: string): void }) {
+  const part = usePart();
+  if (!props.items.length) return null;
+  return (
+    <div {...part("attachments", { editable: Boolean(props.onRemove) })}>
+      {props.items.map((item, index) => {
+        const pending = "status" in item ? item : undefined;
+        const path = pending ? pending.attachment?.path : (item as Attachment).path;
+        const image = item.type.startsWith("image/");
+        const status = pending?.status ?? "ready";
+        return (
+          <span key={pending?.id ?? path ?? index} title={pending?.error ?? path ?? item.name} {...part("attachment", { image, status })}>
+            {image && (pending?.preview ? <img alt="" src={pending.preview} {...part("attachmentThumb")} /> : path ? <span {...part("attachmentThumb")}><Image alt={item.name} src={path} /></span> : null)}
+            <span {...part("attachmentName")}>{item.name}</span>
+            <span {...part("attachmentSize")}>{pending?.error ?? (status === "uploading" ? "uploading" : bytes(item.size))}</span>
+            {props.onRemove && pending && <button aria-label={`Remove ${item.name}`} onClick={() => props.onRemove!(pending.id)} type="button" {...part("attachmentRemove")}>×</button>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolean }) {
   const part = usePart();
   const { entry, previous, live = false } = props;
@@ -445,6 +628,7 @@ export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolea
       {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
         : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Markdown live={live} text={entry.text} /></div>
         : <p {...part("entry", { kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
+      {entry.attachments?.length ? <AttachmentList items={entry.attachments} /> : null}
     </div>
   );
 }
@@ -476,6 +660,7 @@ export function Chat(props: ChatProps) {
   const part = usePart();
   const { entries, live } = useTranscript();
   const { send, isPending: busy } = useSend();
+  const attachments = useAttachments();
   const doing = useActivity();
   const threads = useConversations();
   const [own, setOwn] = useState<Picker | null>(null);
@@ -535,12 +720,15 @@ export function Chat(props: ChatProps) {
 
   const submit = (raw: string) => {
     const text = raw.trim();
-    if (!text) return;
+    const attached = attachments.ready;
+    if (!text && !attached.length) return;
+    if (attachments.uploading) return;
     setPrompt("");
     setRecalled(-1);
     stick.current = true;
-    if (props.onSubmit) props.onSubmit(text);
-    else void send(text);
+    if (props.onSubmit && !attached.length) props.onSubmit(text);
+    else void send(text, attached);
+    attachments.clear();
   };
 
   const choose = (item: PickerItem) => {
@@ -619,7 +807,8 @@ export function Chat(props: ChatProps) {
           if (target.closest("a, button, input, textarea, select") || getSelection()?.toString()) return;
           input.current?.focus();
         }}
-        {...part("chat", { expanded: full })}
+        {...attachments.drop}
+        {...part("chat", { dragging: attachments.dragging, expanded: full })}
       >
         <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...part("log", { expanded: full })}>
           {entries.length === 0 && live.length === 0 && props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>}
@@ -654,8 +843,14 @@ export function Chat(props: ChatProps) {
           </div>
         )}
 
+        <AttachmentList items={attachments.items} onRemove={attachments.remove} />
+
         <div {...part("row")}>
           <span aria-hidden="true" {...part("chevron")}>❯</span>
+          {attachments.enabled && <>
+            <input {...attachments.input} />
+            <button aria-label="Attach files" onClick={attachments.open} title="Attach files (or paste, or drop)" type="button" {...part("attach")}>+</button>
+          </>}
           <textarea
             aria-label="Prompt"
             onChange={event => {
@@ -665,6 +860,7 @@ export function Chat(props: ChatProps) {
               if (!picker) props.onInput?.(event.target.value);
             }}
             onKeyDown={key}
+            onPaste={attachments.onPaste}
             placeholder={placeholder}
             ref={input}
             rows={Math.min(8, Math.max(1, prompt.split("\n").length))}

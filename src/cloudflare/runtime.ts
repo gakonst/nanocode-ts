@@ -2,6 +2,7 @@ import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives } from "../bash/index.ts";
+import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
@@ -47,12 +48,18 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
   mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch; deferred?: boolean };
   instructions?: string;
+  handInstructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   valueLimit?: number;
 };
 
 type TurnTiming = { started: number; admitted_at?: number; admission_ms?: number; pump_wait_ms?: number; runtime_open_ms?: number; runtime_reused?: boolean; run_started?: number; run_ms?: number; recovered?: boolean; checkpoints: TimingSnapshot; runtime?: TimingSnapshot };
 type LegacyJob = { request_id: string; prompt: string; status: string; result: string | null; scope?: string; descriptor?: string; cancel_requested?: number; first_seq?: number | null; last_seq?: number | null };
+
+function withHand(instructions: string | undefined, hand: string | undefined): { instructions?: string } {
+  const text = [instructions, hand].filter(Boolean).join("\n\n");
+  return text ? { instructions: text } : {};
+}
 
 function policy(value: string, name: string): number {
   const number = Number(value);
@@ -253,6 +260,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           this.crash = after;
           return json({ armed: true, after_ms: after });
         }
+        if (parts[2] === "files") return await this.files(scope, url, request);
         if (parts[2] !== "turns") return json({ error: "route not found" }, 404);
         if (request.method === "GET" && parts.length === 4) {
           const turn = await (await this.instance(scope)).turn(scope, decodeURIComponent(parts[3]));
@@ -270,6 +278,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (input.executor !== undefined && (typeof input.executor !== "string" || !EXECUTOR_ID.test(input.executor))) return json({ error: "invalid executor" }, 400);
         if (input.hand !== undefined && !handName(input.hand)) return json({ error: "hand must be the name of an attached hand" }, 400);
         if (input.steer !== undefined && typeof input.steer !== "boolean") return json({ error: "steer must be a boolean" }, 400);
+        if (input.images !== undefined && (!Array.isArray(input.images) || input.images.length > 8 || input.images.some((path: unknown) => typeof path !== "string"))) return json({ error: "images must be at most 8 workspace paths" }, 400);
         if (input.steer) {
           const resident = this.residents.get(scope);
           if (resident && this.driving.has(scope) && await resident.steer(input.request_id, input.prompt)) return json({ request_id: input.request_id, status: "steered" });
@@ -309,7 +318,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           policy(this.env.RECOVERY_DELAY_MS, "RECOVERY_DELAY_MS");
           const current = this.metadata.get("authority");
           if (current && current !== identity) throw new Error("session authority mismatch");
-          submitted = await (await this.instance(scope)).submit(scope, { request_id: input.request_id, prompt: input.prompt, hand: input.hand, metadata: descriptor });
+          const images = options.workspace === false || (descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "")) ? [] : await promptImages(new SqlFileSystem(this.store, scope), input.images, { root: options.workspace?.cwd ?? "/workspace" });
+          submitted = await (await this.instance(scope)).submit(scope, { request_id: input.request_id, prompt: input.prompt, ...(images.length ? { images } : {}), hand: input.hand, metadata: descriptor });
           if (submitted.submitted === "too_large") return json({ error: "request exceeds the session's storage limit", bytes: submitted.bytes, limit: submitted.limit }, 413);
           if (submitted.submitted === "conflict") return json({ error: "request_id already belongs to different input or authority" }, 409);
           if (submitted.submitted === "accepted") {
@@ -583,7 +593,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(options.instructions === undefined ? {} : { instructions: options.instructions }), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.mcp?.deferred === undefined ? {} : { mcp: { deferred: options.mcp.deferred } }),
           fetch: cellFetch,
@@ -1124,6 +1134,22 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       return json(await (await this.instance(scope)).page(scope, after, limit));
     }
 
+    private async files(scope: string, url: URL, request: Request): Promise<Response> {
+      if (options.workspace === false) return json({ error: "this deployment has no workspace" }, 404);
+      const root = options.workspace?.cwd ?? "/workspace";
+      const fs = new SqlFileSystem(this.store, scope);
+      const rest = url.pathname.slice("/internal/files".length);
+      if (request.method === "GET") return await fileResponse(fs, rest, { root });
+      if (request.method !== "POST" || rest) return json({ error: "method not allowed" }, 405);
+      if (Number(request.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) {
+        await request.body?.cancel().catch(() => undefined);
+        return json({ error: "attachments are at most " + MAX_UPLOAD_BYTES + " bytes" }, 413);
+      }
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      const uploaded = await uploadFile(fs, url.searchParams.get("name") ?? "", bytes, { dir: root + "/uploads" });
+      return uploaded instanceof Response ? uploaded : json(uploaded);
+    }
+
     private scopeTimings(scope: string): Timings {
       let value = this.timings.get(scope);
       if (!value) { value = new Timings(); this.timings.set(scope, value); }
@@ -1141,19 +1167,20 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     if (url.pathname === "/health") return json({ ok: true, model: claude, models: { claude, codex: "gpt-6.1-sol" }, auth: env.MODEL_AUTH ?? "api_key" });
     const head = request.method === "HEAD";
     if (url.pathname === "/metrics" && (request.method === "GET" || head)) return options.egress(env).fetch(new Request(url.searchParams.get("probe") === "codex" ? "https://egress.internal/probe/codex" : "https://egress.internal/metrics"));
-    const match = /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm)(?:\/([^/]+)(?:\/(cancel))?)?)?$/.exec(url.pathname);
-    if (!match || (match[3] !== undefined && match[2] !== "turns" && match[2] !== "hands") || (match[4] !== undefined && match[2] !== "turns")) return json({ error: "route not found" }, 404);
+    const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname);
+    const match = files ? undefined : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm)(?:\/([^/]+)(?:\/(cancel))?)?)?$/.exec(url.pathname);
+    if (!files && (!match || (match[3] !== undefined && match[2] !== "turns" && match[2] !== "hands") || (match[4] !== undefined && match[2] !== "turns"))) return json({ error: "route not found" }, 404);
     let name: string;
-    try { name = decodeURIComponent(match[1]); } catch { return json({ error: "invalid session encoding" }, 400); }
+    try { name = decodeURIComponent((files ?? match)![1]); } catch { return json({ error: "invalid session encoding" }, 400); }
     if (!name || name.includes("\0")) return json({ error: "invalid session name" }, 400);
     if (Number(request.headers.get("content-length") ?? 0) > valueLimit) return json({ error: tooLarge }, 413);
     const mode = (provider: ModelProvider) => options.subscription ? options.subscription(account, env, provider) : env.MODEL_AUTH === "subscription";
     const [subscription, codex_subscription] = await Promise.all([mode("claude"), mode("codex")]);
     const caller = typeof principal === "object" ? principal : undefined;
     const descriptor: SessionDescriptor = { account_id: account, session_id: "", session_name: name, subscription, codex_subscription, ...(caller?.read_only ? { read_only: true } : {}), ...(caller?.grant !== undefined ? { grant: caller.grant } : {}), ...(typeof caller?.expires_at === "number" ? { expires_at: caller.expires_at } : {}) };
-    let path = `/internal/${match[2] ?? "metrics"}`;
-    if (match[4]) path = `/internal/cancel/${match[3]}`;
-    else if (match[3]) path += `/${match[3]}`;
+    let path = files ? `/internal/files${files[2] ?? ""}` : `/internal/${match![2] ?? "metrics"}`;
+    if (match?.[4]) path = `/internal/cancel/${match[3]}`;
+    else if (match?.[3]) path += `/${match[3]}`;
     const headers = new Headers(request.headers);
     headers.delete("authorization");
     if (head) headers.delete("upgrade");
