@@ -1,7 +1,7 @@
 import { FsError, decode, encode, rejoin, resolvePath, type FileSystem } from "./fs.ts";
 import { DECLARATIONS, SyntaxError as ParseError, ansiEscape, parse, type Assign, type Command, type Part, type Pipeline, type Redirect, type Script, type Word, type AndOr } from "./syntax.ts";
-import { ArithError, evaluateArith } from "./arith.ts";
-import { escapeRegExp, globRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
+import { ArithError, evaluateArith, type ArithValue } from "./arith.ts";
+import { escapeRegExp, globSource, hasGlob, posixRegExp } from "./text.ts";
 import { TestError, evaluateTest, type TestArg } from "./test.ts";
 
 export type Limits = {
@@ -62,6 +62,96 @@ class LoopSignal {
   }
 }
 
+export class PipeError extends Error {
+  constructor() {
+    super("Broken pipe");
+  }
+}
+
+class KillSignal {
+  readonly status: number;
+  constructor(status: number) {
+    this.status = status;
+  }
+}
+
+const PIPE_HIGH = 1 << 20;
+const SPILL = 1 << 20;
+
+export class Pipe {
+  #chunks: string[] = [];
+  size = 0;
+  ended = false;
+  closed = false;
+  readonly limit: number;
+  readonly signal: AbortSignal | undefined;
+  #reader: (() => void) | undefined;
+  #writer: (() => void) | undefined;
+
+  constructor(limit: number, signal?: AbortSignal) {
+    this.limit = limit;
+    this.signal = signal;
+    signal?.addEventListener("abort", () => this.#wake(), { once: true });
+  }
+
+  #wake() {
+    const reader = this.#reader;
+    const writer = this.#writer;
+    this.#reader = this.#writer = undefined;
+    reader?.();
+    writer?.();
+  }
+
+  #abort() {
+    if (this.signal?.aborted) throw new LimitError(typeof this.signal.reason === "string" ? this.signal.reason : "execution aborted", 124);
+  }
+
+  push(text: string) {
+    if (this.closed) throw new PipeError();
+    if (this.size + text.length > this.limit) throw new LimitError("pipe buffer exceeded " + this.limit + " characters");
+    this.#chunks.push(text);
+    this.size += text.length;
+    const reader = this.#reader;
+    this.#reader = undefined;
+    reader?.();
+  }
+
+  async take(): Promise<string | null> {
+    while (!this.#chunks.length) {
+      if (this.ended || this.closed) return null;
+      this.#abort();
+      await new Promise<void>(resolve => (this.#reader = resolve));
+    }
+    const text = this.#chunks.length === 1 ? this.#chunks[0] : this.#chunks.join("");
+    this.#chunks = [];
+    this.size = 0;
+    const writer = this.#writer;
+    this.#writer = undefined;
+    writer?.();
+    return text;
+  }
+
+  async wait(strict: boolean) {
+    while (this.size > PIPE_HIGH && !this.closed) {
+      this.#abort();
+      await new Promise<void>(resolve => (this.#writer = resolve));
+    }
+    if (strict && this.closed) throw new PipeError();
+  }
+
+  end() {
+    this.ended = true;
+    this.#wake();
+  }
+
+  close() {
+    this.closed = true;
+    this.#chunks = [];
+    this.size = 0;
+    this.#wake();
+  }
+}
+
 export class Output {
   #chunks: string[] = [];
   length = 0;
@@ -69,6 +159,10 @@ export class Output {
   readonly limit: number;
   readonly strict: boolean;
   readonly discard: boolean;
+  #pipe: Pipe | undefined;
+  #spill: ((text: string) => Promise<void>) | undefined;
+  #pending: Promise<void> | undefined;
+  #failure: unknown;
 
   constructor(limit: number, strict = true, discard = false) {
     this.limit = limit;
@@ -76,16 +170,80 @@ export class Output {
     this.discard = discard;
   }
 
+  static pipe(pipe: Pipe): Output {
+    const out = new Output(pipe.limit);
+    out.#pipe = pipe;
+    return out;
+  }
+
+  static spill(limit: number, spill: (text: string) => Promise<void>): Output {
+    const out = new Output(limit);
+    out.#spill = spill;
+    return out;
+  }
+
+  get piped(): boolean {
+    return this.#pipe !== undefined;
+  }
+
+  get backlog(): boolean {
+    return this.#pipe ? this.#pipe.size > PIPE_HIGH : this.#pending !== undefined;
+  }
+
   write(text: string) {
     if (!text || this.discard) return;
+    if (this.#pipe) {
+      this.#pipe.push(text);
+      return;
+    }
     if (this.length + text.length > this.limit) {
-      if (this.strict) throw new LimitError(`output exceeded ${this.limit} characters`);
+      if (this.strict) throw new LimitError("output exceeded " + this.limit + " characters");
       text = text.slice(0, this.limit - this.length);
       this.truncated = true;
       if (!text) return;
     }
     this.#chunks.push(text);
     this.length += text.length;
+    if (this.#spill && this.length >= SPILL) this.#flush(false);
+  }
+
+  #flush(all: boolean) {
+    let text = this.#chunks.length === 1 ? this.#chunks[0] : this.#chunks.join("");
+    let keep = "";
+    const last = text.charCodeAt(text.length - 1);
+    if (!all && last >= 0xd800 && last <= 0xdbff) {
+      keep = text.slice(-1);
+      text = text.slice(0, -1);
+    }
+    this.#chunks = keep ? [keep] : [];
+    this.length = keep.length;
+    if (!text) return;
+    const spill = this.#spill!;
+    const pending: Promise<void> = (this.#pending ?? Promise.resolve()).then(() => spill(text)).catch(error => {
+      this.#failure ??= error;
+    }).then(() => {
+      if (this.#pending === pending) this.#pending = undefined;
+    });
+    this.#pending = pending;
+  }
+
+  async drain() {
+    if (this.#pipe) return this.#pipe.wait(true);
+    await this.#settled();
+  }
+
+  async settle() {
+    if (this.#pipe) return this.#pipe.wait(false);
+    if (this.#spill && this.length) this.#flush(true);
+    await this.#settled();
+  }
+
+  async #settled() {
+    if (this.#pending) await this.#pending;
+    if (this.#failure === undefined) return;
+    const failure = this.#failure;
+    this.#failure = undefined;
+    throw failure;
   }
 
   text(): string {
@@ -97,18 +255,104 @@ export class Output {
 export class Input {
   #text: string;
   #pos = 0;
+  #scan = 0;
+  #pipe: Pipe | undefined;
+  #done = true;
 
   constructor(text = "") {
     this.#text = text;
   }
 
+  static pipe(pipe: Pipe): Input {
+    const input = new Input();
+    input.#pipe = pipe;
+    input.#done = false;
+    return input;
+  }
+
+  get ready(): boolean {
+    return this.#done;
+  }
+
+  #pending(): never {
+    throw new Error("stdin is an open pipe; read it with await stdin.text(), chunk() or readLine()");
+  }
+
+  async #more(): Promise<boolean> {
+    if (this.#done) return false;
+    const chunk = await this.#pipe!.take();
+    if (chunk === null) {
+      this.#done = true;
+      return false;
+    }
+    const rest = this.#text.length - this.#pos;
+    if (rest + chunk.length > this.#pipe!.limit) throw new LimitError("input exceeded " + this.#pipe!.limit + " characters");
+    this.#scan = Math.max(0, this.#scan - this.#pos);
+    this.#text = rest ? this.#text.slice(this.#pos) + chunk : chunk;
+    this.#pos = 0;
+    return true;
+  }
+
+  async fill() {
+    while (await this.#more());
+    if (this.#pos === 0 && this.#pipe) this.#text = rejoin(this.#text);
+  }
+
+  async text(): Promise<string> {
+    await this.fill();
+    return this.read();
+  }
+
+  async chunk(): Promise<string | null> {
+    if (this.#pos >= this.#text.length && !(await this.#more())) return null;
+    const text = this.#pos ? this.#text.slice(this.#pos) : this.#text;
+    this.#text = "";
+    this.#pos = this.#scan = 0;
+    return this.#pipe ? rejoin(text) : text;
+  }
+
+  async readLine(delimiter = "\n"): Promise<{ text: string; complete: boolean } | null> {
+    const mark = delimiter === "" ? "\0" : delimiter;
+    for (;;) {
+      const end = this.#text.indexOf(mark, Math.max(this.#pos, this.#scan));
+      if (end >= 0) {
+        const text = this.#text.slice(this.#pos, end);
+        this.#pos = this.#scan = end + mark.length;
+        return { text: this.#pipe ? rejoin(text) : text, complete: true };
+      }
+      this.#scan = Math.max(this.#pos, this.#text.length - mark.length + 1);
+      if (!(await this.#more())) break;
+    }
+    if (this.#pos >= this.#text.length) return null;
+    const text = this.#text.slice(this.#pos);
+    this.#text = "";
+    this.#pos = this.#scan = 0;
+    return { text: this.#pipe ? rejoin(text) : text, complete: false };
+  }
+
+  async readChars(count: number): Promise<string> {
+    while (this.#text.length - this.#pos < count && (await this.#more()));
+    return this.chars(count);
+  }
+
+  close() {
+    this.#pipe?.close();
+    if (!this.#done) {
+      this.#done = true;
+      this.#text = "";
+      this.#pos = 0;
+    }
+  }
+
   read(): string {
+    if (!this.#done) this.#pending();
     const rest = this.#text.slice(this.#pos);
     this.#pos = this.#text.length;
     return rest;
   }
 
   line(delimiter = "\n"): { text: string; complete: boolean } | null {
+    if (!this.#done) this.#pending();
     if (this.#pos >= this.#text.length) return null;
     const end = delimiter === "" ? this.#text.indexOf("\0", this.#pos) : this.#text.indexOf(delimiter, this.#pos);
     if (end < 0) return { text: this.read(), complete: false };
@@ -118,6 +362,7 @@ export class Input {
   }
 
   chars(count: number): string {
+    if (!this.#done && this.#text.length - this.#pos < count) this.#pending();
     const text = this.#text.slice(this.#pos, this.#pos + count);
     this.#pos += text.length;
     return text;
@@ -146,9 +391,24 @@ export type CommandContext = {
 
 export type CommandHandler = (context: CommandContext) => Promise<number | void> | number | void;
 
+const STREAMS = new WeakSet<CommandHandler>();
+
+const UNREAD = new Set(["basename", "chmod", "cp", "date", "dirname", "du", "echo", "false", "hostname", "id", "ln", "ls", "mkdir", "mktemp", "mv", "printf", "pwd", "readlink", "realpath", "rm", "rmdir", "seq", "sleep", "stat", "touch", "true", "uname", "which", "whoami", "yes"]);
+
+export function streaming<T extends CommandHandler>(handler: T): T {
+  STREAMS.add(handler);
+  return handler;
+}
+
+type Job = { id: number; pid: number; source: string; controller: AbortController; promise: Promise<number>; status?: number; signal?: number };
+
+type Shared = { steps: number; processes: number; pid: number; failure: "syntax" | "limit" | undefined; temporaries: string[]; flushes: (() => Promise<void>)[]; started: number; running: Set<Promise<number>> };
+
 export type ShellHost = { fs: FileSystem; commands: Map<string, CommandHandler>; fetch?: typeof fetch; limits: Limits };
 
-type Frame = Map<string, { value?: string[]; exported: boolean }>;
+type Frame = Map<string, { value?: string[]; map?: Map<string, string>; ref?: string; exported: boolean; readonly: boolean; integer: boolean }>;
+
+class ExpansionError extends Error {}
 
 export class State {
   vars = new Map<string, string[]>();
@@ -157,8 +417,10 @@ export class State {
   functions = new Map<string, Command>();
   frames: Frame[] = [];
   maps = new Map<string, Map<string, string>>();
+  refs = new Map<string, string>();
+  sources = new Map<string, string>();
   readonly = new Set<string>();
-  jobs = new Map<string, number>();
+  jobs = new Map<number, Job>();
   cases = new Map<string, "l" | "u">();
   stack: string[] = [];
   traps = new Map<string, string>();
@@ -168,6 +430,7 @@ export class State {
   optind = 1;
   optpos = 1;
   cwd = "/";
+  umask = 0o022;
   status = 0;
   options = { errexit: false, nounset: false, pipefail: false, xtrace: false, noglob: false };
 
@@ -175,6 +438,9 @@ export class State {
     const state = new State();
     for (const [name, value] of this.vars) state.vars.set(name, value.slice());
     for (const [name, map] of this.maps) state.maps.set(name, new Map(map));
+    state.refs = new Map(this.refs);
+    state.jobs = new Map(this.jobs);
+    state.sources = new Map(this.sources);
     state.readonly = new Set(this.readonly);
     state.cases = new Map(this.cases);
     state.stack = [...this.stack];
@@ -187,6 +453,7 @@ export class State {
     state.functions = new Map(this.functions);
     state.positional = [...this.positional];
     state.cwd = this.cwd;
+    state.umask = this.umask;
     state.status = this.status;
     state.options = { ...this.options };
     return state;
@@ -196,6 +463,8 @@ export class State {
 type Piece = { text: string; quoted: boolean; split: boolean } | { split: "break" };
 
 const BRACE_LIMIT = 100_000;
+
+const LINES: string[] = [];
 
 function escapeGlob(text: string): string {
   return text.replace(/[*?[\]\\]/g, "\\$&");
@@ -256,7 +525,7 @@ function braces(items: Item[], count: { n: number }): Item[][] {
             const step = Math.abs(Number(letters![3] ?? 1)) || 1;
             for (let n = from; from <= to ? n <= to : n >= to; n += from <= to ? step : -step) values.push(String.fromCharCode(n));
           }
-          alternatives = values.map(value => [...value].map(c => ({ c })));
+          alternatives = values.map(value => [{ c: value }]);
         }
       }
     }
@@ -299,27 +568,62 @@ export class Runner {
   state: State;
   readonly host: ShellHost;
   readonly signal: AbortSignal;
-  failure: "syntax" | "limit" | undefined;
-  temporaries: string[] = [];
-  flushes: (() => Promise<void>)[] = [];
+  readonly #shared: Shared;
   #deferred: { path: string; body: Script }[] = [];
-  #processes = 0;
   #ignored = false;
-  #started = Date.now();
-  #steps = 0;
   #depth = 0;
   #condition = 0;
   #substitution: number | undefined;
 
-  constructor(host: ShellHost, state: State, signal: AbortSignal) {
+  constructor(host: ShellHost, state: State, signal: AbortSignal, shared?: Shared) {
     this.host = host;
     this.state = state;
     this.signal = signal;
+    this.#shared = shared ?? { steps: 0, processes: 0, pid: 1000, failure: undefined, temporaries: [], flushes: [], started: Date.now(), running: new Set() };
+  }
+
+  get failure(): "syntax" | "limit" | undefined {
+    return this.#shared.failure;
+  }
+
+  set failure(value: "syntax" | "limit" | undefined) {
+    this.#shared.failure = value;
+  }
+
+  get temporaries(): string[] {
+    return this.#shared.temporaries;
+  }
+
+  get flushes(): (() => Promise<void>)[] {
+    return this.#shared.flushes;
+  }
+
+  fork(state: State, signal = this.signal): Runner {
+    const runner = new Runner(this.host, state, signal, this.#shared);
+    runner.#depth = this.#depth;
+    runner.#condition = this.#condition;
+    return runner;
+  }
+
+  async isolated(run: () => Promise<number>, io?: IO): Promise<number> {
+    let status: number;
+    try {
+      status = await run();
+    } catch (error) {
+      if (error instanceof ExitSignal || error instanceof ReturnSignal || error instanceof KillSignal) status = error.status;
+      else if (error instanceof PipeError) status = 141;
+      else throw error;
+    }
+    return io && this.state.traps.has("EXIT") ? await this.exitTrap(io, status) : status;
   }
 
   check() {
-    if (this.signal.aborted) throw new LimitError(typeof this.signal.reason === "string" ? this.signal.reason : "execution aborted", 124);
-    if (++this.#steps > this.host.limits.maxCommands) throw new LimitError(`too many commands (limit ${this.host.limits.maxCommands})`);
+    if (this.signal.aborted) {
+      const reason = this.signal.reason;
+      if (reason instanceof KillSignal) throw reason;
+      throw new LimitError(typeof reason === "string" ? reason : "execution aborted", 124);
+    }
+    if (++this.#shared.steps > this.host.limits.maxCommands) throw new LimitError(`too many commands (limit ${this.host.limits.maxCommands})`);
   }
 
   enter() {
@@ -345,7 +649,29 @@ export class Runner {
     return this.state.vars.get(name)?.[0];
   }
 
+  target(name: string): string {
+    if (!this.state.refs.size) return name;
+    for (let i = 0; i < 8 && this.state.refs.has(name); i++) name = this.state.refs.get(name)!;
+    return name;
+  }
+
   set(name: string, value: string | string[]) {
+    if (this.state.refs.size) {
+      name = this.target(name);
+      const element = /^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/.exec(name);
+      if (element && typeof value === "string") {
+        if (this.state.readonly.has(element[1])) throw new FatalError(element[1] + ": readonly variable");
+        const map = this.state.maps.get(element[1]);
+        if (map) map.set(element[2], value);
+        else {
+          const array = (this.state.vars.get(element[1]) ?? []).slice();
+          const index = Number(evaluateArith(element[2], { get: n => this.get(n) ?? "", set: () => undefined }));
+          array[index < 0 ? array.length + index : index] = value;
+          this.state.vars.set(element[1], array);
+        }
+        return;
+      }
+    }
     if (this.state.readonly.has(name)) throw new FatalError(name + ": readonly variable");
     this.state.vars.set(name, typeof value === "string" ? [value] : value);
   }
@@ -362,6 +688,48 @@ export class Runner {
       if (!(error instanceof ReturnSignal || error instanceof LoopSignal || error instanceof ParseError)) throw error;
     }
     return status;
+  }
+
+  async jobs() {
+    while (this.#shared.running.size) await Promise.allSettled([...this.#shared.running]);
+  }
+
+  background(item: AndOr, io: IO) {
+    const controller = new AbortController();
+    const runner = this.fork(this.state.clone(), AbortSignal.any([this.signal, controller.signal]));
+    const pid = ++this.#shared.pid;
+    let id = 1;
+    for (const job of this.state.jobs.values()) if (job.id >= id) id = job.id + 1;
+    const stdio: IO = { stdin: new Input(), stdout: io.stdout, stderr: io.stderr };
+    const job: Job = { id, pid, source: item.source ?? "", controller, promise: Promise.resolve(0) };
+    job.promise = (async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      return guard(runner, stdio, () => runner.isolated(() => runner.andOr(item, stdio)));
+    })().catch(error => {
+      stdio.stderr.write("bash: " + message(error) + "\n");
+      return 1;
+    }).then(status => {
+      job.status = status;
+      this.#shared.running.delete(job.promise);
+      return status;
+    });
+    this.#shared.running.add(job.promise);
+    this.state.jobs.set(pid, job);
+    this.state.vars.set("!", [String(pid)]);
+  }
+
+  job(id: string): Job | undefined {
+    const jobs = [...this.state.jobs.values()].sort((a, b) => a.id - b.id);
+    if (id === "%%" || id === "%+" || id === "%") return jobs[jobs.length - 1];
+    if (id === "%-") return jobs[jobs.length - 2];
+    if (/^%\d+$/.test(id)) return jobs.find(job => job.id === Number(id.slice(1)));
+    if (id.startsWith("%")) return jobs.find(job => job.source.startsWith(id.slice(id[1] === "?" ? 2 : 1)));
+    return /^\d+$/.test(id) ? this.state.jobs.get(Number(id)) : undefined;
+  }
+
+  reap(job: Job, io: IO) {
+    if (job.signal && job.signal !== 2 && job.signal !== 13 && job.signal !== 15 && this.state.jobs.has(job.pid)) io.stderr.write("bash: line " + (this.get("LINENO") ?? "1") + ": " + job.pid + " " + (SIGNAL_NAMES[job.signal] ?? "Killed").padEnd(24) + job.source + "\n");
+    this.state.jobs.delete(job.pid);
   }
 
   async cleanup() {
@@ -382,9 +750,7 @@ export class Runner {
     let status = this.state.status;
     for (const item of script) {
       if (item.background) {
-        const job = String(this.state.jobs.size + 1000);
-        this.state.jobs.set(job, await this.subshell(() => this.andOr(item, io)));
-        this.state.vars.set("!", [job]);
+        this.background(item, io);
         status = this.state.status = 0;
       } else status = await this.andOr(item, io);
     }
@@ -445,14 +811,7 @@ export class Runner {
     const saved = this.state;
     this.state = saved.clone();
     try {
-      let status: number;
-      try {
-        status = await run();
-      } catch (error) {
-        if (error instanceof ExitSignal || error instanceof ReturnSignal) status = error.status;
-        else throw error;
-      }
-      return io && this.state.traps.has("EXIT") ? await this.exitTrap(io, status) : status;
+      return await this.isolated(run, io);
     } finally {
       this.state = saved;
     }
@@ -462,16 +821,25 @@ export class Runner {
     let status: number;
     if (pipeline.commands.length === 1) {
       status = await this.command(pipeline.commands[0], io);
-      this.state.vars.set("PIPESTATUS", [String(status)]);
+      const text = String(status);
+      const current = this.state.vars.get("PIPESTATUS");
+      if (current?.length !== 1 || current[0] !== text) this.state.vars.set("PIPESTATUS", [text]);
     } else {
-      let input = io.stdin;
+      const count = pipeline.commands.length;
+      const pipes: Pipe[] = [];
+      for (let i = 1; i < count; i++) pipes.push(new Pipe(this.host.limits.maxBufferLength, this.signal));
+      const settled = await Promise.allSettled(pipeline.commands.map((command, i) => {
+        const runner = this.fork(this.state.clone());
+        const stage: IO = { stdin: i ? Input.pipe(pipes[i - 1]) : io.stdin, stdout: i < count - 1 ? Output.pipe(pipes[i]) : io.stdout, stderr: io.stderr };
+        return runner.isolated(() => runner.command(command, stage)).finally(() => {
+          if (i < count - 1) pipes[i].end();
+          if (i) pipes[i - 1].close();
+        });
+      }));
       const statuses: number[] = [];
-      for (let i = 0; i < pipeline.commands.length; i++) {
-        const last = i === pipeline.commands.length - 1;
-        const stdout = last ? io.stdout : this.buffer();
-        const stage = { stdin: input, stdout, stderr: io.stderr };
-        statuses.push(await this.subshell(() => this.command(pipeline.commands[i], stage)));
-        if (!last) input = new Input(stdout.text());
+      for (const result of settled) {
+        if (result.status === "rejected") throw result.reason;
+        statuses.push(result.value);
       }
       status = statuses[statuses.length - 1];
       this.state.vars.set("PIPESTATUS", statuses.map(String));
@@ -484,7 +852,17 @@ export class Runner {
     this.check();
     if (command.type === "function") {
       this.state.functions.set(command.name, command.body);
+      this.state.sources.set(command.name, this.state.vars.get("BASH_SOURCE")?.[0] ?? "environment");
       return 0;
+    }
+    if (!command.redirects.length) {
+      try {
+        return await (command.type === "simple" ? this.simple(command, io) : this.compound(command, io));
+      } catch (error) {
+        if (!(error instanceof ExpansionError)) throw error;
+        io.stderr.write("bash: " + error.message + "\n");
+        return 1;
+      }
     }
     const mark = this.#deferred.length;
     let redirected: { io: IO; flush(): Promise<void> };
@@ -504,6 +882,10 @@ export class Runner {
     try {
       return await this.compound(command, redirected.io);
     } catch (error) {
+      if (error instanceof ExpansionError) {
+        io.stderr.write("bash: " + error.message + "\n");
+        return 1;
+      }
       if (error instanceof FatalError && !error.reported && command.redirects.length) {
         redirected.io.stderr.write("bash: " + error.message + "\n");
         error.reported = true;
@@ -511,7 +893,7 @@ export class Runner {
       throw error;
     } finally {
       await redirected.flush();
-      for (const { path, body } of this.#deferred.splice(mark)) {
+      if (this.#deferred.length > mark) for (const { path, body } of this.#deferred.splice(mark)) {
         const text = decode(await this.host.fs.read(path).catch(() => new Uint8Array(0)));
         await this.subshell(() => this.script(body, { stdin: new Input(text), stdout: io.stdout, stderr: io.stderr }));
       }
@@ -520,7 +902,7 @@ export class Runner {
 
   async processPath(part: Part & { type: "process" }, io: IO): Promise<string> {
     for (const dir of ["/dev", "/dev/fd"]) if (!(await this.host.fs.stat(dir))) await this.host.fs.mkdir(dir);
-    const path = "/dev/fd/" + (63 - (this.#processes++ % 54));
+    const path = "/dev/fd/" + (63 - (this.#shared.processes++ % 54));
     this.temporaries.push(path);
     if (part.output) {
       await this.host.fs.write(path, new Uint8Array(0));
@@ -595,7 +977,7 @@ export class Runner {
           let matched = falling;
           if (!matched) {
             for (const pattern of item.patterns) {
-              if (globRegExp(await this.pattern(pattern, io)).test(value)) {
+              if (compiled("^" + globbed(await this.pattern(pattern, io)) + "$").test(value)) {
                 matched = true;
                 break;
               }
@@ -627,7 +1009,8 @@ export class Runner {
           if ("op" in token) args.push({ text: token.op, op: true });
           else {
             const pieces = await this.pieces(token.word, io);
-            args.push({ text: joinPieces(pieces, "text"), pattern: joinPieces(pieces, "pattern"), regex: joinPieces(pieces, "regex") });
+            const text = joinPieces(pieces, "text");
+            args.push(pieces.some(piece => piece.split !== "break" && piece.quoted) ? { text, pattern: joinPieces(pieces, "pattern"), regex: joinPieces(pieces, "regex") } : { text });
           }
         }
         return this.test(args, true, io);
@@ -654,6 +1037,7 @@ export class Runner {
     try {
       const result = await evaluateTest(args, double, {
         stat: path => this.host.fs.stat(this.resolve(path)),
+        lstat: path => (this.host.fs.lstat ? this.host.fs.lstat(this.resolve(path)) : Promise.resolve(null)),
         isSet: name => {
           const element = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
           if (!element) return this.state.vars.has(name) || this.state.maps.has(name);
@@ -661,7 +1045,7 @@ export class Runner {
           if (map) return map.has(element[2]);
           return this.state.vars.get(element[1])?.[Number(element[2])] !== undefined;
         },
-        match: (text, pattern) => globRegExp(pattern).test(text),
+        match: (text, pattern) => compiled("^" + globbed(pattern) + "$").test(text),
         regex: (text, source) => {
           const match = text.match(posixRegExp(source, true));
           this.set("BASH_REMATCH", match ? [...match].map(group => group ?? "") : []);
@@ -676,18 +1060,20 @@ export class Runner {
     }
   }
 
-  async arith(word: Word, io: IO): Promise<number> {
+  async arith(word: Word, io: IO): Promise<ArithValue> {
     const source = await this.string(word, io);
     return evaluateArith(source, {
       get: (name, index) => {
+        if (this.state.refs.size) name = this.target(name);
         const value = this.state.vars.get(name);
         if (value === undefined && this.state.options.nounset) throw new FatalError(name + ": unbound variable");
         return value?.[index ?? 0] ?? "";
       },
       set: (name, value, index) => {
+        if (this.state.refs.size) name = this.target(name);
         if (index === undefined) this.set(name, String(value));
         else {
-          const array = (this.state.vars.get(name) ?? []).slice();
+          const array = this.state.vars.get(name) ?? [];
           array[index < 0 ? array.length + index : index] = String(value);
           this.set(name, array);
         }
@@ -697,7 +1083,10 @@ export class Runner {
 
   async simple(command: Command & { type: "simple" }, io: IO): Promise<number> {
     this.#substitution = undefined;
-    if (command.line !== undefined) this.state.vars.set("LINENO", [String(command.line)]);
+    if (command.line !== undefined) {
+      const line = LINES[command.line] ??= String(command.line);
+      if (this.state.vars.get("LINENO")?.[0] !== line) this.state.vars.set("LINENO", [line]);
+    }
     const head = command.words[0];
     if (head && Array.isArray(head) && head.length === 1 && head[0].type === "text" && !head[0].quoted && DECLARATIONS.has(head[0].value) && !this.state.functions.has(head[0].value)) {
       return this.declare(head[0].value, command.words.slice(1), io);
@@ -710,7 +1099,7 @@ export class Runner {
     }
     const saved: [string, string[] | undefined, boolean][] = [];
     for (const assign of command.assigns) {
-      saved.push([assign.name, this.state.vars.get(assign.name), this.state.exported.has(assign.name)]);
+      saved.push([assign.name, this.state.vars.get(assign.name)?.slice(), this.state.exported.has(assign.name)]);
       await this.assign(assign, io);
       this.state.exported.add(assign.name);
     }
@@ -727,7 +1116,7 @@ export class Runner {
   }
 
   async assign(assign: Assign, io: IO) {
-    const { name } = assign;
+    const name = this.target(assign.name);
     const map = this.state.maps.get(name);
     if (assign.items) {
       if (this.state.readonly.has(name)) throw new FatalError(name + ": readonly variable");
@@ -744,14 +1133,20 @@ export class Runner {
         }
         return;
       }
-      const array = assign.append ? (this.state.vars.get(name) ?? []).slice() : [];
-      let position = array.length;
+      const entries: (number | string)[] = [];
       for (let i = 0; i < assign.items.length; i++) {
         const key = assign.keys?.[i];
-        if (key) {
-          position = await this.arith(key, io);
-          array[position++] = await this.string(assign.items[i], io);
-        } else for (const value of await this.fields(assign.items[i], io)) array[position++] = value;
+        if (key) entries.push(Number(await this.arith(key, io)), await this.string(assign.items[i], io));
+        else for (const value of await this.fields(assign.items[i], io)) entries.push(value);
+      }
+      const array = assign.append ? this.state.vars.get(name) ?? [] : [];
+      let position = array.length;
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (typeof entry === "number") {
+          position = entry;
+          array[position++] = entries[++i] as string;
+        } else array[position++] = entry;
       }
       this.set(name, array);
       return;
@@ -766,14 +1161,14 @@ export class Runner {
     const letter = this.state.cases.get(name);
     if (letter) value = letter === "l" ? value.toLowerCase() : value.toUpperCase();
     if (this.state.integers.has(name)) {
-      const number = await this.arith([{ type: "text", value: value || "0", quoted: true }], io);
-      value = String(assign.append ? Number(this.get(name) ?? 0) + number : number);
+      const number = await this.arith([{ type: "text", value: assign.append ? (this.get(name) || "0") + "+(" + (value || "0") + ")" : value || "0", quoted: true }], io);
+      value = String(number);
       this.set(name, value);
       return;
     }
     if (assign.index) {
-      const array = (this.state.vars.get(name) ?? []).slice();
-      const index = await this.arith(assign.index, io);
+      const index = Number(await this.arith(assign.index, io));
+      const array = this.state.vars.get(name) ?? [];
       const position = index < 0 ? array.length + index : index;
       array[position] = assign.append ? (array[position] ?? "") + value : value;
       this.set(name, array);
@@ -788,7 +1183,8 @@ export class Runner {
   local(name: string) {
     const frame = this.state.frames[this.state.frames.length - 1];
     if (!frame || frame.has(name)) return;
-    frame.set(name, { value: this.state.vars.get(name), exported: this.state.exported.has(name) });
+    const state = this.state;
+    frame.set(name, { value: state.vars.get(name), map: state.maps.get(name), ref: state.refs.get(name), exported: state.exported.has(name), readonly: state.readonly.has(name), integer: state.integers.has(name) });
   }
 
   async declare(builtin: string, items: (Word | Assign)[], io: IO): Promise<number> {
@@ -823,9 +1219,14 @@ export class Runner {
           continue;
         }
         if (exporting && !targets.length && !this.state.exported.has(name)) continue;
+        const ref = this.state.refs.get(name);
+        if (ref !== undefined) {
+          io.stdout.write("declare -n" + (this.state.readonly.has(name) ? "r" : "") + " " + name + "=" + JSON.stringify(ref) + "\n");
+          continue;
+        }
         const value = this.state.vars.get(name);
         if (!value) continue;
-        const flag = (value.length > 1 ? "a" : "") + (this.state.exported.has(name) ? "x" : "");
+        const flag = (value.length > 1 ? "a" : "") + (this.state.integers.has(name) ? "i" : "") + (this.state.readonly.has(name) ? "r" : "") + (this.state.exported.has(name) ? "x" : "");
         const body = value.length > 1 ? "(" + value.map((item, index) => "[" + index + "]=" + JSON.stringify(item)).join(" ") + ")" : JSON.stringify(value[0] ?? "");
         io.stdout.write("declare -" + (flag || "-") + " " + name + "=" + body + "\n");
       }
@@ -848,7 +1249,33 @@ export class Runner {
         status = 1;
         continue;
       }
-      if (scoped) this.local(name);
+      if (flags.has("n") && builtin !== "export") {
+        if (scoped) this.local(name);
+        this.state.refs.set(name, assign?.value ? await this.string(assign.value, io) : this.state.refs.get(name) ?? "");
+        if (flags.has("r")) this.state.readonly.add(name);
+        continue;
+      }
+      if (!flags.has("p") && this.state.refs.has(name) && !(scoped && !this.state.frames[this.state.frames.length - 1]?.has(name))) {
+        const resolved = this.target(name);
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(resolved)) {
+          if (assign) assign = { ...assign, name: resolved };
+          name = resolved;
+        }
+      }
+      if (scoped && this.state.readonly.has(name)) {
+        io.stderr.write("bash: " + builtin + ": " + name + ": readonly variable\n");
+        status = 1;
+        continue;
+      }
+      if (scoped) {
+        const fresh = !this.state.frames[this.state.frames.length - 1]?.has(name);
+        this.local(name);
+        if (fresh) {
+          this.state.refs.delete(name);
+          this.state.maps.delete(name);
+          if (!assign) this.state.vars.delete(name);
+        }
+      }
       if (flags.has("i")) this.state.integers.add(name);
       if (flags.has("l") || flags.has("u")) this.state.cases.set(name, flags.has("l") ? "l" : "u");
       if (flags.has("A") && !this.state.maps.has(name)) {
@@ -876,7 +1303,9 @@ export class Runner {
     const builtin = BUILTINS[name];
     if (builtin) {
       try {
-        return await builtin.call(this, args, io);
+        const status = await builtin.call(this, args, io);
+        if (io.stdout.backlog) await io.stdout.settle();
+        return status;
       } catch (error) {
         if (error instanceof CommandError || error instanceof FsError || error instanceof ArithError) {
           io.stderr.write("bash: " + name + ": " + message(error) + "\n");
@@ -886,7 +1315,11 @@ export class Runner {
       }
     }
     const handler = this.host.commands.get(name);
-    if (handler) return this.external(name, handler, args, io);
+    if (handler) {
+      const status = await this.external(name, handler, args, io);
+      if (io.stdout.backlog) await io.stdout.settle();
+      return status;
+    }
     if (name.includes("/")) {
       const path = this.resolve(name);
       const stat = await this.host.fs.stat(path);
@@ -907,6 +1340,8 @@ export class Runner {
 
   async external(name: string, handler: CommandHandler, args: string[], io: IO): Promise<number> {
     const cwd = this.state.cwd;
+    const runner = this;
+    let env: Record<string, string> | undefined;
     const context: CommandContext = {
       name,
       args,
@@ -914,7 +1349,12 @@ export class Runner {
       stdout: io.stdout,
       stderr: io.stderr,
       cwd,
-      env: this.environment(),
+      get env() {
+        return (env ??= runner.environment());
+      },
+      set env(value) {
+        env = value;
+      },
       fs: this.host.fs,
       fetch: this.host.fetch,
       signal: this.signal,
@@ -946,9 +1386,10 @@ export class Runner {
       sleep: ms => this.sleep(ms),
     };
     try {
+      if (!io.stdin.ready && !STREAMS.has(handler) && !(UNREAD.has(name) && handler === this.host.commands.get(name))) await io.stdin.fill();
       return (await handler(context)) ?? 0;
     } catch (error) {
-      if (error instanceof LimitError || error instanceof ExitSignal || error instanceof FatalError) throw error;
+      if (error instanceof LimitError || error instanceof ExitSignal || error instanceof FatalError || error instanceof PipeError || error instanceof KillSignal) throw error;
       if (this.signal.aborted) throw new LimitError(typeof this.signal.reason === "string" ? this.signal.reason : "execution aborted", 124);
       io.stderr.write(name + ": " + message(error) + "\n");
       return error instanceof CommandError ? error.status : 1;
@@ -958,11 +1399,15 @@ export class Runner {
   async sleep(ms: number) {
     if (ms > 0) {
       await new Promise<void>(resolve => {
-        const timer = setTimeout(resolve, ms);
-        this.signal.addEventListener("abort", () => {
+        const abort = () => {
           clearTimeout(timer);
           resolve();
-        }, { once: true });
+        };
+        const timer = setTimeout(() => {
+          this.signal.removeEventListener("abort", abort);
+          resolve();
+        }, ms);
+        this.signal.addEventListener("abort", abort, { once: true });
       });
     }
     this.check();
@@ -973,7 +1418,9 @@ export class Runner {
     const positional = this.state.positional;
     const frame: Frame = new Map();
     const names = this.state.vars.get("FUNCNAME");
+    const sources = this.state.vars.get("BASH_SOURCE");
     this.state.vars.set("FUNCNAME", [name, ...(names ?? [])]);
+    this.state.vars.set("BASH_SOURCE", [this.state.sources.get(name) ?? "environment", ...(sources ?? [])]);
     this.state.positional = args;
     this.state.frames.push(frame);
     try {
@@ -983,20 +1430,31 @@ export class Runner {
       throw error;
     } finally {
       this.state.frames.pop();
+      const state = this.state;
       for (const [name, saved] of frame) {
-        if (saved.value === undefined) this.state.vars.delete(name);
-        else this.state.vars.set(name, saved.value);
-        if (saved.exported) this.state.exported.add(name);
-        else this.state.exported.delete(name);
+        if (saved.value === undefined) state.vars.delete(name);
+        else state.vars.set(name, saved.value);
+        if (saved.map === undefined) state.maps.delete(name);
+        else state.maps.set(name, saved.map);
+        if (saved.ref === undefined) state.refs.delete(name);
+        else state.refs.set(name, saved.ref);
+        if (saved.exported) state.exported.add(name);
+        else state.exported.delete(name);
+        if (saved.readonly) state.readonly.add(name);
+        else state.readonly.delete(name);
+        if (saved.integer) state.integers.add(name);
+        else state.integers.delete(name);
       }
-      this.state.positional = positional;
-      if (names) this.state.vars.set("FUNCNAME", names);
-      else this.state.vars.delete("FUNCNAME");
+      state.positional = positional;
+      if (names) state.vars.set("FUNCNAME", names);
+      else state.vars.delete("FUNCNAME");
+      if (sources) state.vars.set("BASH_SOURCE", sources);
+      else state.vars.delete("BASH_SOURCE");
       this.leave();
     }
   }
 
-  async source(path: string, args: string[], io: IO, isolated: boolean, arg0?: string): Promise<number> {
+  async source(path: string, args: string[], io: IO, isolated: boolean, arg0?: string, label?: string): Promise<number> {
     const text = decode(await this.host.fs.read(path));
     let script: Script;
     try {
@@ -1012,7 +1470,7 @@ export class Runner {
       const sources = this.state.vars.get("BASH_SOURCE");
       if (args.length || isolated) this.state.positional = args;
       if (arg0 !== undefined) this.state.arg0 = arg0;
-      this.state.vars.set("BASH_SOURCE", [arg0 ?? path, ...(sources ?? [])]);
+      this.state.vars.set("BASH_SOURCE", [arg0 ?? label ?? path, ...(sources ?? [])]);
       try {
         return await this.script(script, io);
       } catch (error) {
@@ -1031,7 +1489,7 @@ export class Runner {
   async redirect(redirects: Redirect[], io: IO): Promise<{ io: IO; flush(): Promise<void> }> {
     if (!redirects.length) return { io, flush: async () => undefined };
     const fds: [Input, Output, Output] = [io.stdin, io.stdout, io.stderr];
-    const writes: { path: string; out: Output }[] = [];
+    const writes: Output[] = [];
     const open = async (target: string, append: boolean): Promise<Output> => {
       if (target === "/dev/null") return new Output(0, false, true);
       if (target === "/dev/stdout") return io.stdout;
@@ -1041,12 +1499,12 @@ export class Runner {
       const stat = await this.host.fs.stat(path);
       if (stat?.kind === "directory") throw new FsError("EISDIR", target);
       if (!append || !stat) await this.host.fs.write(path, new Uint8Array(0));
-      const out = this.buffer();
-      writes.push({ path, out });
+      const out = Output.spill(this.host.limits.maxBufferLength, text => this.host.fs.write(path, encode(text), true));
+      writes.push(out);
       return out;
     };
     const flush = async () => {
-      for (const { path, out } of writes) if (out.length) await this.host.fs.write(path, encode(out.text()), true);
+      for (const out of writes) await out.settle();
     };
     try {
       for (const redirect of redirects) {
@@ -1138,7 +1596,7 @@ export class Runner {
       case "RANDOM":
         return [String(Math.floor(Math.random() * 32768))];
       case "SECONDS":
-        return state.vars.get(name) ?? [String(Math.floor((Date.now() - this.#started) / 1000))];
+        return state.vars.get(name) ?? [String(Math.floor((Date.now() - this.#shared.started) / 1000))];
       case "EPOCHSECONDS":
         return [String(Math.floor(Date.now() / 1000))];
       case "EPOCHREALTIME":
@@ -1155,8 +1613,16 @@ export class Runner {
     return state.vars.get(name);
   }
 
+  quick(name: string): { values: string[]; list: boolean; joined: boolean } | undefined {
+    if (name === "@" || name === "*" || this.state.maps.has(name) || this.state.refs.has(name)) return undefined;
+    const value = this.special(name);
+    if (value === undefined) return this.state.options.nounset ? undefined : { values: [""], list: false, joined: false };
+    return { values: [value[0] ?? ""], list: false, joined: false };
+  }
+
   async param(part: Part & { type: "param" }, io: IO): Promise<{ values: string[]; list: boolean; joined: boolean }> {
     let name = part.name;
+    if (part.op === "bad") throw new ExpansionError(name + ": bad substitution");
     if (part.op === "names") {
       const names = [...new Set([...this.state.vars.keys(), ...this.state.maps.keys()])].filter(key => key.startsWith(name)).sort();
       return { values: names, list: true, joined: false };
@@ -1164,21 +1630,34 @@ export class Runner {
     if (part.op === "indirect" && part.index) {
       const key = await this.string(part.index, io);
       if (key === "@" || key === "*") {
+        name = this.target(name);
         const map = this.state.maps.get(name);
         return { values: map ? [...map.keys()] : Object.keys(this.state.vars.get(name) ?? []), list: true, joined: key === "*" };
       }
     }
-    if (part.op === "indirect") {
-      name = this.special(name)?.[0] ?? "";
+    if (part.op === "indirect" && !part.index && this.state.refs.has(name)) return { values: [this.state.refs.get(name)!], list: false, joined: false };
+    if (part.op === "indirect" || part.indirect) {
+      name = this.special(this.target(name))?.[0] ?? "";
       const bracket = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
       if (bracket) {
-        const values = this.state.vars.get(bracket[1]) ?? [];
+        const map = this.state.maps.get(bracket[1]);
+        const values = map ? [...map.values()] : this.state.vars.get(bracket[1]) ?? [];
         if (bracket[2] === "@" || bracket[2] === "*") return { values, list: true, joined: bracket[2] === "*" };
-        const index = evaluateArith(bracket[2], { get: n => this.get(n) ?? "", set: () => undefined });
-        return { values: [values[index] ?? ""], list: false, joined: false };
+        if (map) return { values: [map.get(bracket[2]) ?? ""], list: false, joined: false };
+        const index = Number(evaluateArith(bracket[2], { get: n => this.get(n) ?? "", set: () => undefined }));
+        return { values: [values[index < 0 ? values.length + index : index] ?? ""], list: false, joined: false };
       }
+      if (name !== "" && !/^([A-Za-z_][A-Za-z0-9_]*|\d+|[@*#?$!-])$/.test(name)) throw new ExpansionError(part.name + ": invalid indirect expansion");
     }
-    const index = part.index ? await this.string(part.index, io) : undefined;
+    let index = part.index ? await this.string(part.index, io) : undefined;
+    if (this.state.refs.size && this.state.refs.has(name)) {
+      const resolved = this.target(name);
+      const element = /^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/.exec(resolved);
+      if (element && index === undefined) {
+        name = element[1];
+        index = element[2];
+      } else name = resolved;
+    }
     const all = name === "@" || name === "*" || index === "@" || index === "*";
     const joined = name === "*" || index === "*";
     let values: string[] | undefined;
@@ -1194,7 +1673,7 @@ export class Runner {
     else if (index !== undefined) {
       const array = this.state.vars.get(name);
       if (array) {
-        let position = await this.arith([{ type: "text", value: index, quoted: true }], io);
+        let position = Number(await this.arith([{ type: "text", value: index, quoted: true }], io));
         if (position < 0) position += array.length;
         values = array[position] === undefined ? undefined : [array[position]];
       }
@@ -1225,9 +1704,15 @@ export class Runner {
     }
     let result = values!;
     if (op === "#" || op === "##" || op === "%" || op === "%%") {
-      const source = globSource(await this.pattern(part.arg ?? [], io));
+      const pattern = await this.pattern(part.arg ?? [], io);
+      if (!hasGlob(pattern)) {
+        const literal = pattern.includes("\\") ? pattern.replace(/\\([\s\S])/g, "$1") : pattern;
+        result = result.map(value => (op[0] === "#" ? (value.startsWith(literal) ? value.slice(literal.length) : value) : value.endsWith(literal) ? value.slice(0, value.length - literal.length) : value));
+        return { values: result, list: all, joined };
+      }
+      const source = globbed(pattern);
       const greedy = op.length === 2;
-      const whole = new RegExp("^(?:" + source + ")$");
+      const whole = compiled("^(?:" + source + ")$");
       result = result.map(value => {
         if (op[0] === "#") {
           for (let n = greedy ? value.length : 0; greedy ? n >= 0 : n <= value.length; n += greedy ? -1 : 1) {
@@ -1241,16 +1726,28 @@ export class Runner {
         return value;
       });
     } else if (op.startsWith("/")) {
-      const source = globSource(await this.pattern(part.arg ?? [], io));
+      const pattern = await this.pattern(part.arg ?? [], io);
       const replacement = part.arg2 ? await this.string(part.arg2, io) : "";
+      if (pattern !== "" && !hasGlob(pattern)) {
+        const literal = pattern.includes("\\") ? pattern.replace(/\\([\s\S])/g, "$1") : pattern;
+        result = result.map(value => {
+          if (op === "//") return value.split(literal).join(replacement);
+          if (op === "/#") return value.startsWith(literal) ? replacement + value.slice(literal.length) : value;
+          if (op === "/%") return value.endsWith(literal) ? value.slice(0, value.length - literal.length) + replacement : value;
+          const at = value.indexOf(literal);
+          return at < 0 ? value : value.slice(0, at) + replacement + value.slice(at + literal.length);
+        });
+        return { values: result, list: all, joined };
+      }
+      const source = globbed(pattern);
       const anchored = op === "/#" ? "^(?:" + source + ")" : op === "/%" ? "(?:" + source + ")$" : source;
       if (source !== "") {
-        const regex = new RegExp(anchored, op === "//" ? "g" : "");
+        const regex = compiled(anchored, op === "//" ? "g" : "");
         result = result.map(value => value.replace(regex, () => replacement));
       }
     } else if (op === ":") {
-      const offset = await this.arith(part.arg ?? [], io);
-      const length = part.arg2 ? await this.arith(part.arg2, io) : undefined;
+      const offset = Number(await this.arith(part.arg ?? [], io));
+      const length = part.arg2 ? Number(await this.arith(part.arg2, io)) : undefined;
       const slice = <T,>(items: T[]): T[] => {
         const start = offset < 0 ? Math.max(0, items.length + offset) : offset;
         const end = length === undefined ? items.length : length < 0 ? items.length + length : start + length;
@@ -1299,7 +1796,7 @@ export class Runner {
           pieces.push({ text: part.user ? "/home/" + part.user : this.get("HOME") ?? "/", quoted: true, split: false });
           break;
         case "param": {
-          const { values, list, joined } = await this.param(part, io);
+          const { values, list, joined } = (part.op === "" && part.index === undefined && !part.indirect && this.quick(part.name)) || (await this.param(part, io));
           if (list && part.quoted && !joined) {
             values.forEach((value, index) => {
               if (index) pieces.push({ split: "break" });
@@ -1330,6 +1827,7 @@ export class Runner {
   }
 
   async string(word: Word, io: IO): Promise<string> {
+    if (word.length === 1 && word[0].type === "text") return word[0].value;
     return joinPieces(await this.pieces(word, io), "text");
   }
 
@@ -1338,6 +1836,10 @@ export class Runner {
   }
 
   async fields(word: Word, io: IO): Promise<string[]> {
+    if (word.length === 1) {
+      const part = word[0];
+      if (part.type === "text" && (part.quoted || (!part.value.includes("{") && !hasGlob(part.value)))) return part.quoted || part.value ? [part.value] : [];
+    }
     const out: string[] = [];
     for (const expanded of braceExpand(word)) {
       const pieces = await this.pieces(expanded, io);
@@ -1347,10 +1849,9 @@ export class Runner {
         if (current.content) fields.push(current);
         current = { text: "", pattern: "", glob: false, content: false };
       };
-      const ifs = this.state.vars.has("IFS") ? this.get("IFS")! : " \t\n";
-      const white = [...ifs].filter(c => " \t\n".includes(c)).join("");
-      const other = [...ifs].filter(c => !" \t\n".includes(c)).join("");
-      const splitter = ifs === "" ? undefined : new RegExp(other ? "[" + escapeRegExp(white) + "]*[" + escapeRegExp(other) + "][" + escapeRegExp(white) + "]*|[" + escapeRegExp(white || " ") + "]+" : "[" + escapeRegExp(white) + "]+");
+      const ifs = this.state.vars.get("IFS")?.[0] ?? " \t\n";
+      const other = splitter(ifs).other;
+      const split = splitter(ifs).regex;
       for (const piece of pieces) {
         if (piece.split === "break") {
           current.content = true;
@@ -1361,13 +1862,13 @@ export class Runner {
           current.text += piece.text;
           current.pattern += escapeGlob(piece.text);
           current.content = true;
-        } else if (!piece.split || !splitter) {
+        } else if (!piece.split || !split) {
           current.text += piece.text;
           current.pattern += piece.text;
           current.glob ||= hasGlob(piece.text);
           current.content ||= piece.text !== "";
         } else {
-          const segments = piece.text.split(splitter);
+          const segments = piece.text.split(split);
           segments.forEach((segment, index) => {
             if (index > 0) {
               if (other && index < segments.length) current.content = true;
@@ -1465,6 +1966,43 @@ export class Runner {
   }
 }
 
+const REGEXPS = new Map<string, RegExp>();
+
+function compiled(source: string, flags = ""): RegExp {
+  const key = flags + "/" + source;
+  let regex = REGEXPS.get(key);
+  if (regex) return regex;
+  regex = new RegExp(source, flags);
+  if (REGEXPS.size > 1024) REGEXPS.clear();
+  REGEXPS.set(key, regex);
+  return regex;
+}
+
+const GLOBS = new Map<string, string>();
+
+function globbed(pattern: string): string {
+  let source = GLOBS.get(pattern);
+  if (source !== undefined) return source;
+  source = globSource(pattern);
+  if (GLOBS.size > 1024) GLOBS.clear();
+  GLOBS.set(pattern, source);
+  return source;
+}
+
+const SPLITTERS = new Map<string, { regex: RegExp | undefined; other: string }>();
+
+function splitter(ifs: string): { regex: RegExp | undefined; other: string } {
+  let cached = SPLITTERS.get(ifs);
+  if (cached) return cached;
+  const white = [...ifs].filter(c => " \t\n".includes(c)).join("");
+  const other = [...ifs].filter(c => !" \t\n".includes(c)).join("");
+  const regex = ifs === "" ? undefined : new RegExp(other ? "[" + escapeRegExp(white) + "]*[" + escapeRegExp(other) + "][" + escapeRegExp(white) + "]*|[" + escapeRegExp(white || " ") + "]+" : "[" + escapeRegExp(white) + "]+");
+  cached = { regex, other };
+  if (SPLITTERS.size > 64) SPLITTERS.clear();
+  SPLITTERS.set(ifs, cached);
+  return cached;
+}
+
 function shellQuote(value: string): string {
   if (/[\x00-\x1f\x7f]/.test(value)) return "$'" + value.replace(/[\\']/g, "\\$&").replace(/[\x00-\x1f\x7f]/g, c => ({ "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c] ?? "\\" + c.charCodeAt(0).toString(8).padStart(3, "0")) + "'";
   return "'" + value.replace(/'/g, "'\\''") + "'";
@@ -1489,7 +2027,7 @@ function count(text: string | undefined, fallback: number): number {
 }
 
 function readFields(text: string, names: number, ifs: string): string[] {
-  const white = [...ifs].filter(c => " \t\n".includes(c));
+  const white = ifs.replace(/[^ \t\n]/g, "");
   const isWhite = (c: string) => white.includes(c);
   const isSep = (c: string) => ifs.includes(c);
   let pos = 0;
@@ -1516,6 +2054,33 @@ function readFields(text: string, names: number, ifs: string): string[] {
 
 const noop: Builtin = async () => 0;
 
+async function physical(fs: FileSystem, path: string): Promise<string> {
+  if (!fs.readlink) return path;
+  const pending = path.split("/").filter(Boolean);
+  const parts: string[] = [];
+  let hops = 0;
+  while (pending.length) {
+    const part = pending.shift()!;
+    if (part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    const target = await fs.readlink("/" + [...parts, part].join("/"));
+    if (target !== null && ++hops <= 40) {
+      if (target.startsWith("/")) parts.length = 0;
+      pending.unshift(...target.split("/").filter(Boolean));
+      continue;
+    }
+    parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
+
+const SIGNAL_NUMBERS: Record<string, number> = { HUP: 1, INT: 2, QUIT: 3, ILL: 4, TRAP: 5, ABRT: 6, BUS: 7, FPE: 8, KILL: 9, USR1: 10, SEGV: 11, USR2: 12, PIPE: 13, ALRM: 14, TERM: 15, CHLD: 17, CONT: 18, STOP: 19, TSTP: 20, WINCH: 28 };
+
+const SIGNAL_NAMES: Record<number, string> = { 1: "Hangup", 2: "Interrupt", 3: "Quit", 6: "Aborted", 9: "Killed", 10: "User defined signal 1", 12: "User defined signal 2", 13: "Broken pipe", 14: "Alarm clock", 15: "Terminated" };
+
 const SHELL_BUILTINS = new Set(["echo", "printf", "kill", "test", "[", "pwd", "read", "true", "false", "type", "command", "ulimit", "umask", "wait", "jobs", "fg", "bg", "help", "history", "times"]);
 
 const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do", "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc"]);
@@ -1524,26 +2089,129 @@ export const BUILTINS: Record<string, Builtin> = {
   ":": noop,
   true: noop,
   false: async () => 1,
-  async wait(args) {
+  async wait(args, io) {
     const ids = args.filter(arg => !arg.startsWith("-"));
-    if (!ids.length) return args.includes("-n") ? [...this.state.jobs.values()].pop() ?? 127 : 0;
+    if (args.includes("-n")) {
+      const pending = (ids.length ? ids.map(id => this.job(id)) : [...this.state.jobs.values()]).filter((job): job is Job => job !== undefined && job.status === undefined);
+      if (!pending.length) return 127;
+      const [job, status] = await Promise.race(pending.map(job => job.promise.then(status => [job, status] as const)));
+      this.reap(job, io);
+      return status;
+    }
+    if (!ids.length) {
+      for (const job of [...this.state.jobs.values()]) {
+        await job.promise;
+        this.reap(job, io);
+      }
+      return 0;
+    }
     let status = 0;
-    for (const id of ids) status = this.state.jobs.get(id.replace(/^%/, "")) ?? 127;
+    for (const id of ids) {
+      const job = this.job(id);
+      if (!job) {
+        io.stderr.write("bash: wait: " + (id.startsWith("%") ? id + ": no such job" : "pid " + id + " is not a child of this shell") + "\n");
+        status = 127;
+        continue;
+      }
+      status = await job.promise;
+      this.reap(job, io);
+    }
     return status;
   },
-  jobs: noop,
+  async jobs(args, io) {
+    const pids = args.includes("-p");
+    const long = args.includes("-l");
+    const running = args.includes("-r");
+    const stopped = args.includes("-s");
+    const jobs = [...this.state.jobs.values()].sort((a, b) => a.id - b.id);
+    jobs.forEach((job, index) => {
+      if (stopped || (running && job.status !== undefined) || (job.status !== undefined && (job.signal === 2 || job.signal === 13 || job.signal === 15))) return;
+      if (pids) {
+        io.stdout.write(job.pid + "\n");
+        return;
+      }
+      const mark = index === jobs.length - 1 ? "+" : index === jobs.length - 2 ? "-" : " ";
+      const state = job.status === undefined ? "Running" : job.signal ? SIGNAL_NAMES[job.signal] ?? "Killed" : job.status ? "Exit " + job.status : "Done";
+      io.stdout.write("[" + job.id + "]" + mark + "  " + (long ? job.pid + " " : "") + state.padEnd(24) + job.source + (job.status === undefined ? " &" : "") + "\n");
+    });
+    for (const job of jobs) if (job.status !== undefined && !pids) this.state.jobs.delete(job.pid);
+    return 0;
+  },
+  async kill(args, io) {
+    if (args[0] === "-l" || args[0] === "-L") {
+      const handler = this.host.commands.get("kill");
+      return handler ? this.external("kill", handler, args, io) : 0;
+    }
+    let signal = 15;
+    let i = 0;
+    const parse = (name: string): number => {
+      if (/^\d+$/.test(name)) return Number(name);
+      const upper = name.toUpperCase().replace(/^SIG/, "");
+      const number = Object.entries(SIGNAL_NUMBERS).find(([key]) => key === upper)?.[1];
+      if (number === undefined) throw new CommandError(name + ": invalid signal specification");
+      return number;
+    };
+    if (args[0] === "-s" || args[0] === "-n") {
+      signal = parse(args[1] ?? "");
+      i = 2;
+    } else if (args[0]?.startsWith("-") && args[0] !== "--" && args[0] !== "-") {
+      signal = parse(args[0].slice(1));
+      i = 1;
+    }
+    if (args[i] === "--") i++;
+    const targets = args.slice(i);
+    if (!targets.length) throw new CommandError("usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]", 2);
+    let status = 0;
+    for (const target of targets) {
+      const job = this.job(target);
+      if (job) {
+        if (job.status !== undefined) {
+          if (target.startsWith("%")) {
+            io.stderr.write("bash: kill: " + target + ": no such job\n");
+            status = 1;
+          }
+          continue;
+        }
+        if (signal === 0 || signal === 18 || signal === 19 || signal === 20) continue;
+        job.signal = signal;
+        job.controller.abort(new KillSignal(128 + signal));
+        continue;
+      }
+      if (target === "1" || target === "$$") {
+        if (signal === 0 || signal === 18 || signal === 19 || signal === 20 || signal === 13 || signal === 17 || signal === 28) continue;
+        throw new ExitSignal(128 + signal);
+      }
+      if (!/^-?\d+$/.test(target) && !target.startsWith("%")) {
+        io.stderr.write("bash: kill: " + target + ": arguments must be process or job IDs\n");
+        status = 1;
+        continue;
+      }
+      io.stderr.write("bash: kill: " + (target.startsWith("%") ? target + ": no such job" : "(" + target + ") - No such process") + "\n");
+      status = 1;
+    }
+    return status;
+  },
   alias: noop,
   unalias: noop,
   hash: noop,
   ulimit: noop,
-  umask: noop,
-  disown: noop,
+  async disown(args) {
+    const ids = args.filter(arg => !arg.startsWith("-") || /^-\d/.test(arg));
+    const jobs = args.includes("-a") ? [...this.state.jobs.values()] : ids.length ? ids.map(id => this.job(id)) : [this.job("%%")];
+    let status = 0;
+    for (const job of jobs) {
+      if (job) this.state.jobs.delete(job.pid);
+      else status = 1;
+    }
+    return status;
+  },
   async cd(args, io) {
     const target = args.filter(arg => arg !== "-P" && arg !== "-L")[0] ?? this.get("HOME") ?? "/";
     const destination = target === "-" ? this.get("OLDPWD") ?? this.state.cwd : target;
-    const path = this.resolve(destination);
-    const stat = await this.host.fs.stat(path);
+    const logical = this.resolve(destination);
+    const stat = await this.host.fs.stat(logical);
     if (!stat) throw new CommandError(target + ": No such file or directory");
+    const path = args.includes("-P") ? await physical(this.host.fs, logical) : logical;
     if (stat.kind !== "directory") throw new CommandError(target + ": Not a directory");
     this.set("OLDPWD", this.state.cwd);
     this.state.cwd = path;
@@ -1667,17 +2335,34 @@ export const BUILTINS: Record<string, Builtin> = {
     io.stdout.write([this.state.cwd, ...this.state.stack].join(" ") + "\n");
     return 0;
   },
-  async pwd(_args, io) {
-    io.stdout.write(this.state.cwd + "\n");
+  async pwd(args, io) {
+    io.stdout.write((args.includes("-P") ? await physical(this.host.fs, this.state.cwd) : this.state.cwd) + "\n");
+    return 0;
+  },
+  async umask(args, io) {
+    const symbolic = args.includes("-S");
+    const value = args.find(arg => !arg.startsWith("-"));
+    if (value === undefined) {
+      const mask = this.state.umask;
+      if (!symbolic) io.stdout.write(mask.toString(8).padStart(4, "0") + "\n");
+      else io.stdout.write(["u", "g", "o"].map((who, index) => who + "=" + ["r", "w", "x"].filter((_, bit) => !(mask >> ((2 - index) * 3) & (4 >> bit))).join("")).join(",") + "\n");
+      return 0;
+    }
+    if (!/^[0-7]{1,4}$/.test(value)) throw new CommandError(value + ": octal number out of range");
+    this.state.umask = parseInt(value, 8);
     return 0;
   },
   async unset(args) {
     let functions = false;
-    for (const arg of args) {
+    let refs = false;
+    for (let arg of args) {
       if (arg === "-f") functions = true;
       else if (arg === "-v") functions = false;
+      else if (arg === "-n") refs = true;
       else if (functions) this.state.functions.delete(arg);
+      else if (refs && this.state.refs.has(arg)) this.state.refs.delete(arg);
       else {
+        arg = this.target(arg);
         const element = arg.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/);
         if (element) {
           const map = this.state.maps.get(element[1]);
@@ -1687,14 +2372,13 @@ export const BUILTINS: Record<string, Builtin> = {
           }
           const array = this.state.vars.get(element[1])?.slice();
           if (array) {
-            const index = evaluateArith(element[2], { get: n => this.get(n) ?? "", set: () => undefined });
+            const index = Number(evaluateArith(element[2], { get: n => this.get(n) ?? "", set: () => undefined }));
             delete array[index < 0 ? array.length + index : index];
             this.state.vars.set(element[1], array);
           }
           continue;
         }
         if (this.state.readonly.has(arg)) throw new CommandError(arg + ": cannot unset: readonly variable");
-        this.local(arg);
         this.state.maps.delete(arg);
         this.state.vars.delete(arg);
         this.state.exported.delete(arg);
@@ -1771,9 +2455,9 @@ export const BUILTINS: Record<string, Builtin> = {
     }
     let line: { text: string; complete: boolean } | null;
     if (chars !== undefined) {
-      const text = io.stdin.chars(chars);
+      const text = await io.stdin.readChars(chars);
       line = text ? { text, complete: true } : null;
-    } else line = io.stdin.line(delimiter);
+    } else line = await io.stdin.readLine(delimiter);
     const targets = names.length ? names : array ? [] : ["REPLY"];
     if (!line) {
       for (const name of targets) this.set(name, "");
@@ -1781,7 +2465,7 @@ export const BUILTINS: Record<string, Builtin> = {
       return 1;
     }
     let text = line.text;
-    if (!raw) text = text.replace(/\\([\s\S])/g, "$1");
+    if (!raw && text.includes("\\")) text = text.replace(/\\([\s\S])/g, "$1");
     const ifs = this.state.vars.has("IFS") ? this.get("IFS")! : " \t\n";
     if (array) this.set(array, readFields(text, Number.MAX_SAFE_INTEGER, ifs).filter((field, index, all) => field !== "" || index < all.length - 1));
     if (targets.length === 1 && !names.length) this.set("REPLY", line.text);
@@ -1802,7 +2486,7 @@ export const BUILTINS: Record<string, Builtin> = {
       else name = args[i];
     }
     const values: string[] = [];
-    for (let line = io.stdin.line(delimiter); line; line = io.stdin.line(delimiter)) values.push(strip || !line.complete ? line.text : line.text + delimiter);
+    for (let line = await io.stdin.readLine(delimiter); line; line = await io.stdin.readLine(delimiter)) values.push(strip || !line.complete ? line.text : line.text + delimiter);
     this.set(name, values);
     return 0;
   },
@@ -1825,7 +2509,7 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   async source(args, io) {
     if (!args.length) throw new CommandError("filename argument required", 2);
-    return this.source(this.resolve(args[0]), args.slice(1), io, false);
+    return this.source(this.resolve(args[0]), args.slice(1), io, false, undefined, args[0]);
   },
   async exit(args) {
     throw new ExitSignal(args.length ? count(args[0], 0) & 255 : this.state.status);
@@ -1840,7 +2524,7 @@ export const BUILTINS: Record<string, Builtin> = {
     throw new LoopSignal("continue", count(args[0], 1));
   },
   async let(args) {
-    let value = 0;
+    let value: ArithValue = 0;
     for (const arg of args) value = await this.arith([{ type: "text", value: arg, quoted: true }], { stdin: new Input(), stdout: this.buffer(), stderr: this.buffer() });
     return value === 0 ? 1 : 0;
   },
@@ -1856,22 +2540,45 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   async type(args, io) {
     let status = 0;
-    const terse = args[0] === "-t";
+    const flags = args.filter(arg => /^-[atpPf]+$/.test(arg)).join("");
+    const terse = flags.includes("t");
+    const every = flags.includes("a");
+    const forced = flags.includes("P");
+    const paths = flags.includes("p") || forced;
     for (const name of args.filter(arg => !arg.startsWith("-"))) {
-      const kind = KEYWORDS.has(name) ? "keyword" : this.state.functions.has(name) ? "function" : BUILTINS[name] || SHELL_BUILTINS.has(name) ? "builtin" : this.host.commands.has(name) ? "file" : undefined;
-      if (!kind) {
+      const kinds: string[] = [];
+      if (forced) {
+        if (this.host.commands.has(name) || ["[", "echo", "false", "kill", "printf", "pwd", "test", "true"].includes(name)) io.stdout.write("/usr/bin/" + name + "\n");
+        else status = 1;
+        continue;
+      }
+      if (KEYWORDS.has(name)) kinds.push("keyword");
+      if (this.state.functions.has(name)) kinds.push("function");
+      if (BUILTINS[name] || SHELL_BUILTINS.has(name) || DECLARATIONS.has(name)) kinds.push("builtin");
+      if (this.host.commands.has(name) || (every && ["[", "echo", "false", "kill", "printf", "pwd", "test", "true"].includes(name))) kinds.push("file");
+      if (!kinds.length) {
         if (!terse) io.stderr.write("bash: type: " + name + ": not found\n");
         status = 1;
-      } else if (terse) io.stdout.write(kind + "\n");
-      else io.stdout.write(kind === "function" ? name + " is a function\n" : kind === "builtin" ? name + " is a shell builtin\n" : kind === "keyword" ? name + " is a shell keyword\n" : name + " is /usr/bin/" + name + "\n");
+        continue;
+      }
+      for (const kind of every ? kinds : kinds.slice(0, 1)) {
+        if (paths) {
+          if (kind === "file") io.stdout.write("/usr/bin/" + name + "\n");
+          continue;
+        }
+        if (terse) io.stdout.write(kind + "\n");
+        else if (kind === "file") for (const dir of every ? ["/usr/bin/", "/bin/"] : ["/usr/bin/"]) io.stdout.write(name + " is " + dir + name + "\n");
+        else io.stdout.write(kind === "function" ? name + " is a function\n" : kind === "builtin" ? name + " is a shell builtin\n" : name + " is a shell keyword\n");
+      }
     }
     return status;
   },
   async command(args, io) {
-    if (args[0] === "-v" || args[0] === "-V") {
+    if (args[0] === "-V") return BUILTINS.type.call(this, args.slice(1), io);
+    if (args[0] === "-v") {
       let status = 0;
       for (const name of args.slice(1)) {
-        if (this.state.functions.has(name) || BUILTINS[name] || SHELL_BUILTINS.has(name) || KEYWORDS.has(name)) io.stdout.write(name + "\n");
+        if (this.state.functions.has(name) || BUILTINS[name] || SHELL_BUILTINS.has(name) || DECLARATIONS.has(name) || KEYWORDS.has(name)) io.stdout.write(name + "\n");
         else if (this.host.commands.has(name)) io.stdout.write("/usr/bin/" + name + "\n");
         else status = 1;
       }
@@ -1985,7 +2692,7 @@ export const BUILTINS: Record<string, Builtin> = {
         }
       }
       if (i >= args.length) {
-        const source = io.stdin.read();
+        const source = await io.stdin.text();
         this.enter();
         try {
           return await this.script(parse(source), io);
@@ -2018,6 +2725,7 @@ BUILTINS.sh = BUILTINS.bash;
 export async function run(runner: Runner, source: string, io: IO): Promise<number> {
   let status = await guard(runner, io, () => runner.script(parse(source), io));
   if (runner.state.traps.has("EXIT")) status = await guard(runner, io, () => runner.exitTrap(io, status));
+  await runner.jobs();
   try {
     await runner.cleanup();
   } catch (error) {
@@ -2030,7 +2738,8 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
   try {
     return await body();
   } catch (error) {
-    if (error instanceof ExitSignal || error instanceof ReturnSignal) return error.status;
+    if (error instanceof ExitSignal || error instanceof ReturnSignal || error instanceof KillSignal) return error.status;
+    if (error instanceof PipeError) return 141;
     if (error instanceof LoopSignal) return 0;
     if (error instanceof ParseError) {
       runner.failure = "syntax";

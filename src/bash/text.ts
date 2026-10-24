@@ -209,6 +209,8 @@ function shellQuote(text: string): string {
   return text.replace(/[^\w@%+=:,.\/~-]|^~/g, "\\$&");
 }
 
+const CONVERSION = /%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/y;
+
 export function format(spec: string, args: FormatValue[], shell: boolean, time?: (spec: string, seconds: number) => string): { text: string; used: number; stop: boolean; errors?: string[] } {
   let out = "";
   let used = 0;
@@ -224,7 +226,10 @@ export function format(spec: string, args: FormatValue[], shell: boolean, time?:
       continue;
     }
     if (c !== "%") {
-      out += c;
+      let end = i + 1;
+      while (end < spec.length && spec[end] !== "%" && !(shell && spec[end] === "\\")) end++;
+      out += spec.slice(i, end);
+      i = end - 1;
       continue;
     }
     const clock = time ? spec.slice(i).match(/^%(-?)(\d*)\(([^)]*)\)T/) : null;
@@ -236,7 +241,8 @@ export function format(spec: string, args: FormatValue[], shell: boolean, time?:
       out += pad(text, Number(clock[2] || 0), clock[1] === "-", false);
       continue;
     }
-    const match = spec.slice(i).match(/^%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/);
+    CONVERSION.lastIndex = i;
+    const match = CONVERSION.exec(spec);
     if (!match) {
       out += c;
       continue;

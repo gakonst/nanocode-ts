@@ -13,12 +13,12 @@ import { gitCommands, type GitHubOptions } from "./commands/git.ts";
 import { wasmCommands, wasmHost, type WasmOptions } from "./commands/wasm.ts";
 import { pythonCommands, type PythonOptions } from "./commands/python.ts";
 
-export { MemoryFileSystem, FsError, normalize, resolvePath, type FileInput, type FileKind, type FileStat, type FileSystem } from "./fs.ts";
+export { MemoryFileSystem, FsError, normalize, resolvePath, type FileInput, type FileKind, type FileStat, type FileSystem, type LinkStat } from "./fs.ts";
 export { SqlFileSystem } from "./sql.ts";
-export { CommandError, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
+export { CommandError, PipeError, streaming, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
 export { codeload, githubArchives, type GitHubOptions } from "./commands/git.ts";
 export { type WasmOptions } from "./commands/wasm.ts";
-export { PYODIDE_URL, PYODIDE_VERSION, type Pyodide, type PyodideFS, type PythonOptions } from "./commands/python.ts";
+export { preloadPython, PYODIDE_URL, PYODIDE_VERSION, pythonHint, type Pyodide, type PyodideFS, type PythonOptions } from "./commands/python.ts";
 
 export type BashOptions = {
   files?: Record<string, FileInput>;
@@ -214,6 +214,11 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     mkdir: path => (charge(), fs.mkdir(path)),
     remove: path => (charge(), fs.remove(path)),
     rename: (from, to) => (charge(), fs.rename(from, to)),
+    ...(fs.chmod ? { chmod: (path: string, mode: number) => (charge(), fs.chmod!(path, mode)) } : {}),
+    ...(fs.utimes ? { utimes: (path: string, mtime: number) => (charge(), fs.utimes!(path, mtime)) } : {}),
+    ...(fs.symlink ? { symlink: (target: string, path: string) => (charge(), fs.symlink!(target, path)) } : {}),
+    ...(fs.readlink ? { readlink: (path: string) => (charge(), fs.readlink!(path)) } : {}),
+    ...(fs.lstat ? { lstat: (path: string) => (charge(), fs.lstat!(path)) } : {}),
   };
 }
 

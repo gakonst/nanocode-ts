@@ -1,5 +1,55 @@
-import { CommandError, type CommandContext } from "../shell.ts";
-import { byte, decode, FsError } from "../fs.ts";
+import { CommandError, type CommandContext, type Input } from "../shell.ts";
+import { byte, decode, FsError, type FileSystem, type LinkStat } from "../fs.ts";
+
+export type LinkFileSystem = FileSystem & {
+  chmod?(path: string, mode: number): Promise<void>;
+  utimes?(path: string, mtime: number): Promise<void>;
+  symlink?(target: string, path: string): Promise<void>;
+  readlink?(path: string): Promise<string | null>;
+  lstat?(path: string): Promise<LinkStat | null>;
+};
+
+export function linked(ctx: CommandContext): LinkFileSystem {
+  return ctx.fs as LinkFileSystem;
+}
+
+export async function linkOf(ctx: CommandContext, path: string): Promise<string | null> {
+  const fs = linked(ctx);
+  return fs.readlink ? fs.readlink(path) : null;
+}
+
+export async function lstatOf(ctx: CommandContext, path: string): Promise<LinkStat | null> {
+  const fs = linked(ctx);
+  return fs.lstat ? fs.lstat(path) : fs.stat(path);
+}
+
+export async function canonical(ctx: CommandContext, path: string, mode: "existing" | "parents" | "missing"): Promise<string | null> {
+  const fs = linked(ctx);
+  const pending = ctx.resolve(path).split("/").filter(Boolean);
+  const parts: string[] = [];
+  let hops = 0;
+  while (pending.length) {
+    const part = pending.shift()!;
+    if (part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    const current = "/" + [...parts, part].join("/");
+    const target = fs.readlink ? await fs.readlink(current) : null;
+    if (target !== null) {
+      if (++hops > 40) return null;
+      if (target.startsWith("/")) parts.length = 0;
+      pending.unshift(...target.split("/").filter(Boolean));
+      continue;
+    }
+    const stat = await fs.stat(current);
+    if (!stat && (mode === "existing" || (mode === "parents" && pending.length))) return null;
+    if (stat && stat.kind !== "directory" && pending.length && mode !== "missing") return null;
+    parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
 
 export type Parsed = { flags: Set<string>; values: Map<string, string[]>; operands: string[] };
 
@@ -76,7 +126,7 @@ export function device(path: string, size = 65536): string | undefined {
 }
 
 export async function readInput(ctx: CommandContext, operand: string, size?: number): Promise<string> {
-  if (operand === "-" || operand === "/dev/stdin") return ctx.stdin.read();
+  if (operand === "-" || operand === "/dev/stdin") return ctx.stdin.text();
   const path = ctx.resolve(operand);
   const special = size !== undefined || !(await ctx.fs.stat(path)) ? device(path, size) : undefined;
   if (special !== undefined) return special;
@@ -106,4 +156,76 @@ export async function allInput(ctx: CommandContext, operands: string[]): Promise
     text += chunk;
   });
   return { text, status };
+}
+
+const SLICE = 1 << 16;
+let yielded = 0;
+
+export async function pause(ctx: CommandContext) {
+  if (ctx.stdout.backlog) await ctx.stdout.drain();
+  const now = Date.now();
+  if (now - yielded < 25) return;
+  yielded = now;
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  if (ctx.signal.aborted) throw new CommandError("aborted", 124);
+}
+
+export async function put(ctx: CommandContext, text: string) {
+  if (text.length <= SLICE) {
+    ctx.stdout.write(text);
+    await pause(ctx);
+    return;
+  }
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(text.length, start + SLICE);
+    const code = text.charCodeAt(end - 1);
+    if (end < text.length && code >= 0xd800 && code <= 0xdbff) end++;
+    ctx.stdout.write(text.slice(start, end));
+    start = end;
+    await pause(ctx);
+  }
+}
+
+export function batches(input: Input, separator = "\n"): () => Promise<string | null> {
+  let carry = "";
+  return async () => {
+    for (;;) {
+      const chunk = await input.chunk();
+      if (chunk === null) {
+        const rest = carry;
+        carry = "";
+        return rest || null;
+      }
+      const text = carry ? carry + chunk : chunk;
+      const end = text.lastIndexOf(separator);
+      if (end < 0) {
+        carry = text;
+        continue;
+      }
+      carry = text.slice(end + separator.length);
+      return end + separator.length === text.length ? text : text.slice(0, end + separator.length);
+    }
+  };
+}
+
+export async function eachBatch(ctx: CommandContext, operands: string[], visit: (text: string, name: string) => void | Promise<void>, separator = "\n"): Promise<number> {
+  let status = 0;
+  for (const operand of operands.length ? operands : ["-"]) {
+    if (operand === "-" || operand === "/dev/stdin") {
+      const next = batches(ctx.stdin, separator);
+      for (let text = await next(); text !== null; text = await next()) await visit(text, operand);
+      continue;
+    }
+    let text: string;
+    try {
+      text = await readInput(ctx, operand);
+    } catch (error) {
+      if (!(error instanceof FsError)) throw error;
+      ctx.stderr.write(ctx.name + ": " + operand + ": " + (error.code === "ENOENT" ? "No such file or directory" : error.code === "EISDIR" ? "Is a directory" : error.message) + "\n");
+      status = 1;
+      continue;
+    }
+    await visit(text, operand);
+  }
+  return status;
 }

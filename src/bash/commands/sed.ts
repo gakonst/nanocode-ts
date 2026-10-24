@@ -1,7 +1,7 @@
-import { CommandError, type CommandHandler } from "../shell.ts";
+import { CommandError, streaming, type CommandHandler } from "../shell.ts";
 import { FsError, decode, encode } from "../fs.ts";
 import { posixRegExp } from "../text.ts";
-import { options } from "./util.ts";
+import { options, put } from "./util.ts";
 
 type Address = { kind: "line"; line: number } | { kind: "last" } | { kind: "regex"; regex: RegExp | null } | { kind: "step"; first: number; step: number } | { kind: "relative"; count: number };
 
@@ -296,7 +296,102 @@ function substitute(template: string, match: string[]): string {
   return out;
 }
 
-export const sed: CommandHandler = async ctx => {
+const templates = new Map<string, (match: RegExpExecArray) => string>();
+
+function template(text: string): (match: RegExpExecArray) => string {
+  let compiled = templates.get(text);
+  if (compiled) return compiled;
+  const pieces: (string | number)[] = [];
+  let literal = "";
+  let simple = true;
+  for (let i = 0; i < text.length && simple; i++) {
+    const c = text[i];
+    if (c === "&") {
+      pieces.push(literal, 0);
+      literal = "";
+    } else if (c === "\\" && i + 1 < text.length) {
+      const next = text[++i];
+      if (/\d/.test(next)) {
+        pieces.push(literal, Number(next));
+        literal = "";
+      } else if (next === "n") literal += "\n";
+      else if (next === "t") literal += "\t";
+      else if ("ULEul".includes(next)) simple = false;
+      else literal += next;
+    } else literal += c;
+  }
+  pieces.push(literal);
+  compiled = simple ? (match: RegExpExecArray) => {
+    let out = "";
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      out += typeof piece === "string" ? piece : match[piece] ?? "";
+    }
+    return out;
+  } : (match: RegExpExecArray) => substitute(text, [...match].map(group => group ?? ""));
+  if (templates.size > 256) templates.clear();
+  templates.set(text, compiled);
+  return compiled;
+}
+
+const replacers = new WeakMap<RegExp, Map<string, ((match: string, ...groups: unknown[]) => string) | null>>();
+
+function replacer(regex: RegExp, text: string): ((match: string, ...groups: unknown[]) => string) | null {
+  let byText = replacers.get(regex);
+  if (!byText) {
+    byText = new Map();
+    replacers.set(regex, byText);
+  }
+  let compiled = byText.get(text);
+  if (compiled !== undefined) return compiled;
+  compiled = null;
+  const empty = new RegExp(regex.source, regex.flags.replace("g", "")).test("") || /\\b|\\B|\(\?[=!<]/.test(regex.source);
+  const groups = (new RegExp(regex.source + "|", regex.flags.replace("g", "")).exec("")?.length ?? 1) - 1;
+  const pieces: (string | number)[] = [];
+  let literal = "";
+  let simple = !empty;
+  for (let i = 0; i < text.length && simple; i++) {
+    const c = text[i];
+    if (c === "&") {
+      pieces.push(literal, 0);
+      literal = "";
+    } else if (c === "\\" && i + 1 < text.length) {
+      const next = text[++i];
+      if (/\d/.test(next)) {
+        if (Number(next) > groups) simple = false;
+        pieces.push(literal, Number(next));
+        literal = "";
+      } else if (next === "n") literal += "\n";
+      else if (next === "t") literal += "\t";
+      else if ("ULEul".includes(next)) simple = false;
+      else literal += next;
+    } else literal += c;
+  }
+  pieces.push(literal);
+  if (simple) compiled = (match: string, ...rest: unknown[]) => {
+    let out = "";
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      out += typeof piece === "string" ? piece : piece === 0 ? match : (rest[piece - 1] as string | undefined) ?? "";
+    }
+    return out;
+  };
+  byText.set(text, compiled);
+  return compiled;
+}
+
+const globals = new WeakMap<RegExp, RegExp>();
+
+function globalOf(regex: RegExp): RegExp {
+  let global = globals.get(regex);
+  if (!global) {
+    global = new RegExp(regex.source, regex.flags.replace("g", "") + "g");
+    globals.set(regex, global);
+  }
+  return global;
+}
+
+export const sed: CommandHandler = streaming(async ctx => {
   let suffix = "";
   const args = ctx.args.map(arg => {
     const match = arg.match(/^(?:-([nErsuz]*)i|--in-place=)(.*)$/);
@@ -330,18 +425,45 @@ export const sed: CommandHandler = async ctx => {
   let lastRegex: RegExp | null = null;
   let exitCode = 0;
   let quit = false;
-  const run = async (text: string): Promise<string> => {
-    const input = text.split(separator);
-    const trailing = input[input.length - 1] === "";
-    if (trailing) input.pop();
+  const run = async (read: () => Promise<string | null>, write: (text: string) => Promise<void>): Promise<void> => {
+    let input: string[] = [];
+    let trailing = true;
+    let ended = false;
+    let carry = "";
     let out = "";
     let index = 0;
+    const fill = async () => {
+      while (!ended && input.length - index < 2) {
+        const chunk = await read();
+        if (chunk === null) {
+          ended = true;
+          if (carry) {
+            input.push(carry);
+            trailing = false;
+            carry = "";
+          }
+          break;
+        }
+        const parts = (carry + chunk).split(separator);
+        carry = parts.pop()!;
+        if (index > 1024) {
+          input = input.slice(index);
+          index = 0;
+        }
+        for (const part of parts) input.push(part);
+      }
+    };
     let lineNumber = 0;
     let hold = "";
     for (const command of commands) if (command.range) command.range = { active: command.from?.kind === "line" && command.from.line === 0 && command.to?.kind === "regex", end: 0 };
     const isLast = () => index >= input.length;
+    const chunks: string[] = [];
     const emit = (value: string) => {
       out += value + separator;
+      if (out.length > 65536) {
+        chunks.push(out);
+        out = "";
+      }
     };
     const pick = (regex: RegExp | null | undefined): RegExp => {
       const value = regex ?? lastRegex;
@@ -392,7 +514,9 @@ export const sed: CommandHandler = async ctx => {
       }
       return hit !== command.negate;
     };
-    while (index < input.length && !quit) {
+    for (;;) {
+      await fill();
+      if (index >= input.length || quit) break;
       let space = input[index++];
       lineNumber++;
       let appended = "";
@@ -410,7 +534,19 @@ export const sed: CommandHandler = async ctx => {
         switch (command.name) {
           case "s": {
             const regex = pick(command.regex);
-            const global = new RegExp(regex.source, regex.flags.replace("g", "") + "g");
+            const global = globalOf(regex);
+            const fast = command.global && (command.occurrence ?? 1) === 1 ? replacer(regex, command.replacement!) : null;
+            if (fast) {
+              global.lastIndex = 0;
+              if (global.test(space)) {
+                space = space.replace(global, fast);
+                substituted = true;
+                if (command.print) emit(space);
+                if (command.file) writes.set(command.file, (writes.get(command.file) ?? "") + space + "\n");
+              }
+              break;
+            }
+            const replacement = template(command.replacement!);
             const target = command.occurrence ?? 1;
             let count = 0;
             let changed = false;
@@ -428,7 +564,7 @@ export const sed: CommandHandler = async ctx => {
               count++;
               const replace = count === target || (command.global && count > target);
               if (replace) changed = true;
-              result += space.slice(last, match.index) + (replace ? substitute(command.replacement!, [...match].map(group => group ?? "")) : match[0]);
+              result += space.slice(last, match.index) + (replace ? replacement(match) : match[0]);
               last = match.index + match[0].length;
               previous = last;
               position = match[0] === "" ? last + 1 : last;
@@ -474,6 +610,7 @@ export const sed: CommandHandler = async ctx => {
             break;
           case "n":
             if (!quiet) emit(space);
+            await fill();
             if (isLast()) {
               deleted = true;
               pc = commands.length;
@@ -483,6 +620,7 @@ export const sed: CommandHandler = async ctx => {
             lineNumber++;
             break;
           case "N":
+            await fill();
             if (isLast()) {
               pc = commands.length;
               break;
@@ -562,14 +700,31 @@ export const sed: CommandHandler = async ctx => {
             break;
         }
       }
-      if (!deleted && !quiet) out += space + (isLast() && !trailing && !appended ? "" : separator);
+      if (!deleted && !restart && !quiet) out += space + (isLast() && !trailing && !appended ? "" : separator);
       out += appended;
+      if (out.length > 65536) {
+        chunks.push(out);
+        out = "";
+      }
+      if (chunks.length) {
+        await write(chunks.join(""));
+        chunks.length = 0;
+      }
       if (restart && !quit) {
-        input.splice(--index, 0, space);
+        input[--index] = space;
         lineNumber--;
       }
     }
-    return out;
+    chunks.push(out);
+    await write(chunks.join(""));
+  };
+  const whole = (text: string) => {
+    let done = false;
+    return async () => {
+      if (done) return null;
+      done = true;
+      return text;
+    };
   };
   let status = 0;
   if (inPlace) {
@@ -577,7 +732,8 @@ export const sed: CommandHandler = async ctx => {
       const path = ctx.resolve(operand);
       try {
         const original = decode(await ctx.fs.read(path));
-        const result = await run(original);
+        let result = "";
+        await run(whole(original), async text => void (result += text));
         quit = false;
         if (suffix) await ctx.fs.write(suffix.includes("*") ? ctx.resolve(suffix.replace(/\*/g, operand.split("/").pop()!)) : path + suffix, encode(original));
         await ctx.fs.write(path, encode(result));
@@ -588,24 +744,47 @@ export const sed: CommandHandler = async ctx => {
       }
     }
   } else {
-    let text = "";
     const inputs = operands.length ? operands : ["-"];
-    for (let i = 0; i < inputs.length; i++) {
-      const operand = inputs[i];
-      try {
-        const chunk = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
-        text += chunk && !chunk.endsWith("\n") && i < inputs.length - 1 ? chunk + "\n" : chunk;
-      } catch (error) {
-        if (!(error instanceof FsError)) throw error;
-        ctx.stderr.write("sed: can't read " + operand + ": No such file or directory\n");
-        status = 2;
+    let i = 0;
+    let stream: (() => Promise<string | null>) | undefined;
+    let ending = "";
+    const read = async (): Promise<string | null> => {
+      for (;;) {
+        if (stream) {
+          const chunk = await stream();
+          if (chunk !== null) {
+            if (chunk) ending = chunk;
+            return chunk;
+          }
+          stream = undefined;
+          if (ending && !ending.endsWith("\n") && i < inputs.length) {
+            ending = "\n";
+            return "\n";
+          }
+          continue;
+        }
+        if (i >= inputs.length) return null;
+        const operand = inputs[i++];
+        ending = "";
+        if (operand === "-") {
+          const input = ctx.stdin;
+          stream = () => input.chunk();
+          continue;
+        }
+        try {
+          stream = whole(decode(await ctx.fs.read(ctx.resolve(operand))));
+        } catch (error) {
+          if (!(error instanceof FsError)) throw error;
+          ctx.stderr.write("sed: can't read " + operand + ": No such file or directory\n");
+          status = 2;
+        }
       }
-    }
-    ctx.stdout.write(await run(text));
+    };
+    await run(read, text => put(ctx, text));
   }
   for (const [file, content] of writes) {
     if (file === "/dev/stdout") ctx.stdout.write(content);
     else await ctx.fs.write(ctx.resolve(file), encode(content));
   }
   return exitCode || status;
-};
+});

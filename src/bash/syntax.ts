@@ -2,7 +2,7 @@ import { byte } from "./fs.ts";
 
 export type Part =
   | { type: "text"; value: string; quoted: boolean }
-  | { type: "param"; name: string; index?: Word; op: string; arg?: Word; arg2?: Word; quoted: boolean }
+  | { type: "param"; name: string; index?: Word; op: string; arg?: Word; arg2?: Word; quoted: boolean; indirect?: boolean }
   | { type: "command"; body: Script; quoted: boolean }
   | { type: "arith"; expr: Word; quoted: boolean }
   | { type: "tilde"; user: string }
@@ -30,7 +30,7 @@ export type Command =
 
 export type Pipeline = { negate: boolean; commands: Command[] };
 
-export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[]; background?: boolean };
+export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[]; background?: boolean; source?: string };
 
 export type Script = AndOr[];
 
@@ -151,11 +151,16 @@ class Parser {
       if (this.done() || this.starts(")") || this.starts(";;") || this.starts(";&")) break;
       const word = this.reserved();
       if (word && (stop.has(word) || RESERVED_STOP.has(word))) break;
-      script.push(this.andOr());
+      const start = this.pos;
+      const item = this.andOr();
+      script.push(item);
       this.blanks();
       if (this.starts(";;") || this.starts(";&")) break;
       const c = this.src[this.pos];
-      if (c === "&" && !this.starts("&&")) script[script.length - 1].background = true;
+      if (c === "&" && !this.starts("&&")) {
+        item.background = true;
+        item.source = this.src.slice(start, this.pos).trim();
+      }
       if (c === ";" || (c === "&" && !this.starts("&&"))) this.pos++;
       else if (c === "\n") this.newline();
       else break;
@@ -607,8 +612,16 @@ class Parser {
       return { type: "command", body, quoted };
     }
     if (this.starts("{")) {
-      this.pos++;
-      return this.braced(quoted);
+      const start = this.pos++;
+      try {
+        return this.braced(quoted);
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        const end = this.closing(start);
+        if (end < 0) throw error;
+        this.pos = end + 1;
+        return { type: "param", name: this.src.slice(start - 1, end + 1), op: "bad", quoted };
+      }
     }
     if (this.starts("[")) {
       this.pos++;
@@ -653,7 +666,11 @@ class Parser {
       part.op = "names";
       return part;
     }
-    if (op) this.fail();
+    if (op === "length") this.fail();
+    if (op === "indirect") {
+      part.indirect = true;
+      part.op = "";
+    }
     if (this.starts("@") && /^@[QEPAaULuK]}/.test(this.src.slice(this.pos, this.pos + 3))) {
       part.op = "@" + this.src[this.pos + 1];
       this.pos += 3;
@@ -682,6 +699,18 @@ class Parser {
     if (!this.starts("}")) this.fail();
     this.pos++;
     return part;
+  }
+
+  closing(start: number): number {
+    let depth = 0;
+    for (let i = start; i < this.src.length; i++) {
+      const c = this.src[i];
+      if (c === "\\") i++;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) return i;
+      else if (c === "\n") return -1;
+    }
+    return -1;
   }
 
   argument(stops: string): Word {

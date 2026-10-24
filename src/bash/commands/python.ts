@@ -334,6 +334,37 @@ function instance(options: PythonOptions): Promise<Instance> {
   return created;
 }
 
+const SHIPPED: readonly (readonly [string, RegExp])[] = [
+  ["matplotlib", /\b(matplotlib|pyplot|plt|chart|charts|plot|plots|graph)\b/],
+  ["networkx", /\bnetworkx\b/],
+  ["numpy", /\b(numpy|np)\b/],
+  ["pandas", /\b(pandas|dataframe|pd)\b/],
+  ["pillow", /\b(pillow|pil)\b/],
+  ["scikit-learn", /\b(scikit-learn|sklearn)\b/],
+  ["scipy", /\bscipy\b/],
+  ["sympy", /\bsympy\b/],
+];
+
+export function pythonHint(text: string): readonly string[] | undefined {
+  const lower = text.toLowerCase();
+  const named = SHIPPED.filter(entry => entry[0] !== "matplotlib" && entry[1].test(lower));
+  if (!named.length && !/\b(python3?|pip3?|pyodide|py)\b|\.py\b/.test(lower)) return undefined;
+  return SHIPPED.filter(entry => entry[1].test(lower)).map(entry => entry[0]);
+}
+
+const preloaded = new WeakMap<Instance, Set<string>>();
+
+export function preloadPython(options: PythonOptions = {}, packages: readonly string[] = []): Promise<void> {
+  if (!canCompile()) return Promise.resolve();
+  return instance(options).then(async python => {
+    const loaded = preloaded.get(python) ?? new Set<string>();
+    preloaded.set(python, loaded);
+    const fresh = packages.filter(name => !loaded.has(name));
+    for (const name of fresh) loaded.add(name);
+    if (fresh.length) await python.pyodide.loadPackage(fresh, { messageCallback: () => {}, errorCallback: () => {} });
+  }).catch(() => {});
+}
+
 function reserved(path: string): boolean {
   return RESERVED.some(prefix => path === prefix || path.startsWith(prefix + "/"));
 }

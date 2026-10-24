@@ -177,6 +177,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       used = performance.now();
       const id = state.id ?? (warmed ??= identifier("web"));
       const model = options.model();
+      void options.hand?.(id).catch(() => undefined);
       void fetch(`${base}sessions/${encodeURIComponent(id)}/warm`, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ provider: model.provider, model: model.model }) }).catch(() => undefined);
     },
     crash(afterMs = 1500) {

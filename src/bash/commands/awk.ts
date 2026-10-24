@@ -1,7 +1,8 @@
-import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
+import { CommandError, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, decode, encode } from "../fs.ts";
 import { format, formatNumber, posixRegExp, type FormatValue } from "../text.ts";
 import { strftime } from "./text.ts";
+import { batches, pause } from "./util.ts";
 
 type Token = { type: string; value: string; line: number };
 
@@ -673,6 +674,11 @@ function toNum(value: Value): number {
   if (typeof value === "number") return value;
   if (value === undefined) return 0;
   const text = typeof value === "string" ? value : value.text;
+  const first = text.charCodeAt(0);
+  if (first >= 48 && first <= 57 && (first !== 48 || text.length === 1 || text.charCodeAt(1) === 46)) {
+    const quick = +text;
+    if (quick === quick) return quick;
+  }
   const match = text.match(/^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/);
   if (match) return Number(match[0]);
   const hex = text.match(/^\s*[+-]?0[xX][0-9a-fA-F]+/);
@@ -695,6 +701,8 @@ function truthy(value: Value): boolean {
   return looksNumeric(value.text) ? toNum(value) !== 0 : value.text !== "";
 }
 
+const FIELD0: Expr = { k: "field", index: { k: "num", v: 0 } };
+
 class NextSignal {}
 class NextFileSignal {}
 class ExitSignal {
@@ -716,6 +724,107 @@ class LoopSignal {
   }
 }
 
+type Piece = string | { spec: string; conv: string; plain: boolean };
+
+const CONVERSION = /%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/y;
+
+function compileFormat(spec: string): Piece[] | null {
+  const pieces: Piece[] = [];
+  let literal = "";
+  for (let i = 0; i < spec.length; i++) {
+    const c = spec[i];
+    if (c !== "%") {
+      literal += c;
+      continue;
+    }
+    CONVERSION.lastIndex = i;
+    const match = CONVERSION.exec(spec);
+    if (!match) {
+      literal += c;
+      continue;
+    }
+    i += match[0].length - 1;
+    if (match[5] === "%") {
+      literal += "%";
+      continue;
+    }
+    if (match[2] === "*" || match[3] === "*") return null;
+    if (literal) pieces.push(literal);
+    literal = "";
+    const conv = match[5] === "i" ? "d" : match[5];
+    pieces.push({ spec: match[0], conv, plain: match[0].length === 2 || (match[0].length === 3 && match[4] === "l") });
+  }
+  if (literal) pieces.push(literal);
+  return pieces;
+}
+
+type Fn = () => Value;
+type Run = () => number;
+type Sink = (text: string) => void;
+
+const BREAK = 1;
+const CONTINUE = 2;
+const RETURN = 3;
+const NEXT = 4;
+
+const COMPARISONS = new Set(["<", "<=", ">", ">=", "==", "!="]);
+
+function exprKids(e: Expr): Expr[] {
+  switch (e.k) {
+    case "field": return [e.index];
+    case "index":
+    case "in": return e.subs;
+    case "assign": return [e.target, e.value];
+    case "cond": return [e.test, e.yes, e.no];
+    case "bin":
+    case "and":
+    case "or":
+    case "match":
+    case "concat": return [e.left, e.right];
+    case "not":
+    case "neg":
+    case "plus": return [e.e];
+    case "incr": return [e.target];
+    case "call":
+    case "builtin": return e.args;
+    case "group": return e.list;
+    case "getline": return [e.target, e.file, e.command].filter((kid): kid is Expr => kid !== undefined);
+    default: return [];
+  }
+}
+
+function stmtKids(s: Stmt): { stmts: Stmt[]; exprs: Expr[] } {
+  switch (s.k) {
+    case "expr": return { stmts: [], exprs: [s.e] };
+    case "print":
+    case "printf": return { stmts: [], exprs: s.redirect ? [...s.args, s.redirect.target] : s.args };
+    case "if": return { stmts: s.no ? [s.yes, s.no] : [s.yes], exprs: [s.test] };
+    case "while":
+    case "do": return { stmts: [s.body], exprs: [s.test] };
+    case "for": return { stmts: [s.init, s.step, s.body].filter((kid): kid is Stmt => kid !== undefined), exprs: s.test ? [s.test] : [] };
+    case "forin": return { stmts: [s.body], exprs: [] };
+    case "block": return { stmts: s.body, exprs: [] };
+    case "exit":
+    case "return": return { stmts: [], exprs: s.e ? [s.e] : [] };
+    case "delete": return { stmts: [], exprs: s.subs ?? [] };
+    default: return { stmts: [], exprs: [] };
+  }
+}
+
+function strlen(text: string): number {
+  return /[\uD800-\uDFFF]/.test(text) ? [...text].length : text.length;
+}
+
+function substr(text: string, from: number, count: number): string {
+  let start = Math.round(from);
+  let length = Number.isNaN(count) ? 0 : count === Infinity ? Infinity : Math.round(count);
+  if (Number.isNaN(start)) start = 1;
+  if (start < 1) start = 1;
+  if (length <= 0) return "";
+  if (!/[\uD800-\uDFFF]/.test(text)) return text.slice(start - 1, length === Infinity ? undefined : start - 1 + length);
+  return [...text].slice(start - 1, length === Infinity ? undefined : start - 1 + length).join("");
+}
+
 class Interpreter {
   ctx: CommandContext;
   program: Program;
@@ -723,10 +832,28 @@ class Interpreter {
   frames: Map<string, Cell>[] = [];
   fields: string[] = [""];
   nf = 0;
+  parsed = true;
+  offset = 0;
+  recordFS = " ";
+  regexCache = new Map<string, RegExp>();
+  formats = new Map<string, Piece[] | null>();
+  globalCache = new WeakMap<RegExp, RegExp>();
+  fastExprs = new Map<Expr, Fn>();
+  fastStmts = new Map<Stmt, Run>();
+  fastFns = new Map<string, Run>();
+  asyncFns = new Set<string>();
+  asyncMemo = new Map<Expr | Stmt, boolean>();
+  returned: Value = undefined;
+  rules?: { rule: Rule; pattern: Fn | undefined; end: Fn | undefined; action: Run | undefined }[];
   outputs = new Map<string, { kind: "file" | "pipe"; text: string; append: boolean }>();
   readers = new Map<string, { lines: string[]; pos: number }>();
-  records: string[] = [];
+  records: string[] | undefined;
+  source = "";
+  cursor = 0;
+  buffer = "";
   preload?: () => Promise<void>;
+  more?: () => Promise<string | null>;
+  skipped = false;
   recordIndex = 0;
   steps = 0;
   depth = 0;
@@ -772,13 +899,18 @@ class Interpreter {
   }
 
   lookup(name: string): Map<string, Cell> {
-    const frame = this.frames[this.frames.length - 1];
-    if (frame && frame.has(name)) return frame;
+    if (this.frames.length) {
+      const frame = this.frames[this.frames.length - 1];
+      if (frame.has(name)) return frame;
+    }
     return this.globals;
   }
 
   scalar(name: string): Value {
-    if (name === "NF") return this.nf;
+    if (name === "NF") {
+      this.parse();
+      return this.nf;
+    }
     const cell = this.lookup(name).get(name);
     if (cell instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
     return cell;
@@ -806,24 +938,81 @@ class Interpreter {
   }
 
   setRecord(text: string) {
-    this.fields = [text];
-    const fs = this.str(this.scalar("FS"));
-    let parts: string[];
-    if (text === "") parts = [];
-    else if (fs === " ") parts = text.trim() === "" ? [] : text.trim().split(/[ \t\n]+/);
-    else if (fs === "") parts = [...text];
-    else if (fs.length === 1 && fs !== "\\") parts = text.split(fs === "\t" ? "\t" : fs);
-    else parts = text.split(regex(fs));
-    this.fields.push(...parts);
+    this.fields.length = 1;
+    this.fields[0] = text;
+    this.recordFS = this.str(this.scalar("FS"));
+    this.parsed = false;
+    this.offset = 0;
+  }
+
+  parse() {
+    this.parseTo(Infinity);
+  }
+
+  parseTo(index: number) {
+    if (this.parsed) return;
+    const text = this.fields[0] ?? "";
+    const fields = this.fields;
+    if (this.recordFS === " ") {
+      const length = text.length;
+      let i = this.offset;
+      while (fields.length <= index) {
+        while (i < length) {
+          const c = text.charCodeAt(i);
+          if (c !== 32 && c !== 9 && c !== 10) break;
+          i++;
+        }
+        if (i >= length) break;
+        const start = i;
+        while (i < length) {
+          const c = text.charCodeAt(i);
+          if (c === 32 || c === 9 || c === 10) break;
+          i++;
+        }
+        fields.push(text.slice(start, i));
+      }
+      this.offset = i;
+      if (fields.length <= index) {
+        this.parsed = true;
+        this.nf = fields.length - 1;
+      }
+      return;
+    }
+    this.parsed = true;
+    const parts = this.splitFields(text, this.recordFS);
+    for (const part of parts) fields.push(part);
     this.nf = parts.length;
   }
 
+  splitFields(text: string, fs: string): string[] {
+    if (text === "") return [];
+    if (fs === " ") {
+      const trimmed = text.trim();
+      return trimmed === "" ? [] : trimmed.split(/[ \t\n]+/);
+    }
+    if (fs === "") return [...text];
+    if (fs.length === 1 && fs !== "\\") return text.split(fs);
+    return text.split(this.dynamic(fs));
+  }
+
+  dynamic(source: string): RegExp {
+    let re = this.regexCache.get(source);
+    if (!re) {
+      if (this.regexCache.size > 512) this.regexCache.clear();
+      re = regex(source);
+      this.regexCache.set(source, re);
+    }
+    return re;
+  }
+
   rebuild() {
+    this.parse();
     const ofs = this.str(this.scalar("OFS"));
     this.fields[0] = this.fields.slice(1, this.nf + 1).map(field => field ?? "").join(ofs);
   }
 
   setNF(n: number) {
+    this.parse();
     for (let i = this.nf + 1; i <= n; i++) this.fields[i] = "";
     this.fields.length = n + 1;
     this.nf = n;
@@ -833,7 +1022,8 @@ class Interpreter {
   getField(index: number): Value {
     if (index < 0) throw new AwkError("attempt to access field " + index);
     if (index === 0) return new Strnum(this.fields[0] ?? "");
-    if (index > this.nf) return new Strnum("");
+    this.parseTo(index);
+    if (index >= this.fields.length || (this.parsed && index > this.nf)) return new Strnum("");
     return new Strnum(this.fields[index] ?? "");
   }
 
@@ -844,6 +1034,7 @@ class Interpreter {
       return;
     }
     if (index > 100000) throw new AwkError("field index too large");
+    this.parse();
     for (let i = this.nf + 1; i < index; i++) this.fields[i] = "";
     this.fields[index] = this.str(value);
     if (index > this.nf) this.nf = index;
@@ -866,7 +1057,7 @@ class Interpreter {
 
   async toRegex(e: Expr): Promise<RegExp> {
     if (e.k === "re") return e.v;
-    return regex(this.str(await this.eval(e)));
+    return this.dynamic(this.str(await this.eval(e)));
   }
 
   compare(op: string, a: Value, b: Value): boolean {
@@ -891,6 +1082,8 @@ class Interpreter {
   }
 
   async eval(e: Expr): Promise<Value> {
+    const fast = this.fastExprs.get(e);
+    if (fast) return fast();
     switch (e.k) {
       case "num":
         return e.v;
@@ -965,6 +1158,736 @@ class Interpreter {
     }
   }
 
+  prepare() {
+    const functions = this.program.functions;
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [name, fn] of functions) {
+        if (this.asyncFns.has(name)) continue;
+        this.asyncMemo.clear();
+        if (fn.body.some(s => this.asyncStmt(s))) {
+          this.asyncFns.add(name);
+          changed = true;
+        }
+      }
+    }
+    this.asyncMemo.clear();
+    const none = new Set<string>();
+    for (const block of [...this.program.begin, ...this.program.end]) for (const s of block) this.visit(s, none);
+    for (const rule of this.program.rules) {
+      if (rule.pattern) this.visitExpr(rule.pattern, none);
+      if (rule.end) this.visitExpr(rule.end, none);
+      if (rule.action) for (const s of rule.action) this.visit(s, none);
+    }
+    for (const fn of functions.values()) {
+      const scope = new Set(fn.params);
+      for (const s of fn.body) this.visit(s, scope);
+    }
+    if (this.program.rules.every(rule => (!rule.pattern || !this.asyncExpr(rule.pattern)) && (!rule.end || !this.asyncExpr(rule.end)) && (!rule.action || !rule.action.some(s => this.asyncStmt(s))))) {
+      this.rules = this.program.rules.map(rule => ({ rule, pattern: rule.pattern && this.expr(rule.pattern, none), end: rule.end && this.expr(rule.end, none), action: rule.action && this.block(rule.action, none) }));
+    }
+  }
+
+  asyncExpr(e: Expr): boolean {
+    let known = this.asyncMemo.get(e);
+    if (known === undefined) {
+      known = e.k === "getline" || (e.k === "builtin" && (e.name === "system" || e.name === "close")) || (e.k === "call" && this.asyncFns.has(e.name)) || exprKids(e).some(kid => this.asyncExpr(kid));
+      this.asyncMemo.set(e, known);
+    }
+    return known;
+  }
+
+  asyncStmt(s: Stmt): boolean {
+    let known = this.asyncMemo.get(s);
+    if (known === undefined) {
+      const kids = stmtKids(s);
+      known = kids.exprs.some(kid => this.asyncExpr(kid)) || kids.stmts.some(kid => this.asyncStmt(kid));
+      this.asyncMemo.set(s, known);
+    }
+    return known;
+  }
+
+  visit(s: Stmt, scope: Set<string>) {
+    if (!this.asyncStmt(s)) {
+      this.stmt(s, scope);
+      return;
+    }
+    const kids = stmtKids(s);
+    for (const kid of kids.stmts) this.visit(kid, scope);
+    for (const kid of kids.exprs) this.visitExpr(kid, scope);
+  }
+
+  visitExpr(e: Expr, scope: Set<string>) {
+    if (!this.asyncExpr(e)) {
+      this.expr(e, scope);
+      return;
+    }
+    for (const kid of exprKids(e)) this.visitExpr(kid, scope);
+  }
+
+  signal(status: number) {
+    if (status === BREAK) throw new LoopSignal("break");
+    if (status === CONTINUE) throw new LoopSignal("continue");
+    if (status === NEXT) throw new NextSignal();
+    if (status === RETURN) {
+      const value = this.returned;
+      this.returned = undefined;
+      throw new ReturnSignal(value);
+    }
+  }
+
+  expr(e: Expr, scope: Set<string>): Fn {
+    let fn = this.fastExprs.get(e);
+    if (!fn) {
+      fn = this.build(e, scope);
+      this.fastExprs.set(e, fn);
+    }
+    return fn;
+  }
+
+  stmt(s: Stmt, scope: Set<string>): Run {
+    let run = this.fastStmts.get(s);
+    if (!run) {
+      run = this.buildStmt(s, scope);
+      this.fastStmts.set(s, run);
+    }
+    return run;
+  }
+
+  block(list: Stmt[], scope: Set<string>): Run {
+    const runs = list.map(s => this.stmt(s, scope));
+    if (runs.length === 1) return runs[0];
+    return () => {
+      for (let i = 0; i < runs.length; i++) {
+        const status = runs[i]();
+        if (status) return status;
+      }
+      return 0;
+    };
+  }
+
+  key(subs: Expr[], scope: Set<string>): () => string {
+    const fns = subs.map(sub => this.expr(sub, scope));
+    if (fns.length === 1) {
+      const only = fns[0];
+      return () => this.str(only());
+    }
+    return () => fns.map(fn => this.str(fn())).join(this.str(this.scalar("SUBSEP")));
+  }
+
+  pattern(e: Expr, scope: Set<string>): () => RegExp {
+    if (e.k === "re") {
+      const re = e.v;
+      return () => re;
+    }
+    const fn = this.expr(e, scope);
+    return () => this.dynamic(this.str(fn()));
+  }
+
+  place(e: Expr, scope: Set<string>): { get: Fn; set: (value: Value) => void; update: (change: (current: Value) => Value) => Value } {
+    if (e.k === "group" && e.list.length === 1) return this.place(e.list[0], scope);
+    if (e.k === "var") {
+      const name = e.name;
+      if (scope.has(name) || name === "NF") {
+        const get = () => this.scalar(name);
+        const set = (value: Value) => this.setScalar(name, value);
+        return { get, set, update: change => {
+          const value = change(get());
+          set(value);
+          return value;
+        } };
+      }
+      const globals = this.globals;
+      const scalar = (): Value => {
+        const cell = globals.get(name);
+        if (cell instanceof Map) throw new AwkError("attempt to use array `" + name + "' in a scalar context");
+        return cell;
+      };
+      return {
+        get: scalar,
+        set: value => {
+          scalar();
+          globals.set(name, value);
+        },
+        update: change => {
+          const value = change(scalar());
+          globals.set(name, value);
+          return value;
+        },
+      };
+    }
+    if (e.k === "field") {
+      const source = e.index;
+      const index = source.k === "num" ? (() => {
+        const n = Math.trunc(source.v);
+        return () => n;
+      })() : (() => {
+        const fn = this.expr(source, scope);
+        return () => Math.trunc(toNum(fn()));
+      })();
+      return {
+        get: () => this.getField(index()),
+        set: value => this.setField(index(), value),
+        update: change => {
+          const i = index();
+          const value = change(this.getField(i));
+          this.setField(i, value);
+          return value;
+        },
+      };
+    }
+    if (e.k === "index") {
+      const name = e.name;
+      const key = this.key(e.subs, scope);
+      return {
+        get: () => {
+          const array = this.array(name);
+          const k = key();
+          const value = array.get(k);
+          if (value === undefined && !array.has(k)) array.set(k, undefined);
+          return value;
+        },
+        set: value => {
+          const array = this.array(name);
+          array.set(key(), value);
+        },
+        update: change => {
+          const array = this.array(name);
+          const k = key();
+          const value = change(array.get(k));
+          array.set(k, value);
+          return value;
+        },
+      };
+    }
+    const get = this.expr(e, scope);
+    const fail = (): never => {
+      throw new AwkError("assignment to non-lvalue");
+    };
+    return { get, set: fail, update: fail };
+  }
+
+  build(e: Expr, scope: Set<string>): Fn {
+    switch (e.k) {
+      case "num":
+      case "str": {
+        const value = e.v;
+        return () => value;
+      }
+      case "re": {
+        const re = e.v;
+        return () => {
+          re.lastIndex = 0;
+          return re.test(this.fields[0] ?? "") ? 1 : 0;
+        };
+      }
+      case "var":
+      case "field":
+      case "index":
+        return this.place(e, scope).get;
+      case "group":
+        return this.expr(e.list[e.list.length - 1], scope);
+      case "assign": {
+        const target = this.place(e.target, scope);
+        const value = this.expr(e.value, scope);
+        if (e.op === "=") return () => {
+          const v = value();
+          target.set(v);
+          return v;
+        };
+        const op = e.op.slice(0, -1);
+        return () => {
+          const v = toNum(value());
+          return target.update(current => this.arith(op, toNum(current), v));
+        };
+      }
+      case "incr": {
+        const target = this.place(e.target, scope);
+        const delta = e.op === "++" ? 1 : -1;
+        if (e.prefix) return () => target.update(current => toNum(current) + delta);
+        return () => {
+          let old = 0;
+          target.update(current => {
+            old = toNum(current);
+            return old + delta;
+          });
+          return old;
+        };
+      }
+      case "cond": {
+        const test = this.expr(e.test, scope);
+        const yes = this.expr(e.yes, scope);
+        const no = this.expr(e.no, scope);
+        return () => (truthy(test()) ? yes() : no());
+      }
+      case "and": {
+        const left = this.expr(e.left, scope);
+        const right = this.expr(e.right, scope);
+        return () => (truthy(left()) && truthy(right()) ? 1 : 0);
+      }
+      case "or": {
+        const left = this.expr(e.left, scope);
+        const right = this.expr(e.right, scope);
+        return () => (truthy(left()) || truthy(right()) ? 1 : 0);
+      }
+      case "not": {
+        const inner = this.expr(e.e, scope);
+        return () => (truthy(inner()) ? 0 : 1);
+      }
+      case "neg": {
+        const inner = this.expr(e.e, scope);
+        return () => -toNum(inner());
+      }
+      case "plus": {
+        const inner = this.expr(e.e, scope);
+        return () => toNum(inner());
+      }
+      case "bin": {
+        const left = this.expr(e.left, scope);
+        const right = this.expr(e.right, scope);
+        const op = e.op;
+        if (COMPARISONS.has(op)) return () => (this.compare(op, left(), right()) ? 1 : 0);
+        if (op === "+") return () => toNum(left()) + toNum(right());
+        if (op === "-") return () => toNum(left()) - toNum(right());
+        if (op === "*") return () => toNum(left()) * toNum(right());
+        return () => this.arith(op, toNum(left()), toNum(right()));
+      }
+      case "concat": {
+        const left = this.expr(e.left, scope);
+        const right = this.expr(e.right, scope);
+        return () => this.str(left()) + this.str(right());
+      }
+      case "match": {
+        const left = this.expr(e.left, scope);
+        const right = this.pattern(e.right, scope);
+        const negate = e.negate;
+        return () => {
+          const text = this.str(left());
+          const re = right();
+          re.lastIndex = 0;
+          return re.test(text) !== negate ? 1 : 0;
+        };
+      }
+      case "in": {
+        const key = this.key(e.subs, scope);
+        const name = e.name;
+        return () => (this.array(name).has(key()) ? 1 : 0);
+      }
+      case "call":
+        return this.buildCall(e.name, e.args, scope);
+      case "builtin":
+        return this.buildBuiltin(e.name, e.args, scope);
+      case "getline":
+        throw new AwkError("getline cannot run synchronously");
+    }
+  }
+
+  buildCall(name: string, args: Expr[], scope: Set<string>): Fn {
+    const fn = this.program.functions.get(name);
+    if (!fn) return () => {
+      throw new AwkError("calling undefined function " + name);
+    };
+    const values = args.map(arg => this.expr(arg, scope));
+    let body: Run | undefined;
+    return () => {
+      body ??= this.fastFn(name);
+      if (++this.depth > this.ctx.limits.maxCallDepth) throw new AwkError("function call nesting too deep");
+      const frame = new Map<string, Cell>();
+      const bindings: [string, Map<string, Value>][] = [];
+      for (let i = 0; i < fn.params.length; i++) {
+        const arg = args[i];
+        if (!arg) {
+          frame.set(fn.params[i], undefined);
+          continue;
+        }
+        if (arg.k === "var") {
+          const scopeOf = this.lookup(arg.name);
+          const cell = scopeOf.get(arg.name);
+          if (cell instanceof Map) {
+            frame.set(fn.params[i], cell);
+            continue;
+          }
+          if (cell === undefined && !scopeOf.has(arg.name)) {
+            const fresh = new Map<string, Value>();
+            bindings.push([arg.name, fresh]);
+            frame.set(fn.params[i], fresh);
+            continue;
+          }
+        }
+        frame.set(fn.params[i], values[i]());
+      }
+      this.frames.push(frame);
+      try {
+        const status = body();
+        if (status === NEXT) throw new NextSignal();
+        if (status === RETURN) {
+          const value = this.returned;
+          this.returned = undefined;
+          return value;
+        }
+        return undefined;
+      } finally {
+        this.frames.pop();
+        this.depth--;
+        for (const [variable, map] of bindings) if (map.size) this.lookup(variable).set(variable, map);
+      }
+    };
+  }
+
+  fastFn(name: string): Run {
+    let run = this.fastFns.get(name);
+    if (!run) {
+      const fn = this.program.functions.get(name)!;
+      run = this.block(fn.body, new Set(fn.params));
+      this.fastFns.set(name, run);
+    }
+    return run;
+  }
+
+  buildBuiltin(name: string, args: Expr[], scope: Set<string>): Fn {
+    const missing = (count: number) => args.length < count;
+    const fail = (message: string): Fn => () => {
+      throw new AwkError(message);
+    };
+    switch (name) {
+      case "length": {
+        const arg = args[0];
+        if (!arg) return () => strlen(this.fields[0] ?? "");
+        const fn = this.expr(arg, scope);
+        if (arg.k === "var") {
+          const variable = arg.name;
+          return () => {
+            const cell = this.lookup(variable).get(variable);
+            return cell instanceof Map ? cell.size : strlen(this.str(fn()));
+          };
+        }
+        return () => strlen(this.str(fn()));
+      }
+      case "split": {
+        const target = args[1];
+        if (target?.k !== "var") return fail("split: second argument is not an array");
+        const source = this.expr(args[0], scope);
+        const separator = args[2];
+        const array = target.name;
+        if (!separator) return () => {
+          const text = this.str(source());
+          return this.split(text, this.array(array), this.str(this.scalar("FS")));
+        };
+        if (separator.k === "re") {
+          const re = separator.v;
+          return () => {
+            const text = this.str(source());
+            return this.split(text, this.array(array), re);
+          };
+        }
+        const sep = this.expr(separator, scope);
+        return () => {
+          const text = this.str(source());
+          const map = this.array(array);
+          return this.split(text, map, this.str(sep()));
+        };
+      }
+      case "sub":
+      case "gsub": {
+        if (missing(2)) return fail(name + ": not enough arguments");
+        const re = this.pattern(args[0], scope);
+        const replacement = this.expr(args[1], scope);
+        const target = this.place(args[2] ?? FIELD0, scope);
+        const global = name === "gsub";
+        return () => {
+          const pattern = re();
+          const result = this.replace(this.str(target.get()), pattern, this.str(replacement()), global);
+          if (result.count) target.set(result.text);
+          return result.count;
+        };
+      }
+      case "gensub": {
+        if (missing(3)) return fail("gensub: not enough arguments");
+        const re = this.pattern(args[0], scope);
+        const rest = args.slice(1).map(arg => this.expr(arg, scope));
+        return () => {
+          const pattern = re();
+          return this.gensub(pattern, rest.map(fn => fn()));
+        };
+      }
+      case "match": {
+        if (missing(2)) return fail("match: not enough arguments");
+        const source = this.expr(args[0], scope);
+        const re = this.pattern(args[1], scope);
+        const target = args[2];
+        return () => {
+          const text = this.str(source());
+          return this.match(text, re(), target);
+        };
+      }
+      case "asort":
+      case "asorti":
+        return () => this.sortArray(name, args);
+    }
+    const fns = args.map(arg => this.expr(arg, scope));
+    if (fns.length === 1) {
+      const only = fns[0];
+      if (name === "tolower") return () => this.str(only()).toLowerCase();
+      if (name === "toupper") return () => this.str(only()).toUpperCase();
+      if (name === "int") return () => Math.trunc(toNum(only()));
+    }
+    return () => this.pure(name, fns.map(fn => fn()));
+  }
+
+  sink(redirect: { op: string; target: Expr } | undefined, scope: Set<string>): Sink {
+    if (!redirect) return text => this.print(text);
+    const target = this.expr(redirect.target, scope);
+    const op = redirect.op;
+    return text => this.emit(text, op, this.str(target()));
+  }
+
+  buildStmt(s: Stmt, scope: Set<string>): Run {
+    switch (s.k) {
+      case "expr": {
+        const fn = this.expr(s.e, scope);
+        return () => {
+          this.tick();
+          fn();
+          return 0;
+        };
+      }
+      case "print": {
+        const sink = this.sink(s.redirect, scope);
+        const args = s.args.map(arg => this.expr(arg, scope));
+        if (!args.length) return () => {
+          this.tick();
+          sink((this.fields[0] ?? "") + this.str(this.scalar("ORS")));
+          return 0;
+        };
+        if (args.length === 1) {
+          const only = args[0];
+          return () => {
+            this.tick();
+            sink(this.str(only(), true) + this.str(this.scalar("ORS")));
+            return 0;
+          };
+        }
+        return () => {
+          this.tick();
+          const parts: string[] = [];
+          for (let i = 0; i < args.length; i++) parts.push(this.str(args[i](), true));
+          sink(parts.join(this.str(this.scalar("OFS"))) + this.str(this.scalar("ORS")));
+          return 0;
+        };
+      }
+      case "printf": {
+        if (!s.args.length) return () => {
+          throw new AwkError("printf: no format");
+        };
+        const sink = this.sink(s.redirect, scope);
+        const spec = this.expr(s.args[0], scope);
+        const rest = s.args.slice(1).map(arg => this.expr(arg, scope));
+        return () => {
+          this.tick();
+          const values: FormatValue[] = [];
+          for (let i = 0; i < rest.length; i++) values.push(this.formatArg(rest[i]()));
+          sink(this.sprintf(this.str(spec()), values));
+          return 0;
+        };
+      }
+      case "if": {
+        const test = this.expr(s.test, scope);
+        const yes = this.stmt(s.yes, scope);
+        const no = s.no ? this.stmt(s.no, scope) : undefined;
+        return () => {
+          this.tick();
+          if (truthy(test())) return yes();
+          return no ? no() : 0;
+        };
+      }
+      case "while": {
+        const test = this.expr(s.test, scope);
+        const body = this.stmt(s.body, scope);
+        return () => {
+          this.tick();
+          for (let n = 0; truthy(test()); n++) {
+            this.loop(n);
+            const status = body();
+            if (status === BREAK) break;
+            if (status && status !== CONTINUE) return status;
+          }
+          return 0;
+        };
+      }
+      case "do": {
+        const test = this.expr(s.test, scope);
+        const body = this.stmt(s.body, scope);
+        return () => {
+          this.tick();
+          let n = 0;
+          do {
+            this.loop(n++);
+            const status = body();
+            if (status === BREAK) break;
+            if (status && status !== CONTINUE) return status;
+          } while (truthy(test()));
+          return 0;
+        };
+      }
+      case "for": {
+        const init = s.init ? this.stmt(s.init, scope) : undefined;
+        const test = s.test ? this.expr(s.test, scope) : undefined;
+        const step = s.step ? this.stmt(s.step, scope) : undefined;
+        const body = this.stmt(s.body, scope);
+        return () => {
+          this.tick();
+          if (init) init();
+          for (let n = 0; !test || truthy(test()); n++) {
+            this.loop(n);
+            const status = body();
+            if (status === BREAK) break;
+            if (status && status !== CONTINUE) return status;
+            if (step) step();
+          }
+          return 0;
+        };
+      }
+      case "forin": {
+        const body = this.stmt(s.body, scope);
+        const name = s.name;
+        const source = s.array;
+        return () => {
+          this.tick();
+          const keys = [...this.array(source).keys()];
+          for (let n = 0; n < keys.length; n++) {
+            this.loop(n);
+            this.setScalar(name, new Strnum(keys[n]));
+            const status = body();
+            if (status === BREAK) break;
+            if (status && status !== CONTINUE) return status;
+          }
+          return 0;
+        };
+      }
+      case "block":
+        return this.block(s.body, scope);
+      case "next":
+        return () => NEXT;
+      case "nextfile":
+        return () => {
+          throw new NextFileSignal();
+        };
+      case "break":
+        return () => BREAK;
+      case "continue":
+        return () => CONTINUE;
+      case "exit": {
+        const code = s.e ? this.expr(s.e, scope) : undefined;
+        return () => {
+          throw new ExitSignal(code ? Math.trunc(toNum(code())) : 0);
+        };
+      }
+      case "return": {
+        const value = s.e ? this.expr(s.e, scope) : undefined;
+        return () => {
+          this.returned = value ? value() : undefined;
+          return RETURN;
+        };
+      }
+      case "delete": {
+        const name = s.name;
+        const key = s.subs ? this.key(s.subs, scope) : undefined;
+        return () => {
+          const array = this.array(name);
+          if (key) array.delete(key());
+          else array.clear();
+          return 0;
+        };
+      }
+    }
+  }
+
+  load(text: string) {
+    const rs = this.str(this.scalar("RS"));
+    if (rs === "\n") {
+      this.records = undefined;
+      this.source = text;
+      this.cursor = 0;
+      return;
+    }
+    this.records = splitRecords(text, rs);
+    this.recordIndex = 0;
+  }
+
+  pending(): boolean {
+    return this.records ? this.recordIndex < this.records.length : this.cursor < this.source.length;
+  }
+
+  next(): string | undefined {
+    if (this.records) return this.recordIndex < this.records.length ? this.records[this.recordIndex++] : undefined;
+    const source = this.source;
+    if (this.cursor >= source.length) return undefined;
+    const start = this.cursor;
+    const end = source.indexOf("\n", start);
+    if (end < 0) {
+      this.cursor = source.length;
+      return source.slice(start);
+    }
+    this.cursor = end + 1;
+    return source.slice(start, end);
+  }
+
+  print(text: string) {
+    this.buffer += text;
+    if (this.buffer.length > 65536) this.flushOut();
+  }
+
+  flushOut() {
+    if (!this.buffer) return;
+    const text = this.buffer;
+    this.buffer = "";
+    this.ctx.stdout.write(text);
+  }
+
+  scan(): boolean {
+    const rules = this.rules!;
+    for (;;) {
+      const record = this.next();
+      if (record === undefined) break;
+      this.globals.set("NR", toNum(this.globals.get("NR") as Value) + 1);
+      this.globals.set("FNR", toNum(this.globals.get("FNR") as Value) + 1);
+      this.setRecord(record);
+      this.tick();
+      try {
+        for (let i = 0; i < rules.length; i++) {
+          const rule = rules[i];
+          let matched: boolean;
+          if (!rule.pattern) matched = true;
+          else if (rule.end) {
+            if (rule.rule.active) {
+              matched = true;
+              if (truthy(rule.end())) rule.rule.active = false;
+            } else if (truthy(rule.pattern())) {
+              matched = true;
+              rule.rule.active = !truthy(rule.end());
+            } else matched = false;
+          } else matched = truthy(rule.pattern());
+          if (!matched) continue;
+          if (rule.action) {
+            if (rule.action() === NEXT) break;
+          } else this.print((this.fields[0] ?? "") + this.str(this.scalar("ORS")));
+        }
+      } catch (error) {
+        if (error instanceof NextSignal) continue;
+        if (error instanceof NextFileSignal) {
+          this.skipped = true;
+          break;
+        }
+        if (error instanceof ExitSignal) {
+          this.exitCode = error.code;
+          return true;
+        }
+        throw error;
+      }
+    }
+    return false;
+  }
+
   arith(op: string, a: number, b: number): number {
     switch (op) {
       case "+": return a + b;
@@ -1024,10 +1947,10 @@ class Interpreter {
 
   replace(text: string, re: RegExp, replacement: string, global: boolean): { text: string; count: number } {
     let count = 0;
-    const source = new RegExp(re.source, re.flags.replace("g", "") + "g");
-    const result = text.replace(source, match => {
-      if (!global && count > 0) return match;
+    const plain = !replacement.includes("&") && !replacement.includes("\\");
+    const result = text.replace(global ? this.global(re) : re, match => {
       count++;
+      if (plain) return replacement;
       let out = "";
       for (let i = 0; i < replacement.length; i++) {
         const c = replacement[i];
@@ -1046,137 +1969,54 @@ class Interpreter {
   }
 
   async builtin(name: string, args: Expr[]): Promise<Value> {
-    const value = async (index: number) => this.eval(args[index]);
-    const text = async (index: number) => this.str(await value(index));
-    const num = async (index: number) => toNum(await value(index));
     switch (name) {
       case "length": {
-        if (!args.length) return [...(this.fields[0] ?? "")].length;
         const arg = args[0];
+        if (!arg) return strlen(this.fields[0] ?? "");
         if (arg.k === "var") {
           const cell = this.lookup(arg.name).get(arg.name);
           if (cell instanceof Map) return cell.size;
         }
-        return [...(await text(0))].length;
-      }
-      case "substr": {
-        const chars = [...(await text(0))];
-        let start = Math.round(await num(1));
-        let length = args.length > 2 ? Math.round(await num(2)) : Infinity;
-        if (start < 1) start = 1;
-        if (length <= 0 || Number.isNaN(length)) return "";
-        return chars.slice(start - 1, length === Infinity ? undefined : start - 1 + length).join("");
-      }
-      case "index": {
-        const haystack = await text(0);
-        const needle = await text(1);
-        return haystack.indexOf(needle) + 1;
+        return strlen(this.str(await this.eval(arg)));
       }
       case "split": {
-        const source = await text(0);
         const target = args[1];
         if (target?.k !== "var") throw new AwkError("split: second argument is not an array");
-        const array = this.array(target.name);
-        array.clear();
-        let parts: string[];
-        if (source === "") parts = [];
-        else if (args.length > 2) {
-          const separator = args[2];
-          if (separator.k === "re") parts = source.split(separator.v);
-          else {
-            const fs = await text(2);
-            parts = fs === " " ? source.trim().split(/[ \t\n]+/).filter(Boolean) : fs === "" ? [...source] : fs.length === 1 ? source.split(fs) : source.split(regex(fs));
-          }
-        } else {
-          const fs = this.str(this.scalar("FS"));
-          parts = fs === " " ? source.trim().split(/[ \t\n]+/).filter(Boolean) : fs.length === 1 ? source.split(fs) : source.split(regex(fs));
-        }
-        parts.forEach((part, index) => array.set(String(index + 1), new Strnum(part)));
-        return parts.length;
+        const source = this.str(await this.eval(args[0]));
+        const separator = args[2];
+        const sep = separator === undefined ? this.str(this.scalar("FS")) : separator.k === "re" ? separator.v : this.str(await this.eval(separator));
+        return this.split(source, this.array(target.name), sep);
       }
       case "sub":
       case "gsub": {
         const re = await this.toRegex(args[0]);
-        const replacement = await text(1);
-        const target: Expr = args[2] ?? { k: "field", index: { k: "num", v: 0 } };
-        const current = this.str(await this.eval(target));
-        const result = this.replace(current, re, replacement, name === "gsub");
+        const replacement = this.str(await this.eval(args[1]));
+        const target: Expr = args[2] ?? FIELD0;
+        const result = this.replace(this.str(await this.eval(target)), re, replacement, name === "gsub");
         if (result.count) await this.assignTo(target, result.text);
         return result.count;
       }
       case "gensub": {
         const re = await this.toRegex(args[0]);
-        const replacement = await text(1);
-        const how = await text(2);
-        const target = args.length > 3 ? await text(3) : this.fields[0] ?? "";
-        const global = /^[gG]/.test(how);
-        const which = global ? 0 : Math.max(1, Math.trunc(toNum(how)));
-        let count = 0;
-        return target.replace(new RegExp(re.source, re.flags.replace("g", "") + "g"), (...matchArgs: unknown[]) => {
-          let end = matchArgs.length - 2;
-          if (typeof matchArgs[matchArgs.length - 1] === "object") end--;
-          const groups = matchArgs.slice(0, end) as string[];
-          count++;
-          if (!global && count !== which) return groups[0];
-          return replacement.replace(/\\(\d)|&|\\&/g, (token, digit: string | undefined) => (token === "\\&" ? "&" : token === "&" ? groups[0] : groups[Number(digit)] ?? ""));
-        });
+        const values: Value[] = [];
+        for (const arg of args.slice(1)) values.push(await this.eval(arg));
+        return this.gensub(re, values);
       }
       case "match": {
-        const source = await text(0);
-        const re = await this.toRegex(args[1]);
-        const found = new RegExp(re.source, re.flags.replace("g", "")).exec(source);
-        const start = found ? [...source.slice(0, found.index)].length + 1 : 0;
-        const length = found ? [...found[0]].length : -1;
-        this.globals.set("RSTART", start);
-        this.globals.set("RLENGTH", length);
-        if (args[2]?.k === "var" && found) {
-          const array = this.array(args[2].name);
-          array.clear();
-          found.forEach((group, index) => array.set(String(index), group ?? ""));
-        }
-        return start;
+        const source = this.str(await this.eval(args[0]));
+        return this.match(source, await this.toRegex(args[1]), args[2]);
       }
-      case "sprintf": {
-        if (!args.length) return "";
-        const values: FormatValue[] = [];
-        for (let i = 1; i < args.length; i++) values.push(this.formatArg(await value(i)));
-        return format(await text(0), values, false).text;
-      }
-      case "sin": return Math.sin(await num(0));
-      case "cos": return Math.cos(await num(0));
-      case "atan2": return Math.atan2(await num(0), await num(1));
-      case "exp": return Math.exp(await num(0));
-      case "log": return Math.log(await num(0));
-      case "sqrt": return Math.sqrt(await num(0));
-      case "int": return Math.trunc(await num(0));
-      case "rand": return Math.random();
-      case "srand": {
-        const previous = this.seed;
-        this.seed = args.length ? await num(0) : Math.floor(Date.now() / 1000);
-        return previous;
-      }
-      case "tolower": return (await text(0)).toLowerCase();
-      case "toupper": return (await text(0)).toUpperCase();
-      case "systime": return Math.floor(Date.now() / 1000);
-      case "strftime": {
-        const spec = args.length ? await text(0) : "%a %b %e %H:%M:%S %Z %Y";
-        const when = args.length > 1 ? (await num(1)) * 1000 : Date.now();
-        return strftime(spec, new Date(when));
-      }
-      case "and": return Number(BigInt(Math.trunc(await num(0))) & BigInt(Math.trunc(await num(1))));
-      case "or": return Number(BigInt(Math.trunc(await num(0))) | BigInt(Math.trunc(await num(1))));
-      case "xor": return Number(BigInt(Math.trunc(await num(0))) ^ BigInt(Math.trunc(await num(1))));
-      case "lshift": return (await num(0)) * 2 ** (await num(1));
-      case "rshift": return Math.floor((await num(0)) / 2 ** (await num(1)));
-      case "compl": return Number(~BigInt(Math.trunc(await num(0))) & 0x1fffffffffffffn);
+      case "asort":
+      case "asorti":
+        return this.sortArray(name, args);
       case "system": {
         await this.flushAll();
-        const result = await this.ctx.exec(await text(0));
-        this.ctx.stdout.write(result.stdout);
+        const result = await this.ctx.exec(this.str(await this.eval(args[0])));
+        this.print(result.stdout);
         return result.status;
       }
       case "close": {
-        const key = await text(0);
+        const key = this.str(await this.eval(args[0]));
         this.readers.delete(key);
         const output = this.outputs.get(key);
         if (!output) return -1;
@@ -1184,22 +2024,133 @@ class Interpreter {
         this.outputs.delete(key);
         return 0;
       }
-      case "fflush":
-        return 0;
-      case "asort":
-      case "asorti": {
-        const source = args[0];
-        if (source?.k !== "var") throw new AwkError(name + ": argument is not an array");
-        const array = this.array(source.name);
-        const items = name === "asort" ? [...array.values()] : [...array.keys()];
-        items.sort((a, b) => (isNumberish(a) && isNumberish(b) && typeof a !== "string" && typeof b !== "string" ? toNum(a) - toNum(b) : this.str(a) < this.str(b) ? -1 : this.str(a) > this.str(b) ? 1 : 0));
-        const target = args[1]?.k === "var" ? this.array((args[1] as { name: string }).name) : array;
-        target.clear();
-        items.forEach((item, index) => target.set(String(index + 1), item));
-        return items.length;
+    }
+    const values: Value[] = [];
+    for (const arg of args) values.push(await this.eval(arg));
+    return this.pure(name, values);
+  }
+
+  pure(name: string, values: Value[]): Value {
+    const text = (index: number) => this.str(values[index]);
+    const num = (index: number) => toNum(values[index]);
+    switch (name) {
+      case "length": return strlen(text(0));
+      case "substr": return substr(text(0), num(1), values.length > 2 ? num(2) : Infinity);
+      case "index": return text(0).indexOf(text(1)) + 1;
+      case "sprintf": return values.length ? this.sprintf(text(0), values.slice(1).map(value => this.formatArg(value))) : "";
+      case "sin": return Math.sin(num(0));
+      case "cos": return Math.cos(num(0));
+      case "atan2": return Math.atan2(num(0), num(1));
+      case "exp": return Math.exp(num(0));
+      case "log": return Math.log(num(0));
+      case "sqrt": return Math.sqrt(num(0));
+      case "int": return Math.trunc(num(0));
+      case "rand": return Math.random();
+      case "srand": {
+        const previous = this.seed;
+        this.seed = values.length ? num(0) : Math.floor(Date.now() / 1000);
+        return previous;
       }
+      case "tolower": return text(0).toLowerCase();
+      case "toupper": return text(0).toUpperCase();
+      case "systime": return Math.floor(Date.now() / 1000);
+      case "strftime": return strftime(values.length ? text(0) : "%a %b %e %H:%M:%S %Z %Y", new Date(values.length > 1 ? num(1) * 1000 : Date.now()));
+      case "and": return Number(BigInt(Math.trunc(num(0))) & BigInt(Math.trunc(num(1))));
+      case "or": return Number(BigInt(Math.trunc(num(0))) | BigInt(Math.trunc(num(1))));
+      case "xor": return Number(BigInt(Math.trunc(num(0))) ^ BigInt(Math.trunc(num(1))));
+      case "lshift": return num(0) * 2 ** num(1);
+      case "rshift": return Math.floor(num(0) / 2 ** num(1));
+      case "compl": return Number(~BigInt(Math.trunc(num(0))) & 0x1fffffffffffffn);
+      case "fflush": return 0;
     }
     throw new AwkError("function " + name + " never defined");
+  }
+
+  split(source: string, array: Map<string, Value>, separator: string | RegExp): number {
+    array.clear();
+    const parts = source === "" ? [] : typeof separator === "string" ? this.splitFields(source, separator) : source.split(separator);
+    for (let i = 0; i < parts.length; i++) array.set(String(i + 1), new Strnum(parts[i]));
+    return parts.length;
+  }
+
+  gensub(re: RegExp, values: Value[]): string {
+    const replacement = this.str(values[0]);
+    const how = this.str(values[1]);
+    const target = values.length > 2 ? this.str(values[2]) : this.fields[0] ?? "";
+    const global = /^[gG]/.test(how);
+    const which = global ? 0 : Math.max(1, Math.trunc(toNum(how)));
+    let count = 0;
+    return target.replace(this.global(re), (...matchArgs: unknown[]) => {
+      let end = matchArgs.length - 2;
+      if (typeof matchArgs[matchArgs.length - 1] === "object") end--;
+      const groups = matchArgs.slice(0, end) as string[];
+      count++;
+      if (!global && count !== which) return groups[0];
+      return replacement.replace(/\\(\d)|&|\\&/g, (token, digit: string | undefined) => (token === "\\&" ? "&" : token === "&" ? groups[0] : groups[Number(digit)] ?? ""));
+    });
+  }
+
+  match(source: string, re: RegExp, target: Expr | undefined): number {
+    re.lastIndex = 0;
+    const found = re.exec(source);
+    const start = found ? strlen(source.slice(0, found.index)) + 1 : 0;
+    const length = found ? strlen(found[0]) : -1;
+    this.globals.set("RSTART", start);
+    this.globals.set("RLENGTH", length);
+    if (target?.k === "var" && found) {
+      const array = this.array(target.name);
+      array.clear();
+      found.forEach((group, index) => array.set(String(index), group ?? ""));
+    }
+    return start;
+  }
+
+  sortArray(name: string, args: Expr[]): number {
+    const source = args[0];
+    if (source?.k !== "var") throw new AwkError(name + ": argument is not an array");
+    const array = this.array(source.name);
+    const items = name === "asort" ? [...array.values()] : [...array.keys()];
+    items.sort((a, b) => (isNumberish(a) && isNumberish(b) && typeof a !== "string" && typeof b !== "string" ? toNum(a) - toNum(b) : this.str(a) < this.str(b) ? -1 : this.str(a) > this.str(b) ? 1 : 0));
+    const target = args[1]?.k === "var" ? this.array((args[1] as { name: string }).name) : array;
+    target.clear();
+    items.forEach((item, index) => target.set(String(index + 1), item));
+    return items.length;
+  }
+
+  global(re: RegExp): RegExp {
+    let global = this.globalCache.get(re);
+    if (!global) {
+      global = new RegExp(re.source, re.flags.replace("g", "") + "g");
+      this.globalCache.set(re, global);
+    }
+    return global;
+  }
+
+  sprintf(spec: string, values: FormatValue[]): string {
+    let pieces = this.formats.get(spec);
+    if (pieces === undefined) {
+      pieces = compileFormat(spec);
+      if (this.formats.size > 256) this.formats.clear();
+      this.formats.set(spec, pieces);
+    }
+    if (!pieces) return format(spec, values, false).text;
+    let out = "";
+    let used = 0;
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      if (typeof piece === "string") {
+        out += piece;
+        continue;
+      }
+      const value = used < values.length ? values[used] : undefined;
+      used++;
+      if (piece.plain && piece.conv === "s") out += value === undefined ? "" : typeof value === "number" ? formatNumber(value) : value;
+      else if (piece.plain && piece.conv === "d" && typeof value === "number") {
+        const int = Math.trunc(Number.isFinite(value) ? value : 0);
+        out += (int < 0 || Object.is(int, -0) ? "-" : "") + Math.abs(int).toString();
+      } else out += format(piece.spec, value === undefined ? [] : [value], false).text;
+    }
+    return out;
   }
 
   formatArg(value: Value): FormatValue {
@@ -1227,7 +2178,7 @@ class Interpreter {
       if (!reader) {
         let content: string;
         try {
-          content = file === "-" || file === "/dev/stdin" ? this.ctx.stdin.read() : decode(await this.ctx.fs.read(this.ctx.resolve(file)));
+          content = file === "-" || file === "/dev/stdin" ? await this.ctx.stdin.text() : decode(await this.ctx.fs.read(this.ctx.resolve(file)));
         } catch {
           return -1;
         }
@@ -1236,14 +2187,22 @@ class Interpreter {
       }
       line = reader.lines[reader.pos++];
     } else {
-      if (this.preload && this.recordIndex >= this.records.length) {
+      if (this.preload && !this.pending()) {
         const preload = this.preload;
         this.preload = undefined;
         await preload();
       }
-      line = this.records[this.recordIndex];
+      line = this.next();
+      while (line === undefined && this.more) {
+        const text = await this.more();
+        if (text === null) {
+          this.more = undefined;
+          break;
+        }
+        this.load(text);
+        line = this.next();
+      }
       if (line !== undefined) {
-        this.recordIndex++;
         this.globals.set("NR", toNum(this.scalar("NR")) + 1);
         this.globals.set("FNR", toNum(this.scalar("FNR")) + 1);
       }
@@ -1259,21 +2218,25 @@ class Interpreter {
 
   async write(text: string, redirect?: { op: string; target: Expr }) {
     if (!redirect) {
-      this.ctx.stdout.write(text);
+      this.print(text);
       return;
     }
-    const key = this.str(await this.eval(redirect.target));
+    this.emit(text, redirect.op, this.str(await this.eval(redirect.target)));
+  }
+
+  emit(text: string, op: string, key: string) {
     if (key === "/dev/stdout" || key === "-") {
-      this.ctx.stdout.write(text);
+      this.print(text);
       return;
     }
     if (key === "/dev/stderr") {
+      this.flushOut();
       this.ctx.stderr.write(text);
       return;
     }
     let output = this.outputs.get(key);
     if (!output) {
-      output = { kind: redirect.op === "|" ? "pipe" : "file", text: "", append: redirect.op === ">>" };
+      output = { kind: op === "|" ? "pipe" : "file", text: "", append: op === ">>" };
       this.outputs.set(key, output);
     }
     output.text += text;
@@ -1281,9 +2244,10 @@ class Interpreter {
   }
 
   async flush(key: string, output: { kind: "file" | "pipe"; text: string; append: boolean }) {
+    this.flushOut();
     if (output.kind === "pipe") {
       const result = await this.ctx.exec(key, output.text);
-      this.ctx.stdout.write(result.stdout);
+      this.print(result.stdout);
     } else {
       await this.ctx.fs.write(this.ctx.resolve(key), encode(output.text), output.append);
       output.append = true;
@@ -1292,7 +2256,9 @@ class Interpreter {
   }
 
   async flushAll() {
+    this.flushOut();
     for (const [key, output] of this.outputs) if (output.text || output.kind === "file") await this.flush(key, output);
+    this.flushOut();
   }
 
   async statements(list: Stmt[]) {
@@ -1300,6 +2266,11 @@ class Interpreter {
   }
 
   async statement(s: Stmt): Promise<void> {
+    const fast = this.fastStmts.get(s);
+    if (fast) {
+      this.signal(fast());
+      return;
+    }
     this.tick();
     switch (s.k) {
       case "expr":
@@ -1408,7 +2379,7 @@ function splitRecords(text: string, rs: string): string[] {
   return parts;
 }
 
-export const awk: CommandHandler = async ctx => {
+export const awk: CommandHandler = streaming(async ctx => {
   const args = ctx.args;
   let fs: string | undefined;
   const assigns: [string, string][] = [];
@@ -1445,6 +2416,12 @@ export const awk: CommandHandler = async ctx => {
     throw error;
   }
   const interp = new Interpreter(ctx, program);
+  try {
+    interp.prepare();
+  } catch (error) {
+    if (error instanceof AwkError) throw new CommandError(error.message, 2);
+    throw error;
+  }
   const unescape = (value: string) => value.replace(/\\(.)/g, (_, c: string) => ({ n: "\n", t: "\t", "\\": "\\", r: "\r" })[c] ?? "\\" + c);
   if (fs !== undefined) interp.globals.set("FS", fs === "t" ? "\t" : unescape(fs));
   for (const [name, value] of assigns) interp.globals.set(name, new Strnum(unescape(value)));
@@ -1459,14 +2436,23 @@ export const awk: CommandHandler = async ctx => {
     const operand = operands.find(operand => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(operand)) ?? "-";
     let text = "";
     try {
-      text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
+      text = operand === "-" ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(operand)));
     } catch (error) {
       if (!(error instanceof FsError)) throw error;
     }
     preloaded = operand;
-    interp.globals.set("FILENAME", operand === "-" ? "" : operand);
-    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
-    interp.recordIndex = 0;
+    interp.globals.set("FILENAME", operand === "-" && !operands.includes("-") ? "" : operand);
+    interp.load(text);
+  };
+  const stdin = () => {
+    const next = batches(ctx.stdin);
+    const more = async (): Promise<string | null> => {
+      if (interp.str(interp.scalar("RS")) === "\n") return next();
+      let all = "";
+      for (let text = await next(); text !== null; text = await next()) all += text;
+      return all || null;
+    };
+    return { first: async () => (await more()) ?? "", more };
   };
   try {
     try {
@@ -1495,11 +2481,21 @@ export const awk: CommandHandler = async ctx => {
           }
           continue;
         }
+        if (operand === "-") {
+          const input = stdin();
+          if (await runFile(interp, program, await input.first(), operand, input.more)) {
+            exiting = true;
+            exitCode = interp.exitCode;
+            break;
+          }
+          continue;
+        }
         let text: string;
         try {
-          text = operand === "-" ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(operand)));
+          text = decode(await ctx.fs.read(ctx.resolve(operand)));
         } catch (error) {
           if (!(error instanceof FsError)) throw error;
+          interp.flushOut();
           ctx.stderr.write("awk: cannot open \"" + operand + "\" (No such file or directory)\n");
           exitCode = 2;
           continue;
@@ -1510,9 +2506,12 @@ export const awk: CommandHandler = async ctx => {
           break;
         }
       }
-      if (!consumed && !exiting && await runFile(interp, program, preloaded === "-" ? undefined : ctx.stdin.read(), "")) {
-        exiting = true;
-        exitCode = interp.exitCode;
+      if (!consumed && !exiting) {
+        const input = preloaded === "-" ? undefined : stdin();
+        if (await runFile(interp, program, input ? await input.first() : undefined, "", input?.more)) {
+          exiting = true;
+          exitCode = interp.exitCode;
+        }
       }
     }
     try {
@@ -1526,23 +2525,42 @@ export const awk: CommandHandler = async ctx => {
       await interp.flushAll();
       throw new CommandError(error.message, 2);
     }
+    interp.flushOut();
     if (error instanceof NextSignal || error instanceof NextFileSignal) throw new CommandError("next used in BEGIN or END action", 2);
     throw error;
   }
   await interp.flushAll();
   return exitCode;
-};
+});
 
-async function runFile(interp: Interpreter, program: Program, text: string | undefined, name: string): Promise<boolean> {
+async function runFile(interp: Interpreter, program: Program, text: string | undefined, name: string, more?: () => Promise<string | null>): Promise<boolean> {
   interp.preload = undefined;
-  interp.globals.set("FILENAME", name === "-" ? "" : name);
+  interp.globals.set("FILENAME", name);
   if (text !== undefined) {
     interp.globals.set("FNR", 0);
-    interp.records = splitRecords(text, interp.str(interp.scalar("RS")));
-    interp.recordIndex = 0;
+    interp.load(text);
   }
-  while (interp.recordIndex < interp.records.length) {
-    const record = interp.records[interp.recordIndex++];
+  interp.more = more;
+  try {
+    for (;;) {
+      interp.skipped = false;
+      if (interp.rules ? interp.scan() : await records(interp, program)) return true;
+      if (interp.skipped || !interp.more) return false;
+      interp.flushOut();
+      await pause(interp.ctx);
+      const next = await interp.more();
+      if (next === null) return false;
+      interp.load(next);
+    }
+  } finally {
+    interp.more = undefined;
+  }
+}
+
+async function records(interp: Interpreter, program: Program): Promise<boolean> {
+  for (;;) {
+    const record = interp.next();
+    if (record === undefined) break;
     interp.globals.set("NR", toNum(interp.scalar("NR")) + 1);
     interp.globals.set("FNR", toNum(interp.scalar("FNR")) + 1);
     interp.setRecord(record);
@@ -1561,11 +2579,14 @@ async function runFile(interp: Interpreter, program: Program, text: string | und
         } else matched = truthy(await interp.eval(rule.pattern));
         if (!matched) continue;
         if (rule.action) await interp.statements(rule.action);
-        else interp.ctx.stdout.write((interp.fields[0] ?? "") + interp.str(interp.scalar("ORS")));
+        else interp.print((interp.fields[0] ?? "") + interp.str(interp.scalar("ORS")));
       }
     } catch (error) {
       if (error instanceof NextSignal) continue;
-      if (error instanceof NextFileSignal) break;
+      if (error instanceof NextFileSignal) {
+        interp.skipped = true;
+        break;
+      }
       if (error instanceof ExitSignal) {
         interp.exitCode = error.code;
         return true;
