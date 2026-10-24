@@ -279,6 +279,7 @@ async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: b
             cells.settle_preempt(&session_id);
             Ok(None)
         }
+        RemoteOperation::EndTurn { .. } => Ok(None),
     }
 }
 

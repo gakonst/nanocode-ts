@@ -725,8 +725,15 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     });
     let codex_search = codex
         .as_ref()
-        .filter(|endpoint| endpoint.gateway.is_none())
-        .map(|endpoint| endpoint.endpoint.clone());
+        .filter(|endpoint| !matches!(endpoint.gateway, Some(Gateway::WorkersAi)))
+        .map(|endpoint| {
+            (
+                endpoint.endpoint.clone(),
+                matches!(endpoint.gateway, Some(Gateway::Vercel))
+                    .then(|| ResponsesGateway::vercel().model_id_prefix())
+                    .flatten(),
+            )
+        });
     let codex = match codex {
         Some(endpoint) => {
             let default = match config.provider {
@@ -765,10 +772,20 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
     let claude_client = claude.as_ref().map(|(_, client)| client.clone());
-    let host_search = config.tools.iter().any(|tool| tool.name() == "web_search");
+    let host_tool = |name: &str| {
+        config
+            .tools
+            .iter()
+            .any(|tool| tool.name() == name || tool.name() == "web_search")
+    };
+    let host_search = [host_tool("WebSearch"), host_tool("web__run")];
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let search = |family: Provider| -> Option<Arc<dyn Tool>> {
-        if !config.web_search.enabled(family) || host_search {
+        let replaced = match family {
+            Provider::Claude => host_search[0],
+            Provider::Codex => host_search[1],
+        };
+        if !config.web_search.enabled(family) || replaced {
             return None;
         }
         match family {
@@ -778,9 +795,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                     claude_search_tokens.flatten(),
                 )) as Arc<dyn Tool>
             }),
-            Provider::Codex => codex_search.as_deref().map(|endpoint| {
+            Provider::Codex => codex_search.as_ref().map(|(endpoint, prefix)| {
                 Arc::new(nanocode::codex_tools::web_search_tool(
                     endpoint,
+                    *prefix,
                     Arc::new(transport::WorkerTransport::CODEX),
                 )) as Arc<dyn Tool>
             }),

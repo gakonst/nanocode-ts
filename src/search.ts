@@ -31,11 +31,13 @@ function strings(value: unknown): string[] | undefined {
 export function searchKind(request: SearchDispatch): "claude" | "codex" | undefined {
   const path = (() => { try { return new URL(request.endpoint).pathname; } catch { return request.endpoint; } })();
   if (path.endsWith("/alpha/search")) return "codex";
-  if (!path.endsWith("/messages") || request.body.byteLength > NESTED_MAX_BYTES) return undefined;
+  const responses = path.endsWith("/responses");
+  if (!(responses || path.endsWith("/messages")) || request.body.byteLength > NESTED_MAX_BYTES) return undefined;
   const text = decode(request.body);
-  if (!text.includes('"web_search_2')) return undefined;
+  if (!text.includes(responses ? '"web_search"' : '"web_search_2')) return undefined;
   try {
-    const body = JSON.parse(text) as { tools?: { type?: unknown }[] };
+    const body = JSON.parse(text) as { tools?: { type?: unknown }[]; input?: unknown };
+    if (responses) return body.tools?.length === 1 && body.tools[0]?.type === "web_search" && typeof body.input === "string" ? "codex" : undefined;
     return body.tools?.length === 1 && typeof body.tools[0]?.type === "string" && body.tools[0].type.startsWith("web_search_") ? "claude" : undefined;
   } catch {
     return undefined;
@@ -206,8 +208,15 @@ export async function answerSearch(request: SearchDispatch, search: WebSearch, s
   let body: Record<string, unknown>;
   try { body = JSON.parse(decode(request.body)); } catch { return undefined; }
   if (kind === "codex") {
-    const output = await runCommands((body.commands ?? {}) as Commands, search, signal, typeof body.model === "string" ? body.model : undefined);
-    return Response.json({ output, results: null }, { headers: { "cache-control": "no-store" } });
+    const model = typeof body.model === "string" ? body.model : undefined;
+    if (typeof body.input !== "string") {
+      const output = await runCommands((body.commands ?? {}) as Commands, search, signal, model);
+      return Response.json({ output, results: null }, { headers: { "cache-control": "no-store" } });
+    }
+    let commands: Commands;
+    try { commands = JSON.parse(body.input); } catch { commands = { search_query: [{ q: body.input }] }; }
+    const output = await runCommands(commands, search, signal, model);
+    return Response.json({ object: "response", status: "completed", model, output: [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: output, annotations: [] }] }] }, { headers: { "cache-control": "no-store" } });
   }
   const tool = ((body.tools as Record<string, unknown>[] | undefined) ?? [])[0] ?? {};
   const messages = (body.messages as { role?: string; content?: unknown }[] | undefined) ?? [];
