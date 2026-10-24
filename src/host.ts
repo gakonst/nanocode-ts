@@ -155,7 +155,7 @@ export class AgentRuntime {
     return false;
   }
 
-  async submit(scope: string, input: { request_id: string; prompt: string; hand?: string; metadata: unknown }): Promise<Submitted> {
+  async submit(scope: string, input: { request_id: string; prompt: string; images?: string[]; hand?: string; metadata: unknown }): Promise<Submitted> {
     return await this.command("submit", { scope, ...input }) as Submitted;
   }
 

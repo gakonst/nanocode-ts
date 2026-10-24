@@ -1,4 +1,7 @@
-import { type LiveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
+import { type Attachment, attachedPrompt, type LiveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
+import { safeName, sniff } from "../files.ts";
+
+export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
 export type VercelSession = { id?: string; cursor?: string; open?: boolean };
 
@@ -27,6 +30,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
   const reconnectMs = options.reconnectMs ?? 1000;
   let state: VercelSession = options.session?.load() ?? {};
   let warmed: { key: string; session: Promise<string | undefined> } | undefined;
+  const pending = new Map<string, { bytes: Uint8Array; type: string }>();
 
   const save = (session = state) => {
     if (session === state) options.session?.save(state);
@@ -100,8 +104,47 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     }
   };
 
+  const encoded = (attachments: readonly Attachment[] = []) => {
+    const files = attachments.flatMap(item => {
+      const found = pending.get(item.path);
+      if (!found) return [];
+      let binary = "";
+      for (let index = 0; index < found.bytes.length; index += 0x8000) binary += String.fromCharCode(...found.bytes.subarray(index, index + 0x8000));
+      return [{ path: item.path, data: btoa(binary) }];
+    });
+    return files.length ? { attachments: files } : {};
+  };
+
   return {
-    async send({ prompt, push, note, signal }: TransportParameters) {
+    files: {
+      maxBytes: VERCEL_ATTACHMENT_BYTES,
+      scope: () => state.id,
+      async upload(file, name) {
+        if (file.size > VERCEL_ATTACHMENT_BYTES) throw new Error(`attachments are at most ${VERCEL_ATTACHMENT_BYTES} bytes here`);
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const safe = safeName(name);
+        const dot = safe.lastIndexOf(".");
+        const suffix = Array.from(crypto.getRandomValues(new Uint8Array(2)), byte => byte.toString(16).padStart(2, "0")).join("");
+        const chosen = dot > 0 ? `${safe.slice(0, dot)}-${suffix}${safe.slice(dot)}` : `${safe}-${suffix}`;
+        const type = sniff(bytes).split(";")[0]!;
+        const path = `/workspace/uploads/${chosen}`;
+        pending.set(path, { bytes, type });
+        return { name: chosen, path, type, size: bytes.length };
+      },
+      async read(file, signal) {
+        const local = pending.get(file);
+        if (local) return new Blob([local.bytes.slice().buffer as ArrayBuffer], { type: local.type });
+        if (!state.id) throw new Error("no session yet");
+        const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&file=${encodeURIComponent(file)}`, { headers: headers(), ...(signal ? { signal } : {}) });
+        if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+        return await response.blob();
+      },
+    },
+    async send({ prompt: typed, attachments, push, note, signal }: TransportParameters) {
+      const prompt = attachedPrompt(typed, attachments);
+      const total = (attachments ?? []).reduce((sum, item) => sum + (pending.get(item.path)?.bytes.length ?? 0), 0);
+      if (total > VERCEL_ATTACHMENT_BYTES) throw new Error(`a message carries at most ${VERCEL_ATTACHMENT_BYTES} bytes of attachments here`);
+      const carried = encoded(attachments);
       const session = state;
       session.open = true;
       save(session);
@@ -120,7 +163,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
             hand = await options.hand!(existing);
           }
         }
-        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt } : { ...chosen(), ...(hand ? { hand } : {}), text: prompt }), signal }).catch((error: unknown) => {
+        const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify(existing ? { sessionId: existing, text: prompt, ...carried } : { ...chosen(), ...(hand ? { hand } : {}), text: prompt, ...carried }), signal }).catch((error: unknown) => {
           if (signal?.aborted) return undefined;
           throw error;
         });

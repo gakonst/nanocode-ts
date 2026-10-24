@@ -1,4 +1,7 @@
 import type { LoggedEvent, ModelEntry, ModelProvider } from "./contracts.ts";
+import type { Attachment } from "./files.ts";
+
+export type { Attachment } from "./files.ts";
 
 export type EntryKind = "assistant" | "error" | "reasoning" | "tool" | "user";
 
@@ -25,7 +28,40 @@ export type ToolCell = {
   children: ToolCell[];
 };
 
-export type Entry = { kind: EntryKind; text: string; tool?: ToolCell; started_at?: number; ended_at?: number; steer?: boolean };
+export type Entry = { kind: EntryKind; text: string; tool?: ToolCell; started_at?: number; ended_at?: number; steer?: boolean; attachments?: Attachment[] };
+
+export type TransportFiles = {
+  upload(file: Blob, name: string, signal?: AbortSignal): Promise<Attachment>;
+  read(path: string, signal?: AbortSignal): Promise<Blob>;
+  maxBytes?: number;
+  maxFiles?: number;
+  scope?(): string | undefined;
+};
+
+export const WORKSPACE_IMAGE = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)$/i;
+
+export function workspaceFile(src: unknown, root = "/workspace"): string | undefined {
+  if (typeof src !== "string") return undefined;
+  const value = src.trim();
+  const scheme = /^(?:workspace|sandbox):(?:\/\/)?(.*)$/i.exec(value) ?? /^file:\/\/(\/.*)$/i.exec(value);
+  const raw = scheme ? scheme[1]! : value.startsWith(root + "/") ? value : undefined;
+  if (raw === undefined) return undefined;
+  const absolute = raw.startsWith("/") ? raw : "/" + raw;
+  const path = absolute === root || absolute.startsWith(root + "/") ? absolute : root + absolute;
+  return path.split("/").includes("..") ? undefined : path.split(/[?#]/)[0];
+}
+
+export function bytes(size: number): string {
+  if (size < 1024) return size + " B";
+  if (size < 1024 * 1024) return Math.round(size / 1024) + " KB";
+  return (size / 1024 / 1024).toFixed(1) + " MB";
+}
+
+export function attachedPrompt(prompt: string, attachments: readonly Attachment[] = []): string {
+  if (!attachments.length) return prompt;
+  const lines = attachments.map(item => `Attached: ${item.path} (${item.type || "file"}, ${bytes(item.size)})`);
+  return prompt ? prompt + "\n\n" + lines.join("\n") : lines.join("\n");
+}
 
 export type LiveEvent = { type: string; [field: string]: unknown };
 
@@ -366,7 +402,7 @@ export function imagesOf(result: unknown, found: string[] = []): string[] {
     : record.type === "image" && source?.type === "base64" && typeof source.data === "string" ? `data:${typeof source.media_type === "string" ? source.media_type : "image/png"};base64,${source.data}`
     : record.type === "image" && source?.type === "url" ? source.url
     : undefined;
-  if (typeof url === "string" && IMAGE.test(url.trim()) && !found.includes(url.trim())) found.push(url.trim());
+  if (typeof url === "string" && (IMAGE.test(url.trim()) || workspaceFile(url)) && !found.includes(url.trim())) found.push(url.trim());
   for (const key of ["content", "content_blocks", "Content", "output"]) if (Array.isArray(record[key])) imagesOf(record[key], found);
   return found;
 }
@@ -754,7 +790,7 @@ export type Conversation = { id: string; title: string; updated: number };
 
 export type ChatState = { entries: readonly Entry[]; live: readonly Entry[]; status: ChatStatus; error: Error | undefined; conversations: readonly Conversation[]; conversation: string | undefined };
 
-export type TransportParameters = { prompt: string; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void; signal: AbortSignal };
+export type TransportParameters = { prompt: string; attachments?: readonly Attachment[]; push(event: LiveEvent): void; note(kind: EntryKind, text: string): void; signal: AbortSignal };
 
 export type Transport = {
   send(parameters: TransportParameters): Promise<void>;
@@ -763,6 +799,7 @@ export type Transport = {
   cancel?(): Promise<void>;
   snapshot?(): unknown;
   restore?(state: unknown): void;
+  files?: TransportFiles;
 };
 
 export type TurnBlock = Entry & { live: boolean };
@@ -822,7 +859,8 @@ export type ConfigOptions = {
 export type Config = {
   getState(): ChatState;
   subscribe(listener: () => void): () => void;
-  send(prompt: string): Promise<void>;
+  send(prompt: string, attachments?: readonly Attachment[]): Promise<void>;
+  readonly files: TransportFiles | undefined;
   resume(): Promise<void>;
   cancel(): Promise<void>;
   readonly cancellable: boolean;
@@ -906,7 +944,7 @@ export function createConfig(options: ConfigOptions): Config {
     if (!existing && !shown) return;
     const entries = [...(shown ? state.entries : read<Entry[]>(entriesKey(id!), [])), entry].slice(-(options.keep ?? 500));
     write(entriesKey(id!), entries);
-    const title = existing?.title || (entry.kind === "user" ? entry.text.replace(/\s+/g, " ").slice(0, 80) : "");
+    const title = existing?.title || (entry.kind === "user" ? (entry.text || entry.attachments?.map(item => item.name).join(", ") || "").replace(/\s+/g, " ").slice(0, 80) : "");
     conversations = [{ id: id!, title, updated: Date.now() }, ...conversations.filter(item => item.id !== id)];
     for (const dropped of conversations.slice(history.limit)) forget(dropped.id);
     conversations = conversations.slice(0, history.limit);
@@ -945,8 +983,9 @@ export function createConfig(options: ConfigOptions): Config {
   };
   let generation = 0;
   let controller: AbortController | undefined;
-  const parameters = (prompt: string, id: number, signal: AbortSignal): TransportParameters => ({
+  const parameters = (prompt: string, id: number, signal: AbortSignal, attachments?: readonly Attachment[]): TransportParameters => ({
     prompt,
+    ...(attachments?.length ? { attachments } : {}),
     signal,
     push: event => { if (id === generation) push(event); },
     note: (kind, text) => { if (id === generation) note(kind, text); },
@@ -958,7 +997,7 @@ export function createConfig(options: ConfigOptions): Config {
     controller?.abort();
     controller = undefined;
   };
-  const settle = (start: (parameters: TransportParameters) => Promise<void>, prompt = "") => {
+  const settle = (start: (parameters: TransportParameters) => Promise<void>, prompt = "", attachments?: readonly Attachment[]) => {
     const id = ++generation;
     controller?.abort();
     const signal = (controller = new AbortController()).signal;
@@ -966,7 +1005,7 @@ export function createConfig(options: ConfigOptions): Config {
     set({ status: "pending", error: undefined });
     let work: Promise<void>;
     try {
-      work = start(parameters(prompt, id, signal));
+      work = start(parameters(prompt, id, signal, attachments));
     } catch (error) {
       work = Promise.reject(error);
     }
@@ -1002,9 +1041,14 @@ export function createConfig(options: ConfigOptions): Config {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    async send(prompt) {
+    async send(prompt, attachments) {
       const text = prompt.trim();
-      if (!text) return;
+      const attached = attachments?.length ? attachments.map(item => ({ name: item.name, path: item.path, type: item.type, size: item.size })) : undefined;
+      if (!text && !attached) return;
+      if (state.status === "pending" && attached) {
+        note("error", "Attachments go with a new message. Send them when the running turn finishes.");
+        return;
+      }
       if (state.status === "pending") {
         const transcript = view().transcript;
         transcript.aside({ kind: "user", text, started_at: Date.now(), steer: true });
@@ -1016,8 +1060,10 @@ export function createConfig(options: ConfigOptions): Config {
         }
         return;
       }
-      note("user", text);
-      await settle(parameters => options.transport.send(parameters), text);
+      const started_at = Date.now();
+      const target = current;
+      view().transcript.run(() => add(target, { kind: "user", text, started_at, ...(attached ? { attachments: attached } : {}) }));
+      await settle(parameters => options.transport.send(parameters), text, attached);
     },
     async resume() {
       const resume = options.transport.resume?.bind(options.transport);
@@ -1033,6 +1079,7 @@ export function createConfig(options: ConfigOptions): Config {
       }
     },
     cancellable: Boolean(options.transport.cancel),
+    files: options.transport.files,
     get detachable() {
       return detachable();
     },

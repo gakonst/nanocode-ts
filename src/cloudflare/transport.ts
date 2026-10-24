@@ -1,4 +1,4 @@
-import { type EntryKind, type LiveEvent, liveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
+import { type Attachment, attachedPrompt, type EntryKind, type LiveEvent, liveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
 import type { LoggedEvent } from "../contracts.ts";
 
 export type CloudflareSession = { id?: string; cursor?: number; open?: string };
@@ -105,7 +105,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     }
   };
 
-  const turn = async (prompt: string, sink: Sink, signal?: AbortSignal) => {
+  const turn = async (prompt: string, sink: Sink, signal?: AbortSignal, attachments: readonly Attachment[] = []) => {
     state.id ??= warmed ?? identifier("web");
     const session = state;
     used = performance.now();
@@ -115,7 +115,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     const model = options.model();
     try {
       const hand = await options.hand?.(session.id!, signal);
-      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt, provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
+      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt: attachedPrompt(prompt, attachments), ...(images(attachments).length ? { images: images(attachments) } : {}), provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
         if (signal?.aborted) return undefined;
         throw error;
       });
@@ -129,9 +129,39 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     }
   };
 
+  const images = (attachments: readonly Attachment[]) => attachments.filter(item => item.type.startsWith("image/")).map(item => item.path);
+
+  const failure = async (response: Response) => {
+    const body = await response.text();
+    try {
+      return (JSON.parse(body) as { error?: string }).error ?? body;
+    } catch {
+      return body || `${response.status}`;
+    }
+  };
+
   return {
-    async send({ prompt, push, note, signal }: TransportParameters) {
-      await turn(prompt, { push, note }, signal);
+    files: {
+      maxBytes: 5 * 1024 * 1024,
+      scope: () => state.id,
+      async upload(file, name, signal) {
+        if (!state.id) {
+          state.id = warmed ?? identifier("web");
+          save();
+        }
+        const response = await fetch(path(`files?name=${encodeURIComponent(name)}`), { method: "POST", headers: headers({ "content-type": "application/octet-stream" }), body: file, ...(signal ? { signal } : {}) });
+        if (!response.ok) throw new Error(await failure(response));
+        return await response.json() as Attachment;
+      },
+      async read(file, signal) {
+        if (!state.id) throw new Error("no session yet");
+        const response = await fetch(path("files" + file.split("/").map(encodeURIComponent).join("/")), { headers: headers(), ...(signal ? { signal } : {}) });
+        if (!response.ok) throw new Error(await failure(response));
+        return await response.blob();
+      },
+    },
+    async send({ prompt, attachments, push, note, signal }: TransportParameters) {
+      await turn(prompt, { push, note }, signal, attachments);
       for (let next = queued.shift(); next && !signal?.aborted; next = queued.shift()) await turn(next, { push, note }, signal);
     },
     async steer({ prompt }: TransportParameters) {
