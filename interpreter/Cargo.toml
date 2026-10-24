@@ -19,8 +19,6 @@ wasmi = { version = "2.0.0", default-features = false, features = ["std", "valid
 
 [profile.release]
 opt-level = "s"
-lto = "fat"
-codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
