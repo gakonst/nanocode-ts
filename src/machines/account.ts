@@ -291,6 +291,7 @@ export function account(options: AccountOptions) {
   }
 
   async function send(kind: "model" | "pay", target: string, init: Init): Promise<Response> {
+    if (kind === "pay" && !publicTarget(target)) return json({ error: "fetch reaches only public http(s) hosts" }, 403);
     if (kind === "pay" && !(await record())) return Payment.locked(servers, undefined, options.scripts)(target, { method: init.method, headers: init.headers, body: init.body, signal: init.signal });
     try {
       const current = await pay();
@@ -305,6 +306,26 @@ export function account(options: AccountOptions) {
 }
 
 export type Account = ReturnType<typeof account>;
+
+const LOCAL_HOST = /(^|\.)(localhost|local|internal)$/;
+
+export function publicTarget(target: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || LOCAL_HOST.test(host)) return false;
+  if (/^[\d.]+$/.test(host)) {
+    const [a = 0, b = 0] = host.split(".").map(Number);
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)));
+  }
+  if (host.includes(":")) return !(host === "::" || host === "::1" || host.startsWith("::ffff:") || /^f[cd]/.test(host) || /^fe[89ab]/.test(host));
+  return true;
+}
 
 export async function envelope(request: Request, servers: readonly Mcp.Server[] = Mcp.servers): Promise<{ kind: "model" | "pay"; target: string; init: Init } | undefined> {
   const { pathname } = new URL(request.url);

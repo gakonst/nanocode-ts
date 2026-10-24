@@ -46,6 +46,7 @@ export type WalletsOptions = {
   payment?: Payment.Config;
   authorize?(request: Request, sessionId: string): Promise<void> | void;
   rpc?: string;
+  scripts?: boolean;
 };
 
 export function createWallets(options: WalletsOptions) {
@@ -54,7 +55,7 @@ export function createWallets(options: WalletsOptions) {
   const holder = (sessionId: string) => {
     let found = holders.get(sessionId);
     if (!found) {
-      found = account({ store: docStore(options.sessions, sessionId), secret: options.secret, servers, scripts: false, ...(options.rpc ? { rpc: options.rpc } : {}) });
+      found = account({ store: docStore(options.sessions, sessionId), secret: options.secret, servers, scripts: options.scripts ?? false, ...(options.rpc ? { rpc: options.rpc } : {}) });
       holders.set(sessionId, found);
     }
     return found;
@@ -83,6 +84,7 @@ export function createWallets(options: WalletsOptions) {
     GET: (request: Request) => guarded(request, request => handlers.me(request, undefined)),
     POST: (request: Request) => guarded(request, request => handlers.register(request, undefined)),
     device,
+    fetch: (sessionId: string) => paying(() => holder(sessionId), servers),
     mcp: { servers: [...servers], fetch: (sessionId: string) => paying(() => holder(sessionId), servers), core: Mcp.core },
     servers,
   };

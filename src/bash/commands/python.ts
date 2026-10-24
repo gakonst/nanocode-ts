@@ -37,7 +37,14 @@ export type Pyodide = {
   setInterruptBuffer(buffer: unknown): void;
 };
 
+export type PythonRequest = { kind: "code" | "stdin" | "file" | "module" | "pip" | "version"; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; roots: string[]; dirs: string[]; files: [string, string][]; stdin: string; timeoutMs: number };
+
+export type PythonReply = { status: number; stdout: string; stderr: string; dirs: string[]; files: [string, string | null][] };
+
+export type PythonRemote = (request: PythonRequest, signal: AbortSignal) => Promise<PythonReply>;
+
 export type PythonOptions = {
+  remote?: PythonRemote;
   load?: () => Promise<Pyodide>;
   indexURL?: string;
   maxBytes?: number;
@@ -520,6 +527,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
       ctx.stdout.write(usage(ctx.name) + "\nPython on Pyodide " + PYODIDE_VERSION + " (CPython for WebAssembly), with pip install through micropip\n");
       return 0;
     }
+    if (options.remote) return executeRemote(ctx, options.remote, mode, maxBytes, maxFiles);
     if (!canCompile()) {
       ctx.stderr.write(NO_WASM + "\n");
       return 126;
@@ -539,6 +547,50 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
     return task;
   };
   return { pip: handler, pip3: handler, python: handler, python3: handler };
+}
+
+function base64(bytes: Uint8Array): string {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 32768) text += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  return btoa(text);
+}
+
+function unbase64(text: string): Uint8Array {
+  const raw = atob(text);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mode | "version", maxBytes: number, maxFiles: number): Promise<number> {
+  const stdin = ctx.stdin.read();
+  const kind = mode === "version" ? "version" : mode.kind;
+  const roots = mode === "version" ? [] : [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
+  const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
+  const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
+  if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+  const target = mode === "version" ? "" : mode.kind === "file" ? "" : mode.kind === "stdin" ? stdin : mode.target;
+  const request: PythonRequest = { kind, name: ctx.name, target, argv: mode === "version" ? [] : mode.argv, filename: mode === "version" ? "" : mode.filename, cwd: ctx.cwd, env: { ...ctx.env, PWD: ctx.cwd }, roots: unique, dirs: [...snap.dirs], files: [...snap.files].map(([path, data]) => [path, base64(data)]), stdin: mode !== "version" && mode.kind === "stdin" ? "" : stdin, timeoutMs: ctx.limits.timeoutMs };
+  let reply: PythonReply;
+  try {
+    reply = await remote(request, ctx.signal);
+  } catch (error) {
+    if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+    throw new CommandError(ctx.name + ": " + (error instanceof Error ? error.message : String(error)), 127);
+  }
+  if (reply.stdout) ctx.stdout.write(reply.stdout);
+  if (reply.stderr) ctx.stderr.write(reply.stderr);
+  if (unique.length) {
+    const after: Tree = { files: new Map(), dirs: new Set(reply.dirs) };
+    for (const [path, data] of reply.files) {
+      const bytes = data === null ? snap.files.get(path) : unbase64(data);
+      if (bytes) after.files.set(path, bytes);
+    }
+    await writeBack(ctx.fs, snap, after);
+  }
+  if (reply.status >= 0) return reply.status;
+  if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+  throw new CommandError("timed out after " + ctx.limits.timeoutMs + " ms", 124);
 }
 
 async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number): Promise<number> {
