@@ -502,6 +502,7 @@ class Parser {
         this.pos = end + 1;
       } else if (c === '"') {
         this.pos++;
+        push(parts, "", true);
         this.double(parts, '"');
         if (this.src[this.pos] !== '"') throw new SyntaxError("unexpected EOF while looking for matching `\"'");
         this.pos++;

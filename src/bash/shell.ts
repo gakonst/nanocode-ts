@@ -157,6 +157,8 @@ export class State {
   frames: Frame[] = [];
   maps = new Map<string, Map<string, string>>();
   readonly = new Set<string>();
+  cases = new Map<string, "l" | "u">();
+  stack: string[] = [];
   traps = new Map<string, string>();
   shopt = new Set<string>();
   positional: string[] = [];
@@ -172,6 +174,8 @@ export class State {
     for (const [name, value] of this.vars) state.vars.set(name, value.slice());
     for (const [name, map] of this.maps) state.maps.set(name, new Map(map));
     state.readonly = new Set(this.readonly);
+    state.cases = new Map(this.cases);
+    state.stack = [...this.stack];
     state.shopt = new Set(this.shopt);
     state.arg0 = this.arg0;
     state.optind = this.optind;
@@ -734,6 +738,8 @@ export class Runner {
       map.set(key, assign.append ? (map.get(key) ?? "") + value : value);
       return;
     }
+    const letter = this.state.cases.get(name);
+    if (letter) value = letter === "l" ? value.toLowerCase() : value.toUpperCase();
     if (this.state.integers.has(name)) {
       const number = await this.arith([{ type: "text", value: value || "0", quoted: true }], io);
       value = String(assign.append ? Number(this.get(name) ?? 0) + number : number);
@@ -819,6 +825,7 @@ export class Runner {
       }
       if (scoped) this.local(name);
       if (flags.has("i")) this.state.integers.add(name);
+      if (flags.has("l") || flags.has("u")) this.state.cases.set(name, flags.has("l") ? "l" : "u");
       if (flags.has("A") && !this.state.maps.has(name)) {
         this.state.maps.set(name, new Map());
         this.state.vars.delete(name);
@@ -1059,6 +1066,19 @@ export class Runner {
   }
 
   async substitute(body: Script, io: IO): Promise<string> {
+    const only = body.length === 1 && !body[0].rest.length && body[0].first.commands.length === 1 ? body[0].first.commands[0] : undefined;
+    if (only?.type === "simple" && !only.words.length && !only.assigns.length && only.redirects.length === 1 && only.redirects[0].op === "<") {
+      const target = await this.string(only.redirects[0].target, io);
+      try {
+        const text = decode(await this.host.fs.read(this.resolve(target)));
+        this.#substitution = 0;
+        return text.replace(/\n+$/, "");
+      } catch (error) {
+        io.stderr.write("bash: " + message(error) + "\n");
+        this.#substitution = 1;
+        return "";
+      }
+    }
     this.enter();
     const out = this.buffer();
     try {
@@ -1157,7 +1177,7 @@ export class Runner {
       if (!test) return { values: values!, list: all, joined };
       const value = await this.string(part.arg ?? [], io);
       if (kind === "=") this.set(name, value);
-      if (kind === "?") throw new FatalError(name + ": " + (value || "parameter null or not set"));
+      if (kind === "?") throw new FatalError(name + ": " + (value || "parameter null or not set"), 127);
       return { values: [value], list: false, joined: false };
     }
     if (unset) {
@@ -1571,6 +1591,32 @@ export const BUILTINS: Record<string, Builtin> = {
     this.state.optpos = next;
     this.state.optind = index;
     this.set("OPTIND", String(index));
+    return 0;
+  },
+  async pushd(args, io) {
+    const target = args.find(arg => !arg.startsWith("-") || arg === "-");
+    const previous = this.state.cwd;
+    if (target === undefined) {
+      const top = this.state.stack.shift();
+      if (top === undefined) throw new CommandError("no other directory");
+      await BUILTINS.cd.call(this, [top], { ...io, stdout: this.buffer() });
+    } else {
+      const status = await BUILTINS.cd.call(this, [target], { ...io, stdout: this.buffer() });
+      if (status) return status;
+    }
+    this.state.stack.unshift(previous);
+    io.stdout.write([this.state.cwd, ...this.state.stack].join(" ") + "\n");
+    return 0;
+  },
+  async popd(_args, io) {
+    const top = this.state.stack.shift();
+    if (top === undefined) throw new CommandError("directory stack empty");
+    await BUILTINS.cd.call(this, [top], { ...io, stdout: this.buffer() });
+    io.stdout.write([this.state.cwd, ...this.state.stack].join(" ") + "\n");
+    return 0;
+  },
+  async dirs(_args, io) {
+    io.stdout.write([this.state.cwd, ...this.state.stack].join(" ") + "\n");
     return 0;
   },
   async pwd(_args, io) {
