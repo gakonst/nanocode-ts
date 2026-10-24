@@ -98,9 +98,15 @@ export const inline = style({ fontVariationSettings: '"wght" 500' });
 
 export const strong = style({ fontVariationSettings: '"wght" 700', fontWeight: "normal" });
 
-export const image = style({ border: "1px solid", borderColor: "rule", display: "block", marginBlock: "sm", maxWidth: "min(100%, 24rem) !custom" });
+export const image = style({ border: "1px solid", borderColor: "rule", display: "block", height: "auto !custom", marginBlock: "sm", maxWidth: "min(100%, 24rem) !custom" });
 
-export const paragraph = style({ margin: "0", selectors: { '[data-live="true"] > &:last-child': { display: "inline" } } });
+export const figure = style({ color: "middle", display: "inline-block", maxWidth: "100% !custom", verticalAlign: "top" });
+
+export const images = style({ display: "flex", flexWrap: "wrap", gap: "sm", marginLeft: "cell" });
+
+export const markdown = style({ display: "contents" });
+
+export const paragraph = style({ margin: "0", selectors: { '[data-live="true"] > &:last-child, [data-live="true"] > [data-nc="markdown"] > &:last-child': { display: "inline" } } });
 
 export const heading = style({
   fontSize: "inherit !custom",
