@@ -120,7 +120,11 @@ class Response {
     this.bodyUsed = false;
   }
   async text() { this.bodyUsed = true; return this.body_ ?? fromUtf8(fromBase64(this.encoded ?? "")); }
-  async json() { return JSON.parse(await this.text()); }
+  async json() {
+    const text = await this.text();
+    try { return JSON.parse(text); }
+    catch (error) { throw new SyntaxError("response from " + (this.url || "fetch") + " (HTTP " + this.status + ") is not JSON: " + (text.trim().slice(0, 300) || "empty body")); }
+  }
   async arrayBuffer() { this.bodyUsed = true; const bytes = this.encoded !== undefined ? fromBase64(this.encoded) : utf8(this.body_ ?? ""); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); }
   async bytes() { return new Uint8Array(await this.arrayBuffer()); }
 }
@@ -138,11 +142,40 @@ const quote = (value) => {
   const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value) ?? "";
   return /^[\w@%+=:,.\/-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'";
 };
-const run = async (script, stdin) => {
-  const result = await callBash(stdin === undefined ? { script } : { script, stdin });
-  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exit_code };
+const run = async (script, stdin, timeout) => {
+  const input = { script };
+  if (stdin !== undefined) input.stdin = stdin;
+  if (timeout !== undefined) input.timeout_ms = timeout;
+  const result = await callBash(input);
+  const shown = { stdout: result.stdout, stderr: result.stderr, exitCode: result.exit_code };
+  Object.defineProperty(shown, "output", { get: () => shown.stdout + shown.stderr });
+  Object.defineProperty(shown, "toString", { value: () => shown.stdout + shown.stderr });
+  return shown;
 };
-const bash = (script, ...values) => run(typeof script === "string" ? script : script.reduce((out, part, index) => out + part + (index < values.length ? quote(values[index]) : ""), ""));
+const template = (strings, values) => strings.reduce((out, part, index) => out + part + (index < values.length ? quote(values[index]) : ""), "");
+const unescape = (strings) => strings.raw.map((part) => part.replace(/\\([\\`$])/g, "$1"));
+const commandOf = (input) => {
+  if (typeof input === "string") return input;
+  if (Array.isArray(input)) return input.map(quote).join(" ");
+  const command = input?.command ?? input?.cmd ?? input?.script ?? input?.code;
+  if (typeof command === "string") return command;
+  if (Array.isArray(command)) return command.map(quote).join(" ");
+  throw new TypeError("bash expects a command string, a tagged template (bash`ls ${dir}`) or { command, cwd?, stdin?, env?, timeout? }, got " + (JSON.stringify(input) ?? String(input)));
+};
+const shell = async (input, options = {}) => {
+  const settings = input !== null && typeof input === "object" && !Array.isArray(input) ? { ...input, ...options } : options;
+  let script = commandOf(input);
+  const env = settings.env !== null && typeof settings.env === "object" ? Object.entries(settings.env) : [];
+  if (env.length) script = env.map(([name, value]) => "export " + name + "=" + quote(String(value))).join("; ") + "; " + script;
+  const cwd = settings.cwd ?? settings.workdir ?? settings.dir;
+  if (typeof cwd === "string" && cwd) script = "cd " + quote(cwd) + " && {\n" + script + "\n}";
+  const stdin = settings.stdin ?? settings.input;
+  const timeout = settings.timeout_ms ?? settings.timeoutMs ?? (typeof settings.timeout === "number" ? (settings.timeout > 1000 ? settings.timeout : settings.timeout * 1000) : undefined);
+  return run(script, stdin === undefined ? undefined : typeof stdin === "string" ? stdin : String(stdin), typeof timeout === "number" && timeout > 0 ? Math.round(timeout) : undefined);
+};
+const bash = (script, ...values) => Array.isArray(script) && Array.isArray(script.raw)
+  ? run(template(unescape(script), values))
+  : shell(script, values[0] !== null && typeof values[0] === "object" ? values[0] : {});
 bash.readFile = async (path) => {
   const result = await run("cat -- " + quote(path));
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || "cat exited with " + result.exitCode);
@@ -215,4 +248,12 @@ const wasm = {
   invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wasmSource(source), name, args: args.map(toWire) })).result),
   instantiate: async (source) => (await instantiate(source instanceof Module ? source : new Module(source))),
 };
-return { fetch, bash, Headers, Response, TextEncoder, TextDecoder, wasm, WebAssembly };
+const aliases = {};
+for (const name of ["exec_command", "write_stdin", "apply_patch"]) {
+  if (!Object.keys(tools).includes(name)) continue;
+  aliases[name] = name === "exec_command"
+    ? (input, options) => tools.exec_command(typeof input === "string" ? { cmd: input, ...(options ?? {}) } : input?.cmd === undefined && typeof input?.command === "string" ? { ...input, cmd: input.command, command: undefined } : input)
+    : name === "apply_patch" ? (input) => tools.apply_patch(typeof input === "string" ? input : input?.input ?? input?.patch ?? input)
+    : (input) => tools[name](input);
+}
+return { fetch, bash, Headers, Response, TextEncoder, TextDecoder, wasm, WebAssembly, ...aliases };
