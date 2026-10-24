@@ -46,6 +46,12 @@ impl FunctionHandler for Bridge {
     }
 }
 
+impl HostTool {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 pub fn tools(definitions: Vec<HostTool>) -> impl Iterator<Item = FunctionTool> {
     let bridge: Arc<dyn FunctionHandler> = Arc::new(Bridge);
     definitions.into_iter().map(move |tool| {

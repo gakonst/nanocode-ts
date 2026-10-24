@@ -1,6 +1,5 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type ModelProvider, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
-import { WEB_SEARCH, requestModel, searchable, searchInput, searchRequest, searchResult, searchText, type SearchRoute } from "./search.ts";
 
 type Exports = {
   memory: WebAssembly.Memory;
@@ -77,8 +76,6 @@ export class AgentRuntime {
   private failure?: Error;
   private disposal?: Promise<void>;
   private readonly attached = new Set<string>();
-  private readonly routes = new Map<ModelProvider, SearchRoute>();
-  private search?: { provider: ModelProvider; model?: string };
   private options: Partial<RuntimeOptions> & HostOptions & { handSend?(text: string): void };
   private readonly sql: SqlHost;
   hands = false;
@@ -126,10 +123,6 @@ export class AgentRuntime {
     this.subscription = config.subscription;
     try {
       const initStarted = performance.now();
-      const { web_search, ...configured } = config;
-      const tools = configured.tools ?? [];
-      if (web_search !== false && !config.subscription && config.gateway !== "workers_ai" && !tools.some(tool => tool.name === WEB_SEARCH.name)) this.search = { provider: config.provider ?? "claude", model: config.model };
-      config = { ...configured, tools: this.search ? [...tools, WEB_SEARCH] : tools };
       const opened = await this.command("init", { config: { ...config, runtime_id: this.runtimeId, started_ms: this.started, provider: config.provider ?? "claude", remote: this.remote, hands: this.hands, code_mode: config.code_mode ?? false, event_coalesce_ms: config.event_coalesce_ms ?? 0, tools: config.tools ?? [] } }) as { rejected?: { error: string; kind: string } };
       if (opened.rejected) throw new HostFailure(opened.rejected.error, opened.rejected.kind, true);
       this.timings.record("sdk.open", performance.now() - initStarted);
@@ -469,7 +462,6 @@ export class AgentRuntime {
         let response: Response;
         try { response = await this.options.dispatch({ provider: request.provider, endpoint: request.endpoint, method: request.method ?? "POST", headers: request.headers, body: request.body, origin: request.origin ?? null }, controller.signal, timing); }
         catch (error) { this.finishModel(timing, controller.signal.aborted ? "cancelled" : "failed"); throw error; }
-        if (this.search && request.provider && searchable(request.endpoint)) this.routes.set(request.provider, { provider: request.provider, endpoint: request.endpoint, headers: request.headers, model: requestModel(request.body) ?? this.routes.get(request.provider)?.model ?? this.search.model ?? "" });
         timing.headers_ms = this.elapsed() - timing.started_ms;
         timing.status = response.status;
         if (!this.live(id)) {
@@ -530,12 +522,6 @@ export class AgentRuntime {
         return null;
       }
       case "tool_call": {
-        if (this.search && request.name === WEB_SEARCH.name) {
-          this.counters.tool_calls++;
-          const controller = new AbortController();
-          this.onCancel(id, () => controller.abort());
-          return await this.webSearch(request.input, request.context?.model, controller.signal);
-        }
         if (!this.options.tools) throw new Error("host tools are not configured");
         this.counters.tool_calls++;
         const controller = new AbortController();
@@ -836,26 +822,6 @@ export class AgentRuntime {
 
   private static encodeError(error: unknown) {
     return { detail: error instanceof Error ? error.message : String(error), ...(error instanceof RemoteRefusal ? { unsent: true } : {}) };
-  }
-
-  private async webSearch(raw: unknown, model: string | undefined, signal: AbortSignal): Promise<string> {
-    const input = searchInput(raw);
-    const routes = [...this.routes.values()];
-    const route = routes.find(route => model && route.model.replace(/^[a-z]+\//, "").replaceAll(".", "-") === model.replaceAll(".", "-")) ?? this.routes.get(this.search!.provider) ?? routes[0];
-    if (!route?.model) throw new Error("web_search is unavailable until the session has reached its model provider");
-    let found: ReturnType<typeof searchResult> | undefined;
-    let messages: unknown[] | undefined;
-    for (let round = 0; round < 4; round++) {
-      const request = searchRequest(route, input, messages);
-      const timing: RuntimeTiming = { runtime_id: this.runtimeId, dispatch_id: -1, started_ms: this.elapsed(), body_read_wait_ms: 0, body_reads: 0, bytes: 0, max_chunk_gap_ms: 0 };
-      const response = await this.options.dispatch!({ provider: route.provider, endpoint: request.endpoint, method: "POST", headers: request.headers, body: request.body, origin: null }, signal, timing);
-      const text = await response.text();
-      if (!response.ok) throw new Error("web search returned HTTP " + response.status + ": " + text.slice(0, 1024));
-      found = searchResult(route.provider, JSON.parse(text), found);
-      if (!found.paused?.length) break;
-      messages = [...(messages ?? [{ role: "user", content: input.query }]), { role: "assistant", content: found.paused }];
-    }
-    return searchText(found!);
   }
 
   private elapsed(): number { return performance.now() - this.started; }
