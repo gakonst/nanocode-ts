@@ -6,6 +6,7 @@
     ]
   },
   "include": [
-    "src/vercel/*.ts"
+    "src/vercel/*.ts",
+    "src/sandbox/vercel.ts"
   ]
 }
