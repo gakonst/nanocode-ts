@@ -107,9 +107,14 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
     header(operand);
     const n = count(byteSpec ?? lineSpec, 10);
     if (!tail && byteSpec !== undefined && !byteSpec.startsWith("-")) {
-      const text = await ctx.stdin.readChars(n);
-      const bytes = encode(text);
-      await put(ctx, bytes.length > n ? decode(bytes.subarray(0, n)) : text);
+      for (let remaining = n; remaining > 0;) {
+        const want = Math.min(remaining, 1 << 20);
+        const text = await ctx.stdin.readChars(want);
+        const bytes = encode(text);
+        await put(ctx, bytes.length > remaining ? decode(bytes.subarray(0, remaining)) : text);
+        remaining -= bytes.length;
+        if (text.length < want) break;
+      }
       ctx.stdin.close();
     } else if (!tail && byteSpec === undefined && !lineSpec?.startsWith("-")) {
       let out = "";

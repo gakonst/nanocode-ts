@@ -34,7 +34,7 @@ export type BashOptions = {
   observe?: (event: BashEvent) => void;
 };
 
-export type ExecOptions = { stdin?: string; env?: Record<string, string>; cwd?: string; signal?: AbortSignal };
+export type ExecOptions = { stdin?: string; env?: Record<string, string>; cwd?: string; signal?: AbortSignal; timeoutMs?: number };
 
 export type BashResult = { stdout: string; stderr: string; exitCode: number; truncated: boolean };
 
@@ -45,6 +45,8 @@ export type BashEvent =
   | { phase: "finished"; call: number; command: string; status: "success" | "error"; category: BashCategory; exitCode: number | null; durationMs: number; outputTruncated: boolean };
 
 export type BashToolOptions = { name?: string; description?: string; maxOutputLength?: number };
+
+const WORKSPACE_TIMEOUT_MS = 600_000;
 
 export const DEFAULT_LIMITS: Limits = {
   maxCommands: 1_000_000,
@@ -96,10 +98,11 @@ export class Bash {
     this.#emit({ phase: "started", call, command });
     const controller = new AbortController();
     let timedOut = false;
+    const timeoutMs = options.timeoutMs ?? this.limits.timeoutMs;
     const timer = setTimeout(() => {
       timedOut = true;
-      controller.abort("execution timed out after " + this.limits.timeoutMs + " ms");
-    }, this.limits.timeoutMs);
+      controller.abort("execution timed out after " + timeoutMs + " ms");
+    }, timeoutMs);
     const onAbort = () => controller.abort("execution aborted");
     if (options.signal?.aborted) onAbort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -172,9 +175,7 @@ export class Bash {
       write: (path, contents) => this.writeFile(path, contents),
       remove: async path => this.fs.remove(resolvePath(this.cwd, path)),
       run: async (request, signal) => {
-        const signals = [signal];
-        if (request.timeout_ms !== null) signals.push(AbortSignal.timeout(request.timeout_ms));
-        const result = await this.exec(request.command, { cwd: request.cwd, signal: AbortSignal.any(signals), ...(request.stdin !== undefined ? { stdin: request.stdin } : {}) });
+        const result = await this.exec(request.command, { cwd: request.cwd, signal, timeoutMs: request.timeout_ms ?? WORKSPACE_TIMEOUT_MS, ...(request.stdin !== undefined ? { stdin: request.stdin } : {}) });
         return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, truncated: result.truncated };
       },
       wasm: (request, signal) => this.#wasm(request, signal),
