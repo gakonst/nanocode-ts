@@ -33,7 +33,10 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
     setCloudState(next);
   }
 
-  useEffect(() => Wallet.onPrompt(setDevice), []);
+  useEffect(() => {
+    Wallet.preload();
+    return Wallet.onPrompt(setDevice);
+  }, []);
 
   useEffect(() => {
     void config.resume();
@@ -266,7 +269,10 @@ export function useUnlock(keyring: Keyring.Keyring, options: { servers?: readonl
   const [device, setDevice] = useState<Wallet.Prompt>();
   const [checkout, setCheckout] = useState<{ address: string; url: string }>();
 
-  useEffect(() => Wallet.onPrompt(setDevice), []);
+  useEffect(() => {
+    Wallet.preload();
+    return Wallet.onPrompt(setDevice);
+  }, []);
 
   useEffect(() => {
     const saved = Wallet.restore();

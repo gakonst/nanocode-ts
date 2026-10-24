@@ -1,13 +1,23 @@
-import { Mach, Provider, tempoWallet } from "accounts";
-import { tempoWallet as deviceWallet } from "accounts/deviceCode";
-import { KeyAuthorization } from "ox/tempo";
-import { type Address, type Client, encodeFunctionData, type Hash, type Hex, isAddressEqual, toHex, type Transport } from "viem";
-import { generatePrivateKey } from "viem/accounts";
-import { prepareTransactionRequest, sendRawTransactionSync, signTransaction } from "viem/actions";
-import { Abis, Account, Actions, createClient, http } from "viem/tempo";
-import { tempo } from "viem/tempo/chains";
+import type { KeyAuthorization } from "ox/tempo";
+import type { Address, Client, Hash, Hex, Transport } from "viem";
+import type * as Chains from "viem/tempo/chains";
+import type * as Tempo from "viem/tempo";
 
-export const mach = Mach.token;
+const modules = () => Promise.all([import("accounts"), import("accounts/deviceCode"), import("ox/tempo"), import("viem"), import("viem/accounts"), import("viem/actions"), import("viem/tempo"), import("viem/tempo/chains")]);
+
+let loaded: ReturnType<typeof modules> | undefined;
+
+function load() {
+  return loaded ??= modules();
+}
+
+export function preload() {
+  const start = () => void load().catch(() => { loaded = undefined; });
+  if (typeof requestIdleCallback === "function") requestIdleCallback(start, { timeout: 3000 });
+  else setTimeout(start, 1000);
+}
+
+export const mach = { address: "0x20c000000000000000000000f37de3740adec032", chainId: 4217, decimals: 6, symbol: "MACH" } as const;
 
 export const usdc = { address: "0x20c000000000000000000000b9537d11c60e8b50", symbol: "USDC.e" } as const;
 
@@ -54,7 +64,7 @@ export function configure(next: Partial<Options>) {
   provider = undefined;
 }
 
-let provider: ReturnType<typeof Provider.create> | undefined;
+let provider: Promise<{ request(request: never): Promise<unknown> }> | undefined;
 
 let prompt: (prompt: Prompt) => void = () => {};
 
@@ -93,16 +103,16 @@ function relay(input: RequestInfo | URL, init?: RequestInit) {
 }
 
 function wallet() {
-  provider ??= Provider.create({
+  return provider ??= load().then(([{ Provider, tempoWallet }, { tempoWallet: deviceWallet }]) => Provider.create({
     adapter: framed()
       ? deviceWallet({ fetch: relay as typeof fetch, meta: { name: options.name, websiteUrl: options.websiteUrl }, onPrompt: next => prompt(next) })
       : tempoWallet(),
     mpp: false,
-  });
-  return provider;
+  }) as never);
 }
 
-export function reader(): Client<Transport, typeof tempo> {
+export async function reader(): Promise<Client<Transport, typeof Chains.tempo>> {
+  const [, , , , , , { createClient, http }, { tempo }] = await load();
   return createClient({ chain: tempo, transport: http(rpc) });
 }
 
@@ -110,13 +120,14 @@ export function restore(): Wallet | undefined {
   const saved = localStorage.getItem(storageKey);
   if (!saved) return undefined;
   const parsed = JSON.parse(saved) as Wallet;
-  const fees = parsed.authorization.limits?.some(limit => isAddressEqual(limit.token, usdc.address));
+  const fees = parsed.authorization.limits?.some(limit => limit.token.toLowerCase() === usdc.address);
   if (parsed.expiry * 1000 > Date.now() && fees) return parsed;
   localStorage.removeItem(storageKey);
   return undefined;
 }
 
 export async function connect(): Promise<Wallet> {
+  const [, , , { toHex }, { generatePrivateKey }, , { Account }, { tempo }] = await load();
   const key = generatePrivateKey();
   const access = Account.fromSecp256k1(key);
   const expiry = Math.floor(Date.now() / 1000) + lifetime;
@@ -134,7 +145,7 @@ export async function connect(): Promise<Wallet> {
       ...[selectors.open, selectors.topUp, selectors.requestClose, selectors.withdraw].map(selector => ({ address: escrow, selector })),
     ],
   };
-  const result = (await wallet().request({ method: "wallet_connect", params: [{ capabilities: { authorizeAccessKey: request }, chainId: tempo.id }] } as never)) as {
+  const result = (await (await wallet()).request({ method: "wallet_connect", params: [{ capabilities: { authorizeAccessKey: request }, chainId: tempo.id }] } as never)) as {
     accounts: readonly { address: Address; capabilities?: { keyAuthorization?: KeyAuthorization.Rpc } }[];
   };
   const account = result.accounts[0];
@@ -146,14 +157,16 @@ export async function connect(): Promise<Wallet> {
 }
 
 export async function published(connected: Wallet) {
-  const metadata = await Actions.accessKey.getMetadata(reader(), { accessKey: connected.keyAddress, account: connected.address });
+  const [, , , { isAddressEqual }, , , { Actions }] = await load();
+  const metadata = await Actions.accessKey.getMetadata(await reader(), { accessKey: connected.keyAddress, account: connected.address });
   return isAddressEqual(metadata.address, connected.keyAddress) && !metadata.isRevoked;
 }
 
 export async function publish(connected: Wallet): Promise<Hash | undefined> {
   if (await published(connected)) return undefined;
-  const client = reader();
-  const account = signer(connected);
+  const [, , { KeyAuthorization }, { encodeFunctionData }, , { prepareTransactionRequest, sendRawTransactionSync, signTransaction }, { Abis }] = await load();
+  const client = await reader();
+  const account = await signer(connected);
   const request = await prepareTransactionRequest(client, {
     account,
     calls: [{ data: encodeFunctionData({ abi: Abis.tip20, args: [swapper, 0n], functionName: "approve" }), to: mach.address }],
@@ -167,27 +180,36 @@ export async function publish(connected: Wallet): Promise<Hash | undefined> {
 }
 
 export async function revoke(connected: Wallet) {
-  await wallet().request({ method: "wallet_revokeAccessKey", params: [{ accessKeyAddress: connected.keyAddress, address: connected.address, chainId: toHex(tempo.id) }] } as never);
+  const [, , , { toHex }, , , , { tempo }] = await load();
+  await (await wallet()).request({ method: "wallet_revokeAccessKey", params: [{ accessKeyAddress: connected.keyAddress, address: connected.address, chainId: toHex(tempo.id) }] } as never);
 }
 
 export function forget() {
   localStorage.removeItem(storageKey);
 }
 
-export function fund(connected: Wallet) {
-  return Mach.fund(wallet(), { address: connected.address, displayName: options.name });
+export async function fund(connected: Wallet) {
+  const [[{ Mach }], client] = await Promise.all([load(), wallet()]);
+  return Mach.fund(client as never, { address: connected.address, displayName: options.name });
 }
 
 export function fundingUrl(connected: Wallet) {
-  return Mach.getFundingUrl({ address: connected.address });
+  const url = new URL("https://wallet.tempo.xyz/agent");
+  url.searchParams.set("action", "fund");
+  url.searchParams.set("intent", "mach");
+  url.searchParams.set("address", connected.address);
+  url.searchParams.set("chainId", String(mach.chainId));
+  return url.toString();
 }
 
-export function signer(connected: Wallet) {
+export async function signer(connected: Wallet): Promise<ReturnType<typeof Tempo.Account.fromSecp256k1>> {
+  const [, , , , , , { Account }] = await load();
   return Account.fromSecp256k1(connected.key, { access: connected.address });
 }
 
 export async function balances(connected: Wallet) {
-  const client = reader();
+  const [, , , , , , { Actions }] = await load();
+  const client = await reader();
   const [balance, fees, remaining] = await Promise.all([
     Actions.token.getBalance(client, { account: connected.address, token: mach.address }),
     Actions.token.getBalance(client, { account: connected.address, token: usdc.address }),

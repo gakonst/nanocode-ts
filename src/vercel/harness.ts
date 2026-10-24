@@ -2,6 +2,7 @@ import { type DriveContext, EffectFailure, Fatal, type Harness, type HostTool, h
 import { liveEvent } from "../client.ts";
 import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type McpServer, type ModelProvider, RemoteExecutor, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
+import { WEB_RUN, type WebSearch, webRun, withSearch } from "../search.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { nanocodeModule } from "./module.ts";
 import { Bash, SqlFileSystem } from "../bash/index.ts";
@@ -47,7 +48,8 @@ export interface NanocodeHarnessOptions {
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
   hands?: false | NanocodeHands;
-  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch };
+  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch; deferred?: boolean };
+  webSearch?: WebSearch | "upstream" | false;
 }
 
 export type NanocodeHands = { relay?(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
@@ -73,7 +75,8 @@ export function isIdle(state: SessionState, batches: number): boolean {
 export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   const tools = new Map((options.tools ?? []).map(tool => [tool.name, tool]));
   const definitions = [...tools.values()].map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema as Record<string, unknown> }));
-  const dispatch = options.dispatch ?? gatewayDispatch();
+  const search = typeof options.webSearch === "function" ? options.webSearch : undefined;
+  const dispatch = search ? withSearch(options.dispatch ?? gatewayDispatch(), search) : options.dispatch ?? gatewayDispatch();
   const gateway = options.endpoint ? options.gateway : "vercel";
   const module = options.module ?? nanocodeModule;
   const durability = options.durability ?? "on";
@@ -99,6 +102,8 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const shell = options.workspace === false || executor ? undefined : await Bash.create({ fs: new SqlFileSystem(journal, SCOPE), cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(options.fetch ? { fetch: options.fetch } : {}) });
     const mcpServers = options.mcp?.servers ?? [];
     const mcpFetch = options.mcp?.fetch?.(ctx.runId) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
+    const searchTool = search && session.provider === "codex" && gateway && !tools.has(WEB_RUN.name) ? { name: WEB_RUN.name, description: WEB_RUN.description, inputSchema: WEB_RUN.parameters, replay: "safe" as const, execute: (input: unknown, io: { signal: AbortSignal }) => webRun(input, search, io.signal, session.model) } : undefined;
+    const sessionTools = searchTool ? new Map([...tools, [searchTool.name, searchTool as HostTool]]) : tools;
     const stop = () => void runtime.dispose().catch(() => undefined);
     ctx.signal.addEventListener("abort", stop, { once: true });
     try {
@@ -120,11 +125,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           stream_tool_input: options.streamToolInput,
           code_mode: executor ? false : options.codeMode,
           ...(executor ? { hands: true } : {}),
-          tools: definitions,
+          tools: searchTool ? [...definitions, WEB_RUN] : definitions,
+          ...(options.webSearch === false ? { web_search: false } : {}),
           ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
           ...(shell ? { workspace: shell.cwd } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
+          ...(options.mcp?.deferred === undefined ? {} : { mcp: { deferred: options.mcp.deferred } }),
           ...(options.fetch ? { fetch: options.fetch } : {}),
           ...(executor ? {
             remote: {
@@ -145,7 +152,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           tools: {
             call: (name, input, signal, { call_id }) => {
               counts.tool_calls++;
-              return callTool(ctx, journal, tools, name, input, signal, call_id);
+              return callTool(ctx, journal, sessionTools, name, input, signal, call_id);
             },
           },
         });
