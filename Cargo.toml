@@ -36,7 +36,6 @@ incremental = true
 [profile.wasm]
 inherits = "release"
 opt-level = "s"
-lto = "fat"
-codegen-units = 1
+lto = "off"
 panic = "abort"
 strip = "symbols"
