@@ -20,6 +20,7 @@ export type ToolCell = {
   started_at: number;
   duration_ms?: number;
   exit_code?: number;
+  images?: string[];
   details: string[];
   children: ToolCell[];
 };
@@ -349,6 +350,27 @@ function textOf(result: unknown): string {
   return "";
 }
 
+const IMAGE = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i;
+
+export function imagesOf(result: unknown, found: string[] = []): string[] {
+  if (Array.isArray(result)) {
+    for (const item of result) imagesOf(item, found);
+    return found;
+  }
+  if (!result || typeof result !== "object") return found;
+  const record = result as Record<string, unknown>;
+  const source = record.source && typeof record.source === "object" ? record.source as Record<string, unknown> : undefined;
+  const nested = record.image_url && typeof record.image_url === "object" ? (record.image_url as Record<string, unknown>).url : undefined;
+  const url = record.type === "input_image" || record.type === "image_url" ? (typeof record.image_url === "string" ? record.image_url : nested)
+    : record.type === "image" && typeof record.data === "string" ? `data:${typeof record.mimeType === "string" ? record.mimeType : typeof record.mime_type === "string" ? record.mime_type : "image/png"};base64,${record.data}`
+    : record.type === "image" && source?.type === "base64" && typeof source.data === "string" ? `data:${typeof source.media_type === "string" ? source.media_type : "image/png"};base64,${source.data}`
+    : record.type === "image" && source?.type === "url" ? source.url
+    : undefined;
+  if (typeof url === "string" && IMAGE.test(url.trim()) && !found.includes(url.trim())) found.push(url.trim());
+  for (const key of ["content", "content_blocks", "Content", "output"]) if (Array.isArray(record[key])) imagesOf(record[key], found);
+  return found;
+}
+
 function humanize(text: string): string {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{")) return text;
@@ -410,6 +432,8 @@ export function finishTool(cell: ToolCell, event: LiveEvent): ToolCell {
       } catch {}
     }
   }
+  const images = imagesOf(event.structured, imagesOf(event.result));
+  if (images.length) cell.images = images;
   const output = cell.output.trim();
   cell.output_language = cell.output && (output.startsWith("{") || output.startsWith("[")) && (() => { try { JSON.parse(output); return true; } catch { return false; } })() ? "json" : /^(diff --git|--- )/.test(cell.output) ? "diff" : "";
   if (status === "completed" && cell.exit_code !== undefined && cell.exit_code !== 0) cell.details.push(`exit ${cell.exit_code}`);

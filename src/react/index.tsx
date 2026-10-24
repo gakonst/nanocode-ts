@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, Fragment, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createContext, Fragment, isValidElement, type JSX, type KeyboardEvent, type ReactNode, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type Components, defaultRehypePlugins, Streamdown, type StreamdownProps, useIsCodeFenceIncomplete } from "streamdown";
 import { type Activity, activity, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type Turn, turns } from "../client.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
@@ -19,7 +20,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "header" | "heading" | "icon" | "image" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
+export type Part = "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -183,160 +184,187 @@ function Tokens(props: { code: string; language: string }) {
   return <code>{tokens ? tokens.map((line, row) => <span key={row}>{row > 0 && "\n"}{line.map((token, column) => <span key={column} style={{ color: token.color, fontStyle: token.italic ? "italic" : undefined }}>{token.content}</span>)}</span>) : props.code}</code>;
 }
 
-export function Code(props: { code: string; language: string; framed?: boolean }) {
+export function Code(props: { code: string; language: string; framed?: boolean; incomplete?: boolean }) {
   const part = usePart();
-  return <pre data-language={props.language} {...part("code", { framed: props.framed ?? false })}><Tokens code={props.code} language={props.language} /></pre>;
+  return <pre data-language={props.language} {...part("code", { framed: props.framed ?? false, incomplete: props.incomplete })}><Tokens code={props.code} language={props.language} /></pre>;
 }
 
 type PartOf = (name: Part, state?: PartState) => PartProps;
 
-const INLINE = /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\n]+)`|\*\*(?=\S)(.+?)\*\*|__(?=\S)(.+?)__|~~(?=\S)(.+?)~~|(?<![*\w])\*(?![\s*])([^*\n]+?)\*(?![*\w])|(?<![_\w])_(?![\s_])([^_\n]+?)_(?![_\w])/g;
+type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
 
-function inline(text: string, part: PartOf, key = ""): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let offset = 0;
-  for (const match of text.matchAll(INLINE)) {
-    if (match.index > offset) nodes.push(text.slice(offset, match.index));
-    const id = key + match.index;
-    const strong = match[6] ?? match[7];
-    const em = match[9] ?? match[10];
-    if (match[2] !== undefined) nodes.push(<img alt={match[1] ?? ""} key={id} loading="lazy" src={match[2]} {...part("image")} />);
-    else if (match[4] !== undefined) nodes.push(<a href={match[4]} key={id} rel="noreferrer" target="_blank" {...part("link")}>{inline(match[3] ?? "", part, id + ".")}</a>);
-    else if (match[5] !== undefined) nodes.push(<code key={id} {...part("inline")}>{match[5]}</code>);
-    else if (strong !== undefined) nodes.push(<strong key={id} {...part("strong")}>{inline(strong, part, id + ".")}</strong>);
-    else if (match[8] !== undefined) nodes.push(<del key={id} {...part("strike")}>{inline(match[8], part, id + ".")}</del>);
-    else nodes.push(<em key={id} {...part("em")}>{inline(em ?? "", part, id + ".")}</em>);
-    offset = match.index + match[0].length;
-  }
-  if (offset < text.length) nodes.push(text.slice(offset));
-  return nodes;
+type Pluggable = PluggableList[number];
+
+type Hast = { type: string; tagName?: string; value?: string; children?: Hast[] };
+
+const BLOCKS = new Set(["blockquote", "div", "li", "ol", "section", "table", "tbody", "thead", "tr", "ul"]);
+
+function trim() {
+  const visit = (node: Hast, root: boolean) => {
+    if (!node.children) return;
+    if (root || BLOCKS.has(node.tagName ?? "")) node.children = node.children.filter(child => child.type !== "text" || !/^\s*\n\s*$/.test(child.value ?? ""));
+    for (const child of node.children) visit(child, false);
+  };
+  return (tree: Hast) => visit(tree, true);
 }
 
-const LIST = /^( *)([-*+]|\d{1,9}[.)])(?: +|$)/;
+const [sanitize, schema] = defaultRehypePlugins.sanitize as [Extract<Pluggable, (...args: never[]) => unknown>, { protocols?: Record<string, string[]> }];
 
-const RULE = /^ {0,3}([-*_])( *\1){2,} *$/;
+const REHYPE: PluggableList = [defaultRehypePlugins.raw!, [sanitize, { ...schema, protocols: { ...schema.protocols, src: [...(schema.protocols?.src ?? []), "data"] } }], defaultRehypePlugins.harden!, trim];
 
-const HEADING = /^ {0,3}(#{1,6})(?: +(.*?))?(?: +#+)? *$/;
+const LINK = /^(https?:|mailto:)/i;
 
-const ROW = /^ *\|.*\| *$/;
+const IMAGE = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i;
 
-const DIVIDER = /^ *\|? *:?-+:? *(\| *:?-+:? *)*\|? *$/;
+export function imageSource(src: unknown): string | undefined {
+  if (typeof src !== "string") return undefined;
+  const value = src.trim();
+  return IMAGE.test(value) ? value : undefined;
+}
 
-const QUOTE = /^ {0,3}>/;
+function openData(src: string) {
+  const comma = src.indexOf(",");
+  const head = src.slice(5, comma);
+  const body = src.slice(comma + 1);
+  const type = head.split(";")[0] || "image/png";
+  const bytes = head.endsWith(";base64") ? Uint8Array.from(atob(body), char => char.charCodeAt(0)) : new TextEncoder().encode(decodeURIComponent(body));
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const opened = open(url, "_blank");
+  if (opened) opened.opener = null;
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+export function Image(props: { src: string; alt?: string; title?: string }) {
+  const part = usePart();
+  const skin = useSkin();
+  const [failed, setFailed] = useState(false);
+  const src = imageSource(props.src);
+  if (!src) return props.alt ? <span {...part("image", { failed: true })}>{props.alt}</span> : null;
+  const data = src.startsWith("data:");
+  const own = part("image", { failed, source: data ? "data" : "url" });
+  const style = skin.parts?.image ? own.style : { height: "auto", maxWidth: "100%", ...own.style };
+  return (
+    <a
+      href={src}
+      onClick={event => {
+        if (!data || event.button !== 0) return;
+        event.preventDefault();
+        try { openData(src); } catch {}
+      }}
+      rel="noreferrer"
+      target="_blank"
+      title={props.title ?? props.alt}
+      {...part("figure", { failed })}
+    >
+      {failed ? props.alt || src : <img {...own} alt={props.alt ?? ""} decoding="async" loading="lazy" onError={() => setFailed(true)} src={src} style={style} />}
+    </a>
+  );
+}
+
+type Props<T extends keyof JSX.IntrinsicElements> = JSX.IntrinsicElements[T] & { node?: unknown };
+
+function text(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(text).join("");
+  if (isValidElement<{ children?: ReactNode }>(children)) return text(children.props.children);
+  return children === undefined || children === null || typeof children === "boolean" ? "" : String(children);
+}
+
+function Fence(props: { code: string; language: string; render: { current: MarkdownProps["code"] } }) {
+  const incomplete = useIsCodeFenceIncomplete();
+  return <>{props.render.current?.(props.language, props.code) ?? <Code code={props.code} framed incomplete={incomplete} language={props.language} />}</>;
+}
+
+function components(part: PartOf, render: { current: MarkdownProps["code"] }): Components {
+  const heading = (level: number) => (props: Props<"h1">) => {
+    const Tag = ("h" + level) as "h1";
+    return <Tag {...part("heading", { level })}>{props.children}</Tag>;
+  };
+  const align = (props: Props<"td">) => {
+    const value = (props.style as { textAlign?: string } | undefined)?.textAlign ?? props.align;
+    return value === "left" || value === "center" || value === "right" ? value : undefined;
+  };
+  return {
+    a: (props: Props<"a">) => props.href && LINK.test(props.href) ? <a href={props.href} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a> : <span {...part("link", { incomplete: true })}>{props.children}</span>,
+    blockquote: (props: Props<"blockquote">) => <blockquote {...part("quote")}>{props.children}</blockquote>,
+    code: (props: Props<"code"> & { "data-block"?: string }) => {
+      if (!("data-block" in props)) return <code {...part("inline")}>{props.children}</code>;
+      const language = /language-(\S+)/.exec(props.className ?? "")?.[1] ?? "text";
+      return <Fence code={text(props.children).replace(/\n$/, "")} language={language} render={render} />;
+    },
+    del: (props: Props<"del">) => <del {...part("strike")}>{props.children}</del>,
+    em: (props: Props<"em">) => <em {...part("em")}>{props.children}</em>,
+    h1: heading(1),
+    h2: heading(2),
+    h3: heading(3),
+    h4: heading(4),
+    h5: heading(5),
+    h6: heading(6),
+    hr: () => <hr {...part("rule")} />,
+    img: (props: Props<"img">) => <Image alt={props.alt} src={typeof props.src === "string" ? props.src : ""} title={props.title} />,
+    inlineCode: (props: Props<"code">) => <code {...part("inline")}>{props.children}</code>,
+    li: (props: Props<"li">) => <li {...part("item")}>{props.children}</li>,
+    ol: (props: Props<"ol">) => <ol start={props.start} {...part("list", { ordered: true })}>{props.children}</ol>,
+    p: (props: Props<"p">) => <p {...part("paragraph")}>{props.children}</p>,
+    strong: (props: Props<"strong">) => <strong {...part("strong")}>{props.children}</strong>,
+    table: (props: Props<"table">) => <table {...part("table")}>{props.children}</table>,
+    td: (props: Props<"td">) => <td {...part("cell", { align: align(props), header: false })}>{props.children}</td>,
+    th: (props: Props<"th">) => <th {...part("cell", { align: align(props), header: true })}>{props.children}</th>,
+    ul: (props: Props<"ul">) => <ul {...part("list", { ordered: false })}>{props.children}</ul>,
+  };
+}
+
+export type MarkdownProps = { text: string; live?: boolean; code?(language: string, code: string): ReactNode };
+
+const OFF = { enabled: false };
+
+const ROW = /^ {0,3}\|.*\|/;
 
 function cells(row: string): string[] {
   return row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
 }
 
-function starts(line: string): boolean {
-  return HEADING.test(line) || RULE.test(line) || LIST.test(line) || QUOTE.test(line) || ROW.test(line) || /^ {0,3}(```|~~~)/.test(line);
-}
-
-type Render = { part: PartOf; code: MarkdownProps["code"] };
-
-function render(text: string, context: Render, key: string, tight = false): ReactNode[] {
-  return fences(text).flatMap((piece, index) => piece.kind === "code"
-    ? [<Fragment key={key + index}>{context.code?.(piece.language, piece.text) ?? <Code code={piece.text.replace(/\n$/, "")} framed language={piece.language} />}</Fragment>]
-    : blocks(piece.text, context, key + index + ":", tight));
-}
-
-function blocks(text: string, context: Render, key: string, tight: boolean): ReactNode[] {
-  const { part } = context;
-  const nodes: ReactNode[] = [];
+function table(text: string): string {
   const lines = text.split("\n");
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    const id = key + nodes.length;
-    const heading = HEADING.exec(line);
-    const list = LIST.exec(line);
-    if (!line.trim()) index++;
-    else if (heading) {
-      index++;
-      if (!heading[2]) continue;
-      const level = heading[1].length;
-      const Tag = ("h" + level) as "h1";
-      nodes.push(<Tag key={id} {...part("heading", { level })}>{inline(heading[2], part)}</Tag>);
-    } else if (RULE.test(line)) {
-      index++;
-      nodes.push(<hr key={id} {...part("rule")} />);
-    } else if (ROW.test(line) && (DIVIDER.test(lines[index + 1] ?? "") || (index + 1 >= lines.length - 1 && /^ *\|[ :|-]*$/.test(lines[index + 1] ?? "|")))) {
-      const head = cells(line);
-      const align = cells(lines[index + 1] ?? "").map(cell => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : undefined);
-      index += 2;
-      const rows: string[][] = [];
-      while (index < lines.length && ROW.test(lines[index])) rows.push(cells(lines[index++]));
-      nodes.push(
-        <table key={id} {...part("table")}>
-          <thead><tr>{head.map((cell, column) => <th key={column} {...part("cell", { align: align[column], header: true })}>{inline(cell, part)}</th>)}</tr></thead>
-          {rows.length > 0 && <tbody>{rows.map((row, number) => <tr key={number}>{head.map((_, column) => <td key={column} {...part("cell", { align: align[column], header: false })}>{inline(row[column] ?? "", part)}</td>)}</tr>)}</tbody>}
-        </table>,
-      );
-    } else if (QUOTE.test(line)) {
-      const quoted: string[] = [];
-      while (index < lines.length && QUOTE.test(lines[index])) quoted.push(lines[index++].replace(/^ {0,3}> ?/, ""));
-      nodes.push(<blockquote key={id} {...part("quote")}>{render(quoted.join("\n"), context, id + ":")}</blockquote>);
-    } else if (list) {
-      const indent = list[1].length;
-      const ordered = /\d/.test(list[2]);
-      const items: { lines: string[]; width: number }[] = [];
-      let loose = false;
-      while (index < lines.length) {
-        const current = lines[index];
-        const marker = LIST.exec(current);
-        const leading = current.length - current.trimStart().length;
-        if (marker && marker[1].length <= indent + 1 && /\d/.test(marker[2]) === ordered) {
-          items.push({ lines: [current.slice(marker[0].length)], width: marker[0].length });
-          index++;
-        } else if (marker && marker[1].length <= indent + 1) break;
-        else if (!current.trim()) {
-          let next = index + 1;
-          while (next < lines.length && !lines[next].trim()) next++;
-          const following = lines[next];
-          const nested = following !== undefined && following.length - following.trimStart().length > indent;
-          const after = following === undefined ? null : LIST.exec(following);
-          const sibling = after !== null && after[1].length <= indent + 1 && /\d/.test(after[2]) === ordered;
-          if (!nested && !sibling) break;
-          loose = true;
-          items[items.length - 1].lines.push("");
-          index++;
-        } else if (leading > indent) {
-          const item = items[items.length - 1];
-          item.lines.push(current.slice(Math.min(leading, item.width)));
-          index++;
-        } else if (!starts(current)) {
-          items[items.length - 1].lines.push(current.trim());
-          index++;
-        } else break;
-      }
-      const List = ordered ? "ol" : "ul";
-      const first = ordered ? Number.parseInt(list[2], 10) : 1;
-      nodes.push(
-        <List key={id} start={ordered && first !== 1 ? first : undefined} {...part("list", { ordered })}>
-          {items.map((item, number) => <li key={number} {...part("item")}>{render(item.lines.join("\n").replace(/\n+$/, ""), context, id + "." + number + ":", !loose)}</li>)}
-        </List>,
-      );
-    } else {
-      const paragraph: string[] = [line];
-      index++;
-      while (index < lines.length && lines[index].trim() && !starts(lines[index])) paragraph.push(lines[index++]);
-      const content = inline(paragraph.join("\n"), part, id + ".");
-      nodes.push(tight ? <Fragment key={id}>{content}</Fragment> : <p key={id} {...part("paragraph")}>{content}</p>);
-    }
+  const last = lines.length > 1 && lines[lines.length - 1] === "" ? lines.length - 2 : lines.length - 1;
+  const typed = lines[last] ?? "";
+  if (/^ {0,3}\|[ :|-]*$/.test(typed) && ROW.test(lines[last - 1] ?? "") && !ROW.test(lines[last - 2] ?? "")) {
+    const written = cells(typed);
+    lines[last] = "|" + cells(lines[last - 1]!).map((_, column) => /^:?-+:?$/.test(written[column] ?? "") ? written[column] : "---").join("|") + "|";
+  } else if (/^ {0,3}\|[^|]+\|/.test(typed) && !ROW.test(lines[last - 1] ?? "")) {
+    const header = typed.trimEnd().endsWith("|") ? typed : typed + "|";
+    lines[last] = header + "\n|" + cells(header).map(() => "---").join("|") + "|";
   }
-  return nodes;
+  return lines.join("\n");
 }
-
-export type MarkdownProps = { text: string; code?(language: string, code: string): ReactNode };
 
 export function Markdown(props: MarkdownProps) {
   const part = usePart();
-  return <>{render(props.text, { part, code: props.code }, "")}</>;
+  const render = useRef(props.code);
+  render.current = props.code;
+  const parts = useMemo(() => components(part, render), [part]);
+  const { className, ...attributes } = part("markdown", { live: props.live });
+  return (
+    <Streamdown
+      {...attributes}
+      className={typeof className === "string" ? className : undefined}
+      components={parts}
+      controls={false}
+      isAnimating={props.live ?? false}
+      linkSafety={OFF}
+      mode="streaming"
+      parseIncompleteMarkdown
+      rehypePlugins={REHYPE}
+    >
+      {props.live === false ? props.text : table(props.text)}
+    </Streamdown>
+  );
 }
 
 export function Reply(props: MarkdownProps) {
   return <Markdown {...props} />;
 }
+
 
 const SPINNER = ["◐", "◓", "◑", "◒"];
 
@@ -382,6 +410,7 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; 
   const unsuccessful = cell.status === "failed" || (cell.exit_code !== undefined && cell.exit_code !== 0);
   const input = cell.input.replace(/\s+$/, "");
   const output = cell.output.replace(/\s+$/, "");
+  const images = cell.images ?? [];
   const icons = useSkin().icons;
   const glyph = icons?.[cell.status] ?? (running ? SPINNER : ICONS[cell.status]);
   const icon = typeof glyph === "string" ? glyph : glyph[Math.floor(now / 120) % glyph.length];
@@ -401,6 +430,7 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; 
       {shown && input && (!nested || open || cell.body === "diff") && <Section language={cell.body === "diff" ? "diff" : cell.language} limit={open ? Infinity : INPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part="input" size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={input} />}
       {shown && cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} collapsed={collapsed} key={child.call_id} live={live} nested />)}</div>}
       {shown && output && (!nested || open || unsuccessful) && <Section language={cell.output_language} limit={open ? Infinity : OUTPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part={unsuccessful ? "error" : "output"} size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={output} />}
+      {shown && images.length > 0 && <div {...part("images", { nested })}>{images.map((src, index) => <Image alt={`${cell.name} image ${index + 1}`} key={index} src={src} />)}</div>}
     </div>
   );
 }
@@ -413,7 +443,7 @@ export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolea
     <div {...part("turn")}>
       {label && <p {...part("speaker", { steer: entry.steer, who: label })}><span aria-hidden="true">●</span> {label}</p>}
       {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
-        : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Markdown text={entry.text} /></div>
+        : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Markdown live={live} text={entry.text} /></div>
         : <p {...part("entry", { kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
     </div>
   );
