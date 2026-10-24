@@ -31,6 +31,7 @@ export interface NanocodeHarnessOptions {
   model?: string;
   thinking?: AgentConfiguration["thinking"];
   instructions?: string;
+  handInstructions?: string;
   tools?: HostTool[];
   durability?: Durability;
   batchMs?: number;
@@ -114,7 +115,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           max_tokens: session.max_tokens,
           service_tier: session.service_tier,
           subagents: options.subagents,
-          instructions: options.instructions,
+          instructions: executor && options.handInstructions ? [options.instructions, options.handInstructions].filter(Boolean).join("\n\n") : options.instructions,
           subscription: false,
           endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
           gateway,
