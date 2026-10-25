@@ -644,9 +644,14 @@ async function gitCommit(ctx: CommandContext, args: string[]): Promise<number> {
     else if (arg.startsWith("--message=")) messages.push(arg.slice(10));
     else if (/^-[a-zA-Z]*m$/.test(arg) && arg.length > 2) {
       if (arg.includes("a")) all = true;
+      if (arg.includes("q")) quiet = true;
       messages.push(args[++i] ?? "");
     } else if (/^-m./.test(arg)) messages.push(arg.slice(2));
     else if (arg === "-a" || arg === "--all") all = true;
+    else if (/^-[aq]+$/.test(arg)) {
+      if (arg.includes("a")) all = true;
+      if (arg.includes("q")) quiet = true;
+    }
     else if (arg === "--allow-empty") allowEmpty = true;
     else if (arg === "--amend") amend = true;
     else if (arg === "-q" || arg === "--quiet") quiet = true;
@@ -959,7 +964,7 @@ async function gitCheckout(ctx: CommandContext, args: string[], command: string)
   for (const path of matches) if (present.has(path)) work.set(path, (await hashWork(ctx, repo, path, false)) ?? "");
   await writeTree(ctx, repo, work, tree, inScope);
   await save(ctx, repo);
-  if (command === "checkout") ctx.stderr.write("Updated " + matches.length + " path" + (matches.length === 1 ? "" : "s") + "\n");
+  if (command === "checkout" && !flags.includes("-q") && !flags.includes("--quiet")) ctx.stderr.write("Updated " + matches.length + " path" + (matches.length === 1 ? "" : "s") + " from " + (from === undefined ? "the index" : from) + "\n");
   return 0;
 }
 
