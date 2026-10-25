@@ -129,7 +129,9 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       published: events => {
         for (const logged of events) {
           const call = modelCall(logged);
-          if (call) counts.models.push(call);
+          if (!call) continue;
+          counts.models.push(call);
+          ctx.live({ type: "usage", ...call } as never);
         }
         publish(events);
       },
