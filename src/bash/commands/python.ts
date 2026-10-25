@@ -549,14 +549,17 @@ function parse(ctx: CommandContext, args: string[]): Mode | "help" | "version" {
 export function pythonCommands(options: PythonOptions = {}): Record<string, CommandHandler> {
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
   const maxFiles = options.maxFiles ?? 20_000;
-  const mirror: Mirror = { id: crypto.randomUUID(), known: new Map() };
+  const mirror: Mirror = { id: "", known: new Map() };
   const handler: CommandHandler = async ctx => {
     const mode = parse(ctx, ctx.args.slice());
     if (mode === "help") {
       ctx.stdout.write(usage(ctx.name) + "\nPython on Pyodide " + PYODIDE_VERSION + " (CPython for WebAssembly), with pip install through micropip\n");
       return 0;
     }
-    if (options.remote) return executeRemote(ctx, options.remote, mode, maxBytes, maxFiles, mirror, options.batchBytes ?? 6 * 1024 * 1024);
+    if (options.remote) {
+      mirror.id ||= crypto.randomUUID();
+      return executeRemote(ctx, options.remote, mode, maxBytes, maxFiles, mirror, options.batchBytes ?? 6 * 1024 * 1024);
+    }
     if (!canCompile()) {
       ctx.stderr.write(NO_WASM + "\n");
       return 126;
