@@ -22,8 +22,8 @@ use std::{
 
 use nanocode::{
     AgentId, ClaudeClient, ClaudeHarness, ClaudeModel, CodeModeExecutors, CodeModeHost,
-    CodexHarness, HarnessFamily, Model, ModelSelection, ModelTransport, Nanocode, NanocodeError,
-    OpenAi, PromptRejection, ReasoningMode, ServiceTier, SubagentControl, Thinking, Tools,
+    CodexHarness, HarnessFamily, Model, ModelInfo, ModelSelection, ModelTransport, Nanocode,
+    NanocodeError, OpenAi, PromptRejection, ServiceTier, SubagentControl, Thinking, Tools,
     agent::{ExecutionEnvironment, input::UserInput},
     backend::Prompt,
     claude::ClaudeEnvironment,
@@ -1260,15 +1260,15 @@ fn models() -> Value {
                  gateways: Vec<&str>,
                  context_window_tokens: u64,
                  auto_compact_limit: Option<u64>| {
-        let capabilities = model.capabilities(ModelTransport::Native);
+        let model = ModelInfo::of(&model);
         json!({
             "id": id,
-            "name": capabilities.display_name(),
-            "efforts": capabilities.thinking().map(Thinking::as_str).collect::<Vec<_>>(),
-            "effort": capabilities.default_thinking().as_str(),
-            "priority": capabilities.supports_service_tier(ServiceTier::Priority),
-            "service_tiers": capabilities.service_tiers().map(ServiceTier::as_str).collect::<Vec<_>>(),
-            "reasoning_modes": capabilities.reasoning_modes().map(ReasoningMode::as_str).collect::<Vec<_>>(),
+            "name": model.name,
+            "efforts": model.efforts,
+            "effort": model.effort,
+            "priority": model.fast,
+            "service_tiers": model.service_tiers,
+            "reasoning_modes": model.reasoning_modes,
             "gateways": gateways,
             "context_window_tokens": context_window_tokens,
             "auto_compact_token_limit": auto_compact_limit,
