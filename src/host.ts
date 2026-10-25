@@ -1,15 +1,6 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type Engine, type EngineCall, type EngineHost, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { deferMcp, type McpPolicy } from "./mcp.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
-
-type Exports = {
-  memory: WebAssembly.Memory;
-  allocate(length: number): number;
-  command(id: number, pointer: number, length: number): void;
-  complete(id: number, pointer: number, length: number): void;
-  complete_bytes(id: number, pointer: number, length: number): void;
-  poll(): void;
-};
 
 type Pending = { resolve(value: unknown): void; reject(reason: unknown): void };
 
@@ -48,6 +39,86 @@ export type RuntimeMetrics = {
   bridge_reply_bytes: number;
 };
 
+export async function localEngine(module: WebAssembly.Module, host: EngineHost): Promise<Engine> {
+  type Exports = { memory: WebAssembly.Memory; allocate(length: number): number; poll(): void } & Record<EngineCall, (id: number, pointer: number, length: number) => void>;
+  const step = 16_384;
+  const args = new Array<number>(step / 8).fill(0);
+  let levels = 0;
+  const descend = (): number => {
+    if (--levels <= 0) return 1;
+    try {
+      return 1 + Reflect.apply(descend, undefined, args);
+    } catch {
+      return 1;
+    }
+  };
+  const room = (want: number): number => {
+    levels = Math.floor(want / step);
+    try {
+      return Reflect.apply(descend, undefined, args) * step;
+    } catch {
+      return 0;
+    }
+  };
+  let exports: Exports | undefined;
+  let entry = 0;
+  const bytes = (pointer: number, length: number) => new Uint8Array(exports!.memory.buffer, pointer, length);
+  const view = () => new DataView(exports!.memory.buffer);
+  const imports = {
+    dispatch: (id: number, pointer: number, length: number) => host.dispatch(id, bytes(pointer, length)),
+    dispatch_body: (id: number, pointer: number, length: number, body: number, bodyLength: number) => host.dispatch(id, bytes(pointer, length), bytes(body, bodyLength).slice()),
+    cancel: (id: number) => host.cancel(id),
+    clock: (monotonic: number) => monotonic ? performance.now() : Date.now(),
+    stack_room: (want: number, at: number) => {
+      entry = at;
+      return room(want);
+    },
+    calendar_date: (pointer: number, length: number) => {
+      try {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: new TextDecoder().decode(bytes(pointer, length)), year: "numeric", month: "numeric", day: "numeric" }).formatToParts(Date.now()).map(part => [part.type, Number(part.value)]));
+        return parts.year * 10_000 + parts.month * 100 + parts.day;
+      } catch {
+        return 0;
+      }
+    },
+    random: (pointer: number, length: number) => { crypto.getRandomValues(bytes(pointer, length)); },
+    reply: (id: number, pointer: number, length: number) => host.reply(id, bytes(pointer, length)),
+    panicked: (pointer: number, length: number) => host.panicked(bytes(pointer, length)),
+  };
+  const libc = {
+    clock_time_get: (clock: number, _precision: bigint, out: number) => {
+      view().setBigUint64(out, BigInt(Math.round((clock === 0 ? Date.now() : performance.now()) * 1e6)), true);
+      return 0;
+    },
+    fd_write: (_fd: number, iovs: number, count: number, written: number) => {
+      let total = 0;
+      for (let index = 0; index < count; index++) total += view().getUint32(iovs + index * 8 + 4, true);
+      view().setUint32(written, total, true);
+      return 0;
+    },
+    fd_close: () => 0,
+    fd_fdstat_get: () => 8,
+    fd_seek: () => 8,
+  };
+  const instance = await WebAssembly.instantiate(module, { host: imports, wasi_snapshot_preview1: libc });
+  const wasm = instance.exports as unknown as Exports;
+  exports = wasm;
+  return {
+    get memoryBytes() {
+      return wasm.memory.buffer.byteLength;
+    },
+    enter(call, id, length, fill) {
+      if (entry) new Uint32Array(wasm.memory.buffer, entry, 1)[0]++;
+      if (call && fill) {
+        const pointer = wasm.allocate(length);
+        fill(new Uint8Array(wasm.memory.buffer, pointer, length));
+        wasm[call](id, pointer, length);
+      }
+      wasm.poll();
+    },
+  };
+}
+
 export class AgentRuntime {
   private readonly runtimeId = sessionUuid();
   private readonly startedAt = Date.now();
@@ -55,7 +126,7 @@ export class AgentRuntime {
   private readonly timings = new Timings();
   private readonly checkpointTimings = new Timings();
   private readonly models: RuntimeTiming[] = [];
-  private wasm!: Exports;
+  private engine!: Engine;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
   private readonly inflight = new Map<number, () => void>();
@@ -73,7 +144,6 @@ export class AgentRuntime {
   private nextSocket = 0;
   private nextCommand = 0;
   private depth = 0;
-  private stackEntry = 0;
   private stopped = false;
   private failure?: Error;
   private disposal?: Promise<void>;
@@ -93,9 +163,8 @@ export class AgentRuntime {
   static async instantiate(module: WebAssembly.Module, sql: SqlHost, options: HostOptions): Promise<AgentRuntime> {
     const runtime = new AgentRuntime(sql, options);
     const instantiateStarted = performance.now();
-    const instance = await WebAssembly.instantiate(module, { host: runtime.imports(), wasi_snapshot_preview1: runtime.libc() });
+    runtime.engine = await (options.engine ?? localEngine)(module, runtime.engineHost());
     runtime.timings.record("wasm.instantiate", performance.now() - instantiateStarted);
-    runtime.wasm = instance.exports as unknown as Exports;
     if (sql.value_limit !== undefined || options.log_logical_limit !== undefined || options.blobs) {
       await runtime.command("configure", { value_limit: sql.value_limit, logical_limit: options.log_logical_limit, blob_threshold: options.blobs ? options.blobs.threshold ?? sql.value_limit ?? Number.MAX_SAFE_INTEGER : undefined });
     }
@@ -136,7 +205,7 @@ export class AgentRuntime {
   }
 
   get metrics(): Readonly<RuntimeMetrics> {
-    return { ...this.counters, wasm_memory_bytes: this.wasm.memory.buffer.byteLength, timing: { runtime_id: this.runtimeId, started_at: this.startedAt, elapsed_ms: this.elapsed(), spans: this.timings.snapshot(), checkpoints: this.checkpointTimings.snapshot(), models: this.models.map(value => ({ ...value })) } };
+    return { ...this.counters, wasm_memory_bytes: this.engine.memoryBytes, timing: { runtime_id: this.runtimeId, started_at: this.startedAt, elapsed_ms: this.elapsed(), spans: this.timings.snapshot(), checkpoints: this.checkpointTimings.snapshot(), models: this.models.map(value => ({ ...value })) } };
   }
 
   get closed(): boolean {
@@ -148,7 +217,7 @@ export class AgentRuntime {
   }
 
   get memoryBytes(): number {
-    return this.wasm.memory.buffer.byteLength;
+    return this.engine.memoryBytes;
   }
 
   get connected(): boolean {
@@ -352,11 +421,11 @@ export class AgentRuntime {
     if (failure !== undefined) throw failure;
   }
 
-  private accept(id: number, pointer: number, length: number, body?: Uint8Array) {
+  private accept(id: number, bytes: Uint8Array, body?: Uint8Array) {
     const received = performance.now();
-    const request = JSON.parse(this.read(pointer, length));
+    const request = JSON.parse(this.decoder.decode(bytes));
     if (body) request.body = body;
-    this.counters.bridge_request_bytes += length + (body?.byteLength ?? 0);
+    this.counters.bridge_request_bytes += bytes.byteLength + (body?.byteLength ?? 0);
     this.timings.record("bridge.decode", performance.now() - received);
     this.counters.host_calls++;
     this.inflight.set(id, () => {});
@@ -371,52 +440,18 @@ export class AgentRuntime {
       .then(reply => this.complete(id, reply));
   }
 
-  private libc() {
-    const view = () => new DataView(this.wasm.memory.buffer);
+  private engineHost(): EngineHost {
     return {
-      clock_time_get: (clock: number, _precision: bigint, out: number) => {
-        view().setBigUint64(out, BigInt(Math.round((clock === 0 ? Date.now() : performance.now()) * 1e6)), true);
-        return 0;
-      },
-      fd_write: (_fd: number, iovs: number, count: number, written: number) => {
-        let bytes = 0;
-        for (let index = 0; index < count; index++) bytes += view().getUint32(iovs + index * 8 + 4, true);
-        view().setUint32(written, bytes, true);
-        return 0;
-      },
-      fd_close: () => 0,
-      fd_fdstat_get: () => 8,
-      fd_seek: () => 8,
-    };
-  }
-
-  private imports() {
-    return {
-      dispatch: (id: number, pointer: number, length: number) => this.accept(id, pointer, length),
-      dispatch_body: (id: number, pointer: number, length: number, body: number, bodyLength: number) => this.accept(id, pointer, length, new Uint8Array(this.wasm.memory.buffer, body, bodyLength).slice()),
-      cancel: (id: number) => {
+      dispatch: (id, request, body) => this.accept(id, request, body),
+      cancel: id => {
         const cancel = this.inflight.get(id);
         if (!cancel) return;
         this.inflight.delete(id);
         this.counters.host_cancellations++;
         cancel();
       },
-      clock: (monotonic: number) => monotonic ? performance.now() : Date.now(),
-      stack_room: (want: number, entry: number) => {
-        this.stackEntry = entry;
-        return stackRoom(want);
-      },
-      calendar_date: (pointer: number, length: number) => {
-        try {
-          const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: this.read(pointer, length), year: "numeric", month: "numeric", day: "numeric" }).formatToParts(Date.now()).map(part => [part.type, Number(part.value)]));
-          return parts.year * 10_000 + parts.month * 100 + parts.day;
-        } catch {
-          return 0;
-        }
-      },
-      random: (pointer: number, length: number) => { crypto.getRandomValues(new Uint8Array(this.wasm.memory.buffer, pointer, length)); },
-      reply: (id: number, pointer: number, length: number) => {
-        const reply = JSON.parse(this.read(pointer, length));
+      reply: (id, bytes) => {
+        const reply = JSON.parse(this.decoder.decode(bytes));
         const pending = this.commands.get(id);
         if (!pending) return;
         this.commands.delete(id);
@@ -424,7 +459,7 @@ export class AgentRuntime {
         else pending.resolve(reply.ok);
         this.notify();
       },
-      panicked: (pointer: number, length: number) => { this.fail(new Error(this.read(pointer, length))); },
+      panicked: bytes => { this.fail(new Error(this.decoder.decode(bytes))); },
     };
   }
 
@@ -762,11 +797,9 @@ export class AgentRuntime {
       return;
     }
     this.inflight.delete(id);
-    this.enter(() => {
-      if ("ok" in reply && isFramed(reply.ok)) this.wasm.complete_bytes(id, ...this.writeFramed(reply.ok));
-      else if ("ok" in reply && reply.ok instanceof Uint8Array) this.wasm.complete_bytes(id, ...this.writeBytes(reply.ok));
-      else this.wasm.complete(id, ...this.write(reply));
-    });
+    if ("ok" in reply && isFramed(reply.ok)) this.enter("complete_bytes", id, ...this.writeFramed(reply.ok));
+    else if ("ok" in reply && reply.ok instanceof Uint8Array) this.enter("complete_bytes", id, ...this.writeBytes(reply.ok));
+    else this.enter("complete", id, ...this.write(reply));
   }
 
   private command(op: string, fields: object): Promise<unknown> {
@@ -774,22 +807,20 @@ export class AgentRuntime {
     const id = ++this.nextCommand;
     return new Promise((resolve, reject) => {
       this.commands.set(id, { resolve, reject });
-      this.enter(() => this.wasm.command(id, ...this.write({ [op]: fields })));
+      this.enter("command", id, ...this.write({ [op]: fields }));
     });
   }
 
-  private enter(call: () => void) {
+  private enter(call: EngineCall, id: number, length: number, fill: (target: Uint8Array) => void) {
     if (this.depth > 0) {
-      queueMicrotask(() => this.enter(call));
+      queueMicrotask(() => this.enter(call, id, length, fill));
       return;
     }
     if (this.stopped) return;
     this.depth++;
-    if (this.stackEntry) new Uint32Array(this.wasm.memory.buffer, this.stackEntry, 1)[0]++;
     const started = performance.now();
     try {
-      call();
-      this.wasm.poll();
+      this.engine.enter(call, id, length, fill);
     } catch (error) {
       this.fail(error);
     } finally {
@@ -806,6 +837,7 @@ export class AgentRuntime {
   private terminate(reason: unknown) {
     if (this.stopped) return;
     this.stopped = true;
+    this.engine?.close?.();
     const cancellations = [...this.inflight.values()];
     this.counters.host_cancellations += cancellations.length;
     this.inflight.clear();
@@ -820,10 +852,6 @@ export class AgentRuntime {
     this.notify();
   }
 
-  private read(pointer: number, length: number) {
-    return this.decoder.decode(new Uint8Array(this.wasm.memory.buffer, pointer, length));
-  }
-
   private write(value: unknown) {
     const started = performance.now();
     try { return this.writeBytes(this.encoder.encode(JSON.stringify(value))); }
@@ -831,26 +859,25 @@ export class AgentRuntime {
   }
 
   private writeBytes(bytes: Uint8Array) {
-    const started = performance.now();
     this.counters.bridge_reply_bytes += bytes.byteLength;
-    const pointer = this.wasm.allocate(bytes.length);
-    new Uint8Array(this.wasm.memory.buffer, pointer, bytes.length).set(bytes);
-    this.timings.record("bridge.copy", performance.now() - started);
-    return [pointer, bytes.length] as const;
+    return [bytes.length, (target: Uint8Array) => {
+      const started = performance.now();
+      target.set(bytes);
+      this.timings.record("bridge.copy", performance.now() - started);
+    }] as const;
   }
 
   private writeFramed(reply: Framed) {
-    const started = performance.now();
     const head = this.encoder.encode(JSON.stringify(reply.head));
     const length = reply.body.byteLength + head.byteLength + 4;
     this.counters.bridge_reply_bytes += length;
-    const pointer = this.wasm.allocate(length);
-    const target = new Uint8Array(this.wasm.memory.buffer, pointer, length);
-    target.set(reply.body);
-    target.set(head, reply.body.byteLength);
-    new DataView(this.wasm.memory.buffer, pointer + length - 4, 4).setUint32(0, head.byteLength, true);
-    this.timings.record("bridge.copy", performance.now() - started);
-    return [pointer, length] as const;
+    return [length, (target: Uint8Array) => {
+      const started = performance.now();
+      target.set(reply.body);
+      target.set(head, reply.body.byteLength);
+      new DataView(target.buffer, target.byteOffset + length - 4, 4).setUint32(0, head.byteLength, true);
+      this.timings.record("bridge.copy", performance.now() - started);
+    }] as const;
   }
 
   private static encodeError(error: unknown) {
@@ -887,28 +914,6 @@ function shellQuote(text: string): string {
 }
 
 const FILE_CHUNK = 600_000;
-
-const STACK_STEP = 16_384;
-const stackArgs = new Array<number>(STACK_STEP / 8).fill(0);
-let stackLevels = 0;
-
-function stackDescend(): number {
-  if (--stackLevels <= 0) return 1;
-  try {
-    return 1 + Reflect.apply(stackDescend, undefined, stackArgs);
-  } catch {
-    return 1;
-  }
-}
-
-function stackRoom(want: number): number {
-  stackLevels = Math.floor(want / STACK_STEP);
-  try {
-    return Reflect.apply(stackDescend, undefined, stackArgs) * STACK_STEP;
-  } catch {
-    return 0;
-  }
-}
 
 async function shellBytes(workspace: WorkspaceHost, command: string): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   const result = await workspace.run({ command, cwd: "/", timeout_ms: null }, new AbortController().signal);

@@ -217,7 +217,25 @@ export type BlobHost = {
   get(key: string): Uint8Array | null | Promise<Uint8Array | null>;
 };
 
+export type EngineHost = {
+  dispatch(id: number, request: Uint8Array, body?: Uint8Array): void;
+  cancel(id: number): void;
+  reply(id: number, bytes: Uint8Array): void;
+  panicked(bytes: Uint8Array): void;
+};
+
+export type EngineCall = "command" | "complete" | "complete_bytes";
+
+export type Engine = {
+  readonly memoryBytes: number;
+  enter(call: EngineCall | null, id: number, length: number, fill: ((target: Uint8Array) => void) | null): void;
+  close?(): void;
+};
+
+export type EngineFactory = (module: WebAssembly.Module, host: EngineHost) => Promise<Engine>;
+
 export type HostOptions = {
+  engine?: EngineFactory;
   log_logical_limit?: number;
   blobs?: BlobHost;
   published(events: LoggedEvent[], bytes: number[]): void;

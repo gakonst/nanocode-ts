@@ -3,6 +3,7 @@ import { liveEvent } from "../client.ts";
 import { AgentRuntime, type AgentConfiguration, HostFailure, type LoggedEvent, type McpServer, type ModelProvider, RemoteExecutor, type ServiceTier, sessionUuid, type Thinking } from "../index.ts";
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
+import { threadEngine } from "../thread.ts";
 import { nanocodeModule } from "./module.ts";
 import { Bash, type FileSystem, SqlFileSystem } from "../bash/index.ts";
 import { dataUrl, MAX_PROMPT_IMAGES, PROMPT_IMAGE_TYPES, sniff, writeFile } from "../files.ts";
@@ -116,11 +117,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   const gateway = options.endpoint ? options.gateway : "vercel";
   const module = options.module ?? nanocodeModule;
   const durability = options.durability ?? "on";
+  const engine = threadEngine();
 
   async function run(ctx: DriveContext, journal: SqlJournal, session: NanocodeSession, counts: { model_requests: number; tool_calls: number; models: ModelCall[]; open_ms: number }): Promise<void> {
     const opening = performance.now();
     const publish = publisher(ctx);
     const runtime = await AgentRuntime.instantiate(await module(), journal, {
+      ...(engine ? { engine } : {}),
       published: events => {
         for (const logged of events) {
           const call = modelCall(logged);
