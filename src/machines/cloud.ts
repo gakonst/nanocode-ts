@@ -122,7 +122,7 @@ function pause(signal?: AbortSignal) {
 
 async function reconnect(cloud: Cloud, session: string, request: string, handlers: Handlers, signal?: AbortSignal) {
   while (!signal?.aborted) {
-    const response = await fetch(`sessions/${encodeURIComponent(session)}/events?after=${cloud.cursor}`, { headers: headers(cloud, { accept: "text/event-stream" }), signal }).catch(() => undefined);
+    const response = await fetch(`sessions/${encodeURIComponent(session)}/events?live=1&after=${cloud.cursor}`, { headers: headers(cloud, { accept: "text/event-stream" }), signal }).catch(() => undefined);
     if (response?.status === 401 || response?.status === 403) throw await failure(response);
     if (response && await follow(cloud, response, request, handlers, signal)) return;
     await pause(signal);
@@ -135,7 +135,7 @@ export async function ask(cloud: Cloud, prompt: string, handlers: Handlers, mode
   cloud.open = request;
   save(cloud);
   try {
-    const response = await fetch(`sessions/${encodeURIComponent(session)}/turns?after=${cloud.cursor}`, {
+    const response = await fetch(`sessions/${encodeURIComponent(session)}/turns?live=1&after=${cloud.cursor}`, {
       body: JSON.stringify({ model: model.model, prompt, provider: model.provider, request_id: request, thinking: model.thinking }),
       headers: headers(cloud, { accept: "text/event-stream", "content-type": "application/json" }),
       method: "POST",
