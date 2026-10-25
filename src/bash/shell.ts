@@ -935,6 +935,14 @@ export class Runner {
   }
 
   async pipeline(pipeline: Pipeline, io: IO): Promise<number> {
+    if (pipeline.timed) {
+      const start = Date.now();
+      try {
+        return await this.pipeline({ negate: pipeline.negate, commands: pipeline.commands }, io);
+      } finally {
+        io.stderr.write("\nreal\t" + ((Date.now() - start) / 1000).toFixed(3) + "s\nuser\t0.000s\nsys\t0.000s\n");
+      }
+    }
     let status: number;
     if (pipeline.commands.length === 1) {
       status = await this.command(pipeline.commands[0], io);

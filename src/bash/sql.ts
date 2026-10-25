@@ -21,6 +21,10 @@ const STAGING = "//staging";
 
 const BREATH_OPERATIONS = 64;
 
+const LISTED_MS = 1000;
+
+const READS = new Set(["stat", "get", "links", "resolve", "list", "children", "tail"]);
+
 const BREATH_BYTES = 4 * 1024 * 1024;
 
 let operations = 0;
@@ -80,6 +84,9 @@ export class SqlFileSystem implements FileSystem {
   readonly chunkBytes: number;
   #ready: Promise<void> | undefined;
   #links: Promise<boolean> | undefined;
+  #listed = new Map<string, Meta>();
+  #listedAt = 0;
+  #generation = 0;
 
   constructor(sql: SqlHost, scope = "", maxFileBytes = MAX_FILE_BYTES) {
     this.sql = sql;
@@ -91,6 +98,10 @@ export class SqlFileSystem implements FileSystem {
   async #run(operation: string, statements: Statement[]): Promise<SqlValue[][][]> {
     this.#ready ??= Promise.resolve(this.sql.transaction("store", "files.schema", [[SCHEMA], [INDEX], [CHUNK_SCHEMA]])).then(() => undefined);
     await this.#ready;
+    if (!READS.has(operation)) {
+      this.#generation++;
+      this.#listed.clear();
+    }
     const results = await this.sql.transaction("store", `files.${operation}`, statements);
     await breathe(statements, results);
     return results;
@@ -98,6 +109,11 @@ export class SqlFileSystem implements FileSystem {
 
   async #meta(path: string, inline = false): Promise<Meta | undefined> {
     if (path === "/") return { kind: "directory", size: 4096, chunked: false, mtime: 0, mode: 0o755 };
+    if (!inline && this.#listed.size) {
+      if (Date.now() - this.#listedAt > LISTED_MS) this.#listed.clear();
+      const listed = this.#listed.get(path);
+      if (listed) return listed;
+    }
     const [rows] = await this.#run("stat", [[`SELECT kind, CASE WHEN data IS NULL AND kind = 'file' THEN (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${CHUNKS} c WHERE c.scope = f.scope AND c.path = f.path) ELSE length(data) END, data IS NULL, mtime, mode, CASE WHEN ? THEN data END FROM ${TABLE} f WHERE scope = ? AND path = ?`, inline ? 1 : 0, this.scope, path]]);
     const row = rows?.[0];
     if (!row) return undefined;
@@ -231,7 +247,14 @@ export class SqlFileSystem implements FileSystem {
   async list(path: string): Promise<string[]> {
     const target = await this.#real(path);
     await this.#directory(target);
-    const [rows] = await this.#run("list", [[`SELECT path FROM ${TABLE} WHERE scope = ? AND parent = ? ORDER BY path`, this.scope, target]]);
+    const generation = this.#generation;
+    const [rows] = await this.#run("list", [[`SELECT path, kind, CASE WHEN data IS NULL AND kind = 'file' THEN (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${CHUNKS} c WHERE c.scope = f.scope AND c.path = f.path) ELSE length(data) END, data IS NULL, mtime, mode FROM ${TABLE} f WHERE scope = ? AND parent = ?`, this.scope, target]]);
+    if (Date.now() - this.#listedAt > LISTED_MS) this.#listed.clear();
+    this.#listedAt = Date.now();
+    if (generation === this.#generation) for (const row of rows ?? []) {
+      const kind = kindOf(row[1] ?? null);
+      this.#listed.set(String(row[0]), { kind, size: Number(row[2] ?? 0), chunked: kind === "file" && Number(row[3]) === 1, mtime: Number(row[4]), mode: Number(row[5]) });
+    }
     return (rows ?? []).map(row => baseOf(String(row[0]))).filter(Boolean).sort();
   }
 
@@ -285,10 +308,12 @@ export class SqlFileSystem implements FileSystem {
 
   async lstat(path: string): Promise<LinkStat | null> {
     const link = await this.#resolved(path, false);
-    const row = link === null ? undefined : await this.#row(link);
+    const meta = link === null ? undefined : await this.#meta(link);
+    if (!meta) return null;
+    if (meta.kind !== "link") return { kind: meta.kind, size: meta.kind === "file" ? meta.size : 4096, mtime: meta.mtime, mode: meta.mode };
+    const row = await this.#row(link!);
     if (!row) return null;
-    if (row.kind === "link") return { kind: "symlink", size: row.data.length, mtime: row.mtime, mode: 0o777, target: decode(row.data) };
-    return { kind: row.kind, size: row.kind === "file" ? row.size : 4096, mtime: row.mtime, mode: row.mode };
+    return { kind: "symlink", size: row.data.length, mtime: row.mtime, mode: 0o777, target: decode(row.data) };
   }
 
   async rename(from: string, to: string): Promise<void> {

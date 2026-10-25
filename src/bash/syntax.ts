@@ -29,7 +29,7 @@ export type Command =
   | { type: "test"; tokens: TestToken[]; redirects: Redirect[] }
   | { type: "coproc"; name: string; body: Command; redirects: Redirect[] };
 
-export type Pipeline = { negate: boolean; commands: Command[] };
+export type Pipeline = { negate: boolean; timed?: boolean; commands: Command[] };
 
 export type AndOr = { first: Pipeline; rest: { op: "&&" | "||"; pipeline: Pipeline }[]; background?: boolean; source?: string };
 
@@ -206,9 +206,17 @@ class Parser {
   pipeline(): Pipeline {
     this.blanks();
     let negate = false;
-    while (this.reserved() === "!") {
-      this.pos++;
-      negate = !negate;
+    let timed = false;
+    for (;;) {
+      if (this.reserved() === "!") {
+        this.pos++;
+        negate = !negate;
+      } else if (this.reserved() === "time" && /^time(?:\s+-p)?[ \t]+[^\s;&|)#]/.test(this.src.slice(this.pos))) {
+        this.pos += 4;
+        this.blanks();
+        if (/^-p(?=\s)/.test(this.src.slice(this.pos))) this.pos += 2;
+        timed = true;
+      } else break;
       this.blanks();
     }
     const commands = [this.command()];
@@ -223,7 +231,7 @@ class Parser {
       this.separators();
       commands.push(this.command());
     }
-    return { negate, commands };
+    return timed ? { negate, timed, commands } : { negate, commands };
   }
 
   command(): Command {
