@@ -16,6 +16,7 @@ unsafe extern "C" {
 struct Data {
     id: u32,
     limits: StoreLimits,
+    memory: Option<Memory>,
 }
 
 struct Slot {
@@ -215,7 +216,16 @@ pub extern "C" fn instantiate(id: u32, memory_bytes: u32, fuel_lo: u32, fuel_hi:
         .memory_size(memory_bytes as usize)
         .instances(1)
         .build();
-    let mut store = ENGINE.with(|engine| Store::new(engine, Data { id: index, limits }));
+    let mut store = ENGINE.with(|engine| {
+        Store::new(
+            engine,
+            Data {
+                id: index,
+                limits,
+                memory: None,
+            },
+        )
+    });
     store.limiter(|data| &mut data.limits);
     if store
         .set_fuel(((fuel_hi as u64) << 32) | fuel_lo as u64)
@@ -236,18 +246,31 @@ pub extern "C" fn instantiate(id: u32, memory_bytes: u32, fuel_lo: u32, fuel_hi:
         let results: Vec<ValType> = ty.results().to_vec();
         let func = Func::new(&mut store, ty.clone(), move |caller, params, outputs| {
             let width = params.len().max(results.len()).max(1);
-            let mut slots = vec![0u64; width];
+            let mut inline = [0u64; 16];
+            let mut heap = Vec::new();
+            let slots: &mut [u64] = if width <= inline.len() {
+                &mut inline[..width]
+            } else {
+                heap.resize(width, 0u64);
+                &mut heap
+            };
             for (slot, value) in slots.iter_mut().zip(params) {
                 *slot = to_slot(value)?;
             }
             let instance = caller.data().id;
-            let memory = match caller.get_export("memory") {
-                Some(Extern::Memory(memory)) => Some((
+            let memory = match caller.data().memory {
+                Some(memory) => Some(memory),
+                None => match caller.get_export("memory") {
+                    Some(Extern::Memory(memory)) => Some(memory),
+                    _ => None,
+                },
+            }
+            .map(|memory| {
+                (
                     memory.data_ptr(&caller) as u32,
                     memory.data_size(&caller) as u32,
-                )),
-                _ => None,
-            };
+                )
+            });
             let previous =
                 ACTIVE.replace(memory.map(|(pointer, length)| (instance, pointer, length)));
             let status = unsafe {
@@ -263,7 +286,7 @@ pub extern "C" fn instantiate(id: u32, memory_bytes: u32, fuel_lo: u32, fuel_hi:
             if status != 0 {
                 return Err(Error::new("host"));
             }
-            for ((output, ty), slot) in outputs.iter_mut().zip(&results).zip(&slots) {
+            for ((output, ty), slot) in outputs.iter_mut().zip(&results).zip(slots.iter()) {
                 *output = from_slot(ty, *slot)?;
             }
             Ok(())
@@ -277,6 +300,7 @@ pub extern "C" fn instantiate(id: u32, memory_bytes: u32, fuel_lo: u32, fuel_hi:
                     .exports(&store)
                     .find_map(|export| export.into_memory())
             });
+            store.data_mut().memory = memory;
             INSTANCES.with(|instances| {
                 put(
                     &mut instances.borrow_mut(),

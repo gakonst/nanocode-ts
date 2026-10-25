@@ -37,5 +37,6 @@ incremental = true
 inherits = "release"
 opt-level = "s"
 lto = "off"
+codegen-units = 1
 panic = "abort"
 strip = "symbols"
