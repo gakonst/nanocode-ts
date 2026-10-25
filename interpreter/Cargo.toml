@@ -18,7 +18,8 @@ bench = false
 wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"] }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
+codegen-units = 1
 panic = "abort"
 strip = "symbols"
 

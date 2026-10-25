@@ -467,7 +467,7 @@ type Raw = {
 
 type Bound = { functions: readonly (HostFunction | undefined)[]; imports: readonly ImportEntry[] };
 
-type Machine = { raw: Raw; bound: Map<number, Bound>; pending: Bound | undefined; thrown: { error: unknown } | undefined; slots: number; capacity: number; broken: boolean; live: number; release: () => void };
+type Machine = { raw: Raw; bound: Map<number, Bound>; pending: Bound | undefined; thrown: { error: unknown } | undefined; slots: number; capacity: number; broken: boolean; live: number; release: () => void; dataView: DataView };
 
 const RELEASE_BYTES = 16 * 1024 * 1024;
 
@@ -488,6 +488,7 @@ function machine(module: WebAssembly.Module): Promise<Machine> {
     state.slots = state.raw.alloc(state.capacity * 8);
     state.broken = false;
     state.live = 0;
+    state.dataView = new DataView(state.raw.memory.buffer);
     state.release = () => {
       if (state.live > 0 || state.raw.memory.buffer.byteLength <= RELEASE_BYTES) return;
       if (MACHINES.get(module) === found) MACHINES.delete(module);
@@ -516,6 +517,11 @@ function writeSlot(view: DataView, pointer: number, type: ValueType, value: unkn
   else throw new Trap("only i32, i64, f32 and f64 values cross the host boundary");
 }
 
+function machineView(state: Machine): DataView {
+  if (state.dataView.buffer !== state.raw.memory.buffer) state.dataView = new DataView(state.raw.memory.buffer);
+  return state.dataView;
+}
+
 function hostCall(state: Machine, instance: number, index: number, slots: number, params: number, results: number): number {
   try {
     const bound = state.bound.get(instance) ?? state.pending;
@@ -523,11 +529,11 @@ function hostCall(state: Machine, instance: number, index: number, slots: number
     const fn = bound?.functions[index];
     if (!entry || !entry.signature) throw new Trap("unknown import " + index);
     if (!fn) throw new Trap(entry.module + "." + entry.name + " is not provided by this host");
-    const view = new DataView(state.raw.memory.buffer);
+    const view = machineView(state);
     const args: Value[] = [];
     for (let i = 0; i < params; i++) args.push(readSlot(view, slots + i * 8, entry.signature.params[i] ?? "i32"));
     const value = (fn as (...args: Value[]) => unknown)(...args);
-    const after = new DataView(state.raw.memory.buffer);
+    const after = machineView(state);
     const values = results > 1 && Array.isArray(value) ? value : [value];
     for (let i = 0; i < results; i++) writeSlot(after, slots + i * 8, entry.signature.results[i] ?? "i32", values[i]);
     return 0;
@@ -618,21 +624,24 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
       state.live++;
       callOptions.check?.();
       let disposed = false;
+      let cached: { buffer: ArrayBuffer; pointer: number; length: number; bytes?: Uint8Array<ArrayBuffer>; view?: DataView } | undefined;
       const memory = () => {
         const pointer = raw.memory_ptr(instance) >>> 0;
         const length = raw.memory_len(instance) >>> 0;
         if (!pointer && !length) throw new Trap("the module exports no memory");
-        return { pointer, length };
+        const buffer = raw.memory.buffer;
+        if (!cached || cached.buffer !== buffer || cached.pointer !== pointer || cached.length !== length) cached = { buffer, pointer, length };
+        return cached;
       };
       return {
         engine: "interpreter",
         bytes: () => {
           const found = memory();
-          return new Uint8Array(raw.memory.buffer, found.pointer, found.length);
+          return (found.bytes ??= new Uint8Array(found.buffer, found.pointer, found.length));
         },
         view: () => {
           const found = memory();
-          return new DataView(raw.memory.buffer, found.pointer, found.length);
+          return (found.view ??= new DataView(found.buffer, found.pointer, found.length));
         },
         grow: pages => guard(state, () => raw.memory_grow(instance, pages)),
         dispose: () => {
@@ -655,7 +664,7 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
             state.slots = raw.alloc(width * 8) >>> 0;
           }
           const slots = state.slots >>> 0;
-          let view = new DataView(raw.memory.buffer);
+          let view = machineView(state);
           types.params.forEach((type, index) => writeSlot(view, slots + index * 8, type, args[index]));
           state.thrown = undefined;
           const encoded = new TextEncoder().encode(name);
@@ -675,7 +684,7 @@ function interpret(state: Machine, bytes: Uint8Array, options: WasmOptions): Loa
           }
           if (status === 1) throw new Trap(text(raw));
           if (status !== 0) throw new Error(text(raw));
-          view = new DataView(raw.memory.buffer);
+          view = machineView(state);
           const results = types.results.map((type, index) => readSlot(view, slots + index * 8, type));
           if (results.length > 1) return results;
           return results[0];
