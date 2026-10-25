@@ -164,6 +164,8 @@ struct Environment {
     shell: Option<String>,
     #[serde(default)]
     timezone: Option<String>,
+    #[serde(default)]
+    project_instructions: Option<String>,
 }
 
 impl Environment {
@@ -197,6 +199,9 @@ impl Environment {
         if let Some(shell) = &self.shell {
             environment = environment.shell(shell.as_str());
         }
+        if let Some(text) = &self.project_instructions {
+            environment = environment.project_instructions(text.as_str());
+        }
         environment
     }
 
@@ -207,6 +212,9 @@ impl Environment {
         }
         if let Some(shell) = &self.shell {
             environment = environment.shell(shell.as_str());
+        }
+        if let Some(text) = &self.project_instructions {
+            environment = environment.project_instructions(text.as_str());
         }
         environment
     }
