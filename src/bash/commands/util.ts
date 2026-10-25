@@ -116,13 +116,17 @@ export function device(path: string, size = 65536): string | undefined {
   if (path === "/dev/null") return "";
   if (path === "/dev/zero") return "\0".repeat(size);
   if (path !== "/dev/urandom" && path !== "/dev/random") return undefined;
-  let out = "";
-  const bytes = new Uint8Array(Math.min(size, 65536));
-  while (out.length < size) {
-    crypto.getRandomValues(bytes);
-    for (let i = 0; i < bytes.length && out.length < size; i++) out += byte(bytes[i]!);
+  const parts: string[] = [];
+  const bytes = new Uint8Array(65536);
+  const chars = new Uint16Array(65536);
+  for (let done = 0; done < size;) {
+    const n = Math.min(65536, size - done);
+    crypto.getRandomValues(bytes.subarray(0, n));
+    for (let i = 0; i < n; i++) chars[i] = bytes[i]! < 0x80 ? bytes[i]! : 0xdc00 + bytes[i]!;
+    for (let i = 0; i < n; i += 8192) parts.push(String.fromCharCode(...chars.subarray(i, Math.min(n, i + 8192))));
+    done += n;
   }
-  return out;
+  return parts.join("");
 }
 
 export async function readInput(ctx: CommandContext, operand: string, size?: number): Promise<string> {

@@ -3045,10 +3045,35 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   async timeout(args, io) {
     let i = 0;
-    while (i < args.length && args[i].startsWith("-")) i += args[i] === "-s" || args[i] === "-k" ? 2 : 1;
+    let preserve = false;
+    while (i < args.length && args[i].startsWith("-") && args[i] !== "-") {
+      if (args[i] === "--preserve-status") preserve = true;
+      i += args[i] === "-s" || args[i] === "-k" ? 2 : 1;
+    }
+    const match = /^(\d*\.?\d+)([smhd]?)$/.exec(args[i] ?? "");
     const command = args.slice(i + 1);
-    if (!command.length) throw new CommandError("missing operand", 125);
-    return this.dispatch(command, io);
+    if (!match || !command.length) throw new CommandError(match ? "missing operand" : "invalid time interval '" + (args[i] ?? "") + "'", 125);
+    const ms = Number(match[1]) * { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[match[2]!]! * 1000;
+    if (ms === 0) return this.dispatch(command, io);
+    const controller = new AbortController();
+    const runner = this.fork(this.state, AbortSignal.any([this.signal, controller.signal]));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<number>(resolve => {
+      timer = setTimeout(() => {
+        controller.abort("timed out");
+        resolve(preserve ? 143 : 124);
+      }, ms);
+    });
+    try {
+      const ran = runner.dispatch(command, io).catch(error => {
+        if (controller.signal.aborted && !this.signal.aborted) return preserve ? 143 : 124;
+        throw error;
+      });
+      return await Promise.race([ran, expired]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      this.check();
+    }
   },
   async time(args, io) {
     const start = Date.now();
