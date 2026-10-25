@@ -3,7 +3,7 @@ import type { ModelDispatch, PrivateBinding } from "./contracts.ts";
 
 const HEADERS: Record<ModelProvider, RegExp> = {
   claude: /^(accept|content-type|anthropic-version|anthropic-beta)$/,
-  codex: /^(accept|content-type)$/,
+  codex: /^(accept|content-type|x-session-affinity)$/,
 };
 const RESPONSE_HEADER = /^(content-type|request-id|x-request-id|retry-after|x-should-retry|anthropic-ratelimit-[a-z0-9-]+|x-ratelimit-[a-z0-9-]+|openai-model|openai-processing-ms|cf-aig-[a-z0-9-]+)$/;
 
