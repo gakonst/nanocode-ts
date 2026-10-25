@@ -137,6 +137,8 @@ struct Configuration {
     #[serde(default)]
     live_deltas: bool,
     #[serde(default)]
+    brief_tools: Vec<String>,
+    #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
     auto_compact_window_tokens: Option<u64>,
@@ -908,6 +910,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into_builder()
             .without_defaults()
             .code_mode_host(executors.clone())
+            .brief_code_tools(config.brief_tools.clone())
             .build()
             .map_err(configuration)
     };
