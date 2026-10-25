@@ -1,7 +1,7 @@
 export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
 export { EventHub, type LiveCursor } from "./events.ts";
 export { compileModule, connectHand, handKeeper, prepareHand, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus, type PreparedHand } from "./hand.ts";
-export { DESCRIBE_TOOLS, deferMcp, type McpPolicy } from "./mcp.ts";
+export { deferMcp, type McpPolicy } from "./mcp.ts";
 export { RemoteExecutor, type RemotePolicy } from "./remote.ts";
 export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from "./timing.ts";
 export { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type BlobHost, type BranchBoundary, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Compacted, type Driven, type HostOptions, type HostTool, type HandToolSelection, type LoggedEvent, type LogPage, type LogPageOptions, type McpServer, type MessageSocket, type ModelCatalog, type ModelEntry, type ModelGateway, type Thinking, type ModelProvider, type ModelTiming, type ReasoningMode, type ProviderEndpoint, type MovedQueued, type RemoteRequest, type Replaced, type RuntimeOptions, type RuntimeSettings, type ServiceTier, type RuntimeTiming, type SessionRecord, type ShellOutput, type ShellRun, type SocketHandshake, type SqlHost, type SqlKind, type SqlValue, type Statement, type Submitted, type SubagentStatus, type SubagentSummary, type ToolCallContext, type TurnReport, type TurnView, type WorkspaceHost, type WorkspaceTools } from "./contracts.ts";

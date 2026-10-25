@@ -54,7 +54,7 @@ export interface NanocodeHarnessOptions {
   fetch?: typeof fetch;
   sessionFetch?(sessionId: string): typeof fetch;
   hands?: false | NanocodeHands;
-  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch; deferred?: boolean; core?: Record<string, readonly string[]> };
+  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch };
   webSearch?: false;
   promptImages?: (session: NanocodeSession) => boolean;
 }
@@ -178,7 +178,6 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
-          ...(options.mcp ? { mcp: { ...(options.mcp.deferred === undefined ? {} : { deferred: options.mcp.deferred }), ...(options.mcp.core ? { core: options.mcp.core } : {}) } } : {}),
           fetch: cellFetch,
           ...(executor ? {
             remote: {

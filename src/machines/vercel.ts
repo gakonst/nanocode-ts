@@ -86,7 +86,7 @@ export function createWallets(options: WalletsOptions) {
     POST: (request: Request) => guarded(request, request => handlers.register(request, undefined)),
     device,
     fetch: (sessionId: string) => paying(() => holder(sessionId), servers),
-    mcp: { servers: [...servers], fetch: (sessionId: string) => paying(() => holder(sessionId), servers), core: Mcp.core },
+    mcp: { servers: [...servers], fetch: (sessionId: string) => paying(() => holder(sessionId), servers) },
     servers,
   };
 }
