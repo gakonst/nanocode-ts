@@ -55,6 +55,7 @@ export type AgentConfiguration = {
   code_mode?: boolean;
   event_coalesce_ms?: number;
   live_deltas?: boolean;
+  brief_tools?: string[];
   stream_tool_input?: boolean;
   auto_compact_window_tokens?: number;
   environment?: { cwd?: string; shell?: string; timezone?: string };
