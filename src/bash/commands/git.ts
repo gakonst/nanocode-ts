@@ -17,7 +17,7 @@ const ATTEMPTS = 2;
 
 const MARKER = ".git/nanocode.json";
 
-const SUPPORTED = "clone, init, status, add, rm, mv, commit, diff, log, show, checkout, switch, restore, reset, branch, rev-parse, remote, ls-files, describe, config";
+const SUPPORTED = "clone, init, status, add, rm, mv, commit, diff, apply, log, show, checkout, switch, restore, reset, branch, rev-parse, remote, ls-files, describe, config";
 
 type Snapshot = {
   repository: string;
@@ -1131,6 +1131,8 @@ async function git(ctx: CommandContext, github: GitHubOptions, args: string[]): 
       return gitMv(ctx, rest);
     case "commit":
       return gitCommit(ctx, rest);
+    case "apply":
+      return gitApply(ctx, rest);
     case "diff":
       return gitDiff(ctx, rest);
     case "log":
@@ -1409,5 +1411,29 @@ export function githubArchives(fetcher: typeof fetch = globalThis.fetch, options
       url = next;
     }
   });
+}
+
+async function gitApply(ctx: CommandContext, args: string[]): Promise<number> {
+  const flags: string[] = ["-s", "-d", ctx.cwd];
+  const files: string[] = [];
+  let strip = "1";
+  let check = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "-R" || arg === "--reverse") flags.push("-R");
+    else if (arg === "--check") check = true;
+    else if (arg === "-p") strip = args[++i] ?? "1";
+    else if (/^-p\d+$/.test(arg)) strip = arg.slice(2);
+    else if (arg === "-v" || arg === "--verbose") flags.splice(flags.indexOf("-s"), 1);
+    else if (arg.startsWith("-") && arg !== "-") continue;
+    else files.push(arg);
+  }
+  const argv = ["patch", "-p" + strip, "-f", ...flags, ...(check ? ["--dry-run"] : [])];
+  if (!files.length || files.includes("-")) return ctx.run(argv);
+  for (const file of files) {
+    const status = await ctx.run([...argv, "-i", ctx.resolve(file)]);
+    if (status !== 0) return status;
+  }
+  return 0;
 }
 
