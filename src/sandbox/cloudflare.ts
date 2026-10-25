@@ -1,5 +1,5 @@
 import type { WorkspaceHost } from "../contracts.ts";
-import { collector, drain, resolvePath, SANDBOX_CWD, SANDBOX_OUTPUT_LIMIT_BYTES, sandboxInstructions, shellOutput, timeoutArgv } from "./shell.ts";
+import { collector, drain, resolvePath, SANDBOX_CWD, SANDBOX_OUTPUT_LIMIT_BYTES, shellOutput, timeoutArgv } from "./shell.ts";
 
 export type ContainerProcess = {
   readonly stdout: ReadableStream | null;
@@ -38,7 +38,6 @@ export const CONTAINER_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 export const CONTAINER_ENV = { DEBIAN_FRONTEND: "noninteractive", HOME: "/root", LANG: "C.UTF-8" };
 export const CONTAINER_SETUP = "command -v git >/dev/null && command -v python3 >/dev/null && command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl git procps python3 python3-pip python3-venv xz-utils >/dev/null; }";
 
-export const CONTAINER_INSTRUCTIONS = sandboxInstructions("a Cloudflare container, a Linux virtual machine running Debian as root with Node.js, Python 3 and git (`apt-get install -y PKG` adds system packages; pip needs `--break-system-packages` or a venv)");
 
 export function containerWorkspace(container: ContainerHandle, options: ContainerWorkspaceOptions = {}): ContainerWorkspace {
   const cwd = options.cwd ?? SANDBOX_CWD;
@@ -78,7 +77,7 @@ export function containerWorkspace(container: ContainerHandle, options: Containe
   };
 
   return {
-    instructions: options.instructions ?? CONTAINER_INSTRUCTIONS,
+    ...(options.instructions ? { instructions: options.instructions } : {}),
     ready,
     stop: async () => {
       booting = undefined;

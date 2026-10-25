@@ -36,7 +36,7 @@ export const limits = `at most ${amount(Wallet.allowance)} MACH, plus ${amount(W
 
 export type Options = {
   history: string;
-  instructions: string;
+  instructions?: string;
   model: () => Models.Model;
   archive?: Local.Options["archive"];
   codeMode?: boolean;

@@ -131,7 +131,7 @@ export function deferMcp<R extends Request, A extends unknown[]>(send: Send<R, A
   const urls = new Set(servers.map(server => key(server.url)));
   const named = new Map(servers.map(server => [key(server.url), server.name]));
   const ttl = policy.cacheMs ?? DEFAULT_CACHE_MS;
-  const deferred = policy.deferred ?? true;
+  const deferred = policy.deferred ?? false;
   return async (request, signal, ...rest) => {
     if (request.provider != null || request.method !== "POST" || !URL.canParse(request.endpoint) || !urls.has(key(request.endpoint))) return send(request, signal, ...rest);
     const url = key(request.endpoint) + "|" + JSON.stringify(request.headers.filter(([name]) => !/^(mcp-session-id|mcp-protocol-version|content-length|content-type|accept|user-agent|last-event-id)$/i.test(name)).sort());

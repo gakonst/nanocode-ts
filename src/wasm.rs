@@ -43,7 +43,6 @@ use nanocode::{
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
 
-const LOCAL_INSTRUCTIONS: &str = "Code Mode scripts run in QuickJS inside this host, not on a separate machine and not in Node: `require`, `import()` and npm packages do not exist. Besides the language built-ins they have `fetch` with `Request`, `Response` (`res.body.getReader()`, `blob()`), `Headers`, `FormData` and `AbortController`, and `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `Blob`, `Buffer`, `ReadableStream`, `structuredClone`, `setInterval`, `crypto` (`randomUUID`, `getRandomValues` from Math.random, `subtle.digest` and HMAC), `process.env` (empty) and an `Intl` that formats en-US in UTC only. `console` has Node's methods (`log`, `table`, `dir`, `time`, `count`, `group`, `assert`, `trace`) and prints objects as JSON. Await every promise: a cell ends when its code returns, which drops pending timers, and a rejection nobody handles fails the cell. Recursion deeper than about 1,500 calls may throw RangeError (the limit varies with the host and how hot the code is); write deep algorithms iteratively. The global `fetch` makes HTTP requests from the host, which may pay for them. For GitHub, fetch file contents from `https://raw.githubusercontent.com/OWNER/REPO/REF/PATH` (REF may be HEAD) and archives from `https://codeload.github.com/OWNER/REPO/tar.gz/REF` (or `git clone` in `bash`) rather than api.github.com, which may answer 403 rate limit exceeded because the host shares its address with others. When the session has a workspace, the globals `bash` and `wasm` reach it: `await bash(script)` runs the simulated shell, `await wasm.run(pathOrBytes, args, { stdin })` runs a WASI program and resolves to `{ stdout, stderr, exitCode }` (pass a .wasm file path rather than reading the file: `bash.readFile` returns text unless given `{ encoding: null }`), and `await wasm.invoke(pathOrBytes, name, ...numbers)` calls one export. `WebAssembly.instantiate(bytes)` and `new WebAssembly.Instance(module)` also work, but every export is an async function (`await instance.exports.add(20, 22)`), i64 values are BigInts, a memory export has async `read(offset, length)` and `write(offset, bytes)`, and imports are not supported. These are globals, not `tools.*` entries.";
 use serde_json::{Map, Value, json, value::RawValue};
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -136,8 +135,6 @@ struct Configuration {
     event_coalesce_ms: u64,
     #[serde(default)]
     live_deltas: bool,
-    #[serde(default)]
-    brief_tools: Vec<String>,
     #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
@@ -754,7 +751,6 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         [
             application,
             placement.then_some(PLACEMENT_INSTRUCTIONS),
-            local.then_some(LOCAL_INSTRUCTIONS),
         ]
         .into_iter()
         .flatten()
@@ -869,10 +865,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .workspace_tools
             .as_ref()
             .and_then(|selection| selection.get(family))
-            .unwrap_or(match family {
-                Provider::Codex if local => WorkspaceTools::Files,
-                _ => WorkspaceTools::All,
-            })
+            .unwrap_or(WorkspaceTools::All)
     };
     let selected = |family: Provider| -> Result<Tools, Opening> {
         let base = match (config.workspace.as_deref(), workspace_tools(family), family) {
@@ -910,7 +903,6 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into_builder()
             .without_defaults()
             .code_mode_host(executors.clone())
-            .brief_code_tools(config.brief_tools.clone())
             .build()
             .map_err(configuration)
     };

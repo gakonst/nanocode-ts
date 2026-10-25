@@ -23,7 +23,7 @@ export type Model = {
 
 export type Options = {
   fetch: typeof fetch;
-  instructions: string;
+  instructions?: string;
   model: Model;
   onEvent: (event: LoggedEvent) => void;
   archive?: (owner: string, repo: string, ref: string) => string;
