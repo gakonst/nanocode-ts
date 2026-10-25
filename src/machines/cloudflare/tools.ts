@@ -6,21 +6,15 @@ const FETCH_PREVIEW = 20_000;
 const SECRET = /\{\{([A-Z_][A-Z0-9_]{0,63})\}\}/g;
 
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", additionalProperties: false, properties, required });
-const path = { type: "string", description: "A workspace path, such as notes/plan.md." };
 
 const definitions: HostTool[] = [
   {
     name: "http",
-    description: "Sends one unpaid HTTPS request with the account's secrets and returns its status, type and up to 20,000 characters of its body. Header values may name the account's secrets as {{NAME}}; the list_secrets tool gives their names, never their values.",
+    description: "Sends an HTTPS request with the account's secrets substituted for {{NAME}} in header values.",
     parameters: object({ url: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }, headers: { type: "object", additionalProperties: { type: "string" } }, body: { type: "string" } }, ["url", "method"]),
   },
-  { name: "list_secrets", description: "The names of the secrets the account stored for the http tool.", parameters: object({}) },
-  { name: "list_files", description: "Lists this session's workspace files. The workspace is durable: it outlives turns, restarts and the browser.", parameters: object({}) },
-  { name: "read_file", description: "Reads a workspace file with line numbers. offset is the first line (1-based) and limit the number of lines.", parameters: object({ path, offset: { type: "integer" }, limit: { type: "integer" } }, ["path"]) },
-  { name: "write_file", description: "Writes a whole workspace file.", parameters: object({ path, content: { type: "string" } }, ["path", "content"]) },
-  { name: "edit_file", description: "Replaces old_string with new_string in a workspace file; old_string must occur once unless replace_all is true.", parameters: object({ path, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, ["path", "old_string", "new_string"]) },
-  { name: "delete_file", description: "Deletes a workspace file.", parameters: object({ path }, ["path"]) },
-  { name: "wallet", description: "The account's wallet: its address, its access key's expiry and what this deployment has paid each service so far, in MACH base units (6 decimals).", parameters: object({}) },
+  { name: "list_secrets", description: "Lists the names of the account's secrets.", parameters: object({}) },
+  { name: "wallet", description: "Returns the account's wallet address, access key expiry and spend per service in MACH base units.", parameters: object({}) },
 ];
 
 function file(value: unknown): string {

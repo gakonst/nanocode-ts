@@ -7,8 +7,6 @@ export const servers: readonly Server[] = [
   { name: "gateway", url: "https://gateway.tempo-dev.workers.dev/mcp" },
 ];
 
-export const core: Record<string, readonly string[]> = { gateway: [], mercator: [] };
-
 type Challenge = { description?: string; intent?: string; request?: { amount?: string } };
 
 type Message = {

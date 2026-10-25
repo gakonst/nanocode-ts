@@ -97,7 +97,7 @@ export function createMachines<E extends MachinesEnv = MachinesEnv>(options: Mac
     subagents: true,
     streamToolInput: true,
     codeMode: paid === "tempo" ? { fetch: (authority, env) => paying(env, authority.account_id) } : {},
-    ...(servers.length ? { mcp: { servers: [...servers], fetch: (authority: { account_id: string }, env: E) => paying(env, authority.account_id), core: Mcp.core } } : {}),
+    ...(servers.length ? { mcp: { servers: [...servers], fetch: (authority: { account_id: string }, env: E) => paying(env, authority.account_id) } } : {}),
     ...rest,
   });
 
@@ -127,7 +127,7 @@ export function createWallets<E extends MachinesEnv>(options: WalletsOptions<E>)
   const handlers = keyHandlers<E>(options.account);
   const nanocode: Pick<NanocodeOptions<E>, "codeMode" | "mcp"> = {
     ...(scripts ? { codeMode: { fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id) } } : { codeMode: { fetch: () => githubArchives() } }),
-    ...(servers.length ? { mcp: { servers: [...servers], fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id), core: Mcp.core } } : {}),
+    ...(servers.length ? { mcp: { servers: [...servers], fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id) } } : {}),
   };
 
   async function fetch(request: Request, env: E): Promise<Response | undefined> {

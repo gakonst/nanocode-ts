@@ -46,8 +46,6 @@ export type BashEvent =
   | { phase: "started"; call: number; command: string }
   | { phase: "finished"; call: number; command: string; status: "success" | "error"; category: BashCategory; exitCode: number | null; durationMs: number; outputTruncated: boolean };
 
-export type BashToolOptions = { name?: string; description?: string; maxOutputLength?: number };
-
 const WORKSPACE_TIMEOUT_MS = 600_000;
 
 export const DEFAULT_LIMITS: Limits = {
@@ -194,23 +192,6 @@ export class Bash {
     };
   }
 
-  tool(options: BashToolOptions = {}): { definition: HostTool; call(input: unknown, signal?: AbortSignal): Promise<string> } {
-    const limit = options.maxOutputLength ?? 30_000;
-    return {
-      definition: bashTool(options),
-      call: async (input, signal) => {
-        const command = typeof input === "string" ? input : (input as { command?: unknown } | null)?.command;
-        if (typeof command !== "string") {
-          const call = ++this.#calls;
-          this.#emit({ phase: "started", call, command: "other" });
-          this.#emit({ phase: "finished", call, command: "other", status: "error", category: "input_validation", exitCode: null, durationMs: 0, outputTruncated: false });
-          throw new Error("bash: input must be { command: string }");
-        }
-        return formatResult(await this.exec(command, { signal }), limit);
-      },
-    };
-  }
-
 }
 
 function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused: boolean }): FileSystem {
@@ -251,33 +232,6 @@ const BASH_GITHUB_FILE_INSTRUCTIONS = "For single files, read `https://raw.githu
 const BASH_PROGRAM_INSTRUCTIONS = "WebAssembly programs built for WASI (wasm32-wasi) run directly: `./prog.wasm ARGS`, `wasm prog.wasm ARGS` or `wasmtime prog.wasm ARGS`, with stdin, stdout, exit codes, the environment and the files under the working directory (up to 64 MiB, written back when the program exits). There is no C or Rust compiler: write WebAssembly text and assemble it with `wat2wasm prog.wat` (writes prog.wasm; flat or folded instructions, memory, data, globals and imports such as WASI's `fd_write`), rather than writing module bytes by hand, or download the .wasm file. `wasm --invoke NAME FILE ARGS` calls one exported function and prints its result. Python 3 runs on Pyodide (CPython compiled to WebAssembly, loaded on first use): `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, numpy, pandas and the other packages Pyodide ships load when imported, and `pip install PKG` installs pure-Python wheels for the rest of the session. Python has no network access (urllib, requests and sockets fail), so download files with curl first and read them from Python.";
 
 export const BASH_SHELL_INSTRUCTIONS = BASH_GIT_INSTRUCTIONS + " " + BASH_GITHUB_FILE_INSTRUCTIONS + " " + BASH_PROGRAM_INSTRUCTIONS;
-
-export const BASH_TOOL_DESCRIPTION = "Run a bash script in a sandboxed, simulated shell (no real processes) over a persistent filesystem shared by every call; variables, functions and the working directory reset between calls. Supports pipes, redirections (> >> < 2> 2>&1 &> heredocs, here-strings), && || ;, if/for/while/until/case, functions, $(...), $((...)), globbing, brace expansion, arrays and set -euo pipefail. Commands: " + BASH_COMMANDS.join(", ") + ", plus builtins (cd, pwd, export, read, test/[ ], [[ ]], source, eval, printf -v, ...). jq covers paths, filters, map/select, reduce, assignment and -r/-c/-n/-s/--arg; curl supports -X -H -d --json -o -i -s -f -w -L and pays MPP (HTTP 402) services automatically when the host provides a paying fetch. " + BASH_SHELL_INSTRUCTIONS + " Output is truncated when very long.";
-
-export function bashTool(options: BashToolOptions = {}): HostTool {
-  return {
-    name: options.name ?? "bash",
-    description: options.description ?? BASH_TOOL_DESCRIPTION,
-    parameters: {
-      type: "object",
-      properties: { command: { type: "string", description: "The bash script to run." } },
-      required: ["command"],
-      additionalProperties: false,
-    },
-  };
-}
-
-export function formatResult(result: BashResult, limit = 30_000): string {
-  let text = result.stdout;
-  if (result.stderr) text += (text && !text.endsWith("\n") ? "\n" : "") + "[stderr]\n" + result.stderr;
-  if (text.length > limit) {
-    const head = Math.floor(limit * 0.6);
-    const tail = limit - head;
-    text = text.slice(0, head) + "\n[... " + (text.length - limit) + " characters truncated ...]\n" + text.slice(-tail);
-  } else if (result.truncated) text += "\n[output truncated]";
-  if (result.exitCode !== 0) text += (text && !text.endsWith("\n") ? "\n" : "") + "[exit code " + result.exitCode + "]";
-  return text || "(no output)";
-}
 
 function compiles(): boolean {
   try {
