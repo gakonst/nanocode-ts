@@ -37,9 +37,9 @@ export type Pyodide = {
   setInterruptBuffer(buffer: unknown): void;
 };
 
-export type PythonRequest = { kind: "code" | "stdin" | "file" | "module" | "pip" | "version"; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; roots: string[]; dirs: string[]; files: [string, string][]; stdin: string; timeoutMs: number; mirror?: string; keep?: string[]; sync?: boolean; fetch?: string[] };
+export type PythonRequest = { kind: "code" | "stdin" | "file" | "module" | "pip" | "version"; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; roots: string[]; dirs: string[]; files: [string, string][]; stdin: string; timeoutMs: number; mirror?: string; keep?: string[]; sync?: boolean; fetch?: string[]; range?: [number, number]; append?: boolean };
 
-export type PythonReply = { status: number; stdout: string; stderr: string; dirs: string[]; files: [string, string | null][]; mirror?: string; missing?: string[]; more?: string[] };
+export type PythonReply = { status: number; stdout: string; stderr: string; dirs: string[]; files: [string, string | null][]; mirror?: string; missing?: string[]; more?: string[]; large?: [string, number][] };
 
 export type PythonRemote = (request: PythonRequest, signal: AbortSignal) => Promise<PythonReply>;
 
@@ -634,7 +634,7 @@ async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mo
   const kind = mode === "version" ? "version" : mode.kind;
   const roots = mode === "version" ? [] : [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
   const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
-  const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, 2 * batchBytes);
+  const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes);
   if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
   const target = mode === "version" ? "" : mode.kind === "file" ? "" : mode.kind === "stdin" ? stdin : mode.target;
   const base = { name: ctx.name, cwd: ctx.cwd, env: { ...ctx.env, PWD: ctx.cwd }, roots: unique, dirs: [...tree.dirs], timeoutMs: ctx.limits.timeoutMs, mirror: mirror.id };
@@ -653,6 +653,14 @@ async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mo
     for (const path of paths) {
       const data = await ctx.fs.read(path).catch(() => null);
       if (!data) continue;
+      if (data.length > batchBytes) {
+        for (let offset = 0; offset < data.length; offset += batchBytes) {
+          const reply = await call({ ...control, files: [[path, base64(data.subarray(offset, offset + batchBytes))]], sync: true, append: offset > 0 });
+          if (reply.mirror !== mirror.id) throw new CommandError(ctx.name + ": " + path + " is larger than one upload and the Python service does not keep files between runs; move it out of this directory", 127);
+        }
+        mirror.known.set(path, tree.files.get(path)!);
+        continue;
+      }
       if (batch.length && bytes + data.length > batchBytes) {
         const reply = await call({ ...control, files: batch, sync: true });
         if (reply.mirror !== mirror.id) throw new CommandError(ctx.name + ": this directory holds more than one upload and the Python service does not keep files between runs; run python3 from a smaller directory", 127);
@@ -684,12 +692,14 @@ async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mo
   if (reply.stderr) ctx.stderr.write(reply.stderr);
   if (unique.length) {
     const changed = new Map<string, string>();
+    const large = new Map(reply.large ?? []);
     for (const [path, data] of reply.files) if (data !== null) changed.set(path, data);
     for (let more = reply.more ?? []; more.length;) {
       const fetched = await call({ ...control, files: [], fetch: more });
       for (const [path, data] of fetched.files) if (data !== null) changed.set(path, data);
+      for (const [path, size] of fetched.large ?? []) large.set(path, size);
       more = fetched.more ?? [];
-      if (!fetched.files.length) break;
+      if (!fetched.files.length && !fetched.large?.length) break;
     }
     const present = new Set(reply.files.map(([path]) => path));
     const dirs = new Set(reply.dirs);
@@ -711,6 +721,26 @@ async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mo
       await breathe();
       await mkdirs(ctx.fs, parentOf(path));
       await ctx.fs.write(path, unbase64(data));
+      const stat = await ctx.fs.stat(path);
+      if (stat && reply.mirror === mirror.id) mirror.known.set(path, stat.size + ":" + stat.mtime);
+    }
+    for (const [path, size] of large) {
+      await mkdirs(ctx.fs, parentOf(path));
+      try {
+        for (let offset = 0; offset < size || offset === 0; offset += batchBytes) {
+          const piece = await call({ ...control, files: [], fetch: [path], range: [offset, batchBytes] });
+          const data = piece.files[0]?.[1];
+          if (data == null) throw new CommandError(ctx.name + ": " + path + " changed while it was copied back", 127);
+          await ctx.fs.write(path, unbase64(data), offset > 0);
+          if (offset + batchBytes >= size) break;
+        }
+      } catch (error) {
+        if (!(error instanceof FsError)) throw error;
+        await ctx.fs.remove(path).catch(() => {});
+        mirror.known.delete(path);
+        ctx.stderr.write(ctx.name + ": warning: " + path + " (" + (size / 1024 / 1024).toFixed(1) + " MiB) stays in the Python container: " + error.message + "\n");
+        continue;
+      }
       const stat = await ctx.fs.stat(path);
       if (stat && reply.mirror === mirror.id) mirror.known.set(path, stat.size + ":" + stat.mtime);
     }
