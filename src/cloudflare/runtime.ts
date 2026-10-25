@@ -1,6 +1,6 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
-import { type AgentConfiguration, AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
+import { type AgentConfiguration, AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LiveCursor, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives, withGitHub, type Limits, type PythonRemote } from "../bash/index.ts";
 import { guard } from "../egress.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
@@ -58,6 +58,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   handInstructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number; python?(authority: SessionAuthority, env: E): PythonRemote | undefined };
   workspaceTools?: AgentConfiguration["workspace_tools"];
+  liveDeltas?: boolean;
   valueLimit?: number;
 };
 
@@ -108,7 +109,7 @@ const HAND_TAG = "hand";
 const HAND_REPLACED = "another hand attached under this name";
 const INVALID_HAND = "hand names are 1 to 48 lowercase letters, digits, _ or -, starting with a letter or digit; pass --name";
 const WATCH_TAG = "watch";
-type Watch = { watch: string; cursor: number };
+type Watch = { watch: string; cursor: number; live?: boolean };
 type Watcher = { state: Watch; scope: string; descriptor: SessionDescriptor };
 type Executor = RemoteExecutor<WebSocket>;
 const OWNER = "owner";
@@ -160,6 +161,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private pumping = false;
     private recorded = false;
     private deleted = false;
+    private readonly liveSockets = new WeakMap<WebSocket, LiveCursor>();
     private readonly eventHub = new EventHub(() => policy(this.env.EVENT_PAGE_SIZE, "EVENT_PAGE_SIZE"), () => policy(this.env.EVENT_TAIL_BYTES, "EVENT_TAIL_BYTES"));
     private readonly modelDiagnostics: { scope: string; value: unknown }[] = [];
     private readonly timings = new Map<string, Timings>();
@@ -610,7 +612,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), live_deltas: options.liveDeltas ?? true, stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.mcp ? { mcp: { ...(options.mcp.deferred === undefined ? {} : { deferred: options.mcp.deferred }), ...(options.mcp.core ? { core: options.mcp.core } : {}) } } : {}),
           fetch: cellFetch,
@@ -809,7 +811,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       const id = crypto.randomUUID();
       this.ctx.storage.sql.exec("INSERT INTO watch_sockets VALUES (?, ?, ?)", id, scope, JSON.stringify(descriptor));
       this.ctx.acceptWebSocket(server, [WATCH_TAG]);
-      const state: Watch = { watch: id, cursor: after };
+      const state: Watch = { watch: id, cursor: after, ...(url.searchParams.get("live") === "1" ? { live: true } : {}) };
       server.serializeAttachment(state);
       this.watchers.set(server, { state, scope, descriptor });
       this.notifyWatchers();
@@ -851,7 +853,30 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private deliver(socket: WebSocket, state: Watch, event: LoggedEvent): void {
       if (event.seq <= state.cursor) return;
-      try { socket.send(JSON.stringify({ type: "event", seq: event.seq, request_id: event.request_id, created_at: event.created_at, event: event.event })); state.cursor = event.seq; } catch {}
+      try { socket.send(JSON.stringify({ type: "event", seq: event.seq, request_id: event.request_id, created_at: event.created_at, event: event.event })); state.cursor = event.seq; this.eventHub.sent(this.liveCursor(socket, state), event); } catch {}
+    }
+
+    private liveCursor(socket: WebSocket, state: Watch): LiveCursor {
+      let found = this.liveSockets.get(socket);
+      if (!found) this.liveSockets.set(socket, found = { sent: new Map(), cursor: state.cursor });
+      found.cursor = Math.max(found.cursor, state.cursor);
+      return found;
+    }
+
+    private deliverLive(socket: WebSocket, state: Watch): void {
+      if (!state.live) return;
+      for (const event of this.eventHub.chunks(this.liveCursor(socket, state))) {
+        try { socket.send(JSON.stringify({ type: "live", request_id: event.request_id, created_at: event.created_at, event: event.event })); } catch {}
+      }
+    }
+
+    private lived(scope: string, events: LoggedEvent[]): void {
+      if (!events.length || this.deleted) return;
+      this.eventHub.live(events);
+      for (const { socket, watcher } of this.watching()) {
+        if (watcher.scope !== scope || watcher.state.cursor < this.eventHub.latest) continue;
+        this.deliverLive(socket, watcher.state);
+      }
     }
 
     private published(scope: string, events: LoggedEvent[], bytes: number[]): void {
@@ -865,6 +890,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (watcher.state.cursor < events[0].seq - 1) { behind = true; continue; }
         const cursor = watcher.state.cursor;
         for (const event of events) this.deliver(socket, watcher.state, event);
+        this.deliverLive(socket, watcher.state);
         if (watcher.state.cursor !== cursor) socket.serializeAttachment(watcher.state);
       }
       if (behind) this.notifyWatchers();
@@ -900,6 +926,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           if (!rows.has_more) break;
           after = rows.next_cursor;
         }
+        for (const { socket, watcher } of list) this.deliverLive(socket, watcher.state);
         list.forEach(({ socket, watcher }, index) => { if (watcher.state.cursor !== before[index]) socket.serializeAttachment(watcher.state); });
       }
     }
@@ -1148,7 +1175,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.deleted) return Promise.reject(new Error("session deleted"));
       let current = this.instances.get(scope);
       if (!current) {
-        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: valueLimit, blobs: this.blobs, published: (events, bytes) => this.published(scope, events, bytes), wake: () => this.eventHub.notify() });
+        current = AgentRuntime.instantiate(wasm, this.store, { log_logical_limit: valueLimit, blobs: this.blobs, published: (events, bytes) => this.published(scope, events, bytes), live: events => this.lived(scope, events), wake: () => this.eventHub.notify() });
         const created = current;
         this.instances.set(scope, created);
         void created.catch(() => { if (this.instances.get(scope) === created) this.instances.delete(scope); });
@@ -1162,18 +1189,18 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       });
     }
 
-    private cursor(url: URL, request: Request): { after: number; limit: number } | undefined {
+    private cursor(url: URL, request: Request): { after: number; limit: number; live: boolean } | undefined {
       const after = Math.max(Number(url.searchParams.get("after") ?? "0"), Number(request.headers.get("last-event-id") ?? "0"));
       const limit = Number(url.searchParams.get("limit") ?? this.env.EVENT_PAGE_SIZE);
-      return Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1 && limit <= policy(this.env.EVENT_PAGE_SIZE, "EVENT_PAGE_SIZE") ? { after, limit } : undefined;
+      return Number.isSafeInteger(after) && after >= 0 && Number.isSafeInteger(limit) && limit >= 1 && limit <= policy(this.env.EVENT_PAGE_SIZE, "EVENT_PAGE_SIZE") ? { after, limit, live: url.searchParams.get("live") === "1" } : undefined;
     }
 
-    private async events(scope: string, { after, limit }: { after: number; limit: number }, streaming = false, requestId?: string, descriptor?: SessionDescriptor): Promise<Response> {
+    private async events(scope: string, { after, limit, live }: { after: number; limit: number; live?: boolean }, streaming = false, requestId?: string, descriptor?: SessionDescriptor): Promise<Response> {
       const read = async (cursor: number): Promise<LogPage> => {
         if (descriptor && !await this.allowed(descriptor)) throw new Error("access token expired or revoked");
         return this.eventHub.recent(cursor, requestId) ?? await (await this.instance(scope)).page(scope, cursor, limit, requestId);
       };
-      if (streaming) return this.eventHub.stream(after, policy(this.env.EVENT_STREAM_KEEPALIVE_MS, "EVENT_STREAM_KEEPALIVE_MS"), read, requestId === undefined ? undefined : event => { const body = event.event as { source?: unknown; type?: unknown } | undefined; return body?.source === undefined && body?.type === "result"; });
+      if (streaming) return this.eventHub.stream(after, policy(this.env.EVENT_STREAM_KEEPALIVE_MS, "EVENT_STREAM_KEEPALIVE_MS"), read, requestId === undefined ? undefined : event => { const body = event.event as { source?: unknown; type?: unknown } | undefined; return body?.source === undefined && body?.type === "result"; }, { ...(requestId === undefined ? {} : { requestId }), live: live === true });
       return json(await (await this.instance(scope)).page(scope, after, limit));
     }
 

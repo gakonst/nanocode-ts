@@ -100,7 +100,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   const reconnect = async (requestId: string, sink: Sink, session: CloudflareSession, signal?: AbortSignal) => {
     let delay = reconnectMs;
     while (!signal?.aborted) {
-      const response = await fetch(path(`events?after=${session.cursor ?? 0}`, session), { headers: headers({ accept: "text/event-stream" }), signal }).catch(() => undefined);
+      const response = await fetch(path(`events?live=1&after=${session.cursor ?? 0}`, session), { headers: headers({ accept: "text/event-stream" }), signal }).catch(() => undefined);
       if (response && (response.status === 408 || response.status === 429 || response.status >= 500)) {
         const after = Number(response.headers.get("retry-after"));
         void response.body?.cancel().catch(() => undefined);
@@ -124,7 +124,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     const model = options.model();
     try {
       const hand = await options.hand?.(session.id!, signal);
-      const response = await fetch(path(`turns?after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt: attachedPrompt(prompt, attachments), ...(images(attachments).length ? { images: images(attachments) } : {}), provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
+      const response = await fetch(path(`turns?live=1&after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt: attachedPrompt(prompt, attachments), ...(images(attachments).length ? { images: images(attachments) } : {}), provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
         if (signal?.aborted) return undefined;
         throw error;
       });

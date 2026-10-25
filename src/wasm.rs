@@ -135,6 +135,8 @@ struct Configuration {
     #[serde(default)]
     event_coalesce_ms: u64,
     #[serde(default)]
+    live_deltas: bool,
+    #[serde(default)]
     stream_tool_input: bool,
     #[serde(default)]
     auto_compact_window_tokens: Option<u64>,
@@ -957,6 +959,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         config.runtime_id,
         config.started_ms,
         executors.clone(),
+        config.live_deltas,
     ));
     let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
     record.initial =

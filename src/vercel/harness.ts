@@ -453,6 +453,7 @@ function publisher(ctx: DriveContext): (events: LoggedEvent[]) => void {
   const quiet = new Set<string>();
   return events => {
     for (const logged of events) {
+      if ((logged.event as { event?: { type?: unknown } } | undefined)?.event?.type === "assistant.message") continue;
       const live = liveEvent(logged) as (Record<string, unknown> & { type: string }) | undefined;
       if (!live) continue;
       const parent = typeof live["parent"] === "string" ? live["parent"] : undefined;
