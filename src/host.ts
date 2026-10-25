@@ -187,6 +187,8 @@ export class AgentRuntime {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
     this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, live: this.options.live, wake: this.options.wake, blobs: this.options.blobs };
+    const project = config.workspace && options.workspace && !config.environment?.project_instructions ? await projectInstructions(options.workspace, config.workspace) : undefined;
+    if (project) config = { ...config, environment: { ...(config.environment ?? { cwd: config.workspace }), project_instructions: project } };
     this.hands = config.hands ?? false;
     this.remote = config.remote ?? false;
     this.subscription = config.subscription;
@@ -945,4 +947,12 @@ export async function writeBytes(workspace: WorkspaceHost, path: string, data: U
   for (let index = 0; index < data.length; index += 0x8000) encoded += String.fromCharCode(...data.subarray(index, index + 0x8000));
   const result = await workspace.run({ command: "mkdir -p -- \"$(dirname -- " + shellQuote(path) + ")\" && base64 -d " + (append ? ">>" : ">") + " " + shellQuote(path), cwd: "/", timeout_ms: null, stdin: btoa(encoded) }, new AbortController().signal);
   if (result.exit_code !== 0) throw new Error(result.stderr.trim() || "write exited with " + result.exit_code);
+}
+
+async function projectInstructions(workspace: WorkspaceHost, root: string): Promise<string | undefined> {
+  for (const name of ["AGENTS.override.md", "AGENTS.md"]) {
+    const text = await workspace.read(root.replace(/\/+$/, "") + "/" + name).catch(() => null);
+    if (text?.trim()) return text;
+  }
+  return undefined;
 }
