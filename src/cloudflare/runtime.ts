@@ -139,6 +139,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private readonly runtimes = new Map<string, Promise<AgentRuntime>>();
     private readonly residents = new Map<string, AgentRuntime>();
     private readonly efforts = new WeakMap<AgentRuntime, Thinking>();
+    private readonly openedWith = new WeakMap<Promise<AgentRuntime>, string>();
+    private readonly prewarmed = new Map<string, { session: string; provider: string; model: string; executor: string }>();
     private readonly blocked = new Set<string>();
     private readonly driving = new Map<string, string>();
     private binding?: Promise<void>;
@@ -253,11 +255,12 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const provider = this.metadata.get(`model_provider:${scope}`) ?? input?.provider ?? "claude";
           if (provider !== "claude" && provider !== "codex") return json({ error: "provider must be claude or codex" }, 400);
           const model = this.metadata.get(`model:${scope}`) ?? (typeof input?.model === "string" && input.model ? input.model : provider === "codex" ? "gpt-6.1-sol" : this.env.CLAUDE_MODEL ?? "claude-opus-5-5");
+          const opened = this.prewarm(scope, descriptor, provider, model).catch(() => false);
           if (provider === "codex" && WORKERS_AI_MODELS.has(model)) {
-            await this.instance(scope);
+            await Promise.all([this.instance(scope), opened]);
             return new Response(null, { status: 204 });
           }
-          const [, warmed] = await Promise.all([this.instance(scope), options.egress(this.env).fetch(new Request("https://egress.internal/warm", { method: "POST", headers: { "x-nanocode-model": headerJson({ provider, model }) } }))]);
+          const [, warmed] = await Promise.all([this.instance(scope), options.egress(this.env).fetch(new Request("https://egress.internal/warm", { method: "POST", headers: { "x-nanocode-model": headerJson({ provider, model }) } })), opened]);
           await warmed.body?.cancel();
           return new Response(null, { status: warmed.ok ? 204 : warmed.status });
         }
@@ -335,7 +338,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
               this.metadata.insert(providerKey, descriptor.provider!);
               if (descriptor.model !== undefined) this.metadata.insert(modelKey, descriptor.model);
               this.metadata.insert(executorKey, executor);
-              this.sessionId(scope, descriptor.session_id);
+              this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor));
             });
             this.unfinished = true;
             this.admissions++;
@@ -573,8 +576,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private runtime(scope: string, sessionId: string, descriptor: SessionDescriptor): Promise<AgentRuntime> {
       let resident = this.runtimes.get(scope);
+      const opening = JSON.stringify([sessionId, descriptor.provider ?? "claude", descriptor.model ?? null, descriptor.executor_id ?? null]);
       if (resident) return resident.then(async runtime => {
-        if (runtime.reusable && runtime.hands === this.handsMode(scope, descriptor) && runtime.subscription === descriptor.subscription) return runtime;
+        if (runtime.reusable && runtime.hands === this.handsMode(scope, descriptor) && runtime.subscription === descriptor.subscription && this.openedWith.get(resident!) === opening) return runtime;
         if (this.runtimes.get(scope) === resident) { this.runtimes.delete(scope); this.residents.delete(scope); }
         this.releaseHands(scope);
         await runtime.dispose().catch(() => {});
@@ -690,6 +694,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           return runtime;
         });
         this.runtimes.set(scope, resident);
+        this.openedWith.set(resident, opening);
         void resident.catch(() => { if (this.runtimes.get(scope) === resident) { this.runtimes.delete(scope); this.residents.delete(scope); } });
       }
       return resident;
@@ -973,7 +978,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (!sessionId) return false;
       const provider = (this.metadata.get(`model_provider:${scope}`) ?? "claude") as ModelProvider;
       const executor = this.metadata.get(`executor:${scope}`) ?? this.legacyExecutor();
-      const descriptor: SessionDescriptor = { ...base, executor_id: executor || undefined, hand: undefined, provider, subscription: provider === "codex" ? base.codex_subscription ?? true : base.subscription };
+      const model = this.metadata.get("model:" + scope);
+      const descriptor: SessionDescriptor = { ...base, executor_id: executor || undefined, hand: undefined, provider, ...(model === undefined ? {} : { model }), subscription: provider === "codex" ? base.codex_subscription ?? true : base.subscription };
       const resident = this.runtimes.get(scope);
       const busy = this.pumping || !this.queueKnownEmpty() || !!this.metadata.first("background:");
       const current = resident && busy ? await resident.catch(() => undefined) : undefined;
@@ -987,6 +993,30 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (!this.pumping && !this.unfinished && !this.metadata.first("background:")) this.releaseIdle(true);
       return true;
     }
+
+    private async prewarm(scope: string, base: SessionDescriptor, provider: ModelProvider, model: string): Promise<boolean> {
+      if (this.metadata.get(this.sessionKey(scope)) !== undefined) return await this.warm(scope, base);
+      if (this.pumping || this.metadata.first("background:")) return false;
+      const executor = this.legacyExecutor();
+      let entry = this.prewarmed.get(scope);
+      if (!entry || entry.provider !== provider || entry.model !== model || entry.executor !== executor) {
+        entry = { session: sessionUuid(), provider, model, executor };
+        this.prewarmed.set(scope, entry);
+      }
+      const descriptor: SessionDescriptor = { ...base, executor_id: executor || undefined, hand: undefined, provider, model, subscription: provider === "codex" ? base.codex_subscription ?? true : base.subscription };
+      const runtime = await this.runtime(scope, entry.session, descriptor);
+      await runtime.preconnect();
+      if (!this.pumping && !this.metadata.first("background:")) this.releaseIdle(true);
+      return true;
+    }
+
+    private claimPrewarmed(scope: string, descriptor: SessionDescriptor): string | undefined {
+      const entry = this.prewarmed.get(scope);
+      this.prewarmed.delete(scope);
+      if (!entry || entry.provider !== descriptor.provider || entry.model !== descriptor.model || entry.executor !== (descriptor.executor_id ?? "")) return undefined;
+      return entry.session;
+    }
+
     private executorEnabled(descriptor: SessionDescriptor): boolean {
       return !!descriptor.executor_id || this.env.RUNNER_ENABLED === "true";
     }
