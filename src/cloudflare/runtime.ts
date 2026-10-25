@@ -1,7 +1,7 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
 import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
-import { Bash, SqlFileSystem, githubArchives, type Limits, type PythonRemote } from "../bash/index.ts";
+import { Bash, SqlFileSystem, githubArchives, withGitHub, type Limits, type PythonRemote } from "../bash/index.ts";
 import { guard } from "../egress.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
 import wasm from "nanocode-ts/nanocode_wasm.wasm";
@@ -52,6 +52,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   subagents?: boolean;
   streamToolInput?: boolean;
   codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch };
+  github?: { token?(env: E, authority: SessionAuthority): string | null | undefined | Promise<string | null | undefined> };
   mcp?: { servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[]); fetch?(authority: SessionAuthority, env: E): typeof fetch; deferred?: boolean; core?: Record<string, readonly string[]> };
   instructions?: string;
   handInstructions?: string;
@@ -593,7 +594,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             ? connectExecutor(options.egress(this.env), authority, this.handLimits()).then(value => remote = value, error => { remoteFailed = true; remoteError = error; throw error; }).finally(() => this.scopeTimings(scope).record("remote.connect", performance.now() - connectStarted))
             : undefined;
           void connecting?.catch(() => {});
-          const cellFetch = guard((options.codeMode || undefined)?.fetch?.(authority, this.env) ?? githubArchives());
+          const githubToken = options.github?.token;
+          const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined };
+          const hostFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env);
+          const cellFetch = guard(hostFetch ? withGitHub(hostFetch, github) : githubArchives(undefined, github));
           const pythonRemote = options.workspace ? options.workspace.python?.(authority, this.env) : undefined;
           const mcpServers = typeof options.mcp?.servers === "function" ? options.mcp.servers(authority, this.env) : options.mcp?.servers ?? [];
           const mcpFetch = options.mcp?.fetch?.(authority, this.env) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));

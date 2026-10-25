@@ -5,7 +5,7 @@ import { type Dispatch, gatewayDispatch, gatewayEndpoint } from "./gateway.ts";
 import { type Durability, type JournalStats, SqlJournal } from "./journal.ts";
 import { threadEngine } from "../thread.ts";
 import { nanocodeModule } from "./module.ts";
-import { Bash, type FileSystem, SqlFileSystem } from "../bash/index.ts";
+import { Bash, type FileSystem, SqlFileSystem, withGitHub } from "../bash/index.ts";
 import { dataUrl, MAX_PROMPT_IMAGES, PROMPT_IMAGE_TYPES, sniff, writeFile } from "../files.ts";
 import { dialHand } from "./hands.ts";
 import { egress } from "./egress.ts";
@@ -48,6 +48,7 @@ export interface NanocodeHarnessOptions {
   subagents?: boolean;
   streamToolInput?: boolean;
   codeMode?: boolean;
+  github?: { token?(sessionId: string): string | null | undefined | Promise<string | null | undefined> };
   workspace?: false | { cwd?: string; files?: Record<string, string> };
   fetch?: typeof fetch;
   sessionFetch?(sessionId: string): typeof fetch;
@@ -140,7 +141,8 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch;
-    const cellFetch = egress(configuredFetch);
+    const githubToken = options.github?.token;
+    const cellFetch = withGitHub(egress(configuredFetch), { token: githubToken ? () => githubToken(ctx.runId) : undefined });
     const files = options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE);
     const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(configuredFetch ? { fetch: cellFetch } : {}) });
     const mcpServers = options.mcp?.servers ?? [];
