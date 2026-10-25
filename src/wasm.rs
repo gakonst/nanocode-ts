@@ -147,6 +147,8 @@ struct Configuration {
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
+    workspace_tools: Option<WorkspaceToolSelection>,
+    #[serde(default)]
     mcp_servers: Vec<mcp::Server>,
     #[serde(default)]
     hand_tools: Option<HashMap<String, remote::ToolSelection>>,
@@ -499,6 +501,36 @@ thread_local! {
     static BLOB_THRESHOLD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceTools {
+    All,
+    Files,
+    None,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkspaceToolSelection {
+    All(WorkspaceTools),
+    Providers {
+        #[serde(default)]
+        claude: Option<WorkspaceTools>,
+        #[serde(default)]
+        codex: Option<WorkspaceTools>,
+    },
+}
+
+impl WorkspaceToolSelection {
+    const fn get(&self, provider: Provider) -> Option<WorkspaceTools> {
+        match (self, provider) {
+            (Self::All(tools), _) => Some(*tools),
+            (Self::Providers { claude, .. }, Provider::Claude) => *claude,
+            (Self::Providers { codex, .. }, Provider::Codex) => *codex,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum WebSearch {
@@ -825,21 +857,37 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             }),
         }
     };
+    let workspace_tools = |family: Provider| {
+        config
+            .workspace_tools
+            .as_ref()
+            .and_then(|selection| selection.get(family))
+            .unwrap_or(match family {
+                Provider::Codex if local => WorkspaceTools::Files,
+                _ => WorkspaceTools::All,
+            })
+    };
     let selected = |family: Provider| -> Result<Tools, Opening> {
-        let base = match config.workspace.as_deref() {
-            Some(root) => match family {
-                Provider::Claude => nanocode::claude::host_tools(
+        let base = match (config.workspace.as_deref(), workspace_tools(family), family) {
+            (Some(root), WorkspaceTools::All, Provider::Claude) => nanocode::claude::host_tools(
+                root.into(),
+                Arc::new(workspace::HostFiles),
+                Arc::new(workspace::HostShell),
+            ),
+            (Some(root), WorkspaceTools::All, Provider::Codex) => {
+                nanocode::codex_tools::host_tools(
                     root.into(),
                     Arc::new(workspace::HostFiles),
                     Arc::new(workspace::HostShell),
-                ),
-                Provider::Codex => nanocode::codex_tools::host_tools(
-                    root.into(),
-                    Arc::new(workspace::HostFiles),
-                    Arc::new(workspace::HostShell),
-                ),
-            },
-            None => Tools::builder().without_defaults().build(),
+                )
+            }
+            (Some(root), WorkspaceTools::Files, Provider::Claude) => {
+                nanocode::claude::host_file_tools(root.into(), Arc::new(workspace::HostFiles))
+            }
+            (Some(root), WorkspaceTools::Files, Provider::Codex) => {
+                nanocode::codex_tools::host_file_tools(root.into(), Arc::new(workspace::HostFiles))
+            }
+            _ => Tools::builder().without_defaults().build(),
         }
         .map_err(configuration)?;
         let tools = shared

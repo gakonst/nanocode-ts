@@ -1,6 +1,6 @@
 import { DurableObjectBlobs } from "./sql.ts";
 import { DurableObject } from "cloudflare:workers";
-import { AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
+import { type AgentConfiguration, AgentRuntime, EventHub, HostFailure, RECENT_MODEL_LIMIT, RemoteExecutor, RemoteRefusal, Timings, sessionUuid, timingDifference, type HostTool, type LoggedEvent, type LogPage, type McpServer, type ModelProvider, type TimingSnapshot, type TurnView } from "../index.ts";
 import { Bash, SqlFileSystem, githubArchives, withGitHub, type Limits, type PythonRemote } from "../bash/index.ts";
 import { guard } from "../egress.ts";
 import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from "../files.ts";
@@ -57,6 +57,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
   instructions?: string;
   handInstructions?: string;
   workspace?: false | { cwd?: string; files?: Record<string, string>; limits?: Partial<Limits>; maxFileBytes?: number; python?(authority: SessionAuthority, env: E): PythonRemote | undefined };
+  workspaceTools?: AgentConfiguration["workspace_tools"];
   valueLimit?: number;
 };
 
@@ -609,7 +610,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.mcp ? { mcp: { ...(options.mcp.deferred === undefined ? {} : { deferred: options.mcp.deferred }), ...(options.mcp.core ? { core: options.mcp.core } : {}) } } : {}),
           fetch: cellFetch,
