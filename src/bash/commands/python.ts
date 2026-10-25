@@ -37,9 +37,9 @@ export type Pyodide = {
   setInterruptBuffer(buffer: unknown): void;
 };
 
-export type PythonRequest = { kind: "code" | "stdin" | "file" | "module" | "pip" | "version"; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; roots: string[]; dirs: string[]; files: [string, string][]; stdin: string; timeoutMs: number };
+export type PythonRequest = { kind: "code" | "stdin" | "file" | "module" | "pip" | "version"; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; roots: string[]; dirs: string[]; files: [string, string][]; stdin: string; timeoutMs: number; mirror?: string; keep?: string[]; sync?: boolean; fetch?: string[] };
 
-export type PythonReply = { status: number; stdout: string; stderr: string; dirs: string[]; files: [string, string | null][] };
+export type PythonReply = { status: number; stdout: string; stderr: string; dirs: string[]; files: [string, string | null][]; mirror?: string; missing?: string[]; more?: string[] };
 
 export type PythonRemote = (request: PythonRequest, signal: AbortSignal) => Promise<PythonReply>;
 
@@ -49,6 +49,7 @@ export type PythonOptions = {
   indexURL?: string;
   maxBytes?: number;
   maxFiles?: number;
+  batchBytes?: number;
   worker?: boolean;
 };
 
@@ -56,7 +57,11 @@ type Mode = { kind: "code" | "stdin" | "file" | "module" | "pip"; target: string
 
 type Tree = { files: Map<string, Uint8Array>; dirs: Set<string> };
 
-type Snapshot = Tree & { partial: Set<string>; bytes: number; entries: number };
+type Snapshot = Tree & { partial: Set<string>; bytes: number; entries: number; left: number; leftBytes: number };
+
+type Listing = { files: Map<string, string>; dirs: Set<string>; partial: Set<string>; bytes: number; left: number; leftBytes: number };
+
+type Mirror = { id: string; known: Map<string, string> };
 
 type Instance = { pyodide: Pyodide; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; mirrored: Set<string>; queue: Promise<unknown>; micropip: boolean };
 
@@ -417,7 +422,7 @@ function within(path: string, dir: string): boolean {
 }
 
 async function snapshot(fs: FileSystem, roots: string[], maxBytes: number, maxFiles: number): Promise<Snapshot> {
-  const result: Snapshot = { files: new Map(), dirs: new Set(), partial: new Set(), bytes: 0, entries: 0 };
+  const result: Snapshot = { files: new Map(), dirs: new Set(), partial: new Set(), bytes: 0, entries: 0, left: 0, leftBytes: 0 };
   const queue = [...roots];
   for (let index = 0; index < queue.length; index++) {
     const path = queue[index];
@@ -427,6 +432,10 @@ async function snapshot(fs: FileSystem, roots: string[], maxBytes: number, maxFi
     if (!stat) continue;
     if (result.entries >= maxFiles || (stat.kind === "file" && result.bytes + stat.size > maxBytes)) {
       result.partial.add(stat.kind === "file" ? parentOf(path) : path);
+      if (stat.kind === "file") {
+        result.left++;
+        result.leftBytes += stat.size;
+      }
       continue;
     }
     result.entries++;
@@ -540,13 +549,14 @@ function parse(ctx: CommandContext, args: string[]): Mode | "help" | "version" {
 export function pythonCommands(options: PythonOptions = {}): Record<string, CommandHandler> {
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
   const maxFiles = options.maxFiles ?? 20_000;
+  const mirror: Mirror = { id: crypto.randomUUID(), known: new Map() };
   const handler: CommandHandler = async ctx => {
     const mode = parse(ctx, ctx.args.slice());
     if (mode === "help") {
       ctx.stdout.write(usage(ctx.name) + "\nPython on Pyodide " + PYODIDE_VERSION + " (CPython for WebAssembly), with pip install through micropip\n");
       return 0;
     }
-    if (options.remote) return executeRemote(ctx, options.remote, mode, maxBytes, maxFiles);
+    if (options.remote) return executeRemote(ctx, options.remote, mode, maxBytes, maxFiles, mirror, options.batchBytes ?? 6 * 1024 * 1024);
     if (!canCompile()) {
       ctx.stderr.write(NO_WASM + "\n");
       return 126;
@@ -581,36 +591,135 @@ function unbase64(text: string): Uint8Array {
   return bytes;
 }
 
-async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mode | "version", maxBytes: number, maxFiles: number): Promise<number> {
+async function scan(fs: FileSystem, roots: string[], maxBytes: number, maxFiles: number, maxFileBytes: number): Promise<Listing> {
+  const result: Listing = { files: new Map(), dirs: new Set(), partial: new Set(), bytes: 0, left: 0, leftBytes: 0 };
+  const queue = [...roots];
+  let entries = 0;
+  for (let index = 0; index < queue.length; index++) {
+    const path = queue[index];
+    if (reserved(path) || result.files.has(path) || result.dirs.has(path)) continue;
+    if (index % 256 === 0) await breathe();
+    const stat = await fs.stat(path);
+    if (!stat) continue;
+    if (stat.kind === "file" && (entries >= maxFiles || result.bytes + stat.size > maxBytes || stat.size > maxFileBytes)) {
+      result.partial.add(parentOf(path));
+      result.left++;
+      result.leftBytes += stat.size;
+      continue;
+    }
+    if (stat.kind !== "file" && entries >= maxFiles) {
+      result.partial.add(path);
+      continue;
+    }
+    entries++;
+    if (stat.kind === "file") {
+      result.bytes += stat.size;
+      result.files.set(path, stat.size + ":" + stat.mtime);
+      continue;
+    }
+    result.dirs.add(path);
+    for (const name of await fs.list(path)) queue.push(join(path, name));
+  }
+  return result;
+}
+
+function leftOut(ctx: CommandContext, left: number, bytes: number, partial: Set<string>, limit: string): void {
+  if (!left && !partial.size) return;
+  const where = [...partial].sort().slice(0, 3).join(", ");
+  ctx.stderr.write(ctx.name + ": warning: Python cannot see " + (left ? left + " file" + (left === 1 ? "" : "s") + " (" + (bytes / 1024 / 1024).toFixed(1) + " MiB) " : "some files ") + "under " + where + (partial.size > 3 ? " and " + (partial.size - 3) + " more directories" : "") + ", past " + limit + "; cd into the directory the script needs, or move large files out of it\n");
+}
+
+async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mode | "version", maxBytes: number, maxFiles: number, mirror: Mirror, batchBytes: number): Promise<number> {
   const stdin = ctx.stdin.read();
   const kind = mode === "version" ? "version" : mode.kind;
   const roots = mode === "version" ? [] : [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
   const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
-  const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
+  const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, 2 * batchBytes);
   if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
   const target = mode === "version" ? "" : mode.kind === "file" ? "" : mode.kind === "stdin" ? stdin : mode.target;
-  const request: PythonRequest = { kind, name: ctx.name, target, argv: mode === "version" ? [] : mode.argv, filename: mode === "version" ? "" : mode.filename, cwd: ctx.cwd, env: { ...ctx.env, PWD: ctx.cwd }, roots: unique, dirs: [...snap.dirs], files: [...snap.files].map(([path, data]) => [path, base64(data)]), stdin: mode !== "version" && mode.kind === "stdin" ? "" : stdin, timeoutMs: ctx.limits.timeoutMs };
-  let reply: PythonReply;
-  try {
-    reply = await remote(request, ctx.signal);
-  } catch (error) {
-    if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
-    throw new CommandError(ctx.name + ": " + (error instanceof Error ? error.message : String(error)), 127);
+  const base = { name: ctx.name, cwd: ctx.cwd, env: { ...ctx.env, PWD: ctx.cwd }, roots: unique, dirs: [...tree.dirs], timeoutMs: ctx.limits.timeoutMs, mirror: mirror.id };
+  const call = async (request: PythonRequest): Promise<PythonReply> => {
+    try {
+      return await remote(request, ctx.signal);
+    } catch (error) {
+      if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+      throw new CommandError(ctx.name + ": " + (error instanceof Error ? error.message : String(error)), 127);
+    }
+  };
+  const control = { ...base, kind: "version" as const, target: "", argv: [], filename: "", stdin: "", keep: [] };
+  const upload = async (paths: string[]): Promise<[string, string][]> => {
+    let batch: [string, string][] = [];
+    let bytes = 0;
+    for (const path of paths) {
+      const data = await ctx.fs.read(path).catch(() => null);
+      if (!data) continue;
+      if (batch.length && bytes + data.length > batchBytes) {
+        const reply = await call({ ...control, files: batch, sync: true });
+        if (reply.mirror !== mirror.id) throw new CommandError(ctx.name + ": this directory holds more than one upload and the Python service does not keep files between runs; run python3 from a smaller directory", 127);
+        for (const [sent] of batch) mirror.known.set(sent, tree.files.get(sent)!);
+        batch = [];
+        bytes = 0;
+      }
+      batch.push([path, base64(data)]);
+      bytes += data.length;
+    }
+    return batch;
+  };
+  let pending = [...tree.files.keys()].filter(path => mirror.known.get(path) !== tree.files.get(path));
+  let reply: PythonReply | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const files = await upload(pending);
+    const sent = new Set(files.map(([path]) => path));
+    const keep = [...tree.files.keys()].filter(path => !sent.has(path) && mirror.known.get(path) === tree.files.get(path));
+    reply = await call({ ...base, kind, target, argv: mode === "version" ? [] : mode.argv, filename: mode === "version" ? "" : mode.filename, files, keep, stdin: mode !== "version" && mode.kind === "stdin" ? "" : stdin });
+    if (!reply.missing?.length || attempt >= 2) break;
+    for (const path of reply.missing) mirror.known.delete(path);
+    for (const [path] of files) mirror.known.set(path, tree.files.get(path)!);
+    pending = reply.missing.filter(path => tree.files.has(path));
   }
+  if (reply.mirror !== mirror.id) mirror.known.clear();
+  if (reply.missing?.length) throw new CommandError(ctx.name + ": the Python service kept losing this workspace's files; try again", 127);
+  leftOut(ctx, tree.left, tree.leftBytes, tree.partial, "the " + (maxBytes / 1024 / 1024).toFixed(0) + " MiB or " + maxFiles + "-file limit for Python");
   if (reply.stdout) ctx.stdout.write(reply.stdout);
   if (reply.stderr) ctx.stderr.write(reply.stderr);
   if (unique.length) {
-    const after: Tree = { files: new Map(), dirs: new Set(reply.dirs) };
-    for (const [path, data] of reply.files) {
-      const bytes = data === null ? snap.files.get(path) : unbase64(data);
-      if (bytes) after.files.set(path, bytes);
+    const changed = new Map<string, string>();
+    for (const [path, data] of reply.files) if (data !== null) changed.set(path, data);
+    for (let more = reply.more ?? []; more.length;) {
+      const fetched = await call({ ...control, files: [], fetch: more });
+      for (const [path, data] of fetched.files) if (data !== null) changed.set(path, data);
+      more = fetched.more ?? [];
+      if (!fetched.files.length) break;
     }
-    await writeBack(ctx.fs, snap, after);
+    const present = new Set(reply.files.map(([path]) => path));
+    const dirs = new Set(reply.dirs);
+    const partial = (path: string) => [...tree.partial].some(dir => within(dir, path));
+    const removals = [...tree.files.keys(), ...tree.dirs].filter(path => !present.has(path) && !dirs.has(path)).sort((a, b) => b.length - a.length);
+    for (const path of removals) {
+      if (tree.dirs.has(path) && (partial(path) || dirs.has(path))) continue;
+      mirror.known.delete(path);
+      await ctx.fs.remove(path).catch(error => {
+        if (!(error instanceof FsError)) throw error;
+      });
+    }
+    for (const dir of [...dirs].sort()) if (!tree.dirs.has(dir)) await mkdirs(ctx.fs, dir);
+    for (const [path, data] of reply.files) {
+      if (data !== null || !tree.files.has(path)) continue;
+      if (reply.mirror === mirror.id) mirror.known.set(path, tree.files.get(path)!);
+    }
+    for (const [path, data] of changed) {
+      await breathe();
+      await mkdirs(ctx.fs, parentOf(path));
+      await ctx.fs.write(path, unbase64(data));
+      const stat = await ctx.fs.stat(path);
+      if (stat && reply.mirror === mirror.id) mirror.known.set(path, stat.size + ":" + stat.mtime);
+    }
   }
   if (reply.status >= 0) return reply.status;
   if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
   throw new CommandError("timed out after " + ctx.limits.timeoutMs + " ms", 124);
 }
+
 
 async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number): Promise<number> {
   if (mode === "version") {
@@ -620,6 +729,7 @@ async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdi
   const roots = [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
   const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
   const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
+  leftOut(ctx, snap.left, snap.leftBytes, snap.partial, "the " + (maxBytes / 1024 / 1024).toFixed(0) + " MiB or " + maxFiles + "-file limit for Python");
   const target = mode.kind === "stdin" ? stdin : mode.kind === "file" ? new TextDecoder().decode(snap.files.get(mode.filename) ?? (await ctx.fs.read(mode.filename))) : mode.target;
   if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
   const env = { ...ctx.env, PWD: ctx.cwd, PYTHONDONTWRITEBYTECODE: "1" };
@@ -645,6 +755,7 @@ async function execute(ctx: CommandContext, python: Instance, mode: Mode | "vers
   for (const path of python.mirrored) unmirror(pyodide.FS, path);
   python.mirrored = new Set(unique);
   const snap = await snapshot(ctx.fs, unique, Math.min(maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2)), maxFiles);
+  leftOut(ctx, snap.left, snap.leftBytes, snap.partial, "the " + (Math.min(maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2)) / 1024 / 1024).toFixed(0) + " MiB or " + maxFiles + "-file limit for Python");
   mirror(pyodide.FS, snap);
   pyodide.FS.mkdirTree(ctx.cwd);
 

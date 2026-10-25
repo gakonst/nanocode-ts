@@ -17,7 +17,7 @@ export { THINKING } from "./contracts.ts";
 const WORKSPACE_MEMORY_BYTES = 48 * 1024 * 1024;
 
 const WORKSPACE_FILE_BYTES = 32 * 1024 * 1024;
-const PYTHON_REMOTE_BYTES = 8 * 1024 * 1024;
+const PYTHON_REMOTE_BYTES = 256 * 1024 * 1024;
 
 const WORKERS_AI_MODELS = new Set(["glm-5.3"]);
 
