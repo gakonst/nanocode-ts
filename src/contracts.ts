@@ -60,9 +60,12 @@ export type AgentConfiguration = {
   tools?: HostTool[];
   web_search?: boolean | Partial<Record<ModelProvider, boolean>>;
   workspace?: string;
+  workspace_tools?: WorkspaceTools | Partial<Record<ModelProvider, WorkspaceTools>>;
   mcp_servers?: McpServer[];
   hand_tools?: Partial<Record<ModelProvider, HandToolSelection>>;
 };
+
+export type WorkspaceTools = "all" | "files" | "none";
 
 export type McpServer = { name: string; url: string; headers?: Record<string, string>; bearer_token?: string };
 

@@ -50,6 +50,7 @@ export interface NanocodeHarnessOptions {
   codeMode?: boolean;
   github?: { token?(sessionId: string): string | null | undefined | Promise<string | null | undefined> };
   workspace?: false | { cwd?: string; files?: Record<string, string> };
+  workspaceTools?: AgentConfiguration["workspace_tools"];
   fetch?: typeof fetch;
   sessionFetch?(sessionId: string): typeof fetch;
   hands?: false | NanocodeHands;
@@ -172,6 +173,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           ...(options.webSearch === false ? { web_search: false } : {}),
           ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
           ...(shell ? { workspace: shell.cwd } : {}),
+          ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}),
         }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           ...(options.mcp ? { mcp: { ...(options.mcp.deferred === undefined ? {} : { deferred: options.mcp.deferred }), ...(options.mcp.core ? { core: options.mcp.core } : {}) } } : {}),
