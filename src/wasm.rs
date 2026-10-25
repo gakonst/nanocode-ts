@@ -778,7 +778,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     });
     let codex_search = codex
         .as_ref()
-        .filter(|endpoint| !matches!(endpoint.gateway, Some(Gateway::WorkersAi)))
+        .filter(|endpoint| {
+            !matches!(endpoint.gateway, Some(Gateway::WorkersAi))
+                || !endpoint.endpoint.trim().is_empty()
+        })
         .map(|endpoint| {
             (
                 endpoint.endpoint.clone(),
