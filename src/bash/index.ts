@@ -1,6 +1,6 @@
 import type { HostTool, WorkspaceHost } from "../contracts.ts";
 import { FsError, MemoryFileSystem, decode, display, encode, parentOf, resolvePath, type FileInput, type FileSystem } from "./fs.ts";
-import { BUILTINS, Input, LimitError, Output, Runner, State, run, type CommandHandler, type Limits } from "./shell.ts";
+import { BUILTINS, Input, LimitError, Output, Runner, State, megabytes, run, type CommandHandler, type Limits } from "./shell.ts";
 import { fileCommands, mkdirs } from "./commands/files.ts";
 import { textCommands } from "./commands/text.ts";
 import { sed } from "./commands/sed.ts";
@@ -10,6 +10,7 @@ import { curl, wget } from "./commands/curl.ts";
 import { unzip, zip } from "./commands/zip.ts";
 import { patch } from "./commands/patch.ts";
 import { extraCommands } from "./commands/extra.ts";
+import { systemCommands } from "./commands/system.ts";
 import { gitCommands, type GitHubOptions } from "./commands/git.ts";
 import { wasmCommands, wasmHost, type WasmOptions } from "./commands/wasm.ts";
 import { pythonCommands, type PythonOptions } from "./commands/python.ts";
@@ -56,11 +57,11 @@ export const DEFAULT_LIMITS: Limits = {
   maxOutputLength: 1_000_000,
   maxBufferLength: 16_000_000,
   maxMemoryBytes: 1 << 30,
-  maxFileOperations: 100_000,
+  maxFileOperations: 1_000_000,
   timeoutMs: 30_000,
 };
 
-const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, wget, patch, unzip, zip, wat2wasm: async context => (await import("./commands/wat.ts")).wat(context) };
+const COMMANDS: Record<string, CommandHandler> = { ...fileCommands, ...textCommands, ...extraCommands, ...systemCommands, ...gitCommands(), ...wasmCommands(), ...pythonCommands(), sed, awk, gawk: awk, jq, curl, wget, patch, unzip, zip, wat2wasm: async context => (await import("./commands/wat.ts")).wat(context) };
 
 export const BASH_COMMANDS = Object.keys(COMMANDS).sort();
 
@@ -175,6 +176,7 @@ export class Bash {
         const stat = await this.fs.stat(target);
         if (!stat) return null;
         if (stat.kind !== "file") throw new FsError("EISDIR", target);
+        if (6 * stat.size > this.limits.maxMemoryBytes) throw new LimitError(path + " is " + megabytes(stat.size) + ", more than the " + megabytes(Math.floor(this.limits.maxMemoryBytes / 6)) + " this host's file tools read whole; read parts of it with bash (head -c, tail -c, sed -n, grep, split) instead");
         return display(decode(await this.fs.read(target)));
       },
       write: (path, contents) => this.writeFile(path, contents),

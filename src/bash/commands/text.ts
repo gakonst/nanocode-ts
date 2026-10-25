@@ -119,6 +119,11 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
   const size = byteSpec !== undefined && !tail && !byteSpec.startsWith("-") ? Math.max(0, count(byteSpec, 0)) : undefined;
   let status = 0;
   for (const operand of parsed.operands.length ? parsed.operands : ["-"]) {
+    if (size !== undefined && device(ctx.resolve(operand), 0) !== undefined) {
+      header(operand);
+      for (let remaining = size; remaining > 0; remaining -= 1 << 20) await put(ctx, device(ctx.resolve(operand), Math.min(remaining, 1 << 20))!);
+      continue;
+    }
     if (operand !== "-" && operand !== "/dev/stdin" && operand !== "/dev/fd/0") {
       status |= await eachInput(ctx, [operand], async (text, name) => {
         header(name);
