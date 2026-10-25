@@ -1641,6 +1641,7 @@ version = "0.6.7"
 dependencies = [
  "nanocode-home",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

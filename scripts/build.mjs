@@ -35,7 +35,8 @@ const sysroot = join(wasiSdk, "share", "wasi-sysroot");
 const cflags = "--target=wasm32-wasip1 --sysroot=" + sysroot;
 process.env.CC_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "clang");
 process.env.AR_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "ar");
-process.env.CFLAGS_wasm32_unknown_unknown ??= cflags + " -DEMSCRIPTEN=1 -DFE_DOWNWARD=0 -DFE_UPWARD=0 -include " + join(process.cwd(), "..", "nanocodex", "crates", "runtime", "code-mode-engine", "wasm", "quickjs-wasi.h");
+const quickjsHeader = join(process.cwd(), "..", "nanocodex", "crates", "runtime", "code-mode-engine", "wasm", "quickjs-wasi.h");
+process.env.CFLAGS_wasm32_unknown_unknown ??= cflags + " -DEMSCRIPTEN=1 -DFE_DOWNWARD=0 -DFE_UPWARD=0 -DNANOCODE_QUICKJS_WASI_H=0x" + createHash("sha256").update(readFileSync(quickjsHeader)).digest("hex").slice(0, 12) + " -include " + quickjsHeader;
 process.env.BINDGEN_EXTRA_CLANG_ARGS_wasm32_unknown_unknown ??= cflags + " -fvisibility=default";
 process.env.WASI_SYSROOT ??= sysroot;
 

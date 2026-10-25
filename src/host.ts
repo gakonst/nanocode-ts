@@ -73,6 +73,7 @@ export class AgentRuntime {
   private nextSocket = 0;
   private nextCommand = 0;
   private depth = 0;
+  private stackEntry = 0;
   private stopped = false;
   private failure?: Error;
   private disposal?: Promise<void>;
@@ -401,6 +402,10 @@ export class AgentRuntime {
         cancel();
       },
       clock: (monotonic: number) => monotonic ? performance.now() : Date.now(),
+      stack_room: (want: number, entry: number) => {
+        this.stackEntry = entry;
+        return stackRoom(want);
+      },
       calendar_date: (pointer: number, length: number) => {
         try {
           const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: this.read(pointer, length), year: "numeric", month: "numeric", day: "numeric" }).formatToParts(Date.now()).map(part => [part.type, Number(part.value)]));
@@ -780,6 +785,7 @@ export class AgentRuntime {
     }
     if (this.stopped) return;
     this.depth++;
+    if (this.stackEntry) new Uint32Array(this.wasm.memory.buffer, this.stackEntry, 1)[0]++;
     const started = performance.now();
     try {
       call();
@@ -881,6 +887,28 @@ function shellQuote(text: string): string {
 }
 
 const FILE_CHUNK = 600_000;
+
+const STACK_STEP = 16_384;
+const stackArgs = new Array<number>(STACK_STEP / 8).fill(0);
+let stackLevels = 0;
+
+function stackDescend(): number {
+  if (--stackLevels <= 0) return 1;
+  try {
+    return 1 + Reflect.apply(stackDescend, undefined, stackArgs);
+  } catch {
+    return 1;
+  }
+}
+
+function stackRoom(want: number): number {
+  stackLevels = Math.floor(want / STACK_STEP);
+  try {
+    return Reflect.apply(stackDescend, undefined, stackArgs) * STACK_STEP;
+  } catch {
+    return 0;
+  }
+}
 
 async function shellBytes(workspace: WorkspaceHost, command: string): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   const result = await workspace.run({ command, cwd: "/", timeout_ms: null }, new AbortController().signal);
