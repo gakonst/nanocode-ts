@@ -159,9 +159,21 @@ impl FunctionHandler for Wasm {
         _context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<Value, String>> {
         Box::pin(async move {
-            call(json!({"op": "cell_wasm", "request": input}))
-                .await
-                .map_err(failure)
+            let mut input = input;
+            match input
+                .as_object_mut()
+                .and_then(|fields| fields.remove("module_ref"))
+            {
+                Some(id) => {
+                    let module = id
+                        .as_u64()
+                        .and_then(bytes::take)
+                        .ok_or("the module bytes are gone")?;
+                    call_with_body(json!({"op": "cell_wasm", "request": input}), &module).await
+                }
+                None => call(json!({"op": "cell_wasm", "request": input})).await,
+            }
+            .map_err(failure)
         })
     }
 }
@@ -228,6 +240,7 @@ fn tools(workspace: Option<&str>) -> Vec<FunctionTool> {
                 "properties": {
                     "op": {"type": "string"},
                     "module": {"type": "string"},
+                    "module_ref": {"type": "integer"},
                     "path": {"type": "string"},
                     "args": {"type": "array"},
                     "stdin": {"type": "string"},
