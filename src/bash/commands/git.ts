@@ -1414,9 +1414,9 @@ export function githubArchives(fetcher: typeof fetch = globalThis.fetch, options
 }
 
 async function gitApply(ctx: CommandContext, args: string[]): Promise<number> {
-  const flags: string[] = ["-s", "-d", ctx.cwd];
+  const flags: string[] = ["-s", "-f", "-d", ctx.cwd];
   const files: string[] = [];
-  let strip = "1";
+  let strip: string | undefined;
   let check = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -1428,10 +1428,10 @@ async function gitApply(ctx: CommandContext, args: string[]): Promise<number> {
     else if (arg.startsWith("-") && arg !== "-") continue;
     else files.push(arg);
   }
-  const argv = ["patch", "-p" + strip, "-f", ...flags, ...(check ? ["--dry-run"] : [])];
-  if (!files.length || files.includes("-")) return ctx.run(argv);
-  for (const file of files) {
-    const status = await ctx.run([...argv, "-i", ctx.resolve(file)]);
+  const patches = !files.length || files.includes("-") ? [await ctx.stdin.text()] : await Promise.all(files.map(async file => new TextDecoder().decode(await ctx.fs.read(ctx.resolve(file)))));
+  for (const patch of patches) {
+    const level = strip ?? (/^\+\+\+ (?!\/dev\/null)[^\s/]+(?:\s|$)/m.test(patch) && !/^\+\+\+ [ab]\//m.test(patch) ? "0" : "1");
+    const status = await ctx.run(["patch", "-p" + level, ...flags, ...(check ? ["--dry-run"] : [])], patch);
     if (status !== 0) return status;
   }
   return 0;
