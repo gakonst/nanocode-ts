@@ -104,6 +104,12 @@ function table(text: string): string {
   return lines.join("\n");
 }
 
+const SPACED = /(!?\[[^\]\n]*\]\()((?:workspace|sandbox):[^()<>\n]*?)(\s+"[^"\n]*")?\)/g;
+
+function spaced(text: string): string {
+  return text.includes("workspace:") || text.includes("sandbox:") ? text.replace(SPACED, (whole: string, open: string, destination: string, title: string | undefined) => /\s/.test(destination) ? open + "<" + destination + ">" + (title ?? "") + ")" : whole) : text;
+}
+
 export default function Streamed(props: MarkdownProps) {
   const part = usePart();
   const render = useRef(props.code);
@@ -122,7 +128,7 @@ export default function Streamed(props: MarkdownProps) {
       parseIncompleteMarkdown
       rehypePlugins={REHYPE}
     >
-      {props.live === false ? props.text : table(props.text)}
+      {spaced(props.live === false ? props.text : table(props.text))}
     </Streamdown>
   );
 }
