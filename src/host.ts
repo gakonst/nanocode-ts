@@ -187,8 +187,6 @@ export class AgentRuntime {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
     this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, live: this.options.live, wake: this.options.wake, blobs: this.options.blobs };
-    const extra = config.code_mode ? options.workspace?.instructions : undefined;
-    if (extra && !config.instructions?.includes(extra)) config = { ...config, instructions: config.instructions ? config.instructions + "\n\n" + extra : extra };
     this.hands = config.hands ?? false;
     this.remote = config.remote ?? false;
     this.subscription = config.subscription;

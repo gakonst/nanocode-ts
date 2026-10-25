@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { Sandbox, type NetworkPolicy, type SandboxRegion } from "@vercel/sandbox";
 import type { WorkspaceHost } from "../contracts.ts";
-import { collector, resolvePath, SANDBOX_CWD, SANDBOX_OUTPUT_LIMIT_BYTES, sandboxInstructions, shellOutput, timeoutArgv } from "./shell.ts";
+import { collector, resolvePath, SANDBOX_CWD, SANDBOX_OUTPUT_LIMIT_BYTES, shellOutput, timeoutArgv } from "./shell.ts";
 
 export type VercelSandboxOptions = {
   name: string;
@@ -24,7 +24,6 @@ export type VercelSandboxWorkspace = WorkspaceHost & { sandbox(): Promise<Sandbo
 
 export const VERCEL_SANDBOX_LEASE_MS = 5 * 60_000;
 
-export const VERCEL_SANDBOX_INSTRUCTIONS = sandboxInstructions("a Vercel Sandbox, a Firecracker microVM running Ubuntu with Node.js, Python 3, git and passwordless sudo (`sudo apt-get install -y PKG` adds system packages, `pip install --user PKG` Python ones)");
 
 export function vercelSandbox(options: VercelSandboxOptions): VercelSandboxWorkspace {
   const cwd = options.cwd ?? SANDBOX_CWD;
@@ -70,7 +69,7 @@ export function vercelSandbox(options: VercelSandboxOptions): VercelSandboxWorks
   };
 
   return {
-    instructions: options.instructions ?? VERCEL_SANDBOX_INSTRUCTIONS,
+    ...(options.instructions ? { instructions: options.instructions } : {}),
     sandbox: () => open(),
     stop: async () => {
       const current = opening;
