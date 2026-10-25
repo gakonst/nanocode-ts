@@ -961,6 +961,12 @@ export type HistoryStorage = { getItem(key: string): string | null; setItem(key:
 
 export type HistoryOptions = { key: string; storage?: HistoryStorage; limit?: number };
 
+type TabLocks = { request(name: string, options: { signal?: AbortSignal }, callback: (lock: unknown) => unknown): Promise<unknown> };
+
+type TabChannel = { postMessage(message: unknown): void; addEventListener(type: "message", listener: (event: { data: unknown }) => void): void };
+
+type TabMessage = { type: "state"; id: string; status: ChatStatus; entries?: readonly Entry[]; live?: readonly Entry[] } | { type: "hello" | "cancel"; id: string } | { type: "send"; id: string; prompt: string };
+
 export type ConfigOptions = {
   transport: Transport;
   persist?: { load(): readonly Entry[]; save(entries: readonly Entry[]): void };
@@ -1018,6 +1024,17 @@ export function createConfig(options: ConfigOptions): Config {
   const entriesKey = (id: string) => `${history!.key}:entries:${id}`;
   const transportKey = (id: string) => `${history!.key}:transport:${id}`;
   const liveKey = (id: string) => `${history!.key}:live:${id}`;
+  const lockName = (id: string) => `${history!.key}:turn:${id}`;
+  const scope = globalThis as { navigator?: { locks?: TabLocks }; BroadcastChannel?: new (name: string) => TabChannel };
+  const locks = history ? scope.navigator?.locks : undefined;
+  const channel = history && locks && scope.BroadcastChannel ? new scope.BroadcastChannel(`nanocode:${history.key}`) : undefined;
+  const coordinated = Boolean(locks && channel);
+  const stale = new Set<string>();
+  const leases = new Map<string, Promise<void>>();
+  let owned: string | undefined;
+  let following: { id: string; abort: AbortController } | undefined;
+  let claiming = false;
+  let fresh = false;
   let conversations: Conversation[] = [];
   let current: string | undefined;
   if (history) {
@@ -1027,6 +1044,7 @@ export function createConfig(options: ConfigOptions): Config {
     if (!current) {
       current = conversationId();
       conversations = [{ id: current, title: "", updated: Date.now() }];
+      fresh = true;
     }
     options.transport.restore?.(read(transportKey(current), undefined));
   }
@@ -1039,10 +1057,29 @@ export function createConfig(options: ConfigOptions): Config {
   const saveIndex = () => {
     if (history) write(indexKey(), { current, conversations });
   };
+  const foreign = (id: string, view?: View) => following?.id === id || (stale.has(id) && owned !== id && !view?.release);
   const saveTransport = () => {
-    if (history && current && options.transport.snapshot) write(transportKey(current), options.transport.snapshot());
+    if (history && current && options.transport.snapshot && !foreign(current, views.get(current))) write(transportKey(current), options.transport.snapshot());
   };
-  type View = { transcript: Transcript; live: Entry[]; entries?: Entry[]; pushed?: unknown; processed?: unknown; dirty: boolean; saved: number; timer?: ReturnType<typeof setTimeout> };
+  const post = (message: TabMessage) => {
+    try {
+      channel?.postMessage(message);
+    } catch {}
+  };
+  const outbox = new Map<string, { entries?: readonly Entry[]; live?: readonly Entry[] }>();
+  let flushing: ReturnType<typeof setTimeout> | undefined;
+  const flush = () => {
+    if (flushing !== undefined) clearTimeout(flushing);
+    flushing = undefined;
+    for (const [id, part] of outbox) post({ type: "state", id, status: owned === id ? "pending" : "idle", ...part });
+    outbox.clear();
+  };
+  const announce = (id: string | undefined, part: { entries?: readonly Entry[]; live?: readonly Entry[] }) => {
+    if (!channel || !id || owned !== id) return;
+    outbox.set(id, { ...outbox.get(id), ...part });
+    flushing ??= setTimeout(flush, 16);
+  };
+  type View = { transcript: Transcript; live: Entry[]; entries?: Entry[]; pushed?: unknown; processed?: unknown; dirty: boolean; saved: number; timer?: ReturnType<typeof setTimeout>; release?: () => void };
   const views = new Map<string | undefined, View>();
   const snapshots = new WeakMap<LiveEvent, unknown>();
   const evict = (id: string, key: string, value: unknown): boolean => {
@@ -1062,6 +1099,7 @@ export function createConfig(options: ConfigOptions): Config {
     const entries = view.entries;
     view.entries = undefined;
     if (entries) evict(id, entriesKey(id), entries);
+    if (foreign(id, view)) return;
     const snapshot = !options.transport.snapshot ? undefined : view.transcript.pending() ? view.processed : id === current ? options.transport.snapshot() : view.pushed;
     if (snapshot === undefined) return;
     view.dirty = false;
@@ -1077,8 +1115,22 @@ export function createConfig(options: ConfigOptions): Config {
     view.timer ??= setTimeout(() => persist(id, view), view.dirty ? 0 : 250);
   };
   const drop = (id: string | undefined) => {
-    views.get(id)?.transcript.reset();
+    const found = views.get(id);
     views.delete(id);
+    found?.release?.();
+    found?.transcript.reset();
+  };
+  const entriesOf = (id: string): readonly Entry[] => id === current ? state.entries : views.get(id)?.entries ?? read<Entry[]>(entriesKey(id), []);
+  const clean = (found: View | undefined) => !found || !(found.entries || found.release || found.transcript.pending());
+  const sync = (id: string) => {
+    if (!stale.has(id) || !clean(views.get(id))) return;
+    stale.delete(id);
+    const found = views.get(id);
+    if (found?.timer !== undefined) clearTimeout(found.timer);
+    drop(id);
+    if (id !== current) return;
+    options.transport.restore?.(read(transportKey(id), undefined));
+    set({ entries: read<Entry[]>(entriesKey(id), []), live: view(id).live });
   };
   const forget = (id: string) => {
     drop(id);
@@ -1100,6 +1152,12 @@ export function createConfig(options: ConfigOptions): Config {
   };
   const store = (id: string, entries: Entry[], target: View | undefined) => {
     const shown = id === current;
+    if (following?.id === id) {
+      if (shown) set({ entries });
+      return;
+    }
+    if (shown) fresh = false;
+    announce(id, { entries });
     const existing = conversations.find(item => item.id === id);
     const entry = entries[entries.length - 1];
     if (target) target.entries = entries;
@@ -1157,7 +1215,8 @@ export function createConfig(options: ConfigOptions): Config {
         },
         live: live => {
           created.live = live;
-          if (id === current) set({ live });
+          if (id === current && following?.id !== id) set({ live });
+          announce(id, { live });
         },
         apply: event => { if (id === current) options.apply?.(event); },
         revealMs: options.revealMs,
@@ -1192,16 +1251,34 @@ export function createConfig(options: ConfigOptions): Config {
   const detachable = () => Boolean(history && options.transport.resume);
   const detach = () => {
     if (state.status !== "pending") return;
+    owned = undefined;
     generation += 1;
     controller?.abort();
     controller = undefined;
   };
-  const settle = (start: (parameters: TransportParameters) => Promise<void>, prompt = "", attachments?: readonly Attachment[]) => {
+  const settle = (start: (parameters: TransportParameters) => Promise<void>, prompt = "", attachments?: readonly Attachment[], free: () => void = () => undefined) => {
     const id = ++generation;
     controller?.abort();
     const signal = (controller = new AbortController()).signal;
-    const transcript = view().transcript;
+    const conversation = current;
+    const shown = view();
+    const transcript = shown.transcript;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (shown.release === finish) shown.release = undefined;
+      if (conversation && owned === conversation) {
+        owned = undefined;
+        flush();
+        post({ type: "state", id: conversation, status: "idle", entries: entriesOf(conversation), live: [] });
+      }
+      free();
+    };
+    shown.release = finish;
+    owned = conversation;
     set({ status: "pending", error: undefined });
+    announce(conversation, { entries: state.entries, live: shown.live });
     let work: Promise<void>;
     try {
       work = start(parameters(prompt, id, signal, attachments));
@@ -1214,26 +1291,88 @@ export function createConfig(options: ConfigOptions): Config {
       note("error", failure.message);
       set({ error: failure });
     }).finally(() => {
-      if (id !== generation) return;
+      const leave = () => {
+        if (conversation) persist(conversation, shown);
+        finish();
+      };
+      if (id !== generation) return transcript.run(leave);
       transcript.close();
       transcript.run(() => {
-        if (id !== generation) return;
+        if (id !== generation) return leave();
         controller = undefined;
-        const shown = views.get(current);
-        if (shown) persist(current, shown);
+        const now = views.get(current);
+        if (now) persist(current, now);
         else saveTransport();
         set({ status: "idle" });
+        finish();
       });
     });
+  };
+  const lease = (id: string | undefined, waitMs: number): Promise<(() => void) | undefined> => {
+    if (!locks || !channel || id === undefined) return Promise.resolve(() => undefined);
+    const lockManager = locks;
+    return (leases.get(id) ?? Promise.resolve()).then(() => new Promise(resolve => {
+      let granted = false;
+      lockManager.request(lockName(id), { signal: AbortSignal.timeout(waitMs) }, () => {
+        granted = true;
+        let free: () => void = () => undefined;
+        const held = new Promise<void>(release => {
+          free = () => {
+            if (leases.get(id) === held) leases.delete(id);
+            release();
+          };
+        });
+        leases.set(id, held);
+        resolve(free);
+        return held;
+      }).catch(() => {
+        if (!granted) resolve(undefined);
+      });
+    }));
+  };
+  const unfollow = () => {
+    following?.abort.abort();
+    following = undefined;
+  };
+  const follow = (id: string) => {
+    if (!locks || !channel || following?.id === id || owned === id) return;
+    unfollow();
+    const abort = new AbortController();
+    following = { id, abort };
+    if (id === current) set({ status: "pending", error: undefined });
+    post({ type: "hello", id });
+    locks.request(lockName(id), { signal: abort.signal }, () => {
+      if (following?.abort !== abort) return;
+      following = undefined;
+      stale.add(id);
+      if (id !== current) return;
+      sync(id);
+      set({ status: "idle" });
+      setTimeout(() => void config.resume());
+    }).catch(() => undefined);
+  };
+  const claim = async (target: string | undefined, waitMs: number): Promise<(() => void) | undefined> => {
+    claiming = true;
+    try {
+      return await lease(target, waitMs);
+    } finally {
+      claiming = false;
+    }
   };
   const open = (id: string, entries: Entry[], resume = true) => {
     const detached = state.status === "pending";
     detach();
+    unfollow();
+    fresh = false;
     const leaving = views.get(current);
     if (leaving && conversations.some(item => item.id === current)) persist(current, leaving);
     else if (conversations.some(item => item.id === current)) saveTransport();
     if (!detached) drop(current);
     current = id;
+    if (stale.has(id) && clean(views.get(id))) {
+      drop(id);
+      stale.delete(id);
+    }
     options.transport.restore?.(read(transportKey(id), undefined));
     saveIndex();
     set({ conversation: id, conversations: [...conversations], entries, live: view(id).live, status: "idle", error: undefined });
@@ -1250,6 +1389,12 @@ export function createConfig(options: ConfigOptions): Config {
       const text = prompt.trim();
       const attached = attachments?.length ? attachments.map(item => ({ name: item.name, path: item.path, type: item.type, size: item.size })) : undefined;
       if (!text && !attached) return;
+      if (claiming) return;
+      if (current && following?.id === current) {
+        if (attached) note("error", "Attachments go with a new message. Send them when the running turn finishes.");
+        else post({ type: "send", id: current, prompt: text });
+        return;
+      }
       if (state.status === "pending" && attached) {
         note("error", "Attachments go with a new message. Send them when the running turn finishes.");
         return;
@@ -1267,15 +1412,38 @@ export function createConfig(options: ConfigOptions): Config {
       }
       const started_at = Date.now();
       const target = current;
+      let free: (() => void) | undefined = () => undefined;
+      if (coordinated && target) {
+        set({ status: "pending", error: undefined });
+        free = await claim(target, 3000);
+        if (target !== current) return free?.();
+        if (!free) {
+          follow(target);
+          if (attached) note("error", "Another tab is running a turn in this conversation. Send the attachments when it finishes.");
+          else post({ type: "send", id: target, prompt: text });
+          return;
+        }
+        owned = target;
+      }
+      if (target) sync(target);
       view().transcript.run(() => add(target, { kind: "user", text, started_at, ...(attached ? { attachments: attached } : {}) }));
-      await settle(parameters => options.transport.send(parameters), text, attached);
+      await settle(parameters => options.transport.send(parameters), text, attached, free);
     },
     async resume() {
       const resume = options.transport.resume?.bind(options.transport);
-      if (!resume || state.status === "pending") return;
-      await settle(({ push, note, signal }) => resume({ push, note, signal }));
+      if (!resume || state.status === "pending" || claiming) return;
+      const target = current;
+      let free: (() => void) | undefined = () => undefined;
+      if (coordinated && target) {
+        free = await claim(target, 250);
+        if (target !== current || config.getState().status === "pending") return free?.();
+        if (!free) return follow(target);
+      }
+      if (target) sync(target);
+      await settle(({ push, note, signal }) => resume({ push, note, signal }), "", undefined, free);
     },
     async cancel() {
+      if (current && following?.id === current) return post({ type: "cancel", id: current });
       if (!options.transport.cancel || state.status !== "pending") return;
       try {
         await options.transport.cancel();
@@ -1305,11 +1473,11 @@ export function createConfig(options: ConfigOptions): Config {
       set({ live: [], status: "idle" });
     },
     select(id) {
-      if (!history || id === current || (state.status === "pending" && !detachable()) || !conversations.some(item => item.id === id)) return;
+      if (!history || id === current || (state.status === "pending" && !detachable() && !following) || !conversations.some(item => item.id === id)) return;
       open(id, views.get(id)?.entries ?? read<Entry[]>(entriesKey(id), []));
     },
     create() {
-      if (!history || (state.status === "pending" && !detachable())) return current;
+      if (!history || (state.status === "pending" && !detachable() && !following)) return current;
       if (!state.entries.length) return current;
       const id = conversationId();
       conversations = [{ id, title: "", updated: Date.now() }, ...conversations].slice(0, history.limit);
@@ -1326,8 +1494,9 @@ export function createConfig(options: ConfigOptions): Config {
         return;
       }
       if (state.status === "pending") {
-        if (!detachable()) return;
-        options.transport.cancel?.().catch(() => undefined);
+        if (!detachable() && !following) return;
+        if (following?.id === id) post({ type: "cancel", id });
+        else options.transport.cancel?.().catch(() => undefined);
         detach();
       }
       forget(id);
@@ -1342,8 +1511,56 @@ export function createConfig(options: ConfigOptions): Config {
   };
   if (history) {
     state = { ...state, live: view(current).live };
-    (globalThis as { addEventListener?: (type: string, listener: () => void) => void }).addEventListener?.("pagehide", () => {
-      for (const [id, entry] of views) persist(id, entry);
+    const target = globalThis as { addEventListener?: (type: string, listener: (event: Event) => void) => void };
+    target.addEventListener?.("pagehide", () => {
+      for (const [id, entry] of views) if (entry.dirty || entry.entries || entry.timer !== undefined || entry.release) persist(id, entry);
+    });
+    const index = () => {
+      const saved = read<{ current?: string; conversations?: Conversation[] }>(indexKey(), {});
+      const list = (saved.conversations ?? []).filter(item => item && typeof item.id === "string");
+      if (fresh && !state.entries.length && state.status !== "pending" && saved.current && saved.current !== current && list.some(item => item.id === saved.current)) {
+        conversations = list;
+        open(saved.current, read<Entry[]>(entriesKey(saved.current), []));
+        return;
+      }
+      const kept = conversations.find(item => item.id === current);
+      conversations = kept && !list.some(item => item.id === current) ? [kept, ...list] : list;
+      set({ conversations: [...conversations] });
+    };
+    target.addEventListener?.("storage", event => {
+      const { key, storageArea } = event as unknown as { key: string | null; storageArea: unknown };
+      const prefix = `${history.key}:`;
+      if ((storageArea && storageArea !== history.storage) || !key?.startsWith(prefix)) return;
+      const rest = key.slice(prefix.length);
+      if (rest === "history") return index();
+      const match = /^(entries|transport|live):(.+)$/.exec(rest);
+      if (!match) return;
+      const id = match[2]!;
+      stale.add(id);
+      if (match[1] === "entries" && id === current && owned !== id && following?.id !== id && state.status !== "pending") set({ entries: read<Entry[]>(entriesKey(id), []) });
+    });
+    channel?.addEventListener("message", event => {
+      const message = event.data as TabMessage;
+      if (!message || typeof message.id !== "string") return;
+      if (message.type === "hello") {
+        if (message.id === owned) post({ type: "state", id: owned, status: "pending", entries: entriesOf(owned), live: views.get(owned)?.live ?? [] });
+        return;
+      }
+      if (message.type === "send" || message.type === "cancel") {
+        if (message.id !== owned || owned !== current) return;
+        if (message.type === "send") void config.send(message.prompt);
+        else void config.cancel();
+        return;
+      }
+      if (message.type !== "state" || message.id === owned) return;
+      stale.add(message.id);
+      if (message.id !== current) return;
+      if (message.status === "pending") follow(message.id);
+      if (following?.id !== message.id) {
+        if (message.entries && state.status !== "pending") set({ entries: [...message.entries] });
+        return;
+      }
+      set({ ...(message.entries ? { entries: [...message.entries] } : {}), ...(message.live ? { live: [...message.live] } : {}) });
     });
   }
   return config;

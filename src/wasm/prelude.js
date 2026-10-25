@@ -472,7 +472,7 @@ for (const name of ["exec_command", "write_stdin", "apply_patch"]) {
     : name === "apply_patch" ? (input) => tools.apply_patch(typeof input === "string" ? input : input?.input ?? input?.patch ?? input)
     : (input) => tools[name](input);
 }
-const core = { TextDecoder, TextEncoder, byteView, callWasm, hostFunction, setTimeoutWithArgs, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
+const core = { TextDecoder, TextEncoder, byteView, callWasm, hostFunction, setTimeoutWithArgs, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, putBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
 const modules = {};
 const lazyBody = (name) => {
   const source = lazySources[name].toString();

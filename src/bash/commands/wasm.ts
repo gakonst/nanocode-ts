@@ -841,7 +841,7 @@ export function wasmCommands(options: WasmOptions = {}): Record<string, CommandH
 
 type CellShell = { fs: FileSystem; cwd: string; limits: { timeoutMs: number }; exec(script: string, options: { stdin?: string; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number }> };
 
-type CellRequest = { op?: unknown; module?: unknown; path?: unknown; args?: unknown; stdin?: unknown; env?: unknown; id?: unknown; name?: unknown; offset?: unknown; length?: unknown; data?: unknown; pages?: unknown };
+type CellRequest = { op?: unknown; module?: unknown; module_bytes?: unknown; path?: unknown; args?: unknown; stdin?: unknown; env?: unknown; id?: unknown; name?: unknown; offset?: unknown; length?: unknown; data?: unknown; pages?: unknown };
 
 const CELL_INSTANCES = 16;
 
@@ -878,6 +878,7 @@ export function wasmHost(shell: CellShell, options: WasmOptions = {}): (request:
   const instances = new Map<number, Live>();
   let next = 0;
   const source = async (request: CellRequest): Promise<{ bytes: Uint8Array; path?: string }> => {
+    if (request.module_bytes instanceof Uint8Array) return { bytes: request.module_bytes };
     if (typeof request.module === "string") return { bytes: fromBase64(request.module) };
     if (typeof request.path !== "string") throw new Error("wasm expects the module's bytes or a path");
     const path = normalize(request.path.startsWith("/") ? request.path : shell.cwd + "/" + request.path);

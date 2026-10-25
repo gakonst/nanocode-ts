@@ -547,7 +547,7 @@ export class AgentRuntime {
         if (!workspace.wasm) throw new Error("this workspace does not run WebAssembly");
         const controller = new AbortController();
         this.onCancel(id, () => controller.abort());
-        return await workspace.wasm(request.request, controller.signal);
+        return await workspace.wasm(request.body instanceof Uint8Array ? { ...request.request, module_bytes: request.body } : request.request, controller.signal);
       }
       case "cell_fetch": {
         const input = request.request as { url: string; method?: string; headers?: Record<string, string>; body?: string };

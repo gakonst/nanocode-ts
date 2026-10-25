@@ -1,4 +1,4 @@
-const { callWasm, fromBase64, fromUtf8, hostFunction, setTimeoutWithArgs, toBase64, utf8 } = core;
+const { callWasm, fromBase64, fromUtf8, hostFunction, putBytes, setTimeoutWithArgs, toBase64, utf8 } = core;
 const log = (...args) => globalThis.console.log(...args);
 const moduleHint = (name) => {
   const bare = String(name).replace(/^node:/, "").split("/")[0];
@@ -122,20 +122,24 @@ class AbortController {
 const toWire = (value) => typeof value === "bigint" ? { bigint: String(value) } : value;
 const fromWire = (value) => Array.isArray(value) ? value.map(fromWire) : value !== null && typeof value === "object" && typeof value.bigint === "string" ? BigInt(value.bigint) : value;
 const wasmSource = (source) => {
-  if (typeof source === "string") return { path: source };
+  if (typeof source === "string") {
+    if (source.length > 4096 || source.includes("\0")) throw new TypeError("expected WebAssembly bytes (Uint8Array or ArrayBuffer) or a file path, got a " + source.length + "-character string: pass the .wasm file's path, or read it as bytes with bash.readFile(path, { encoding: null })");
+    return { path: source };
+  }
   if (source instanceof Module) return source.input;
-  if (source instanceof ArrayBuffer) return { module: toBase64(new Uint8Array(source)) };
-  if (ArrayBuffer.isView(source)) return { module: toBase64(new Uint8Array(source.buffer, source.byteOffset, source.byteLength)) };
-  if (Array.isArray(source)) return { module: toBase64(Uint8Array.from(source)) };
+  if (source instanceof ArrayBuffer) return { bytes: new Uint8Array(source) };
+  if (ArrayBuffer.isView(source)) return { bytes: new Uint8Array(source.buffer, source.byteOffset, source.byteLength) };
+  if (Array.isArray(source)) return { bytes: Uint8Array.from(source) };
   throw new TypeError("expected WebAssembly bytes (Uint8Array or ArrayBuffer) or a file path");
 };
+const wire = (input) => input.bytes ? { module_ref: putBytes(input.bytes) } : input;
 const importHint = (error, imports) => {
   const names = [];
   for (const [module, entries] of Object.entries(imports ?? {})) for (const [name, value] of Object.entries(entries ?? {})) if (typeof value === "function" || value instanceof Memory) names.push(module + "." + name);
   return names.length ? new Error(error.message + " (the JavaScript imports " + names.join(", ") + " are not linked: cell WebAssembly runs in the host, which provides only WASI preview1 imports)") : error;
 };
 class Module {
-  constructor(source) { this.input = wasmSource(source); }
+  constructor(source) { const input = wasmSource(source); this.input = input.bytes ? { bytes: input.bytes.slice() } : input; }
 }
 class Memory {
   constructor(id) { this.id = id; }
@@ -154,7 +158,7 @@ const exportsOf = (id, list, imports) => {
 };
 class Instance {
   constructor(module, imports) {
-    const ready = callWasm({ op: "instantiate", ...wasmSource(module) });
+    const ready = callWasm({ op: "instantiate", ...wire(wasmSource(module)) });
     this.ready = ready.then((reply) => { this.id = reply.id; this.engine = reply.engine; this.exports = exportsOf(reply.id, reply.exports, imports); return this; }, (error) => { throw importHint(error, imports); });
     this.ready.catch(() => {});
     this.exports = new Proxy({}, { get: (_, name) => typeof name !== "string" || name === "then" ? undefined : async (...args) => (await this.ready).exports[name](...args) });
@@ -174,14 +178,14 @@ const WebAssembly = {
   instantiate,
   compileStreaming: async (response) => new Module(new Uint8Array(await (await response).arrayBuffer())),
   instantiateStreaming: async (response, imports) => instantiate(new Uint8Array(await (await response).arrayBuffer()), imports),
-  validate: (source) => { const input = wasmSource(source); const bytes = input.module ? fromBase64(input.module) : null; return !bytes || (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d); },
+  validate: (source) => { const bytes = wasmSource(source).bytes; return !bytes || (bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d); },
 };
 const wasm = {
   run: async (source, args = [], options = {}) => {
-    const reply = await callWasm({ op: "run", ...wasmSource(source), args: args.map(String), ...(options.stdin === undefined ? {} : { stdin: String(options.stdin) }), ...(options.env ? { env: options.env } : {}) });
+    const reply = await callWasm({ op: "run", ...wire(wasmSource(source)), args: args.map(String), ...(options.stdin === undefined ? {} : { stdin: String(options.stdin) }), ...(options.env ? { env: options.env } : {}) });
     return { stdout: reply.stdout, stderr: reply.stderr, exitCode: reply.exit_code };
   },
-  invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wasmSource(source), name, args: args.map(toWire) })).result),
+  invoke: async (source, name, ...args) => fromWire((await callWasm({ op: "invoke", ...wire(wasmSource(source)), name, args: args.map(toWire) })).result),
   instantiate: async (source) => (await instantiate(source instanceof Module ? source : new Module(source))),
 };
 return { AbortController, AbortSignal, CustomEvent, Event, EventTarget, WebAssembly, process, require, wasm };
