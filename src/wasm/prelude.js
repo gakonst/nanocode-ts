@@ -97,6 +97,9 @@ const putBytes = (data) => {
   try { return nativeBytes.put(data); } catch { return putBytes(utf8(data)); }
 };
 const takeBytes = (id) => new Uint8Array(nativeBytes.take(id));
+const takeText = (id) => nativeBytes.text(id, false);
+const unread = typeof FinalizationRegistry === "function" ? new FinalizationRegistry((id) => nativeBytes.discard(id)) : undefined;
+const adopt = Symbol("adopt");
 const ownedBodies = new WeakSet();
 const joinBytes = (chunks) => {
   const out = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
@@ -239,16 +242,34 @@ class Body {
   #state;
   #stream;
   constructor(body) { this.#state = extractBody(body); this.bodyUsed = false; }
+  [adopt](id) { this.#state = { ref: id }; unread?.register(this, id, this.#state); }
+  #claim() {
+    const state = this.#state;
+    if (state.ref === undefined) return undefined;
+    unread?.unregister(state);
+    this.#state = {};
+    return state.ref;
+  }
+  #settle() {
+    const id = this.#claim();
+    if (id !== undefined) this.#state = { bytes: takeBytes(id) };
+    return this.#state;
+  }
   async #take() {
     this.bodyUsed = true;
     if (this.#state.stream) this.#state = { bytes: await load("web").readAll(this.#state.stream), type: this.#state.type };
-    return this.#state;
+    return this.#settle();
   }
   get body() {
-    if (this.#state.text === undefined && this.#state.bytes === undefined && this.#state.stream === undefined) return null;
+    if (this.#state.text === undefined && this.#state.bytes === undefined && this.#state.stream === undefined && this.#state.ref === undefined) return null;
     return this.#stream ??= new (load("web").ReadableStream)({ pull: async (controller) => { const bytes = await this.bytes(); if (bytes.length) controller.enqueue(bytes); controller.close(); } });
   }
-  async text() { const state = await this.#take(); return state.text ?? fromUtf8(state.bytes ?? new Uint8Array(0)); }
+  async text() {
+    const id = this.#claim();
+    if (id !== undefined) { this.bodyUsed = true; this.#state = { text: takeText(id) }; return this.#state.text; }
+    const state = await this.#take();
+    return state.text ?? fromUtf8(state.bytes ?? new Uint8Array(0));
+  }
   async json() {
     const text = await this.text();
     try { return JSON.parse(text); }
@@ -265,7 +286,7 @@ class Body {
     for (const [key, value] of new web.URLSearchParams(await this.text())) form.append(key, value);
     return form;
   }
-  bodyInit() { return this.#state.stream ?? this.#state.bytes ?? this.#state.text ?? null; }
+  bodyInit() { this.#settle(); return this.#state.stream ?? this.#state.bytes ?? this.#state.text ?? null; }
   bodyType() { return this.#state.type; }
 }
 class Request extends Body {
@@ -326,9 +347,13 @@ const fetch = async (input, init = {}) => {
     else message.body_ref = putBytes(body.bytes);
   } else if (body.text !== undefined && body.text.length < 65536) message.body = body.text;
   else if (body.text !== undefined) message.body_ref = putBytes(body.text);
-  const pending = callFetch(message).then((reply) => ({ ...reply, bytes: takeBytes(reply.body_ref) }), (error) => { throw new TypeError(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
+  const pending = callFetch(message).then((reply) => {
+    if (signal?.aborted) { nativeBytes.discard(reply.body_ref); throw signal.reason; }
+    return reply;
+  }, (error) => { throw new TypeError(typeof error === "string" ? error : error?.message ?? JSON.stringify(error)); });
   const reply = signal ? await Promise.race([pending, aborted(signal)]) : await pending;
-  const response = new Response(reply.bytes, { status: reply.status, statusText: reply.status_text ?? "", headers: reply.headers, url: reply.url || url, type: "basic" });
+  const response = new Response(null, { status: reply.status, statusText: reply.status_text ?? "", headers: reply.headers, url: reply.url || url, type: "basic" });
+  response[adopt](reply.body_ref);
   ownedBodies.add(response);
   return response;
 };
@@ -416,12 +441,13 @@ const shell = async (input, options = {}) => {
 const bash = (script, ...values) => Array.isArray(script) && Array.isArray(script.raw)
   ? run(template(unescape(script), values))
   : shell(script, values[0] !== null && typeof values[0] === "object" ? values[0] : {});
-const readBytes = async (path) => takeBytes((await callFile({ op: "read", path: String(path) })).bytes_ref);
+const readRef = async (path) => (await callFile({ op: "read", path: String(path) })).bytes_ref;
 bash.readFile = async (path, options) => {
   const encoding = typeof options === "string" ? options : options !== null && typeof options === "object" ? (options.encoding === undefined ? "utf8" : options.encoding) : options === null ? null : "utf8";
   const name = encoding === null ? "buffer" : String(encoding).toLowerCase().replace("-", "");
-  const bytes = await readBytes(path);
-  if (name === "utf8") return fromUtf8(bytes);
+  const id = await readRef(path);
+  if (name === "utf8") return takeText(id);
+  const bytes = takeBytes(id);
   if (name === "buffer" || name === "bytes" || name === "uint8array") return load("web").Buffer.wrap(bytes);
   return decodeBytes(bytes, name);
 };
