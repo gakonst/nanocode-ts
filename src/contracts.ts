@@ -54,6 +54,7 @@ export type AgentConfiguration = {
   hands?: boolean;
   code_mode?: boolean;
   event_coalesce_ms?: number;
+  live_deltas?: boolean;
   stream_tool_input?: boolean;
   auto_compact_window_tokens?: number;
   environment?: { cwd?: string; shell?: string; timezone?: string };
@@ -242,6 +243,7 @@ export type HostOptions = {
   log_logical_limit?: number;
   blobs?: BlobHost;
   published(events: LoggedEvent[], bytes: number[]): void;
+  live?(events: LoggedEvent[]): void;
   wake?(): void;
 };
 

@@ -15,14 +15,21 @@ pub struct WorkerInbox {
     runtime_id: String,
     started_ms: f64,
     executors: CodeModeExecutors,
+    live_deltas: bool,
 }
 
 impl WorkerInbox {
-    pub const fn new(runtime_id: String, started_ms: f64, executors: CodeModeExecutors) -> Self {
+    pub const fn new(
+        runtime_id: String,
+        started_ms: f64,
+        executors: CodeModeExecutors,
+        live_deltas: bool,
+    ) -> Self {
         Self {
             runtime_id,
             started_ms,
             executors,
+            live_deltas,
         }
     }
 }
@@ -48,9 +55,34 @@ pub async fn publish(events: Vec<LoggedEvent>) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+#[derive(Serialize)]
+struct Live<'a> {
+    op: &'static str,
+    events: &'a [LoggedEvent],
+}
+
 impl InboxHost for WorkerInbox {
     fn publish(&self, events: Vec<LoggedEvent>) -> HostFuture<'_, Result<(), String>> {
         Box::pin(publish(events))
+    }
+
+    fn live_deltas(&self) -> bool {
+        self.live_deltas
+    }
+
+    fn publish_live(&self, events: Vec<LoggedEvent>) -> HostFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            if events.is_empty() {
+                return Ok(());
+            }
+            call_with(&Live {
+                op: "live_events",
+                events: &events,
+            })
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+        })
     }
 
     fn annotate(&self) -> Map<String, Value> {

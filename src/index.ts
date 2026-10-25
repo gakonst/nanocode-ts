@@ -1,5 +1,5 @@
 export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
-export { EventHub } from "./events.ts";
+export { EventHub, type LiveCursor } from "./events.ts";
 export { compileModule, connectHand, handKeeper, prepareHand, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus, type PreparedHand } from "./hand.ts";
 export { DESCRIBE_TOOLS, deferMcp, type McpPolicy } from "./mcp.ts";
 export { RemoteExecutor, type RemotePolicy } from "./remote.ts";

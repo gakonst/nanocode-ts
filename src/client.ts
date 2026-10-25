@@ -87,13 +87,14 @@ function parentOf(payload: Record<string, unknown>): string | undefined {
 
 export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
   const body = logged.event as LoggedBody;
-  const base = { seq: logged.seq, request_id: logged.request_id, ...(typeof logged.created_at === "number" ? { at: logged.created_at } : {}) };
+  const base = { ...(logged.seq > 0 ? { seq: logged.seq } : {}), request_id: logged.request_id, ...(typeof logged.created_at === "number" ? { at: logged.created_at } : {}) };
   if (body.source === "agent" && body.event) {
     const { type, payload } = body.event;
     switch (type) {
-      case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...base };
+      case "assistant.delta": return { type: "text", delta: payload.text, item: payload.item_id, ...(typeof payload.offset === "number" ? { offset: payload.offset } : {}), ...base };
+      case "assistant.message": return typeof payload.text === "string" && payload.text ? { type: "text", delta: payload.text, item: payload.item_id, offset: 0, ...base } : undefined;
       case "reasoning.summary.delta": return { type: "reasoning", delta: payload.text, item: `reasoning:${payload.model_call_index}`, ...base };
-      case "tool.input.delta": return { type: "tool_input", name: payload.tool, delta: payload.text, call_id: payload.call_id, ...base };
+      case "tool.input.delta": return { type: "tool_input", name: payload.tool, delta: payload.text, call_id: payload.call_id, ...(typeof payload.offset === "number" ? { offset: payload.offset } : {}), ...base };
       case "tool.call": return { type: "tool_start", name: payload.tool, args: payload.arguments, call_id: payload.call_id, parent: parentOf(payload), ...base };
       case "tool.notification": return { type: "tool_output", call_id: payload.call_id, text: payload.text, ...base };
       case "tool.result": return { type: "tool_end", name: payload.tool, call_id: payload.call_id, parent: parentOf(payload), status: payload.status, result: payload.result, structured: payload.structured_result, duration_ns: payload.duration_ns, ...base };
@@ -561,7 +562,7 @@ export type TranscriptOptions = {
   end?(status: ToolStatus): void;
 };
 
-export type TranscriptState = { running: ToolCell[]; stream: Omit<Stream, "shown">; links: [string, { cell: string; latest: string }][]; orphans: [string, ToolCell[]][]; ended?: string[]; seen?: [number, string][] };
+export type TranscriptState = { running: ToolCell[]; stream: Omit<Stream, "shown">; links: [string, { cell: string; latest: string }][]; orphans: [string, ToolCell[]][]; ended?: string[]; seen?: [number, string][]; received?: [string, number][] };
 
 type Stream = { kind?: "assistant" | "reasoning"; item?: unknown; posted: number; shown: number; text: string; started?: number; ended?: number };
 
@@ -575,7 +576,15 @@ const SEEN_LIMIT = 4096;
 
 const SAVED_SEEN = 256;
 
+const RECEIVED_LIMIT = 256;
+
 const OUTPUT_LIMIT = 65_536;
+
+function remember(map: Map<string, number>, key: string, value: number): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > RECEIVED_LIMIT) map.delete(map.keys().next().value!);
+}
 
 function fingerprint(event: LiveEvent): string {
   return [event.type, event.call_id ?? event.item ?? "", typeof event.delta === "string" ? event.delta.length : typeof event.text === "string" ? event.text.length : ""].join("|");
@@ -596,6 +605,8 @@ export class Transcript {
   private readonly orphans = new Map<string, ToolCell[]>();
   private readonly ended = new Set<string>();
   private readonly seen = new Map<number, string>();
+  private readonly received = new Map<string, number>();
+  private readonly consumed = new Map<string, number>();
 
   constructor(options: TranscriptOptions) {
     this.options = options;
@@ -609,7 +620,21 @@ export class Transcript {
       this.seen.set(event.seq, key);
       if (this.seen.size > SEEN_LIMIT) this.seen.delete(this.seen.keys().next().value!);
     }
+    if (event.type === "text" && event.item !== undefined) {
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      const key = String(event.item);
+      const have = this.received.get(key) ?? (this.stream.kind === "assistant" && this.stream.item === event.item ? this.stream.text.length : 0);
+      const offset = typeof event.offset === "number" ? event.offset : have;
+      const through = Math.max(have, offset + delta.length);
+      remember(this.received, key, through);
+      if (offset + delta.length <= have) return;
+      event = { ...event, delta: offset >= have ? delta : delta.slice(have - offset), through };
+    }
     this.enqueue({ event });
+  }
+
+  private consume(event: LiveEvent): void {
+    if (event.type === "text" && event.item !== undefined && typeof event.through === "number") remember(this.consumed, String(event.item), event.through);
   }
 
   run(callback: () => void): void {
@@ -633,6 +658,8 @@ export class Transcript {
     this.orphans.clear();
     this.ended.clear();
     this.seen.clear();
+    this.received.clear();
+    this.consumed.clear();
     this.held = [];
     this.clock = 0;
     this.options.live([]);
@@ -645,7 +672,7 @@ export class Transcript {
   state(limit = 65_536): TranscriptState {
     const clip = (cell: ToolCell) => clipCell(cell, limit, true);
     const { shown: _shown, ...stream } = this.stream;
-    return { running: this.running.map(clip), stream, links: [...this.links], orphans: [...this.orphans].map(([key, cells]) => [key, cells.map(clip)]), ended: [...this.ended].slice(-256), seen: [...this.seen].slice(-SAVED_SEEN) };
+    return { running: this.running.map(clip), stream, links: [...this.links], orphans: [...this.orphans].map(([key, cells]) => [key, cells.map(clip)]), ended: [...this.ended].slice(-256), seen: [...this.seen].slice(-SAVED_SEEN), received: [...this.consumed].slice(-SAVED_SEEN) };
   }
 
   restore(state: TranscriptState | undefined): void {
@@ -663,6 +690,10 @@ export class Transcript {
     for (const [key, link] of state.links ?? []) this.links.set(key, link);
     for (const id of Array.isArray(state.ended) ? state.ended : []) this.ended.add(id);
     for (const [seq, key] of Array.isArray(state.seen) ? state.seen : []) this.seen.set(seq, key);
+    for (const [key, length] of Array.isArray(state.received) ? state.received : []) {
+      this.received.set(key, length);
+      this.consumed.set(key, length);
+    }
     if (state.stream && typeof state.stream.text === "string") {
       this.stream = { ...state.stream, shown: state.stream.text.length };
       this.reveal();
@@ -743,7 +774,10 @@ export class Transcript {
     if (event.type === "tool_input") {
       let input = this.inputs.get(id);
       if (!input) this.inputs.set(id, input = new ToolInput());
-      input.push(typeof event.delta === "string" ? event.delta : "");
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      const have = input.raw.length;
+      const offset = typeof event.offset === "number" ? event.offset : have;
+      if (offset + delta.length > have) input.push(offset >= have ? delta : delta.slice(have - offset));
       describeTool(cell, input.arguments());
     } else if (event.type === "tool_start") {
       this.inputs.delete(id);
@@ -818,6 +852,7 @@ export class Transcript {
         current.kind = kind;
         current.item = item;
         current.text += typeof event.delta === "string" ? event.delta : "";
+        this.consume(event);
         current.started ??= at(event);
         current.ended = at(event);
         this.options.checkpoint?.(event);
@@ -849,6 +884,7 @@ export class Transcript {
       }
       if (kind) {
         this.stream = { kind, item, posted: 0, shown: 0, text: typeof next.event.delta === "string" ? next.event.delta : "", started: at(next.event), ended: at(next.event) };
+        this.consume(next.event);
         this.options.checkpoint?.(next.event);
         continue;
       }

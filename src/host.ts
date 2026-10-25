@@ -186,7 +186,7 @@ export class AgentRuntime {
   async open(config: AgentConfiguration, options: RuntimeOptions): Promise<void> {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
-    this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, wake: this.options.wake, blobs: this.options.blobs };
+    this.options = { ...options, dispatch: deferMcp(options.dispatch, config.mcp_servers, options.mcp), published: this.options.published, live: this.options.live, wake: this.options.wake, blobs: this.options.blobs };
     const extra = config.code_mode ? options.workspace?.instructions : undefined;
     if (extra && !config.instructions?.includes(extra)) config = { ...config, instructions: config.instructions ? config.instructions + "\n\n" + extra : extra };
     this.hands = config.hands ?? false;
@@ -683,6 +683,10 @@ export class AgentRuntime {
         this.counters.events += request.events.length;
         this.options.published(request.events, request.bytes);
         this.notify();
+        return null;
+      }
+      case "live_events": {
+        this.options.live?.(request.events);
         return null;
       }
       case "turn_finished": return await this.options.finishing?.(request.request_id) ?? {};
