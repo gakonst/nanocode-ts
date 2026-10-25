@@ -44,8 +44,15 @@ export function workspaceFile(src: unknown, root = "/workspace"): string | undef
   if (typeof src !== "string") return undefined;
   const value = src.trim();
   const scheme = /^(?:workspace|sandbox):(?:\/\/)?(.*)$/i.exec(value) ?? /^file:\/\/(\/.*)$/i.exec(value);
-  const raw = scheme ? scheme[1]! : value.startsWith(root + "/") ? value : undefined;
-  if (raw === undefined) return undefined;
+  const found = scheme ? scheme[1]! : value.startsWith(root + "/") ? value : undefined;
+  if (found === undefined) return undefined;
+  const raw = (() => {
+    try {
+      return decodeURIComponent(found);
+    } catch {
+      return found;
+    }
+  })();
   const absolute = raw.startsWith("/") ? raw : "/" + raw;
   const path = absolute === root || absolute.startsWith(root + "/") ? absolute : root + absolute;
   return path.split("/").includes("..") ? undefined : path.split(/[?#]/)[0];
