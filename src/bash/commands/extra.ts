@@ -4,6 +4,7 @@ import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from
 import { checksum, perlSource, scan } from "./text.ts";
 import { allInput, device, eachInput, last, linked, linkOf, lstatOf, options, pause, put, readInput } from "./util.ts";
 import { mkdirs } from "./files.ts";
+import { literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { make } from "./make.ts";
 import { yq } from "./yaml.ts";
 import { gunzip, gzip, pack, unpack, untar, type TarEntry } from "./archive.ts";
@@ -1011,12 +1012,13 @@ const rg: CommandHandler = async ctx => {
     }
     return rules;
   };
-  const walk = async (path: string, display: string, depth: number, rules: IgnoreRule[], git: boolean, root: string) => {
+  const prunable = !listFiles && !f.has("v") && !f.has("c") && !has("count-matches") && !has("files-without-match") ? literals(patterns, f.has("F") ? "fixed" : "perl") : null;
+  const walk = async (path: string, display: string, depth: number, rules: IgnoreRule[], git: boolean, root: string, tree: Pruned | null) => {
     if (depth > maxDepth) return;
     const local = rules.concat(await loadRules(path, git));
-    for (const name of await ctx.fs.list(path)) {
+    for (const name of tree ? prunedList(tree, path) : await ctx.fs.list(path)) {
       const child = (path === "/" ? "" : path) + "/" + name;
-      const stat = await ctx.fs.stat(child);
+      const stat = tree ? prunedStat(tree, child) : await ctx.fs.stat(child);
       if (!stat) continue;
       const directory = stat.kind === "directory";
       if (depth + 1 > maxDepth) continue;
@@ -1030,7 +1032,7 @@ const rg: CommandHandler = async ctx => {
       }
       const shown = display === "" ? name : display.endsWith("/") ? display + name : display + "/" + name;
       if (directory) {
-        await walk(child, shown, depth + 1, local, git, root);
+        await walk(child, shown, depth + 1, local, git, root, tree);
         continue;
       }
       if (types.length && !types.includes("all") && !typeMatch(types, name)) continue;
@@ -1059,7 +1061,7 @@ const rg: CommandHandler = async ctx => {
       if (dir === "/") break;
     }
     for (const dir of ancestors) inherited.push(...(await loadRules(dir, git)));
-    await walk(path, implicit ? "" : root, 0, inherited, git, path);
+    await walk(path, implicit ? "" : root, 0, inherited, git, path, await pruned(ctx.fs, path, prunable));
   }
   if (listFiles) {
     for (const target of targets) ctx.stdout.write(target.display + (f.has("0") ? "\0" : "\n"));

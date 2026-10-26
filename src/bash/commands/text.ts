@@ -1,5 +1,6 @@
 import { CommandError, PipeError, budget, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, decode, encode } from "../fs.ts";
+import { literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { escapeRegExp, escapes, format, globRegExp, joinLines, lines, posixRegExp } from "../text.ts";
 import { allInput, batches, device, eachBatch, eachInput, last, options, pause, put, readInput } from "./util.ts";
 
@@ -394,9 +395,10 @@ const grep: CommandHandler = streaming(async ctx => {
   let status = 1;
   let errors = false;
   let directories = false;
-  const collect = async (operand: string, display: string, top: boolean) => {
+  const prunable = !f.has("v") && !f.has("L") && !f.has("c") ? literals(patterns, f.has("F") ? "fixed" : f.has("P") ? "perl" : f.has("E") ? "extended" : "basic") : null;
+  const collect = async (operand: string, display: string, top: boolean, tree?: Pruned | null) => {
     const path = ctx.resolve(operand);
-    const stat = await ctx.fs.stat(path);
+    const stat = tree && !top ? prunedStat(tree, path) : await ctx.fs.stat(path);
     if (!stat && device(path) !== undefined) {
       targets.push({ path, display });
       return;
@@ -416,7 +418,8 @@ const grep: CommandHandler = streaming(async ctx => {
       }
       directories = true;
       if (!top && excludeDir.some(glob => glob.test(name))) return;
-      for (const child of await ctx.fs.list(path)) await collect(path + "/" + child, display === "" ? child : display.replace(/\/$/, "") + "/" + child, false);
+      if (top) tree = await pruned(ctx.fs, path, prunable);
+      for (const child of tree ? prunedList(tree, path) : await ctx.fs.list(path)) await collect((path === "/" ? "" : path) + "/" + child, display === "" ? child : display.replace(/\/$/, "") + "/" + child, false, tree);
       return;
     }
     if (!top || recursive) {

@@ -17,6 +17,7 @@ import { pythonCommands, type PythonOptions } from "./commands/python.ts";
 
 export { MemoryFileSystem, FsError, normalize, resolvePath, type FileInput, type FileKind, type FileStat, type FileSystem, type LinkStat } from "./fs.ts";
 export { SqlFileSystem } from "./sql.ts";
+export { mounted } from "./mount.ts";
 export { CommandError, PipeError, streaming, type CommandContext, type CommandHandler, type Limits } from "./shell.ts";
 export { codeload, githubArchives, withGitHub, type GitHubFetchOptions, type GitHubOptions, type GitHubToken } from "./commands/git.ts";
 export { type WasmOptions } from "./commands/wasm.ts";
@@ -213,6 +214,7 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     ...(fs.symlink ? { symlink: (target: string, path: string) => (charge(), fs.symlink!(target, path)) } : {}),
     ...(fs.readlink ? { readlink: (path: string) => (charge(), fs.readlink!(path)) } : {}),
     ...(fs.lstat ? { lstat: (path: string) => (charge(), fs.lstat!(path)) } : {}),
+    ...(fs.search ? { search: (dir: string, literals: string[]) => (charge(), fs.search!(dir, literals)) } : {}),
   };
 }
 
