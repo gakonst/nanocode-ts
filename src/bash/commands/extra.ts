@@ -915,6 +915,7 @@ const rg: CommandHandler = async ctx => {
   for (const arg of ctx.args) {
     if (/^-u+$/.test(arg)) unrestricted += arg.length - 1;
     else if (arg === "--unrestricted") unrestricted++;
+    else if (/^-[ilcwFvnNHIUSsoqxaLp0.zP]*r[ilcwFvnNHIUSsoqxaLp0.zP]+$/.test(arg)) args.push(arg.replace("r", ""));
     else args.push(arg);
   }
   const parsed = options(args, {
