@@ -71,6 +71,10 @@
       "types": "./dist/react/playground.d.ts",
       "default": "./dist/react/playground.js"
     },
+    "./react/clones": {
+      "types": "./dist/react/clones.d.ts",
+      "default": "./dist/react/clones.js"
+    },
     "./react/zyzz.css": "./dist/react/zyzz.css",
     "./highlight": {
       "types": "./dist/highlight.d.ts",

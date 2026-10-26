@@ -56,10 +56,12 @@ export const stage = style({
   gap: "md",
   minWidth: "0",
   padding: "md",
-  selectors: { "&:has(> [data-app])": { padding: "0" } },
+  selectors: { "&:has(> [data-app]), &:has(> [data-clone])": { padding: "0" } },
 });
 
 export const app = style({ display: "flex", minWidth: "0", "& > [data-nc=\"chat\"]": { borderRadius: "0 !custom", flex: "1 !custom", minWidth: "0" } });
+
+export const clone = style({ height: "40rem !custom", minWidth: "0", overflow: "hidden", position: "relative" });
 
 export const pane = style({ display: "flex", flexDirection: "column", gap: "md", minWidth: "0" });
 
