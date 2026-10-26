@@ -1,10 +1,10 @@
-import { CommandError, LimitError, budget, type CommandContext, type CommandHandler } from "../shell.ts";
+import { CommandError, LimitError, PipeError, budget, type CommandContext, type CommandHandler } from "../shell.ts";
 import { baseOf, byte, decode, encode, FsError, parentOf } from "../fs.ts";
 import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from "../text.ts";
 import { checksum, perlSource, scan } from "./text.ts";
 import { allInput, device, eachInput, last, linked, linkOf, lstatOf, options, pause, put, readInput } from "./util.ts";
 import { mkdirs } from "./files.ts";
-import { literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
+import { ahead, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { make } from "./make.ts";
 import { yq } from "./yaml.ts";
 import { gunzip, gzip, pack, unpack, untar, type TarEntry } from "./archive.ts";
@@ -995,7 +995,7 @@ const rg: CommandHandler = async ctx => {
   const implicit = !operands.length;
   let errors = false;
   let directories = false;
-  const targets: { path: string; display: string; explicit: boolean }[] = [];
+  const targets: { path: string; display: string; explicit: boolean; pruned?: boolean }[] = [];
   const gitRoot = async (path: string): Promise<boolean> => {
     for (let dir = path; ; dir = parentOf(dir)) {
       if (await ctx.fs.stat((dir === "/" ? "" : dir) + "/.git")) return true;
@@ -1012,7 +1012,8 @@ const rg: CommandHandler = async ctx => {
     }
     return rules;
   };
-  const prunable = !listFiles && !f.has("v") && !f.has("c") && !has("count-matches") && !has("files-without-match") ? literals(patterns, f.has("F") ? "fixed" : "perl") : null;
+  const prunable = !listFiles && !f.has("v") && !has("files-without-match") ? literals(patterns, f.has("F") ? "fixed" : "perl") : null;
+  let narrowed = false;
   const walk = async (path: string, display: string, depth: number, rules: IgnoreRule[], git: boolean, root: string, tree: Pruned | null) => {
     if (depth > maxDepth) return;
     const local = rules.concat(await loadRules(path, git));
@@ -1037,7 +1038,7 @@ const rg: CommandHandler = async ctx => {
       }
       if (types.length && !types.includes("all") && !typeMatch(types, name)) continue;
       if (notTypes.length && typeMatch(notTypes, name)) continue;
-      targets.push({ path: child, display: shown, explicit: false });
+      targets.push({ path: child, display: shown, explicit: false, pruned: !!tree });
     }
   };
   for (const root of roots) {
@@ -1061,7 +1062,9 @@ const rg: CommandHandler = async ctx => {
       if (dir === "/") break;
     }
     for (const dir of ancestors) inherited.push(...(await loadRules(dir, git)));
-    await walk(path, implicit ? "" : root, 0, inherited, git, path, await pruned(ctx.fs, path, prunable));
+    const tree = await pruned(ctx.fs, path, prunable);
+    if (tree && !types.length && !notTypes.length) narrowed = true;
+    await walk(path, implicit ? "" : root, 0, inherited, git, path, tree);
   }
   if (listFiles) {
     for (const target of targets) ctx.stdout.write(target.display + (f.has("0") ? "\0" : "\n"));
@@ -1121,15 +1124,20 @@ const rg: CommandHandler = async ctx => {
       ctx.stdout.write(output);
     }
   };
-  if (!useStdin && !targets.length && !errors) {
+  if (!useStdin && !targets.length && !errors && !narrowed) {
     ctx.stderr.write("rg: No files were searched, which means ripgrep probably applied a filter you didn't expect.\nRunning with --debug will show why files are being skipped.\n");
     return 2;
   }
   if (useStdin) search(stdinText, f.has("H") ? "<stdin>" : undefined, true);
-  for (const target of targets) {
+  const partial = prunable && !numbers && !before && !after && !has("column") && !has("vimgrep") && !f.has("U") ? prunable : null;
+  const take = ahead(targets, target => partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index];
+    const pending = take(index)!;
+    if (ctx.stdout.closed) throw new PipeError();
     let text: string;
     try {
-      text = decode(await ctx.fs.read(target.path));
+      text = decode(await pending);
     } catch {
       ctx.stderr.write("rg: " + target.display + ": failed to read\n");
       errors = true;

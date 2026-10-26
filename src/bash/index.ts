@@ -215,6 +215,7 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     ...(fs.readlink ? { readlink: (path: string) => (charge(), fs.readlink!(path)) } : {}),
     ...(fs.lstat ? { lstat: (path: string) => (charge(), fs.lstat!(path)) } : {}),
     ...(fs.search ? { search: (dir: string, literals: string[]) => (charge(), fs.search!(dir, literals)) } : {}),
+    ...(fs.excerpt ? { excerpt: (path: string, literals: string[]) => (charge(), fs.excerpt!(path, literals)) } : {}),
   };
 }
 

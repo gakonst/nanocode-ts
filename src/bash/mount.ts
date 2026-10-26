@@ -61,6 +61,10 @@ export function mounted(base: FileSystem, mounts: Record<string, FileSystem>): F
       const found = await target.fs.search(target.path, literals);
       return found && found.map(path => full(target.point, path));
     },
+    excerpt: async (path, literals) => {
+      const target = route(path);
+      return target.point && target.fs.excerpt ? target.fs.excerpt(target.path, literals) : null;
+    },
     ...optional("chmod"),
     ...optional("utimes"),
     ...optional("readlink"),
@@ -70,6 +74,39 @@ export function mounted(base: FileSystem, mounts: Record<string, FileSystem>): F
 }
 
 export type Pruned = Map<string, Set<string>>;
+
+const AHEAD = 64;
+const AHEAD_BYTES = 16 << 20;
+
+export function ahead<T>(items: T[], load: (item: T) => Promise<Uint8Array> | null): (index: number) => Promise<Uint8Array> | null {
+  const slots = new Map<number, Promise<Uint8Array> | null>();
+  const sizes = new Map<number, number>();
+  let next = 0;
+  let width = 2;
+  let held = 0;
+  const start = (index: number) => {
+    const promise = load(items[index]);
+    if (promise) promise.then(bytes => {
+      if (!slots.has(index)) return;
+      sizes.set(index, bytes.length);
+      held += bytes.length;
+    }, () => {});
+    slots.set(index, promise);
+  };
+  return index => {
+    if (index >= next) {
+      start(index);
+      next = index + 1;
+    }
+    const promise = slots.get(index) ?? null;
+    slots.delete(index);
+    held -= sizes.get(index) ?? 0;
+    sizes.delete(index);
+    for (; next < items.length && next <= index + width && held < AHEAD_BYTES; next++) start(next);
+    width = Math.min(width * 2, AHEAD);
+    return promise;
+  };
+}
 
 export async function pruned(fs: FileSystem, root: string, literals: string[] | null): Promise<Pruned | null> {
   if (!literals || !fs.search) return null;
