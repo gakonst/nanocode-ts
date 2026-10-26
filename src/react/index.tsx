@@ -142,6 +142,15 @@ export function useActivity(): Activity {
   return useMemo(() => activity(live, pending), [live, pending]);
 }
 
+export function useAnswer(): { text: string; prompt: string | undefined; live: boolean; busy: boolean; activity: Activity; error: Error | undefined } {
+  const all = useTurns();
+  const doing = useActivity();
+  const error = useChatState(state => state.error);
+  const last = all[all.length - 1];
+  const text = useMemo(() => (last?.blocks ?? []).filter(block => block.kind === "assistant").map(block => block.text).join("\n\n"), [last]);
+  return { activity: doing, busy: doing.busy, error, live: last?.live ?? false, prompt: last?.prompt?.text, text };
+}
+
 export function useConversations(): { conversations: readonly Conversation[]; current: string | undefined; enabled: boolean; canCreate: boolean; canSelect: boolean; select(id: string): void; create(): string | undefined; remove(id: string): void } {
   const config = useConfig();
   const conversations = useChatState(state => state.conversations);

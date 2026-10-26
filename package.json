@@ -59,6 +59,14 @@
       "types": "./dist/react/theme.d.ts",
       "default": "./dist/react/theme.js"
     },
+    "./react/themes": {
+      "types": "./dist/react/themes.d.ts",
+      "default": "./dist/react/themes.js"
+    },
+    "./react/playground": {
+      "types": "./dist/react/playground.d.ts",
+      "default": "./dist/react/playground.js"
+    },
     "./react/zyzz.css": "./dist/react/zyzz.css",
     "./highlight": {
       "types": "./dist/highlight.d.ts",
