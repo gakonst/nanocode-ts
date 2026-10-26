@@ -2,7 +2,7 @@
 
 import type { ToolCell as Cell, TurnBlock } from "../../client.ts";
 import { type KeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Code, useAttachments, useConfig, useConversations, useSend } from "../index.tsx";
+import { Code, type Skin, useAttachments, useConfig, useConversations, useSend } from "../index.tsx";
 
 export type Block = TurnBlock | { kind: "tools"; cells: Cell[]; live: boolean };
 
@@ -13,6 +13,12 @@ export type ClonePicker = { models: readonly CloneModel[]; current: string; choo
 export type CloneProps = {
   actions?: ReactNode;
   before?(): Promise<unknown>;
+  busy?: boolean;
+  heading?: string;
+  input?(composer: ReactNode): ReactNode;
+  parts?: Skin["parts"];
+  send?(text: string): void;
+  suggestions?: ReactNode;
   footer?: ReactNode;
   picker?: ClonePicker;
   prompts?: readonly string[];
@@ -51,7 +57,7 @@ export function useStick(dependency: unknown) {
   return { onScroll, pin: () => { stick.current = true; }, ref };
 }
 
-export function useComposer(options: { onSend?(): void; warm?(): void; before?(): Promise<unknown> }) {
+export function useComposer(options: { onSend?(): void; warm?(): void; before?(): Promise<unknown>; send?(text: string): void }) {
   const { cancel, canCancel, isPending: busy, send } = useSend();
   const attachments = useAttachments();
   const [prompt, setPrompt] = useState("");
@@ -71,6 +77,7 @@ export function useComposer(options: { onSend?(): void; warm?(): void; before?()
     setPrompt("");
     attachments.clear();
     options.onSend?.();
+    if (options.send) return options.send(text);
     void (options.before?.() ?? Promise.resolve()).finally(() => send(text, attached));
   };
 
