@@ -56,9 +56,15 @@ export function useExpanded(): { open: ReadonlySet<string>; toggle(id: string, o
   return useContext(ExpandedContext);
 }
 
+const LinkContext = createContext<((href: string) => string | undefined) | undefined>(undefined);
+
+export function useLinks() {
+  return useContext(LinkContext);
+}
+
 const HighlightContext = createContext<{ highlighter?: Highlighter; request?(): void }>({});
 
-export function NanocodeProvider(props: { config: Config; highlight?: () => Promise<Highlighter>; skin?: Skin; children: ReactNode }) {
+export function NanocodeProvider(props: { config: Config; highlight?: () => Promise<Highlighter>; skin?: Skin; links?(href: string): string | undefined; children: ReactNode }) {
   const [highlighter, setHighlighter] = useState<Highlighter>();
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const toggle = useCallback((id: string, value?: boolean) => setOpen(current => {
@@ -91,7 +97,9 @@ export function NanocodeProvider(props: { config: Config; highlight?: () => Prom
     <ConfigContext.Provider value={props.config}>
       <SkinContext.Provider value={props.skin ?? EMPTY_SKIN}>
         <ExpandedContext.Provider value={expanded}>
-          <HighlightContext.Provider value={highlighting}>{props.children}</HighlightContext.Provider>
+          <HighlightContext.Provider value={highlighting}>
+            <LinkContext.Provider value={props.links}>{props.children}</LinkContext.Provider>
+          </HighlightContext.Provider>
         </ExpandedContext.Provider>
       </SkinContext.Provider>
     </ConfigContext.Provider>

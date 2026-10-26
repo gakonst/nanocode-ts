@@ -2,7 +2,7 @@
 
 import { isValidElement, type JSX, type ReactNode, useMemo, useRef } from "react";
 import { type Components, defaultRehypePlugins, Streamdown, type StreamdownProps, useIsCodeFenceIncomplete } from "streamdown";
-import { Code, Image, type MarkdownProps, usePart } from "./index.tsx";
+import { Code, Image, type MarkdownProps, useLinks, usePart } from "./index.tsx";
 
 type PartOf = ReturnType<typeof usePart>;
 
@@ -43,7 +43,11 @@ function Fence(props: { code: string; language: string; render: { current: Markd
   return <>{props.render.current?.(props.language, props.code) ?? <Code code={props.code} framed incomplete={incomplete} language={props.language} />}</>;
 }
 
-function components(part: PartOf, render: { current: MarkdownProps["code"] }): Components {
+function popup(event: { preventDefault(): void }, href: string) {
+  if (globalThis.open?.(href, "nanocode-link", "popup,width=960,height=800")) event.preventDefault();
+}
+
+function components(part: PartOf, render: { current: MarkdownProps["code"] }, links: ((href: string) => string | undefined) | undefined): Components {
   const heading = (level: number) => (props: Props<"h1">) => {
     const Tag = ("h" + level) as "h1";
     return <Tag {...part("heading", { level })}>{props.children}</Tag>;
@@ -53,7 +57,12 @@ function components(part: PartOf, render: { current: MarkdownProps["code"] }): C
     return value === "left" || value === "center" || value === "right" ? value : undefined;
   };
   return {
-    a: (props: Props<"a">) => props.href && LINK.test(props.href) ? <a href={props.href} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a> : <span {...part("link", { incomplete: true })}>{props.children}</span>,
+    a: (props: Props<"a">) => {
+      if (props.href && LINK.test(props.href)) return <a href={props.href} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a>;
+      const resolved = props.href ? links?.(props.href) : undefined;
+      if (resolved) return <a href={resolved} onClick={event => popup(event, resolved)} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a>;
+      return <span {...part("link", { incomplete: true })}>{props.children}</span>;
+    },
     blockquote: (props: Props<"blockquote">) => <blockquote {...part("quote")}>{props.children}</blockquote>,
     code: (props: Props<"code"> & { "data-block"?: string }) => {
       if (!("data-block" in props)) return <code {...part("inline")}>{props.children}</code>;
@@ -114,7 +123,8 @@ export default function Streamed(props: MarkdownProps) {
   const part = usePart();
   const render = useRef(props.code);
   render.current = props.code;
-  const parts = useMemo(() => components(part, render), [part]);
+  const links = useLinks();
+  const parts = useMemo(() => components(part, render, links), [part, links]);
   const { className, ...attributes } = part("markdown", { live: props.live });
   return (
     <Streamdown
