@@ -570,6 +570,7 @@ export class AgentRuntime {
         return await this.options.tools.call(request.name, request.input, controller.signal, request.context) ?? null;
       }
       case "file_read": return await this.workspace().read(request.path);
+      case "file_exists": return await this.workspace().read(request.path).then(found => found !== null, () => true);
       case "file_write": return await this.workspace().write(request.path, request.contents) ?? null;
       case "file_remove": return await this.workspace().remove(request.path) ?? null;
       case "shell_run": {

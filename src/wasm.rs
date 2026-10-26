@@ -843,6 +843,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .any(|tool| tool.name() == name || tool.name() == "web_search")
     };
     let host_search = [host_tool("WebSearch"), host_tool("web__run")];
+    let host_image = config.tools.iter().any(|tool| tool.name() == "image_gen__imagegen");
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let search = |family: Provider| -> Option<Arc<dyn Tool>> {
         let replaced = match family {
@@ -867,6 +868,21 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 )) as Arc<dyn Tool>
             }),
         }
+    };
+    let image_root = config.workspace.clone();
+    let image = |family: Provider| -> Option<Arc<dyn Tool>> {
+        if !matches!(family, Provider::Codex) || host_image {
+            return None;
+        }
+        let root = image_root.as_deref()?;
+        codex_search.as_ref().map(|(endpoint, _)| {
+            Arc::new(nanocode::codex_tools::image_generation_tool(
+                endpoint,
+                Arc::new(transport::WorkerTransport::CODEX),
+                Arc::new(workspace::HostFiles),
+                root.into(),
+            )) as Arc<dyn Tool>
+        })
     };
     let workspace_tools = |family: Provider| {
         config
@@ -902,6 +918,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .iter()
             .cloned()
             .chain(search(family))
+            .chain(image(family))
             .try_fold(base, |tools, tool| tools.add_shared_tool(tool))
             .map_err(configuration)?;
         if !(placement || local) {

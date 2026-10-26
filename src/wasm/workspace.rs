@@ -8,7 +8,7 @@ use nanocode::process::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::bridge::{call, monotonic_ms};
+use super::bridge::{call, call_bytes_with, call_with_body, monotonic_ms};
 
 pub struct HostFiles;
 
@@ -70,6 +70,42 @@ impl FileHost for HostFiles {
                 .await
                 .map(drop)
                 .map_err(failure)
+        })
+    }
+
+    fn read_bytes<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> ProcessFuture<'a, Result<Option<Vec<u8>>, String>> {
+        Box::pin(async move {
+            let path = text(path)?;
+            if call(json!({"op": "file_exists", "path": path}))
+                .await
+                .map_err(failure)?
+                != Value::Bool(true)
+            {
+                return Ok(None);
+            }
+            call_bytes_with(&json!({"op": "cell_read", "path": path, "cwd": "/"}))
+                .await
+                .map(Some)
+                .map_err(failure)
+        })
+    }
+
+    fn write_bytes<'a>(
+        &'a self,
+        path: &'a Path,
+        bytes: &'a [u8],
+    ) -> ProcessFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            call_with_body(
+                json!({"op": "cell_write", "path": text(path)?, "cwd": "/", "append": false}),
+                bytes,
+            )
+            .await
+            .map(drop)
+            .map_err(failure)
         })
     }
 
