@@ -30,6 +30,8 @@ export type Theme = {
   skin: Skin;
   tokens: Tokens;
   scheme?: Scheme;
+  greeting?: string | ((hour: number) => string);
+  placeholder?: string;
 };
 
 const VARIABLES: Record<keyof Tokens, string> = {
@@ -73,8 +75,10 @@ const ICONS: Skin["icons"] = { cancelled: "–", completed: "✓", failed: "!", 
 
 export const chatgptTheme: Theme = {
   description: "The system sans, no agent label, gray bubbles for you and a black send button.",
+  greeting: "What can I help with?",
   id: "chatgpt",
   label: "ChatGPT",
+  placeholder: "Ask anything",
   scheme: "light dark",
   skin: { icons: ICONS, parts: { ...base, ...(chatgpt as unknown as NonNullable<Skin["parts"]>) } },
   tokens: {
@@ -95,8 +99,10 @@ export const chatgptTheme: Theme = {
 
 export const claudeTheme: Theme = {
   description: "Warm paper, a serif answer under a terracotta asterisk and a bordered composer.",
+  greeting: hour => hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening",
   id: "claude",
   label: "Claude",
+  placeholder: "How can I help you today?",
   scheme: "light dark",
   skin: { icons: ICONS, parts: { ...base, ...(claude as unknown as NonNullable<Skin["parts"]>) } },
   tokens: {
@@ -117,8 +123,10 @@ export const claudeTheme: Theme = {
 
 export const geminiTheme: Theme = {
   description: "Google Sans, a sparkle for the agent, bubbles for you and a pill composer.",
+  greeting: "Hello, there",
   id: "gemini",
   label: "Gemini",
+  placeholder: "Ask Gemini",
   scheme: "light dark",
   skin: { icons: ICONS, parts: { ...base, ...(gemini as unknown as NonNullable<Skin["parts"]>) } },
   tokens: {
