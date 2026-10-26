@@ -5,6 +5,7 @@ const MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospac
 
 export const chat = variants({
   base: {
+    height: "34rem !custom",
     backgroundColor: "bg",
     border: "none",
     borderRadius: "1.75rem !custom",
@@ -18,12 +19,13 @@ export const chat = variants({
     selectors: { "[data-xframe] &": { borderRadius: "0 !custom", inset: "0 !custom", position: "fixed", zIndex: 200 } },
   },
   variants: {
+    empty: { false: {}, true: { justifyContent: "center" } },
     expanded: {
       false: {},
       true: { borderRadius: "0 !custom", bottom: "0", left: "0", position: "fixed", right: "0", top: "0", zIndex: 90 },
     },
   },
-  defaultVariants: { expanded: false },
+  defaultVariants: { empty: false, expanded: false },
 });
 
 export const log = variants({
@@ -31,11 +33,12 @@ export const log = variants({
     display: "flex",
     flexDirection: "column",
     gap: "md",
-    height: "26rem !custom",
+    flex: "1 !custom",
+    minHeight: "0",
     overflowY: "auto",
     paddingBlock: "lg",
     paddingInline: "lg",
-    selectors: { "[data-xframe] &": { flex: "1 !custom", height: "auto !custom", minHeight: "0" } },
+    selectors: { "[data-xframe] &": { flex: "1 !custom", height: "auto !custom", minHeight: "0" }, '[data-empty="true"] > &': { flex: "0 0 auto !custom", overflowY: "visible" } },
   },
   variants: {
     expanded: { false: {}, true: { flex: "1 !custom", height: "auto !custom", marginInline: "auto !custom", maxWidth: "48rem !custom", minHeight: "0", width: "100% !custom" } },
@@ -194,15 +197,18 @@ export const children = style({ display: "flex", flexDirection: "column", gap: "
 export const more = style({ alignSelf: "flex-start", backgroundColor: "transparent", border: "none", color: "accent", cursor: "pointer", font: "inherit !custom", fontSize: "0.8125rem !custom", marginTop: "xs", padding: "0", textDecorationLine: "none" });
 
 export const typing = variants({
-  base: { color: "middle", fontSize: "0.8125rem !custom", height: "1.25rem !custom", margin: "0", paddingInline: "lg" },
+  base: { color: "middle", fontSize: "0.8125rem !custom", height: "1.25rem !custom", margin: "0", paddingInline: "lg", selectors: { '[data-empty="true"] > &': { display: "none" } } },
   variants: { visible: { false: { visibility: "hidden" }, true: {} } },
   defaultVariants: { visible: false },
 });
 
 export const row = style({
   alignItems: "center",
-  backgroundColor: "surface",
+  backgroundColor: "bg",
+  border: "1px solid",
+  borderColor: "rule",
   borderRadius: "1.75rem !custom",
+  boxShadow: "0 4px 16px rgb(0 0 0 / 0.06) !custom",
   display: "flex",
   gap: "sm",
   marginBottom: "sm",
@@ -210,7 +216,7 @@ export const row = style({
   paddingBlock: "0.375rem !custom",
   paddingLeft: "1.25rem !custom",
   paddingRight: "0.375rem !custom",
-  selectors: { '[data-expanded="true"] > &': { marginInline: "auto !custom", maxWidth: "48rem !custom", width: "calc(100% - 2rem) !custom" } },
+  selectors: { '[data-expanded="true"] > &, [data-empty="true"] > &': { marginInline: "auto !custom", maxWidth: "48rem !custom", width: "calc(100% - 2rem) !custom" } },
 });
 
 export const chevron = style({ display: "none" });
@@ -242,6 +248,7 @@ export const send = style({
   height: "2.25rem !custom",
   justifyContent: "center",
   padding: "0",
+  textDecorationLine: "none",
   width: "2.25rem !custom",
   "::before": { content: '"↑"', fontSize: "1.125rem !custom", fontWeight: "600 !custom" },
   ":focus-visible": { outline: "2px solid", outlineColor: "text", outlineOffset: "2px" },
@@ -249,7 +256,7 @@ export const send = style({
 
 export const key = style({ display: "none" });
 
-export const suggestions = style({ display: "flex", flexWrap: "wrap", gap: "sm", paddingBottom: "sm", paddingInline: "md" });
+export const suggestions = style({ display: "flex", flexWrap: "wrap", gap: "sm", paddingBottom: "sm", paddingInline: "md", selectors: { '[data-empty="true"] > &': { justifyContent: "center" } } });
 
 export const suggestion = variants({
   base: {
@@ -290,3 +297,5 @@ export const picker = style({ backgroundColor: "surface", borderRadius: "1rem !c
 export const attachment = style({ alignItems: "center", backgroundColor: "surface", borderRadius: "0.75rem !custom", display: "inline-flex", gap: "xs", maxWidth: "100% !custom", minWidth: "0", paddingBlock: "xs", paddingInline: "sm" });
 
 export const quote = style({ borderLeft: "3px solid", borderLeftColor: "rule", color: "middle", marginBlock: "0", marginInline: "0", paddingLeft: "md" });
+
+export const greeting = style({ fontSize: "1.75rem !custom", fontWeight: "400 !custom", lineHeight: "2.25rem !custom", margin: "0", paddingBottom: "md", textAlign: "center" });

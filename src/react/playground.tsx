@@ -58,6 +58,9 @@ export function Playground(props: PlaygroundProps) {
   const [scheme, setScheme] = useState<Scheme | "theme">("theme");
   const [custom, setCustom] = useState<Tokens>(CUSTOM);
   const [font, setFont] = useState("sans");
+  const [hour, setHour] = useState<number>();
+
+  useEffect(() => setHour(new Date().getHours()), []);
 
   const theme = useMemo<Theme>(() => {
     if (chosen !== "custom") return themes.find(item => item.id === chosen) ?? nanocodeTheme;
@@ -65,50 +68,15 @@ export function Playground(props: PlaygroundProps) {
   }, [chosen, custom, font, themes]);
 
   const style = themeStyle(theme, scheme === "theme" ? undefined : scheme);
+  const greeting = typeof theme.greeting === "function" ? (hour === undefined ? undefined : theme.greeting(hour)) : theme.greeting;
   const set = (key: keyof Tokens) => (value: string) => setCustom(current => ({ ...current, [key]: value }));
 
   return (
     <div {...styles.playground()}>
-      <div {...styles.controls()}>
-        <div {...styles.bar()} role="radiogroup" aria-label="Theme">
-          <span {...styles.label()}>theme</span>
-          {[...themes, { id: "custom", label: "Custom" }].map(item => (
-            <button aria-checked={item.id === chosen} key={item.id} onClick={() => setChosen(item.id)} role="radio" type="button" {...styles.option({ current: item.id === chosen })}>{item.label}</button>
-          ))}
-        </div>
-        <div {...styles.bar()} role="radiogroup" aria-label="Form factor">
-          <span {...styles.label()}>form factor</span>
-          {FORMS.map(item => (
-            <button aria-checked={item.id === form} key={item.id} onClick={() => setForm(item.id)} role="radio" title={item.detail} type="button" {...styles.option({ current: item.id === form })}>{item.label}</button>
-          ))}
-        </div>
-        <div {...styles.bar()} role="radiogroup" aria-label="Color scheme">
-          <span {...styles.label()}>scheme</span>
-          {SCHEMES.map(item => (
-            <button aria-checked={item.id === scheme} key={item.id} onClick={() => setScheme(item.id)} role="radio" type="button" {...styles.option({ current: item.id === scheme })}>{item.label}</button>
-          ))}
-        </div>
-        {chosen === "custom" && (
-          <div {...styles.custom()}>
-            <span {...styles.label()}>tokens</span>
-            {(["accent", "bg", "surface", "text"] as const).map(key => (
-              <label key={key} {...styles.field()}>{key}<input aria-label={key} onChange={event => set(key)(event.target.value)} type="color" value={custom[key] ?? "#000000"} {...styles.swatch()} /></label>
-            ))}
-            <label {...styles.field()}>font
-              <select onChange={event => setFont(event.target.value)} value={font} {...styles.select()}>
-                {Object.keys(FONTS).map(name => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </label>
-            <label {...styles.field()}>radius<input max={28} min={0} onChange={event => set("radius")(event.target.value + "px")} type="range" value={parseInt(custom.radius ?? "0")} /></label>
-          </div>
-        )}
-        <p {...styles.description()}>{theme.label}: {theme.description} {FORMS.find(item => item.id === form)?.detail}</p>
-      </div>
-
       <div data-theme={theme.id} style={style} {...styles.stage()}>
         {form === "chat" && (
           <NanocodeProvider config={props.configs.chat} skin={theme.skin} {...(props.highlight ? { highlight: props.highlight } : {})}>
-            <Chat expandable={false} label={theme.label + " chat"} placeholder={theme.id === "gemini" ? "Ask Gemini-style nanocode" : "Ask the agent"} status={props.status} suggestions={props.suggestions ?? ["What can you do?", "Plot y = sin(x) and show me", "Fetch the top Hacker News story"]} />
+            <Chat expandable={false} greeting={greeting} label={theme.label + " chat"} placeholder={theme.placeholder ?? "Ask the agent"} status={props.status} suggestions={props.suggestions ?? ["What can you do?", "Plot y = sin(x) and show me", "Fetch the top Hacker News story"]} />
           </NanocodeProvider>
         )}
         {form === "button" && (
@@ -123,8 +91,46 @@ export function Playground(props: PlaygroundProps) {
         )}
       </div>
 
-      <div {...styles.code()}>
-        <Block code={snippet(theme, form)} label={form === "chat" ? "Chat.tsx" : form === "button" ? "SummarizeButton.tsx" : "Rewrite.tsx"} language="tsx" />
+      <div {...styles.side()}>
+        <div {...styles.controls()}>
+          <div {...styles.bar()} role="radiogroup" aria-label="Theme">
+            <span {...styles.label()}>theme</span>
+            {[...themes, { id: "custom", label: "Custom" }].map(item => (
+              <button aria-checked={item.id === chosen} key={item.id} onClick={() => setChosen(item.id)} role="radio" type="button" {...styles.option({ current: item.id === chosen })}>{item.label}</button>
+            ))}
+          </div>
+          <div {...styles.bar()} role="radiogroup" aria-label="Form factor">
+            <span {...styles.label()}>form factor</span>
+            {FORMS.map(item => (
+              <button aria-checked={item.id === form} key={item.id} onClick={() => setForm(item.id)} role="radio" title={item.detail} type="button" {...styles.option({ current: item.id === form })}>{item.label}</button>
+            ))}
+          </div>
+          <div {...styles.bar()} role="radiogroup" aria-label="Color scheme">
+            <span {...styles.label()}>scheme</span>
+            {SCHEMES.map(item => (
+              <button aria-checked={item.id === scheme} key={item.id} onClick={() => setScheme(item.id)} role="radio" type="button" {...styles.option({ current: item.id === scheme })}>{item.label}</button>
+            ))}
+          </div>
+          {chosen === "custom" && (
+            <div {...styles.custom()}>
+              <span {...styles.label()}>tokens</span>
+              {(["accent", "bg", "surface", "text"] as const).map(key => (
+                <label key={key} {...styles.field()}>{key}<input aria-label={key} onChange={event => set(key)(event.target.value)} type="color" value={custom[key] ?? "#000000"} {...styles.swatch()} /></label>
+              ))}
+              <label {...styles.field()}>font
+                <select onChange={event => setFont(event.target.value)} value={font} {...styles.select()}>
+                  {Object.keys(FONTS).map(name => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </label>
+              <label {...styles.field()}>radius<input max={28} min={0} onChange={event => set("radius")(event.target.value + "px")} type="range" value={parseInt(custom.radius ?? "0")} /></label>
+            </div>
+          )}
+          <p {...styles.description()}>{theme.label}: {theme.description} {FORMS.find(item => item.id === form)?.detail}</p>
+        </div>
+
+        <div {...styles.code()}>
+          <Block code={snippet(theme, form)} label={form === "chat" ? "Chat.tsx" : form === "button" ? "SummarizeButton.tsx" : "Rewrite.tsx"} language="tsx" />
+        </div>
       </div>
     </div>
   );

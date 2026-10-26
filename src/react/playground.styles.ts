@@ -2,7 +2,16 @@ import { style, variants } from "./theme.ts";
 
 const ROUND = "var(--nc-radius, 0) !custom";
 
-export const playground = style({ display: "flex", flexDirection: "column", gap: "lg", minWidth: "0" });
+export const playground = style({
+  alignItems: "start",
+  display: "grid",
+  gap: "lg",
+  gridTemplateColumns: "minmax(0, 3fr) minmax(0, 2fr) !custom",
+  minWidth: "0",
+  "@media (max-width: 960px)": { gridTemplateColumns: "minmax(0, 1fr) !custom" },
+});
+
+export const side = style({ display: "flex", flexDirection: "column", gap: "lg", minWidth: "0", position: "sticky", top: "md" });
 
 export const controls = style({ display: "flex", flexDirection: "column", gap: "sm" });
 

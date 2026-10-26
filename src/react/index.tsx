@@ -19,7 +19,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
+export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "greeting" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -604,6 +604,7 @@ export type ChatProps = {
   steering?: string;
   activity?: { who: string; text: string };
   empty?: string;
+  greeting?: ReactNode;
   label?: string;
   expandable?: boolean;
   defaultPrompt?: string;
@@ -763,10 +764,10 @@ export function Chat(props: ChatProps) {
           input.current?.focus();
         }}
         {...attachments.drop}
-        {...part("chat", { dragging: attachments.dragging, expanded: full })}
+        {...part("chat", { dragging: attachments.dragging, empty: Boolean(props.greeting) && entries.length === 0 && live.length === 0, expanded: full })}
       >
         <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...part("log", { expanded: full })}>
-          {entries.length === 0 && live.length === 0 && props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>}
+          {entries.length === 0 && live.length === 0 && (props.greeting ? <p {...part("greeting")}>{props.greeting}</p> : props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>)}
           {entries.map((entry, index) => <Fragment key={index}><EntryView entry={entry} previous={entries[index - 1]} reasoning={props.reasoning} tools={props.tools} />{props.after?.(entry, index)}</Fragment>)}
           {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} reasoning={props.reasoning} tools={props.tools} />)}
         </div>
