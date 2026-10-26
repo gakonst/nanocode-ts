@@ -5,7 +5,7 @@ type Stat = { mode: number; size: number; mtime: Date | number };
 
 type FS = PyodideFS & { lstat(path: string): Stat; isLink(mode: number): boolean };
 
-type Runner = { pyodide: Pyodide; fs: FS; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; micropip: boolean };
+type Runner = { pyodide: Pyodide; fs: FS; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; micropip: boolean; installed: Set<string> };
 
 const ALLOWED = ["/workspace", "/tmp", "/home/user"];
 const LIMIT = 4 * 1024 * 1024;
@@ -90,12 +90,11 @@ function text(chunks: Uint8Array[]): string {
 
 export type PythonServerState = { load(): Promise<string[][] | undefined>; save(installs: string[][]): Promise<void> };
 
-export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerState): (request: PythonRequest) => Promise<PythonReply> {
+export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequest, state?: PythonServerState) => Promise<PythonReply> {
   let runner: Promise<Runner> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   let mirror: string | undefined;
   const stamps = new Map<string, string | undefined>();
-  let installs: string[][] = [];
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -104,16 +103,7 @@ export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerS
       for (const root of ALLOWED) mkdirs(fs, root);
       const namespace = (pyodide.globals.get("dict") as () => { get(name: string): unknown })();
       pyodide.runPython(HELPER, { globals: namespace });
-      const python: Runner = { pyodide, fs, start: namespace.get("start") as Runner["start"], cancel: namespace.get("cancel") as Runner["cancel"], micropip: false };
-      installs = (await state?.load()) ?? [];
-      if (installs.length) {
-        await pyodide.loadPackage("micropip", { messageCallback: () => {}, errorCallback: () => {} });
-        python.micropip = true;
-        pyodide.setStdout({ write: (buffer: Uint8Array) => buffer.length });
-        pyodide.setStderr({ write: (buffer: Uint8Array) => buffer.length });
-        for (const argv of installs) await python.start(JSON.stringify({ kind: "pip", target: "", argv, filename: "", cwd: "/home/user", env: { HOME: "/home/user" }, path0: "" }));
-      }
-      return python;
+      return { pyodide, fs, start: namespace.get("start") as Runner["start"], cancel: namespace.get("cancel") as Runner["cancel"], micropip: false, installed: new Set<string>() };
     })();
     runner.catch(() => { runner = undefined; });
     return runner;
@@ -247,7 +237,23 @@ export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerS
     return { dirs, files };
   };
 
-  const execute = async (python: Runner, request: PythonRequest): Promise<{ status: number; stdout: string; stderr: string }> => {
+  const replay = async (python: Runner, installs: string[][]) => {
+    const missing = installs.filter(argv => !python.installed.has(JSON.stringify(argv)));
+    if (!missing.length) return;
+    const { pyodide } = python;
+    if (!python.micropip) {
+      await pyodide.loadPackage("micropip", { messageCallback: () => {}, errorCallback: () => {} });
+      python.micropip = true;
+    }
+    pyodide.setStdout({ write: (buffer: Uint8Array) => buffer.length });
+    pyodide.setStderr({ write: (buffer: Uint8Array) => buffer.length });
+    for (const argv of missing) {
+      await python.start(JSON.stringify({ kind: "pip", target: "", argv, filename: "", cwd: "/home/user", env: { HOME: "/home/user" }, path0: "" }));
+      python.installed.add(JSON.stringify(argv));
+    }
+  };
+
+  const execute = async (python: Runner, request: PythonRequest, state?: PythonServerState): Promise<{ status: number; stdout: string; stderr: string }> => {
     const { pyodide, fs } = python;
     const out: Uint8Array[] = [], err: Uint8Array[] = [];
     const errText = (message: string) => err.push(new TextEncoder().encode(message));
@@ -289,14 +295,14 @@ export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerS
       clearTimeout(timer);
       pyodide.setInterruptBuffer(undefined);
     }
-    if (request.kind === "pip" && status === 0 && (request.argv[0] === "install" || request.argv[0] === "uninstall") && state) {
-      installs = [...installs, request.argv];
-      await state.save(installs);
+    if (request.kind === "pip" && status === 0 && (request.argv[0] === "install" || request.argv[0] === "uninstall")) {
+      python.installed.add(JSON.stringify(request.argv));
+      if (state) await state.save([...((await state.load()) ?? []), request.argv]);
     }
     return { status, stdout: text(out), stderr: text(err) };
   };
 
-  const mirrored = async (python: Runner, request: PythonRequest, roots: string[]): Promise<PythonReply> => {
+  const mirrored = async (python: Runner, request: PythonRequest, roots: string[], state?: PythonServerState): Promise<PythonReply> => {
     const { fs } = python;
     const id = request.mirror!;
     const empty: PythonReply = { status: 0, stdout: "", stderr: "", dirs: [], files: [], mirror: id };
@@ -318,16 +324,17 @@ export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerS
       else if (found === "file") before.set(path, stamp(fs, path));
     };
     for (const root of roots) walk(root);
-    const result = await execute(python, request);
+    const result = await execute(python, request, state);
     return { ...empty, ...result, ...changed(fs, roots, before) };
   };
 
-  const run = async (request: PythonRequest): Promise<PythonReply> => {
+  const run = async (request: PythonRequest, state?: PythonServerState): Promise<PythonReply> => {
     const roots = request.roots;
     const refused = roots.filter(root => !allowed(root));
     if (refused.length) return { status: 1, stdout: "", stderr: "python3 runs only under /workspace, /tmp or /home/user, not " + refused.join(", ") + "\n", dirs: [], files: [] };
     const python = await boot();
-    if (request.mirror) return mirrored(python, request, roots);
+    if (state && request.kind !== "version") await replay(python, (await state.load()) ?? []);
+    if (request.mirror) return mirrored(python, request, roots, state);
     const { fs } = python;
     mirror = undefined;
     const before = new Map(request.files.map(([path, data]) => [path, unbase64(data)] as const));
@@ -340,12 +347,12 @@ export function pythonServer(load: () => Promise<Pyodide>, state?: PythonServerS
       mkdirs(fs, parentOf(path));
       fs.writeFile(path, data);
     }
-    const result = await execute(python, request);
+    const result = await execute(python, request, state);
     return { ...result, ...collect(fs, roots, before) };
   };
 
-  return request => {
-    const next = queue.then(() => run(request));
+  return (request, state) => {
+    const next = queue.then(() => run(request, state));
     queue = next.catch(() => {});
     return next;
   };
