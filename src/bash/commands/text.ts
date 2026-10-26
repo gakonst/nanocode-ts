@@ -1,6 +1,6 @@
 import { CommandError, PipeError, budget, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, decode, encode } from "../fs.ts";
-import { ahead, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
+import { ahead, exactLiterals, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { escapeRegExp, escapes, format, globRegExp, joinLines, lines, posixRegExp } from "../text.ts";
 import { allInput, batches, device, eachBatch, eachInput, last, options, pause, put, readInput } from "./util.ts";
 
@@ -391,11 +391,12 @@ const grep: CommandHandler = streaming(async ctx => {
   const include = (parsed.values.get("include") ?? []).map(glob => globRegExp(glob));
   const exclude = (parsed.values.get("exclude") ?? []).map(glob => globRegExp(glob));
   const excludeDir = (parsed.values.get("exclude-dir") ?? []).map(glob => globRegExp(glob));
-  const targets: ({ path: string; display: string; pruned?: boolean } | "-")[] = [];
+  const targets: ({ path: string; display: string; pruned?: boolean; matched?: boolean } | "-")[] = [];
   let status = 1;
   let errors = false;
   let directories = false;
   const prunable = !f.has("v") && !f.has("L") && !f.has("c") ? literals(patterns, f.has("F") ? "fixed" : f.has("P") ? "perl" : f.has("E") ? "extended" : "basic") : null;
+  const exactTerms = (f.has("l") || f.has("q")) && !f.has("v") && !f.has("L") && !f.has("c") && !f.has("w") && !f.has("x") && !f.has("z") ? exactLiterals(patterns, f.has("F") ? "fixed" : f.has("P") ? "perl" : f.has("E") ? "extended" : "basic") : null;
   const collect = async (operand: string, display: string, top: boolean, tree?: Pruned | null) => {
     const path = ctx.resolve(operand);
     const stat = tree && !top ? prunedStat(tree, path) : await ctx.fs.stat(path);
@@ -418,7 +419,7 @@ const grep: CommandHandler = streaming(async ctx => {
       }
       directories = true;
       if (!top && excludeDir.some(glob => glob.test(name))) return;
-      if (top) tree = await pruned(ctx.fs, path, prunable);
+      if (top) tree = await pruned(ctx.fs, path, prunable, exactTerms && { literals: exactTerms, ignoreCase: f.has("i") });
       for (const child of tree ? prunedList(tree, path) : await ctx.fs.list(path)) await collect((path === "/" ? "" : path) + "/" + child, display === "" ? child : display.replace(/\/$/, "") + "/" + child, false, tree);
       return;
     }
@@ -426,7 +427,7 @@ const grep: CommandHandler = streaming(async ctx => {
       if (include.length && !include.some(glob => glob.test(name))) return;
       if (exclude.some(glob => glob.test(name))) return;
     }
-    targets.push({ path, display, pruned: !!tree && !top });
+    targets.push({ path, display, pruned: !!tree && !top, matched: !!tree?.exact && !top });
   };
   if (implicit) await collect(".", "", true);
   else for (const operand of operands) {
@@ -492,11 +493,17 @@ const grep: CommandHandler = streaming(async ctx => {
   } else {
     let stdinUsed = false;
     const partial = prunable && !f.has("n") && !f.has("b") && !before && !after && !f.has("z") ? prunable : null;
-    const take = ahead(targets, target => target === "-" || device(target.path) !== undefined ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
+    const take = ahead(targets, target => target === "-" || target.matched || device(target.path) !== undefined ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
     for (let index = 0; index < targets.length; index++) {
       const target = targets[index];
       const pending = take(index);
       if (ctx.stdout.closed) throw new PipeError();
+      if (target !== "-" && target.matched) {
+        status = 0;
+        if (f.has("q")) return 0;
+        ctx.stdout.write(target.display + (f.has("Z") ? "\0" : "\n"));
+        continue;
+      }
       let source: () => Promise<string | null>;
       let stream = false;
       let display: string;

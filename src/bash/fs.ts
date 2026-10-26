@@ -19,6 +19,7 @@ export interface FileSystem {
   lstat?(path: string): Promise<LinkStat | null>;
   search?(dir: string, literals: string[]): Promise<string[] | null>;
   excerpt?(path: string, literals: string[]): Promise<Uint8Array | null>;
+  matches?(dir: string, literals: string[], ignoreCase: boolean): Promise<string[] | null>;
 }
 
 export type FileInput = string | Uint8Array;
@@ -48,6 +49,7 @@ export function masked(fs: FileSystem, umask: number): FileSystem {
     ...(fs.lstat ? { lstat: fs.lstat.bind(fs) } : {}),
     ...(fs.search ? { search: fs.search.bind(fs) } : {}),
     ...(fs.excerpt ? { excerpt: fs.excerpt.bind(fs) } : {}),
+    ...(fs.matches ? { matches: fs.matches.bind(fs) } : {}),
   };
 }
 

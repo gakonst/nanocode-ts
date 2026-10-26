@@ -65,6 +65,12 @@ export function mounted(base: FileSystem, mounts: Record<string, FileSystem>): F
       const target = route(path);
       return target.point && target.fs.excerpt ? target.fs.excerpt(target.path, literals) : null;
     },
+    matches: async (dir, literals, ignoreCase) => {
+      const target = route(dir);
+      if (!target.point || !target.fs.matches) return null;
+      const found = await target.fs.matches(target.path, literals, ignoreCase);
+      return found && found.map(path => full(target.point, path));
+    },
     ...optional("chmod"),
     ...optional("utimes"),
     ...optional("readlink"),
@@ -73,7 +79,7 @@ export function mounted(base: FileSystem, mounts: Record<string, FileSystem>): F
   };
 }
 
-export type Pruned = Map<string, Set<string>>;
+export type Pruned = Map<string, Set<string>> & { exact?: boolean };
 
 const AHEAD = 64;
 const AHEAD_BYTES = 16 << 20;
@@ -108,11 +114,13 @@ export function ahead<T>(items: T[], load: (item: T) => Promise<Uint8Array> | nu
   };
 }
 
-export async function pruned(fs: FileSystem, root: string, literals: string[] | null): Promise<Pruned | null> {
-  if (!literals || !fs.search) return null;
-  const files = await fs.search(root, literals);
+export async function pruned(fs: FileSystem, root: string, literals: string[] | null, exact?: { literals: string[]; ignoreCase: boolean } | null): Promise<Pruned | null> {
+  const matched = exact && fs.matches ? await fs.matches(root, exact.literals, exact.ignoreCase) : null;
+  if (!matched && (!literals || !fs.search)) return null;
+  const files = matched ?? await fs.search!(root, literals!);
   if (!files) return null;
   const tree: Pruned = new Map([[root, new Set()]]);
+  if (matched) tree.exact = true;
   for (const file of files) {
     if (!inside(file, root === "/" ? "" : root) || file === root) continue;
     let child = file;
@@ -136,6 +144,13 @@ export function prunedStat(tree: Pruned, path: string): FileStat {
 }
 
 export type Syntax = "fixed" | "basic" | "extended" | "perl";
+
+export function exactLiterals(patterns: string[], syntax: Syntax): string[] | null {
+  if (!patterns.length) return null;
+  const special = syntax === "fixed" ? null : syntax === "basic" ? /[.[\]*^$\\]/ : /[.[\]*^$\\+?(){}|]/;
+  for (const pattern of patterns) if (!pattern || pattern.includes("\n") || (special && special.test(pattern))) return null;
+  return patterns;
+}
 
 export function literals(patterns: string[], syntax: Syntax): string[] | null {
   const out: string[] = [];
