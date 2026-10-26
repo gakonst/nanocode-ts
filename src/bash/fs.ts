@@ -17,6 +17,7 @@ export interface FileSystem {
   symlink?(target: string, path: string): Promise<void>;
   readlink?(path: string): Promise<string | null>;
   lstat?(path: string): Promise<LinkStat | null>;
+  search?(dir: string, literals: string[]): Promise<string[] | null>;
 }
 
 export type FileInput = string | Uint8Array;
@@ -44,6 +45,7 @@ export function masked(fs: FileSystem, umask: number): FileSystem {
     ...(fs.symlink ? { symlink: fs.symlink.bind(fs) } : {}),
     ...(fs.readlink ? { readlink: fs.readlink.bind(fs) } : {}),
     ...(fs.lstat ? { lstat: fs.lstat.bind(fs) } : {}),
+    ...(fs.search ? { search: fs.search.bind(fs) } : {}),
   };
 }
 
@@ -64,6 +66,9 @@ const FS_MESSAGES: Record<string, string> = {
   EFBIG: "File too large",
   EINVAL: "Invalid argument",
   ELOOP: "Too many levels of symbolic links",
+  EROFS: "Read-only file system",
+  EXDEV: "Invalid cross-device link",
+  EBUSY: "Device or resource busy",
 };
 
 const encoder = new TextEncoder();
