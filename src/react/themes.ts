@@ -31,6 +31,7 @@ export type Theme = {
   tokens: Tokens;
   scheme?: Scheme;
   greeting?: string | ((hour: number) => string);
+  recents?: string;
   placeholder?: string;
 };
 
@@ -101,6 +102,7 @@ export const claudeTheme: Theme = {
   description: "Warm paper, a serif answer under a terracotta asterisk and a bordered composer.",
   greeting: hour => hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening",
   id: "claude",
+  recents: "Recents",
   label: "Claude",
   placeholder: "How can I help you today?",
   scheme: "light dark",
@@ -125,6 +127,7 @@ export const geminiTheme: Theme = {
   description: "Google Sans, a sparkle for the agent, bubbles for you and a pill composer.",
   greeting: "Hello, there",
   id: "gemini",
+  recents: "Recent",
   label: "Gemini",
   placeholder: "Ask Gemini",
   scheme: "light dark",
