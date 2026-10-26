@@ -2,7 +2,7 @@
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { Config } from "../client.ts";
-import { Chat, Markdown, NanocodeProvider, type Highlighter, useAnswer, useConfig, useSend } from "./index.tsx";
+import { Chat, Markdown, NanocodeProvider, type Highlighter, Sidebar, useAnswer, useConfig, useSend } from "./index.tsx";
 import * as styles from "./playground.styles.ts";
 import { Block } from "./site.tsx";
 import { nanocodeTheme, type Scheme, type Theme, themes as defaults, themeStyle, type Tokens, tokens } from "./themes.ts";
@@ -76,7 +76,10 @@ export function Playground(props: PlaygroundProps) {
       <div data-theme={theme.id} style={style} {...styles.stage()}>
         {form === "chat" && (
           <NanocodeProvider config={props.configs.chat} skin={theme.skin} {...(props.highlight ? { highlight: props.highlight } : {})}>
+            <div data-app="" {...styles.app()}>
+            {theme.skin.parts?.sidebar && <Sidebar title={theme.recents ?? "Chats"} />}
             <Chat expandable={false} greeting={greeting} label={theme.label + " chat"} placeholder={theme.placeholder ?? "Ask the agent"} status={props.status} suggestions={props.suggestions ?? ["What can you do?", "Plot y = sin(x) and show me", "Fetch the top Hacker News story"]} />
+            </div>
           </NanocodeProvider>
         )}
         {form === "button" && (

@@ -1,4 +1,4 @@
-import { flicker, style, variants } from "./theme.ts";
+import { flicker, pulse, spin, style, variants } from "./theme.ts";
 
 const SANS = '"Styrene B", "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !custom';
 const SERIF = '"Tiempos Text", "Copernicus", "Source Serif 4", Georgia, "Times New Roman", serif !custom';
@@ -201,7 +201,7 @@ export const children = style({ display: "flex", flexDirection: "column", gap: "
 export const more = style({ alignSelf: "flex-start", backgroundColor: "transparent", border: "none", color: "accent", cursor: "pointer", font: "inherit !custom", fontSize: "0.8125rem !custom", marginTop: "xs", padding: "0", textDecorationLine: "none" });
 
 export const typing = variants({
-  base: { color: "middle", fontSize: "0.8125rem !custom", height: "1.25rem !custom", margin: "0", paddingInline: "lg", selectors: { '[data-empty="true"] > &': { display: "none" } } },
+  base: { border: "0", clip: "rect(0 0 0 0) !custom", height: "1px !custom", margin: "-1px !custom", overflow: "hidden", padding: "0", position: "absolute", whiteSpace: "nowrap", width: "1px !custom" },
   variants: { visible: { false: { visibility: "hidden" }, true: {} } },
   defaultVariants: { visible: false },
 });
@@ -312,3 +312,28 @@ export const greeting = style({
   textAlign: "center",
   "::before": { color: "accent", content: '"✻ "' },
 });
+
+export const sidebar = style({ backgroundColor: "light-dark(#f5f4ed, #1f1e1d) !custom", borderRight: "1px solid", borderRightColor: "rule", display: "flex", flexDirection: "column", flexShrink: 0, gap: "0.125rem !custom", overflow: "hidden", padding: "sm", width: "15rem !custom", "@media (max-width: 720px)": { display: "none" } });
+
+export const sidebarNew = style({ alignItems: "center", backgroundColor: "transparent", border: "none", borderRadius: "0.625rem !custom", color: "accent", cursor: "pointer", display: "flex", font: "inherit !custom", fontSize: "0.875rem !custom", fontWeight: "500 !custom", gap: "0.625rem !custom", paddingBlock: "0.5rem !custom", paddingInline: "0.625rem !custom", textAlign: "left", textDecorationLine: "none", "::before": { alignItems: "center", backgroundColor: "accent", borderRadius: "50% !custom", color: "onAccent", content: '"+"', display: "inline-flex", fontSize: "1rem !custom", height: "1.625rem !custom", justifyContent: "center", width: "1.625rem !custom" }, ":disabled": { cursor: "default", opacity: "faint" }, ":hover:not(:disabled)": { backgroundColor: "light-dark(#ebe9e0, #2c2b28) !custom" } });
+
+export const sidebarSection = style({ color: "middle", fontSize: "0.8125rem !custom", margin: "1rem 0.625rem 0.375rem !custom" });
+
+export const sidebarChats = style({ display: "flex", flexDirection: "column", gap: "1px !custom", overflowY: "auto" });
+
+export const sidebarChat = variants({
+  base: {
+    alignItems: "center",
+    borderRadius: "0.625rem !custom",
+    display: "flex",
+    ":hover": { backgroundColor: "light-dark(#ebe9e0, #2c2b28) !custom" },
+    "& > button:first-child": { backgroundColor: "transparent", border: "none", color: "text", cursor: "pointer", flex: "1 !custom", font: "inherit !custom", fontSize: "0.875rem !custom", minWidth: "0", overflow: "hidden", paddingBlock: "0.5rem !custom", paddingInline: "0.625rem !custom", textAlign: "left", textDecorationLine: "none", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  },
+  variants: { current: { false: {}, true: { backgroundColor: "light-dark(#ebe9e0, #2c2b28) !custom" } } },
+  defaultVariants: { current: false },
+});
+
+export const sidebarRemove = style({ backgroundColor: "transparent", border: "none", color: "middle", cursor: "pointer", font: "inherit !custom", opacity: "0 !custom", paddingInline: "0.5rem !custom", textDecorationLine: "none", selectors: { '[data-nc="sidebarChat"]:hover > &, &:focus-visible': { opacity: "1 !custom" } } });
+
+// The running turn's marker, under the last message as in the durable demos' clones.
+export const pending = style({ alignSelf: "flex-start", display: "inline-block", lineHeight: "1.25rem !custom", minHeight: "1.25rem !custom", "::before": { animationDuration: "1.2s", animationIterationCount: "infinite", animationName: spin, animationTimingFunction: "linear", color: "accent", content: '"✻"', display: "inline-block", fontSize: "1.25rem !custom", lineHeight: "1.25rem !custom" }, "@media (prefers-reduced-motion: reduce)": { "::before": { animationName: "none" } } });

@@ -70,6 +70,14 @@ export const flicker = keyframes({
   "50%, 100%": { opacity: 1 },
 });
 
+export const pulse = keyframes({
+  "50%": { opacity: 0.6, transform: "scale(0.7)" },
+});
+
+export const spin = keyframes({
+  to: { transform: "rotate(360deg)" },
+});
+
 export const ellipsis = keyframes({
   from: { width: "0" },
   to: { width: "3ch" },

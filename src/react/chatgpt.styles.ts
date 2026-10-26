@@ -1,4 +1,4 @@
-import { flicker, style, variants } from "./theme.ts";
+import { flicker, pulse, spin, style, variants } from "./theme.ts";
 
 const SANS = 'ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif !custom';
 const MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace !custom';
@@ -197,7 +197,7 @@ export const children = style({ display: "flex", flexDirection: "column", gap: "
 export const more = style({ alignSelf: "flex-start", backgroundColor: "transparent", border: "none", color: "accent", cursor: "pointer", font: "inherit !custom", fontSize: "0.8125rem !custom", marginTop: "xs", padding: "0", textDecorationLine: "none" });
 
 export const typing = variants({
-  base: { color: "middle", fontSize: "0.8125rem !custom", height: "1.25rem !custom", margin: "0", paddingInline: "lg", selectors: { '[data-empty="true"] > &': { display: "none" } } },
+  base: { border: "0", clip: "rect(0 0 0 0) !custom", height: "1px !custom", margin: "-1px !custom", overflow: "hidden", padding: "0", position: "absolute", whiteSpace: "nowrap", width: "1px !custom" },
   variants: { visible: { false: { visibility: "hidden" }, true: {} } },
   defaultVariants: { visible: false },
 });
@@ -299,3 +299,28 @@ export const attachment = style({ alignItems: "center", backgroundColor: "surfac
 export const quote = style({ borderLeft: "3px solid", borderLeftColor: "rule", color: "middle", marginBlock: "0", marginInline: "0", paddingLeft: "md" });
 
 export const greeting = style({ fontSize: "1.75rem !custom", fontWeight: "400 !custom", lineHeight: "2.25rem !custom", margin: "0", paddingBottom: "md", textAlign: "center" });
+
+export const sidebar = style({ backgroundColor: "light-dark(#f9f9f9, #181818) !custom", display: "flex", flexDirection: "column", flexShrink: 0, gap: "0.125rem !custom", overflow: "hidden", padding: "sm", width: "15rem !custom", "@media (max-width: 720px)": { display: "none" } });
+
+export const sidebarNew = style({ alignItems: "center", backgroundColor: "transparent", border: "none", borderRadius: "0.625rem !custom", color: "text", cursor: "pointer", display: "flex", font: "inherit !custom", fontSize: "0.875rem !custom", fontWeight: "500 !custom", gap: "0.625rem !custom", paddingBlock: "0.5rem !custom", paddingInline: "0.625rem !custom", textAlign: "left", textDecorationLine: "none", "::before": { content: '"✎"', fontSize: "1rem !custom", width: "1.25rem !custom" }, ":disabled": { cursor: "default", opacity: "faint" }, ":hover:not(:disabled)": { backgroundColor: "light-dark(#ececec, #2f2f2f) !custom" } });
+
+export const sidebarSection = style({ color: "middle", fontSize: "0.8125rem !custom", margin: "1rem 0.625rem 0.375rem !custom" });
+
+export const sidebarChats = style({ display: "flex", flexDirection: "column", gap: "1px !custom", overflowY: "auto" });
+
+export const sidebarChat = variants({
+  base: {
+    alignItems: "center",
+    borderRadius: "0.625rem !custom",
+    display: "flex",
+    ":hover": { backgroundColor: "light-dark(#ececec, #2f2f2f) !custom" },
+    "& > button:first-child": { backgroundColor: "transparent", border: "none", color: "text", cursor: "pointer", flex: "1 !custom", font: "inherit !custom", fontSize: "0.875rem !custom", minWidth: "0", overflow: "hidden", paddingBlock: "0.5rem !custom", paddingInline: "0.625rem !custom", textAlign: "left", textDecorationLine: "none", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  },
+  variants: { current: { false: {}, true: { backgroundColor: "light-dark(#ececec, #2f2f2f) !custom" } } },
+  defaultVariants: { current: false },
+});
+
+export const sidebarRemove = style({ backgroundColor: "transparent", border: "none", color: "middle", cursor: "pointer", font: "inherit !custom", opacity: "0 !custom", paddingInline: "0.5rem !custom", textDecorationLine: "none", selectors: { '[data-nc="sidebarChat"]:hover > &, &:focus-visible': { opacity: "1 !custom" } } });
+
+// The running turn's marker, under the last message as in the durable demos' clones.
+export const pending = style({ alignSelf: "flex-start", display: "inline-block", lineHeight: "1.25rem !custom", minHeight: "1.25rem !custom", "::before": { animationDuration: "1.2s", animationIterationCount: "infinite", animationName: pulse, animationTimingFunction: "ease-in-out", backgroundColor: "text", borderRadius: "50% !custom", content: '""', display: "inline-block", height: "0.75rem !custom", width: "0.75rem !custom" }, "@media (prefers-reduced-motion: reduce)": { "::before": { animationName: "none" } } });

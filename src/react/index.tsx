@@ -19,7 +19,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "greeting" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "send" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
+export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "greeting" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "pending" | "send" | "sidebar" | "sidebarChat" | "sidebarChats" | "sidebarNew" | "sidebarRemove" | "sidebarSection" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -586,6 +586,26 @@ export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolea
   );
 }
 
+export function Sidebar(props: { title?: string; label?: string }) {
+  const part = usePart();
+  const threads = useConversations();
+  if (!threads.enabled) return null;
+  return (
+    <aside aria-label={props.label ?? "Chats"} {...part("sidebar")}>
+      <button disabled={!threads.canCreate} onClick={() => threads.create()} type="button" {...part("sidebarNew")}>New chat</button>
+      <p {...part("sidebarSection")}>{props.title ?? "Chats"}</p>
+      <nav {...part("sidebarChats")}>
+        {threads.conversations.map(item => (
+          <div key={item.id} {...part("sidebarChat", { current: item.id === threads.current })}>
+            <button disabled={!threads.canSelect} onClick={() => threads.select(item.id)} title={item.title || "New chat"} type="button">{item.title || "New chat"}</button>
+            <button aria-label="Delete chat" onClick={() => threads.remove(item.id)} type="button" {...part("sidebarRemove")}>×</button>
+          </div>
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
 export type ChatProps = {
   tools?: Disclosure;
   reasoning?: Disclosure;
@@ -770,6 +790,7 @@ export function Chat(props: ChatProps) {
           {entries.length === 0 && live.length === 0 && (props.greeting ? <p {...part("greeting")}>{props.greeting}</p> : props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>)}
           {entries.map((entry, index) => <Fragment key={index}><EntryView entry={entry} previous={entries[index - 1]} reasoning={props.reasoning} tools={props.tools} />{props.after?.(entry, index)}</Fragment>)}
           {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} reasoning={props.reasoning} tools={props.tools} />)}
+          {showTyping && <span aria-hidden="true" {...part("pending")} />}
         </div>
 
         <p aria-live="polite" {...part("typing", { visible: showTyping || Boolean(props.activity) })}>
