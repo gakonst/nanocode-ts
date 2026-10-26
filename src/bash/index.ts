@@ -216,6 +216,7 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     ...(fs.lstat ? { lstat: (path: string) => (charge(), fs.lstat!(path)) } : {}),
     ...(fs.search ? { search: (dir: string, literals: string[]) => (charge(), fs.search!(dir, literals)) } : {}),
     ...(fs.excerpt ? { excerpt: (path: string, literals: string[]) => (charge(), fs.excerpt!(path, literals)) } : {}),
+    ...(fs.matches ? { matches: (dir: string, literals: string[], ignoreCase: boolean) => (charge(), fs.matches!(dir, literals, ignoreCase)) } : {}),
   };
 }
 

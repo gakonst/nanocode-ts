@@ -4,7 +4,7 @@ import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from
 import { checksum, perlSource, scan } from "./text.ts";
 import { allInput, device, eachInput, last, linked, linkOf, lstatOf, options, pause, put, readInput } from "./util.ts";
 import { mkdirs } from "./files.ts";
-import { ahead, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
+import { ahead, exactLiterals, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { make } from "./make.ts";
 import { yq } from "./yaml.ts";
 import { gunzip, gzip, pack, unpack, untar, type TarEntry } from "./archive.ts";
@@ -920,7 +920,7 @@ const rg: CommandHandler = async ctx => {
   const parsed = options(args, {
     flags: "ilcwFvnNHIUSsoqxaLp0.zP",
     values: "eAgCBtTmfrdjM",
-    long: { "ignore-case": "i", "files-with-matches": "l", "files-without-match": "9", count: "c", "count-matches": "8", "word-regexp": "w", "fixed-strings": "F", "invert-match": "v", "line-number": "n", "no-line-number": "N", "with-filename": "H", "no-filename": "I", "only-matching": "o", glob: "g", iglob: "iglob", context: "C", "after-context": "A", "before-context": "B", "max-count": "m", type: "t", "type-not": "T", hidden: ".", "no-heading": "", heading: "2", "smart-case": "S", "case-sensitive": "s", quiet: "q", "line-regexp": "x", text: "a", follow: "L", regexp: "e", file: "f", replace: "r", "max-depth": "d", maxdepth: "d", "no-ignore": "3", "no-ignore-vcs": "4", "no-ignore-dot": "", "no-ignore-parent": "", "no-require-git": "5", files: "1", sort: "sort", sortr: "sort", color: "", colour: "", colors: "", "no-messages": "", column: "6", vimgrep: "7", pcre2: "P", "no-config": "", "line-buffered": "", "block-buffered": "", null: "0", pretty: "p", trim: "", threads: "j", "max-columns": "M", "max-filesize": "", "one-file-system": "", binary: "", "search-zip": "z", "no-unicode": "", multiline: "U", crlf: "", engine: "engine" },
+    long: { include: "g", "ignore-case": "i", "files-with-matches": "l", "files-without-match": "9", count: "c", "count-matches": "8", "word-regexp": "w", "fixed-strings": "F", "invert-match": "v", "line-number": "n", "no-line-number": "N", "with-filename": "H", "no-filename": "I", "only-matching": "o", glob: "g", iglob: "iglob", context: "C", "after-context": "A", "before-context": "B", "max-count": "m", type: "t", "type-not": "T", hidden: ".", "no-heading": "", heading: "2", "smart-case": "S", "case-sensitive": "s", quiet: "q", "line-regexp": "x", text: "a", follow: "L", regexp: "e", file: "f", replace: "r", "max-depth": "d", maxdepth: "d", "no-ignore": "3", "no-ignore-vcs": "4", "no-ignore-dot": "", "no-ignore-parent": "", "no-require-git": "5", files: "1", sort: "sort", sortr: "sort", color: "", colour: "", colors: "", "no-messages": "", column: "6", vimgrep: "7", pcre2: "P", "no-config": "", "line-buffered": "", "block-buffered": "", null: "0", pretty: "p", trim: "", threads: "j", "max-columns": "M", "max-filesize": "", "one-file-system": "", binary: "", "search-zip": "z", "no-unicode": "", multiline: "U", crlf: "", engine: "engine" },
   });
   const f = parsed.flags;
   const longFlags: Record<string, string> = { "count-matches": "8", "files-without-match": "9", "no-ignore": "3", "no-ignore-vcs": "4", column: "6", files: "1", heading: "2", vimgrep: "7" };
@@ -995,7 +995,7 @@ const rg: CommandHandler = async ctx => {
   const implicit = !operands.length;
   let errors = false;
   let directories = false;
-  const targets: { path: string; display: string; explicit: boolean; pruned?: boolean }[] = [];
+  const targets: { path: string; display: string; explicit: boolean; pruned?: boolean; matched?: boolean }[] = [];
   const gitRoot = async (path: string): Promise<boolean> => {
     for (let dir = path; ; dir = parentOf(dir)) {
       if (await ctx.fs.stat((dir === "/" ? "" : dir) + "/.git")) return true;
@@ -1013,6 +1013,7 @@ const rg: CommandHandler = async ctx => {
     return rules;
   };
   const prunable = !listFiles && !f.has("v") && !has("files-without-match") ? literals(patterns, f.has("F") ? "fixed" : "perl") : null;
+  const exactTerms = (f.has("l") || f.has("q")) && !listFiles && !f.has("v") && !f.has("w") && !f.has("x") && !f.has("c") && !has("count-matches") && !has("files-without-match") ? exactLiterals(patterns, f.has("F") ? "fixed" : "perl") : null;
   let narrowed = false;
   const walk = async (path: string, display: string, depth: number, rules: IgnoreRule[], git: boolean, root: string, tree: Pruned | null) => {
     if (depth > maxDepth) return;
@@ -1038,7 +1039,7 @@ const rg: CommandHandler = async ctx => {
       }
       if (types.length && !types.includes("all") && !typeMatch(types, name)) continue;
       if (notTypes.length && typeMatch(notTypes, name)) continue;
-      targets.push({ path: child, display: shown, explicit: false, pruned: !!tree });
+      targets.push({ path: child, display: shown, explicit: false, pruned: !!tree, matched: !!tree?.exact });
     }
   };
   for (const root of roots) {
@@ -1062,7 +1063,7 @@ const rg: CommandHandler = async ctx => {
       if (dir === "/") break;
     }
     for (const dir of ancestors) inherited.push(...(await loadRules(dir, git)));
-    const tree = await pruned(ctx.fs, path, prunable);
+    const tree = await pruned(ctx.fs, path, prunable, exactTerms && { literals: exactTerms, ignoreCase: insensitive });
     if (tree && !types.length && !notTypes.length) narrowed = true;
     await walk(path, implicit ? "" : root, 0, inherited, git, path, tree);
   }
@@ -1130,11 +1131,17 @@ const rg: CommandHandler = async ctx => {
   }
   if (useStdin) search(stdinText, f.has("H") ? "<stdin>" : undefined, true);
   const partial = prunable && !numbers && !before && !after && !has("column") && !has("vimgrep") && !f.has("U") ? prunable : null;
-  const take = ahead(targets, target => partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
+  const take = ahead(targets, target => target.matched ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
   for (let index = 0; index < targets.length; index++) {
     const target = targets[index];
     const pending = take(index)!;
     if (ctx.stdout.closed) throw new PipeError();
+    if (target.matched) {
+      found = true;
+      if (f.has("q")) return 0;
+      ctx.stdout.write(target.display + (f.has("0") ? "\0" : "\n"));
+      continue;
+    }
     let text: string;
     try {
       text = decode(await pending);
