@@ -78,6 +78,7 @@ pub async fn open(
         max_frame_bytes: Some(limit),
         resumable: false,
         tool_selection: true,
+        cancels_calls: false,
     };
     catalog
         .encode(limit)
@@ -279,7 +280,7 @@ async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: b
             cells.settle_preempt(&session_id);
             Ok(None)
         }
-        RemoteOperation::EndTurn { .. } => Ok(None),
+        RemoteOperation::CancelCall { .. } | RemoteOperation::EndTurn { .. } => Ok(None),
     }
 }
 

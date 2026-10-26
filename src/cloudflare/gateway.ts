@@ -65,6 +65,22 @@ function catalogModel(model: string): string {
   return `anthropic/${model.replace(/-(\d+)-(\d+)$/, "-$1.$2")}`;
 }
 
+async function image(ai: Ai, gateway: string, query: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+  const { images, model, ...rest } = query;
+  const inputs = Array.isArray(images) ? images.map(item => typeof item === "object" && item !== null ? (item as { image_url?: unknown }).image_url : item) : undefined;
+  if (inputs && !inputs.every(item => typeof item === "string")) return modelError("codex", 400, "invalid_request_error", "image edits take inline images only");
+  const run = await ai.run(`openai/${typeof model === "string" ? model : "gpt-image-2"}`, { ...rest, ...(inputs ? { images: inputs } : {}) }, { gateway: { id: gateway }, returnRawResponse: true, signal }) as unknown as Response;
+  if (!run.ok) return new Response(run.body, { status: run.status, headers: { "content-type": run.headers.get("content-type") ?? "application/json" } });
+  const url = ((await run.json()) as { result?: { image?: unknown } }).result?.image;
+  if (typeof url !== "string") return modelError("codex", 502, "api_error", "image model returned no image");
+  const file = await fetch(url, { signal });
+  if (!file.ok) return modelError("codex", 502, "api_error", "image download returned HTTP " + file.status);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return json({ created: Math.floor(Date.now() / 1000), data: [{ b64_json: btoa(binary) }] });
+}
+
 async function model(ai: Ai, gateway: string, serviceTier: string, firstByteMs: number, request: Request): Promise<Response> {
   let dispatch: ModelDispatch;
   try { dispatch = JSON.parse(request.headers.get("x-nanocode-model") ?? ""); } catch { return modelError("claude", 400, "invalid_request_error", "invalid model dispatch"); }
@@ -78,6 +94,7 @@ async function model(ai: Ai, gateway: string, serviceTier: string, firstByteMs: 
   let query: Record<string, unknown>;
   try { query = JSON.parse(new TextDecoder().decode(body)); } catch { return modelError(provider, 400, "invalid_request_error", "model request body is not JSON"); }
   if (provider === "claude" && typeof query.model !== "string") return modelError(provider, 400, "invalid_request_error", "model request names no model");
+  if (provider === "codex" && /\/images\/(?:generations|edits)$/.test(dispatch.endpoint)) return image(ai, gateway, query, request.signal);
   const start = async (signal: AbortSignal): Promise<Response> => {
     if (provider === "claude") {
       const catalog = catalogModel(String(query.model));
@@ -85,8 +102,7 @@ async function model(ai: Ai, gateway: string, serviceTier: string, firstByteMs: 
     }
     const gatewayRun = ai.gateway(gateway);
     try {
-      const images = /\/(images\/(?:generations|edits))$/.exec(dispatch.endpoint)?.[1];
-      return await gatewayRun.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : images ? { provider: "openai", endpoint: images, headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal });
+      return await gatewayRun.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal });
     } finally {
       (gatewayRun as Partial<Disposable>)[Symbol.dispose]?.();
     }
