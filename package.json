@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs && npm run build:ts",
-    "build:ts": "tsc -p tsconfig.build.json && tsc -p tsconfig.cloudflare.build.json && node scripts/zyzz.mjs",
+    "build:ts": "tsc -p tsconfig.build.json && tsc -p tsconfig.cloudflare.build.json && node scripts/zyzz.mjs && node scripts/pyodide.mjs",
     "prepare": "node scripts/prepare.mjs",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json && tsc --noEmit -p tsconfig.cloudflare.json"
   },
@@ -38,6 +38,10 @@
     "./cloudflare/transport": {
       "types": "./dist/cloudflare/transport.d.ts",
       "default": "./dist/cloudflare/transport.js"
+    },
+    "./cloudflare/python": {
+      "types": "./dist/cloudflare/python.d.ts",
+      "default": "./dist/cloudflare/python.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
@@ -113,7 +117,11 @@
       "default": "./dist/sandbox/vercel.js"
     },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
-    "./interpreter.wasm": "./dist/interpreter.wasm"
+    "./interpreter.wasm": "./dist/interpreter.wasm",
+    "./pyodide-modules": {
+      "types": "./dist/pyodide/modules.d.ts",
+      "default": "./dist/pyodide/modules.js"
+    }
   },
   "dependencies": {
     "accounts": "0.21.0",
@@ -160,6 +168,7 @@
     "@vercel/oidc": "3.2.0",
     "@vercel/sandbox": "3.9.0",
     "durable-harness": "0.0.1-beta.6",
+    "pyodide": "^314.0.7",
     "typescript": "6.0.2"
   }
 }

@@ -61,7 +61,7 @@ if (current(dist, print)) {
 }
 
 function typescript() {
-  const paths = ["package.json", "package-lock.json", "scripts/zyzz.mjs", ...readdirSync(root).filter(name => /^tsconfig.*\.json$/.test(name))];
+  const paths = ["package.json", "package-lock.json", "scripts/zyzz.mjs", "scripts/pyodide.mjs", ...readdirSync(root).filter(name => /^tsconfig.*\.json$/.test(name))];
   for (const entry of readdirSync(join(root, "src"), { recursive: true, withFileTypes: true })) {
     if (entry.isFile() && !entry.name.endsWith(".rs")) paths.push(relative(root, join(entry.parentPath, entry.name)).split(sep).join("/"));
   }

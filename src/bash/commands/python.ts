@@ -69,9 +69,11 @@ const RESERVED = ["/dev", "/proc", "/lib", "/home/pyodide", "/home/web_user"];
 
 const NO_WASM = "python3 needs a host that can compile WebAssembly; this one can't";
 
-const HELPER = String.raw`
+export const HELPER = String.raw`
 import asyncio, json, os, signal, sys, traceback, types
 from pyodide.code import eval_code_async
+import warnings
+warnings.filterwarnings("ignore", message="The [xy] parameter as float was deprecated")
 sys.dont_write_bytecode = True
 _base = set(sys.modules)
 _active = False
