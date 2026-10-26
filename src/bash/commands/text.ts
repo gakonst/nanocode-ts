@@ -427,7 +427,7 @@ const grep: CommandHandler = streaming(async ctx => {
       if (include.length && !include.some(glob => glob.test(name))) return;
       if (exclude.some(glob => glob.test(name))) return;
     }
-    targets.push({ path, display, pruned: !!tree && !top, matched: !!tree?.exact && !top });
+    targets.push({ path, display, pruned: (!!tree && !top) || (top && !!prunable), matched: !!tree?.exact && !top });
   };
   if (implicit) await collect(".", "", true);
   else for (const operand of operands) {
