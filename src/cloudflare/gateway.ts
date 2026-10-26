@@ -85,7 +85,8 @@ async function model(ai: Ai, gateway: string, serviceTier: string, firstByteMs: 
     }
     const gatewayRun = ai.gateway(gateway);
     try {
-      return await gatewayRun.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal });
+      const images = /\/(images\/(?:generations|edits))$/.exec(dispatch.endpoint)?.[1];
+      return await gatewayRun.run(dispatch.endpoint.endsWith("/chat/completions") ? { provider: "workers-ai", endpoint: "v1/chat/completions", headers, query } : images ? { provider: "openai", endpoint: images, headers, query } : { provider: "openai", endpoint: "responses", headers, query: serviceTier ? { ...query, service_tier: serviceTier } : query }, { signal });
     } finally {
       (gatewayRun as Partial<Disposable>)[Symbol.dispose]?.();
     }
