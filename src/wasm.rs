@@ -876,11 +876,17 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         }
         let root = image_root.as_deref()?;
         codex_search.as_ref().map(|(endpoint, _)| {
-            Arc::new(nanocode::codex_tools::image_generation_tool(
+            let images = if BLOB_THRESHOLD.get().is_some() {
+                nanocode::ImageHistory::default().with_blob_store(Arc::new(store::WorkerBlobs))
+            } else {
+                nanocode::ImageHistory::default()
+            };
+            Arc::new(nanocode::codex_tools::image_generation_tool_with_images(
                 endpoint,
                 Arc::new(transport::WorkerTransport::CODEX),
                 Arc::new(workspace::HostFiles),
                 root.into(),
+                images,
             )) as Arc<dyn Tool>
         })
     };
