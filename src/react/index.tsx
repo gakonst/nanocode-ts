@@ -536,22 +536,53 @@ export function AttachmentList(props: { items: readonly (PendingAttachment | Att
   );
 }
 
-export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolean }) {
+export type Disclosure = "expanded" | "collapsed" | "hidden";
+
+export function Thinking(props: { entry: Entry; live?: boolean; collapsed?: boolean }) {
   const part = usePart();
-  const { entry, previous, live = false } = props;
+  const { entry, live = false, collapsed = true } = props;
+  const expanded = useContext(ExpandedContext);
+  const id = "reasoning:" + (entry.started_at ?? entry.text.slice(0, 64));
+  const open = expanded.open.has(id);
+  const now = useNow(live);
+  const icons = useSkin().icons;
+  const status = live ? "running" : "completed";
+  const glyph = icons?.[status] ?? (live ? SPINNER : "✻");
+  const icon = typeof glyph === "string" ? glyph : glyph[Math.floor(now / 120) % glyph.length];
+  const end = entry.ended_at ?? (live ? now : undefined);
+  const label = live ? "Thinking" : entry.started_at !== undefined && end !== undefined ? "Thought for " + duration(Math.max(0, end - entry.started_at)) : "Thought";
+  const shown = open || live || !collapsed;
+  return (
+    <div {...part("tool", { kind: "reasoning", collapsed, open, status })}>
+      <button aria-expanded={shown} onClick={() => expanded.toggle(id)} type="button" {...part("header")}>
+        <span aria-hidden="true" {...part("icon", { status })}>{icon}</span>
+        <span {...part("name")}>{label}</span>
+      </button>
+      {shown && <div {...part("entry", { kind: "reasoning", live })}><Markdown live={live} text={entry.text} /></div>}
+    </div>
+  );
+}
+
+export function EntryView(props: { entry: Entry; previous?: Entry; live?: boolean; tools?: Disclosure; reasoning?: Disclosure }) {
+  const part = usePart();
+  const { entry, previous, live = false, tools = "expanded", reasoning = "collapsed" } = props;
+  if ((entry.kind === "tool" && tools === "hidden") || (entry.kind === "reasoning" && reasoning === "hidden")) return null;
   const label = entry.kind === "user" ? "you" : !previous || previous.kind === "user" ? "agent" : undefined;
   return (
     <div {...part("turn")}>
       {label && <p {...part("speaker", { steer: entry.steer, who: label })}><span aria-hidden="true">●</span> {label}</p>}
-      {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} live={live} /></div>
+      {entry.kind === "tool" && entry.tool ? <div {...part("entry", { kind: "cell" })}><ToolCell cell={entry.tool} collapsed={tools === "collapsed"} live={live} /></div>
         : entry.kind === "assistant" ? <div {...part("entry", { kind: "assistant", live })}><Markdown live={live} text={entry.text} /></div>
-        : <p {...part("entry", { kind: entry.kind, live })}>{entry.kind === "reasoning" ? entry.text.replace(/\*\*(.+?)\*\*/g, "$1") : entry.text}</p>}
+        : entry.kind === "reasoning" ? <Thinking collapsed={reasoning === "collapsed"} entry={entry} live={live} />
+        : <p {...part("entry", { kind: entry.kind, live })}>{entry.text}</p>}
       {entry.attachments?.length ? <AttachmentList items={entry.attachments} /> : null}
     </div>
   );
 }
 
 export type ChatProps = {
+  tools?: Disclosure;
+  reasoning?: Disclosure;
   onSubmit?(text: string): void;
   onInput?(text: string): void;
   commands?: readonly Command[];
@@ -730,8 +761,8 @@ export function Chat(props: ChatProps) {
       >
         <div aria-live="polite" onScroll={() => { const node = log.current!; stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; }} ref={log} {...part("log", { expanded: full })}>
           {entries.length === 0 && live.length === 0 && props.empty && <p {...part("entry", { kind: "tool" })}>{props.empty}</p>}
-          {entries.map((entry, index) => <Fragment key={index}><EntryView entry={entry} previous={entries[index - 1]} />{props.after?.(entry, index)}</Fragment>)}
-          {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} />)}
+          {entries.map((entry, index) => <Fragment key={index}><EntryView entry={entry} previous={entries[index - 1]} reasoning={props.reasoning} tools={props.tools} />{props.after?.(entry, index)}</Fragment>)}
+          {live.map((entry, index) => <EntryView entry={entry} key={`live-${entry.tool?.call_id ?? index}`} live previous={index ? live[index - 1] : entries[entries.length - 1]} reasoning={props.reasoning} tools={props.tools} />)}
         </div>
 
         <p aria-live="polite" {...part("typing", { visible: showTyping || Boolean(props.activity) })}>

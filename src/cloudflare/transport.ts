@@ -3,7 +3,7 @@ import type { LoggedEvent } from "../contracts.ts";
 
 export type CloudflareSession = { id?: string; cursor?: number; open?: string };
 
-export type CloudflareModel = { provider: string; model: string; thinking?: string };
+export type CloudflareModel = { provider: string; model: string; thinking?: string; web_search?: boolean };
 
 export type CloudflareTransportOptions = {
   url?: string;
@@ -124,7 +124,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     const model = options.model();
     try {
       const hand = await options.hand?.(session.id!, signal);
-      const response = await fetch(path(`turns?live=1&after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt: attachedPrompt(prompt, attachments), ...(images(attachments).length ? { images: images(attachments) } : {}), provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
+      const response = await fetch(path(`turns?live=1&after=${session.cursor ?? 0}`, session), { method: "POST", headers: headers({ accept: "text/event-stream", "content-type": "application/json" }), body: JSON.stringify({ request_id: requestId, prompt: attachedPrompt(prompt, attachments), ...(images(attachments).length ? { images: images(attachments) } : {}), provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}), ...(model.web_search !== undefined ? { web_search: model.web_search } : {}), ...(hand ? { hand } : {}) }), signal }).catch((error: unknown) => {
         if (signal?.aborted) return undefined;
         throw error;
       });
