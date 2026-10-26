@@ -1130,7 +1130,7 @@ const rg: CommandHandler = async ctx => {
     return 2;
   }
   if (useStdin) search(stdinText, f.has("H") ? "<stdin>" : undefined, true);
-  const partial = prunable && !numbers && !before && !after && !has("column") && !has("vimgrep") && !f.has("U") ? prunable : null;
+  const partial = prunable && !before && !after && !has("column") && !has("vimgrep") && !f.has("U") ? prunable : null;
   const take = ahead(targets, target => target.matched ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
   for (let index = 0; index < targets.length; index++) {
     const target = targets[index];
