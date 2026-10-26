@@ -918,6 +918,8 @@ const rg: CommandHandler = async ctx => {
     else if (/^-[ilcwFvnNHIUSsoqxaLp0.zP]*r[ilcwFvnNHIUSsoqxaLp0.zP]+$/.test(arg)) args.push(arg.replace("r", ""));
     else args.push(arg);
   }
+  const replaceAt = args.indexOf("-r");
+  if (replaceAt >= 0 && replaceAt + 1 < args.length && !args.includes("-e") && args.some(arg => /^-[a-zA-Z.0]*[lcq]/.test(arg) || ["--files-with-matches", "--count", "--count-matches", "--quiet", "--files-without-match"].includes(arg))) args.splice(replaceAt, 1);
   const parsed = options(args, {
     flags: "ilcwFvnNHIUSsoqxaLp0.zP",
     values: "eAgCBtTmfrdjM",
