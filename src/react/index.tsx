@@ -365,6 +365,11 @@ function Section(props: { text: string; language: string; part: "error" | "input
   );
 }
 
+function lineCount(text: string): string {
+  const lines = text.split("\n").length;
+  return lines === 1 ? "1 line" : lines.toLocaleString("en-US") + " lines";
+}
+
 export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; collapsed?: boolean }) {
   const part = usePart();
   const { cell, live = false, nested = false, collapsed = false } = props;
@@ -390,10 +395,11 @@ export function ToolCell(props: { cell: Cell; live?: boolean; nested?: boolean; 
           {running ? ` · ${duration(now - cell.started_at)}` : cell.duration_ms !== undefined ? ` · ${duration(cell.duration_ms)}` : ""}
           {cell.status === "cancelled" || cell.status === "failed" ? ` · ${cell.status}` : ""}
           {cell.details.map(detail => ` · ${detail}`).join("")}
+          {collapsed && nested && !running && output ? ` · ${lineCount(output)}` : ""}
         </span>
       </button>
       {shown && input && (!nested || open || cell.body === "diff") && <Section language={cell.body === "diff" ? "diff" : cell.language} limit={open ? Infinity : INPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part="input" size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={input} />}
-      {shown && cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} collapsed={collapsed} key={child.call_id} live={live} nested />)}</div>}
+      {(shown || collapsed) && cell.children.length > 0 && <div {...part("children")}>{cell.children.map(child => <ToolCell cell={child} collapsed={collapsed} key={child.call_id} live={live} nested />)}</div>}
       {shown && output && (!nested || open || unsuccessful) && <Section language={cell.output_language} limit={open ? Infinity : OUTPUT_LINES} onMore={() => expanded.toggle(cell.call_id, true)} part={unsuccessful ? "error" : "output"} size={open ? "full" : nested ? "nested" : "normal"} tail={live && running} text={output} />}
       {shown && images.length > 0 && <div {...part("images", { nested })}>{images.map((src, index) => <Image alt={`${cell.name} image ${index + 1}`} key={index} src={src} />)}</div>}
     </div>
