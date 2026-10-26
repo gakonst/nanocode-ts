@@ -146,10 +146,16 @@ export function prunedStat(tree: Pruned, path: string): FileStat {
 export type Syntax = "fixed" | "basic" | "extended" | "perl";
 
 export function exactLiterals(patterns: string[], syntax: Syntax): string[] | null {
-  if (!patterns.length) return null;
+  const out: string[] = [];
   const special = syntax === "fixed" ? null : syntax === "basic" ? /[.[\]*^$\\]/ : /[.[\]*^$\\+?(){}|]/;
-  for (const pattern of patterns) if (!pattern || pattern.includes("\n") || (special && special.test(pattern))) return null;
-  return patterns;
+  for (const pattern of patterns) {
+    const branches = syntax === "fixed" ? [pattern] : syntax === "basic" ? pattern.split("\\|") : pattern.split("|");
+    for (const branch of branches) {
+      if (!branch || branch.includes("\n") || (special && special.test(branch))) return null;
+      out.push(branch);
+    }
+  }
+  return out.length ? out : null;
 }
 
 export function literals(patterns: string[], syntax: Syntax): string[] | null {
