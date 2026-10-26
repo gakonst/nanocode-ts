@@ -47,7 +47,22 @@ function popup(event: { preventDefault(): void }, href: string) {
   if (globalThis.open?.(href, "nanocode-link", "popup,width=960,height=800")) event.preventDefault();
 }
 
-function components(part: PartOf, render: { current: MarkdownProps["code"] }, links: ((href: string) => string | undefined) | undefined): Components {
+const DESTINATION = /(\]\()(<[^>\n]*>|[^()\s]+)/g;
+
+function mapped(text: string, links: ((href: string) => string | undefined) | undefined, popups: Set<string>): string {
+  if (!links || !text.includes("](")) return text;
+  return text.replace(DESTINATION, (whole: string, open: string, destination: string) => {
+    const href = destination.startsWith("<") ? destination.slice(1, -1) : destination;
+    if (LINK.test(href)) return whole;
+    const target = links(href);
+    if (!target) return whole;
+    const absolute = new URL(target, globalThis.location?.href ?? "https://localhost/").href;
+    popups.add(absolute);
+    return open + absolute;
+  });
+}
+
+function components(part: PartOf, render: { current: MarkdownProps["code"] }, popups: Set<string>): Components {
   const heading = (level: number) => (props: Props<"h1">) => {
     const Tag = ("h" + level) as "h1";
     return <Tag {...part("heading", { level })}>{props.children}</Tag>;
@@ -58,10 +73,9 @@ function components(part: PartOf, render: { current: MarkdownProps["code"] }, li
   };
   return {
     a: (props: Props<"a">) => {
-      if (props.href && LINK.test(props.href)) return <a href={props.href} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a>;
-      const resolved = props.href ? links?.(props.href) : undefined;
-      if (resolved) return <a href={resolved} onClick={event => popup(event, resolved)} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a>;
-      return <span {...part("link", { incomplete: true })}>{props.children}</span>;
+      const href = props.href;
+      if (!href || !LINK.test(href)) return <span {...part("link", { incomplete: true })}>{props.children}</span>;
+      return <a href={href} onClick={popups.has(href) ? event => popup(event, href) : undefined} rel="noreferrer" target="_blank" title={props.title} {...part("link")}>{props.children}</a>;
     },
     blockquote: (props: Props<"blockquote">) => <blockquote {...part("quote")}>{props.children}</blockquote>,
     code: (props: Props<"code"> & { "data-block"?: string }) => {
@@ -124,7 +138,8 @@ export default function Streamed(props: MarkdownProps) {
   const render = useRef(props.code);
   render.current = props.code;
   const links = useLinks();
-  const parts = useMemo(() => components(part, render, links), [part, links]);
+  const popups = useMemo(() => new Set<string>(), []);
+  const parts = useMemo(() => components(part, render, popups), [part, popups]);
   const { className, ...attributes } = part("markdown", { live: props.live });
   return (
     <Streamdown
@@ -138,7 +153,7 @@ export default function Streamed(props: MarkdownProps) {
       parseIncompleteMarkdown
       rehypePlugins={REHYPE}
     >
-      {spaced(props.live === false ? props.text : table(props.text))}
+      {mapped(spaced(props.live === false ? props.text : table(props.text)), links, popups)}
     </Streamdown>
   );
 }
