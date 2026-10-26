@@ -292,6 +292,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (input.executor !== undefined && (typeof input.executor !== "string" || !EXECUTOR_ID.test(input.executor))) return json({ error: "invalid executor" }, 400);
         if (input.hand !== undefined && !handName(input.hand)) return json({ error: "hand must be the name of an attached hand" }, 400);
         if (input.steer !== undefined && typeof input.steer !== "boolean") return json({ error: "steer must be a boolean" }, 400);
+        if (input.web_search !== undefined && typeof input.web_search !== "boolean") return json({ error: "web_search must be a boolean" }, 400);
         if (input.images !== undefined && (!Array.isArray(input.images) || input.images.length > 8 || input.images.some((path: unknown) => typeof path !== "string"))) return json({ error: "images must be at most 8 workspace paths" }, 400);
         if (input.steer) {
           const resident = this.residents.get(scope);
@@ -328,6 +329,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           if (boundModel !== undefined && input.model !== undefined && input.model !== boundModel) return json({ error: "session model is immutable; create a new session" }, 409);
           descriptor.model = input.model ?? (boundModel === null ? undefined : boundModel);
           descriptor.thinking = input.thinking;
+          descriptor.web_search = input.web_search;
           if (descriptor.provider === "codex") descriptor.subscription = descriptor.codex_subscription ?? true;
           policy(this.env.RECOVERY_DELAY_MS, "RECOVERY_DELAY_MS");
           const current = this.metadata.get("authority");
@@ -580,7 +582,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private runtime(scope: string, sessionId: string, descriptor: SessionDescriptor): Promise<AgentRuntime> {
       let resident = this.runtimes.get(scope);
-      const opening = JSON.stringify([sessionId, descriptor.provider ?? "claude", descriptor.model ?? null, descriptor.executor_id ?? null]);
+      const opening = JSON.stringify([sessionId, descriptor.provider ?? "claude", descriptor.model ?? null, descriptor.executor_id ?? null, descriptor.web_search ?? null]);
       if (resident) return resident.then(async runtime => {
         if (runtime.reusable && runtime.hands === this.handsMode(scope, descriptor) && runtime.subscription === descriptor.subscription && this.openedWith.get(resident!) === opening) return runtime;
         if (this.runtimes.get(scope) === resident) { this.runtimes.delete(scope); this.residents.delete(scope); }
@@ -613,7 +615,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor);
           try {
             const created = await this.instance(scope, true);
-            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), live_deltas: options.liveDeltas ?? true, stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
+            await created.open({ scope, session_id: sessionId, provider: descriptor.provider ?? "claude", model: descriptor.model ?? (descriptor.provider === "codex" ? undefined : this.env.CLAUDE_MODEL), subscription: descriptor.subscription, endpoint: descriptor.provider === "codex" ? (descriptor.subscription ? "https://chatgpt.com/backend-api/codex" : "https://api.openai.com/v1") : `https://api.anthropic.com/v1/messages${descriptor.subscription ? "?beta=true" : ""}`, ...(descriptor.provider === "codex" && WORKERS_AI_MODELS.has(descriptor.model ?? "") ? { gateway: "workers_ai" as const, cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID } : {}), remote: enabled, code_mode: local, executor: descriptor.executor_id, ...(options.subagents === undefined ? {} : { subagents: options.subagents }), ...(withHand(options.instructions, this.handsMode(scope, descriptor) ? options.handInstructions : undefined)), hands: this.handsMode(scope, descriptor), event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, "EVENT_COALESCE_MS"), live_deltas: options.liveDeltas ?? true, ...(descriptor.web_search === undefined ? {} : { web_search: descriptor.web_search }), stream_tool_input: options.streamToolInput ?? true, tools: options.tools?.definitions, ...(mcpServers.length ? { mcp_servers: mcpServers } : {}), ...(shell ? { workspace: shell.cwd } : {}), ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}), ...(descriptor.provider === "codex" && options.workspace !== false ? { environment: { cwd: options.workspace?.cwd ?? "/workspace" } } : {}) }, {
           ...(shell ? { workspace: shell.workspace() } : {}),
           fetch: cellFetch,
           tools: options.tools && {
