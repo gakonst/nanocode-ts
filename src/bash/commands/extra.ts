@@ -1054,7 +1054,7 @@ const rg: CommandHandler = async ctx => {
       continue;
     }
     if (stat.kind === "file") {
-      targets.push({ path, display: root, explicit: true });
+      targets.push({ path, display: root, explicit: true, pruned: !!prunable });
       continue;
     }
     directories = true;
