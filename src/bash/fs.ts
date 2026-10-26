@@ -18,6 +18,7 @@ export interface FileSystem {
   readlink?(path: string): Promise<string | null>;
   lstat?(path: string): Promise<LinkStat | null>;
   search?(dir: string, literals: string[]): Promise<string[] | null>;
+  excerpt?(path: string, literals: string[]): Promise<Uint8Array | null>;
 }
 
 export type FileInput = string | Uint8Array;
@@ -46,6 +47,7 @@ export function masked(fs: FileSystem, umask: number): FileSystem {
     ...(fs.readlink ? { readlink: fs.readlink.bind(fs) } : {}),
     ...(fs.lstat ? { lstat: fs.lstat.bind(fs) } : {}),
     ...(fs.search ? { search: fs.search.bind(fs) } : {}),
+    ...(fs.excerpt ? { excerpt: fs.excerpt.bind(fs) } : {}),
   };
 }
 

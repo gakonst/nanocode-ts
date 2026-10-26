@@ -1,6 +1,6 @@
 import { CommandError, PipeError, budget, streaming, type CommandContext, type CommandHandler } from "../shell.ts";
 import { FsError, baseOf, decode, encode } from "../fs.ts";
-import { literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
+import { ahead, literals, pruned, prunedList, prunedStat, type Pruned } from "../mount.ts";
 import { escapeRegExp, escapes, format, globRegExp, joinLines, lines, posixRegExp } from "../text.ts";
 import { allInput, batches, device, eachBatch, eachInput, last, options, pause, put, readInput } from "./util.ts";
 
@@ -391,7 +391,7 @@ const grep: CommandHandler = streaming(async ctx => {
   const include = (parsed.values.get("include") ?? []).map(glob => globRegExp(glob));
   const exclude = (parsed.values.get("exclude") ?? []).map(glob => globRegExp(glob));
   const excludeDir = (parsed.values.get("exclude-dir") ?? []).map(glob => globRegExp(glob));
-  const targets: ({ path: string; display: string } | "-")[] = [];
+  const targets: ({ path: string; display: string; pruned?: boolean } | "-")[] = [];
   let status = 1;
   let errors = false;
   let directories = false;
@@ -426,7 +426,7 @@ const grep: CommandHandler = streaming(async ctx => {
       if (include.length && !include.some(glob => glob.test(name))) return;
       if (exclude.some(glob => glob.test(name))) return;
     }
-    targets.push({ path, display });
+    targets.push({ path, display, pruned: !!tree && !top });
   };
   if (implicit) await collect(".", "", true);
   else for (const operand of operands) {
@@ -491,7 +491,12 @@ const grep: CommandHandler = streaming(async ctx => {
     if (await search(source, stdinName, stream)) status = 0;
   } else {
     let stdinUsed = false;
-    for (const target of targets) {
+    const partial = prunable && !f.has("n") && !f.has("b") && !before && !after && !f.has("z") ? prunable : null;
+    const take = ahead(targets, target => target === "-" || device(target.path) !== undefined ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
+    for (let index = 0; index < targets.length; index++) {
+      const target = targets[index];
+      const pending = take(index);
+      if (ctx.stdout.closed) throw new PipeError();
       let source: () => Promise<string | null>;
       let stream = false;
       let display: string;
@@ -503,7 +508,7 @@ const grep: CommandHandler = streaming(async ctx => {
       } else {
         display = target.display;
         try {
-          source = once(device(target.path) ?? decode(await ctx.fs.read(target.path)));
+          source = once(device(target.path) ?? decode(await pending!));
         } catch (error) {
           if (!(error instanceof FsError)) throw error;
           errors = true;

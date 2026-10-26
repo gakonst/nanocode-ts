@@ -232,6 +232,10 @@ export class Output {
     return this.#pipe !== undefined;
   }
 
+  get closed(): boolean {
+    return this.#pipe?.closed ?? false;
+  }
+
   get bounded(): boolean {
     return !this.#pipe && !this.#spill && !this.discard;
   }
