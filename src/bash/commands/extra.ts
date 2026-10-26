@@ -955,7 +955,7 @@ const rg: CommandHandler = async ctx => {
     let source: string;
     if (f.has("F")) source = escapeRegExp(pattern);
     else {
-      const perl = perlSource(pattern);
+      const perl = perlSource(pattern.includes("\\|") && !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, "")) ? pattern.replace(/\\\|/g, "|") : pattern);
       source = perl.source;
       extraFlags += perl.flags;
     }
