@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { Config } from "../client.ts";
 import { Chat, Markdown, NanocodeProvider, type Highlighter, Sidebar, useAnswer, useConfig, useSend } from "./index.tsx";
 import * as styles from "./playground.styles.ts";
+import { ChatGpt, Claude } from "./clones.tsx";
 import { Block } from "./site.tsx";
 import { nanocodeTheme, type Scheme, type Theme, themes as defaults, themeStyle, type Tokens, tokens } from "./themes.ts";
 
@@ -24,6 +25,8 @@ const FORMS: readonly { id: FormFactor; label: string; detail: string }[] = [
   { detail: "A button in your product that runs an agent job and shows its answer.", id: "button", label: "AI button" },
   { detail: "Agent as a function: rewrite a field in place.", id: "rewrite", label: "Inline rewrite" },
 ];
+
+const SUGGESTIONS: readonly string[] = ["What can you do?", "Plot y = sin(x) and show me", "Fetch the top Hacker News story"];
 
 const SCHEMES: readonly { id: Scheme | "theme"; label: string }[] = [
   { id: "theme", label: "theme" },
@@ -74,11 +77,18 @@ export function Playground(props: PlaygroundProps) {
   return (
     <div {...styles.playground()}>
       <div data-theme={theme.id} style={style} {...styles.stage()}>
-        {form === "chat" && (
+        {form === "chat" && (theme.id === "chatgpt" || theme.id === "claude") && (
+          <div data-clone="" {...styles.clone()}>
+            {theme.id === "chatgpt"
+              ? <ChatGpt config={props.configs.chat} footer={props.status} prompts={props.suggestions ?? SUGGESTIONS} {...(props.highlight ? { highlight: props.highlight } : {})} />
+              : <Claude config={props.configs.chat} footer={props.status} prompts={props.suggestions ?? SUGGESTIONS} {...(props.highlight ? { highlight: props.highlight } : {})} />}
+          </div>
+        )}
+        {form === "chat" && theme.id !== "chatgpt" && theme.id !== "claude" && (
           <NanocodeProvider config={props.configs.chat} skin={theme.skin} {...(props.highlight ? { highlight: props.highlight } : {})}>
             <div data-app="" {...styles.app()}>
             {theme.skin.parts?.sidebar && <Sidebar title={theme.recents ?? "Chats"} />}
-            <Chat expandable={false} greeting={greeting} label={theme.label + " chat"} placeholder={theme.placeholder ?? "Ask the agent"} status={props.status} suggestions={props.suggestions ?? ["What can you do?", "Plot y = sin(x) and show me", "Fetch the top Hacker News story"]} />
+            <Chat expandable={false} greeting={greeting} label={theme.label + " chat"} placeholder={theme.placeholder ?? "Ask the agent"} status={props.status} suggestions={props.suggestions ?? SUGGESTIONS} />
             </div>
           </NanocodeProvider>
         )}
@@ -220,6 +230,17 @@ function snippet(theme: Theme, form: FormFactor): string {
     : "import { nanocodeTheme, tokens } from \"nanocode-ts/react/themes\";";
   const style = known ? "themeStyle(" + name + ")" : "tokens(" + literal(theme.tokens).replace(/\n/g, "\n    ") + ")";
   const skin = known ? name + ".skin" : "nanocodeTheme.skin";
+
+  if (form === "chat" && (theme.id === "chatgpt" || theme.id === "claude")) {
+    const component = theme.id === "chatgpt" ? "ChatGpt" : "Claude";
+    return [
+      "import { " + component + " } from \"nanocode-ts/react/clones\";",
+      "",
+      "export function App() {",
+      "  return <" + component + " config={config} prompts={[\"What can you do?\"]} />;",
+      "}",
+    ].join("\n");
+  }
 
   if (form === "chat") return [
     "import { Chat, NanocodeProvider } from \"nanocode-ts/react\";",
