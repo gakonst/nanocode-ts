@@ -97,7 +97,7 @@ function BlockView(props: { block: Block }) {
 }
 
 function Composer(props: CloneProps & { onSend(): void }) {
-  const composer = useComposer({ ...(props.before ? { before: props.before } : {}), onSend: props.onSend, ...(props.warm ? { warm: props.warm } : {}) });
+  const composer = useComposer({ ...(props.before ? { before: props.before } : {}), onSend: props.onSend, ...(props.send ? { send: props.send } : {}), ...(props.warm ? { warm: props.warm } : {}) });
 
   return (
     <div className="gpt-composer" data-dragging={composer.attachments.dragging} onClick={composer.focus} {...composer.attachments.drop}>
@@ -122,9 +122,11 @@ function App(props: CloneProps) {
   const log = useStick(thread);
   const activity = useActivity();
 
-  const waiting = activity.phase === "waiting" || activity.phase === "running";
+  const waiting = activity.phase === "waiting" || activity.phase === "running" || (Boolean(props.busy) && !activity.busy);
   const newChat = () => { threads.create(); sidebar.close(); };
   const footer = props.footer && <p className="gpt-foot">{props.footer}</p>;
+  const composer = <Composer {...props} onSend={log.pin} />;
+  const input = props.input ? props.input(composer) : composer;
 
   return (
     <div className="gpt" data-sidebar={sidebar.open}>
@@ -155,9 +157,9 @@ function App(props: CloneProps) {
         </header>
         {thread.length === 0 ? (
           <div className="gpt-hero">
-            <h1>What can I help with?</h1>
-            <Composer {...props} onSend={log.pin} />
-            <Prompts onSend={log.pin} prompts={props.prompts} {...(props.warm ? { warm: props.warm } : {})} />
+            <h1>{props.heading ?? "What can I help with?"}</h1>
+            {input}
+            {props.suggestions ?? <Prompts onSend={log.pin} prompts={props.prompts} {...(props.warm ? { warm: props.warm } : {})} />}
             {footer}
           </div>
         ) : (
@@ -176,7 +178,7 @@ function App(props: CloneProps) {
               </div>
             </div>
             <div className="gpt-bottom">
-              <Composer {...props} onSend={log.pin} />
+              {input}
               {footer}
             </div>
           </>
@@ -188,7 +190,7 @@ function App(props: CloneProps) {
 
 export function ChatGpt(props: CloneProps & { config: Config; highlight?: () => Promise<Highlighter> }) {
   return (
-    <NanocodeProvider config={props.config} skin={skin} {...(props.highlight ? { highlight: props.highlight } : {})}>
+    <NanocodeProvider config={props.config} skin={props.parts ? { ...skin, parts: { ...skin.parts, ...props.parts } } : skin} {...(props.highlight ? { highlight: props.highlight } : {})}>
       <style href="nanocode-ts-chatgpt" precedence="nanocode">{css}</style>
       <App {...props} />
     </NanocodeProvider>
