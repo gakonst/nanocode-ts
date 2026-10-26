@@ -1,6 +1,6 @@
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const BASE = process.env.CF_BASE ?? "https://nanocode-cloudflare-durable.tempo-dev.workers.dev/";
-const AUTH = process.env.CF_TOKEN ? { authorization: "Bearer " + process.env.CF_TOKEN } : {};
+const BASE = process.env.CF_BASE ?? "https://nanocode.xyz/cloudflare/";
+const AUTH = process.env.CF_TOKEN ? { authorization: "Bearer " + process.env.CF_TOKEN } : { "x-nanocode-visitor": "sweep-" + Math.random().toString(16).slice(2, 10) };
 
 function frames(text) { return text.split("\n\n").map(b => { const l = b.split("\n"); const id = l.find(x => x.startsWith("id: "))?.slice(4); const data = l.filter(x => x.startsWith("data: ")).map(x => x.slice(6)).join(""); return data ? { id, data } : null; }).filter(Boolean); }
 

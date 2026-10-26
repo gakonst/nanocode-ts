@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { probes } from "./probes.mjs";
 
-const MODELS = { haiku: ["claude", "claude-haiku-5-5"], sonnet: ["claude", "claude-sonnet-5-5"], sol: ["codex", "gpt-6.1-sol"], luna: ["codex", "gpt-6-luna"], glm: ["codex", "glm-5.3"] };
+const MODELS = { haiku: ["claude", "claude-haiku-5-5"], sonnet: ["claude", "claude-sonnet-5-5"], cglm: ["claude", "zai/glm-5.3"], ckimi: ["claude", "moonshotai/kimi-k3"], sol: ["codex", "gpt-6.1-sol"], luna: ["codex", "gpt-6-luna"], glm: ["codex", "glm-5.3"], kimi: ["codex", "kimi-k3"] };
 const arg = (name, fallback) => process.argv.find(a => a.startsWith("--" + name + "="))?.split("=")[1] ?? fallback;
 const targets = arg("targets", "cloudflare").split(",");
 const models = arg("models", "haiku,sol,glm").split(",");
@@ -11,7 +11,7 @@ const label = arg("label", new Date().toISOString().slice(0, 16).replace(/[:T]/g
 const chosen = probes.filter(p => !only || only.includes(p.id));
 
 const jobs = [];
-for (const target of targets) for (const m of models) for (const probe of chosen) jobs.push({ target, model: m, probe });
+for (const target of targets) for (const m of models) for (const probe of chosen) if (!probe.providers || probe.providers.includes((MODELS[m] ?? ["codex"])[0])) jobs.push({ target, model: m, probe });
 mkdirSync("bench/out", { recursive: true });
 const file = "bench/out/" + label + ".jsonl";
 writeFileSync(file, "");
