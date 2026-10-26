@@ -492,7 +492,7 @@ const grep: CommandHandler = streaming(async ctx => {
     if (await search(source, stdinName, stream)) status = 0;
   } else {
     let stdinUsed = false;
-    const partial = prunable && !f.has("n") && !f.has("b") && !before && !after && !f.has("z") ? prunable : null;
+    const partial = prunable && !f.has("b") && !before && !after && !f.has("z") ? prunable : null;
     const take = ahead(targets, target => target === "-" || target.matched || device(target.path) !== undefined ? null : partial && target.pruned ? ctx.fs.excerpt?.(target.path, partial).then(bytes => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path) : ctx.fs.read(target.path));
     for (let index = 0; index < targets.length; index++) {
       const target = targets[index];
