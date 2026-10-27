@@ -4,3 +4,4 @@ export { THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, t
 export { aiGateway } from "./gateway.ts";
 export { client, PUBLIC_REQUESTS, PUBLIC_WINDOW_MS, PublicLimit } from "./limit.ts";
 export { HandRelay, relay, RELAY_TOKEN, relayToken } from "./relay.ts";
+export { bearerAccepted, bearerToken } from "../remote.ts";
