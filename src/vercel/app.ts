@@ -1,5 +1,5 @@
 import { durableAgent, getWorld, type HostTool } from "durable-harness";
-import { handId, handRoute } from "./hands.ts";
+import { attachedHands, handId, handRoute } from "./hands.ts";
 import { ATTACHMENT_PATH, CANCEL, type CarriedFile, carryAttachments, HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, SCOPE, type ServiceTier, type Thinking } from "./harness.ts";
 import { committedBatches, LocalSql } from "./journal.ts";
 import { SqlFileSystem } from "../bash/index.ts";
@@ -132,6 +132,11 @@ export function createNanocode(options: NanocodeAppOptions) {
     const params = new URL(request.url).searchParams;
     if (params.has("file")) return file(request, params);
     if (upgrade && request.headers.get("upgrade")?.toLowerCase() === "websocket") return handRoutes.SOCKET(request, upgrade);
+    if (hands !== false && params.has("hands") && params.get("sessionId")) {
+      const refused = await admit(request);
+      if (refused) return refused;
+      return Response.json({ hands: await attachedHands(await getWorld(), params.get("sessionId")!) }, { headers: { "cache-control": "no-store" } });
+    }
     if (streamsHands && params.has("hand")) return handRoutes.GET(request);
     if (params.get("cursor") === FIRST_CURSOR && params.get("sessionId")) {
       const state = await agent.sessions.inspect(params.get("sessionId")!).catch(() => undefined);

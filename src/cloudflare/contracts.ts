@@ -25,7 +25,29 @@ export type SessionDescriptor = SessionAuthority & {
   read_only?: boolean;
   grant?: unknown;
   expires_at?: number;
+  hand_token?: string;
 };
+
+export const HAND_TOKEN = /^nch_([0-9a-f]{2,512})_([0-9a-f]{64})$/;
+
+const hex = (bytes: Uint8Array) => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+
+export function handToken(account: string, secret: string): string {
+  return `nch_${hex(new TextEncoder().encode(account))}_${secret}`;
+}
+
+export function handTokenAccount(encoded: string): string | null {
+  if (encoded.length % 2) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(encoded.match(/../g)!, pair => parseInt(pair, 16)));
+  } catch {
+    return null;
+  }
+}
+
+export function handSecret(): string {
+  return hex(crypto.getRandomValues(new Uint8Array(32)));
+}
 
 export type ModelDispatch = {
   provider?: ModelProvider;

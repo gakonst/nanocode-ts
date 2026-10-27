@@ -21,6 +21,8 @@ export type CloudflareTransport = Transport & {
   crash(afterMs?: number): Promise<Response>;
   forget(): void;
   health(): Promise<Response | undefined>;
+  handToken(): Promise<{ session: string; token: string }>;
+  hands(): Promise<string[]>;
 };
 
 type Sink = { push(event: LiveEvent): void; note(kind: EntryKind, text: string): void };
@@ -228,6 +230,19 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       used = 0;
       queued.length = 0;
       save();
+    },
+    async handToken() {
+      const id = state.id ?? (warmed ??= identifier("web"));
+      const response = await fetch(path("hands", { id }), { method: "POST", headers: headers() });
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+      return { session: id, token: (await response.json() as { token: string }).token };
+    },
+    async hands() {
+      const id = state.id ?? warmed;
+      if (!id) return [];
+      const response = await fetch(path("hands", { id }), { headers: headers() }).catch(() => undefined);
+      if (!response?.ok) return [];
+      return (await response.json() as { hands?: string[] }).hands ?? [];
     },
     async health() {
       const open = await fetch(`${base}health`).catch(() => undefined);

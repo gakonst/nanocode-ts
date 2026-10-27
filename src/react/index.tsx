@@ -19,7 +19,7 @@ export type Picker = {
   onChoose(item: PickerItem): void;
 };
 
-export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "greeting" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "pending" | "send" | "sidebar" | "sidebarChat" | "sidebarChats" | "sidebarNew" | "sidebarRemove" | "sidebarSection" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
+export type Part = "attach" | "attachment" | "attachmentName" | "attachmentRemove" | "attachmentSize" | "attachmentThumb" | "attachments" | "actions" | "body" | "cell" | "chat" | "chevron" | "children" | "choice" | "choiceDetail" | "choiceLabel" | "code" | "em" | "entry" | "expand" | "figure" | "greeting" | "hand" | "handActions" | "handButton" | "handCommand" | "handStatus" | "handText" | "handTitle" | "header" | "heading" | "icon" | "image" | "images" | "inline" | "input" | "item" | "key" | "link" | "list" | "log" | "markdown" | "marker" | "meta" | "more" | "name" | "paragraph" | "picker" | "pickerHeader" | "pickerMuted" | "pickerQuery" | "pickerTitle" | "quote" | "row" | "rule" | "section" | "pending" | "send" | "sidebar" | "sidebarChat" | "sidebarChats" | "sidebarNew" | "sidebarRemove" | "sidebarSection" | "site" | "speaker" | "status" | "statusText" | "strike" | "strong" | "suggestion" | "suggestions" | "table" | "title" | "tool" | "turn" | "typing" | "account" | "accountActions" | "accountAvatar" | "accountLogin" | "accountWho" | "meter" | "meterBolt" | "meterDot" | "meterEmpty" | "meterHead" | "meterName" | "meterRow" | "meterRows" | "meterSpark" | "prompt" | "signIn" | "signInButton" | "spend" | "spendAccent" | "spendCalls" | "spendDot" | "spendEmpty" | "spendSpark" | "spendTitle" | "unlock" | "unlockButton" | "walletCard" | "walletCardActions" | "walletCardButton" | "walletCardText" | "walletCardTitle";
 
 export type PartState = Record<string, string | number | boolean | undefined>;
 
@@ -872,6 +872,34 @@ export function Chat(props: ChatProps) {
           )}
         </p>
     </section>
+  );
+}
+
+export type HandProps = { command: string; short?: string; hands: readonly (string | null)[]; onClose?(): void };
+
+export function Hand(props: HandProps) {
+  const part = usePart();
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => setCopied(text), () => setCopied(null));
+  };
+  const attached = props.hands.length > 0;
+  return (
+    <div aria-label="Run on your machine" role="region" {...part("hand", { attached })}>
+      <p {...part("handTitle")}>Run this session on your machine</p>
+      <p {...part("handText")}>Paste this in a terminal, in the folder the agent should work in. It installs nanocode (<code>nc</code>) and connects your computer to this session: from the next message the agent's code runs there, with your files and your shell, so it can run any command you could.</p>
+      <pre {...part("handCommand")}>{props.command}</pre>
+      <p {...part("handActions")}>
+        <button onClick={() => copy(props.command)} type="button" {...part("handButton")}>{copied === props.command ? "copied" : "copy"}</button>
+        <span aria-live="polite" {...part("handStatus", { attached })}>{attached ? `connected: ${props.hands.map(name => name ?? "your machine").join(", ")}` : "waiting for your machine…"}</span>
+        {props.onClose && <button onClick={props.onClose} type="button" {...part("handButton")}>close</button>}
+      </p>
+      {props.short && (
+        <p {...part("handText")}>
+          Already have <code>nc</code>? <code>{props.short}</code> <button onClick={() => copy(props.short!)} type="button" {...part("handButton")}>{copied === props.short ? "copied" : "copy"}</button>
+        </p>
+      )}
+    </div>
   );
 }
 

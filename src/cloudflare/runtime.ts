@@ -8,7 +8,7 @@ import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
-import { DEFAULT_EXECUTOR, EXECUTOR_ID, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
+import { DEFAULT_EXECUTOR, EXECUTOR_ID, HAND_TOKEN, handSecret, handToken, handTokenAccount, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
 
 export type { HostTool, ModelProvider } from "../index.ts";
 export type { HostToolCall, ModelDispatch, PrivateBinding, SessionAuthority, SessionDescriptor, SocketDispatch, Thinking } from "./contracts.ts";
@@ -228,6 +228,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (binding && binding !== identity) return json({ error: "session authority mismatch" }, 403);
         const scope = OWNER;
         const parts = url.pathname.split("/");
+        if (descriptor.hand_token !== undefined && (parts[2] !== "hands" || request.method !== "GET" || !this.handTokenMatches(descriptor.hand_token))) return json({ error: "this hand token is not valid for the session" }, 403);
         if (parts[2] === "delete" && request.method === "POST") return await this.destroy();
         if (descriptor.read_only && (request.method !== "GET" || (parts[2] === "hands" && request.headers.get("upgrade")?.toLowerCase() === "websocket"))) return json({ error: "read-only access" }, 403);
         if (!this.recorded && options.recordSession) {
@@ -248,6 +249,15 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         }
         if (parts[2] === "socket") return this.watch(scope, url, request, descriptor);
         if (parts[2] === "hands") {
+          if (request.method === "POST" && parts.length === 3) {
+            if (descriptor.read_only) return json({ error: "read-only access" }, 403);
+            let secret = this.metadata.get("hand_token");
+            if (!secret) {
+              secret = handSecret();
+              this.metadata.insert("hand_token", secret);
+            }
+            return json({ token: handToken(descriptor.account_id, secret) });
+          }
           if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
           if (parts.length === 3 && request.headers.get("upgrade")?.toLowerCase() !== "websocket") return json({ hands: [...(this.hands.get(scope) ?? [])].filter(([, entry]) => entry.ready).map(([hand]) => hand) });
           return this.attachHand(scope, parts.length === 4 ? decodeURIComponent(parts[3]) : undefined, request, descriptor);
@@ -977,6 +987,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       try { return await options.active(descriptor.account_id, descriptor.grant, this.env); } catch { return false; }
     }
 
+    private handTokenMatches(secret: string): boolean {
+      const stored = this.metadata.get("hand_token");
+      if (!stored || stored.length !== secret.length) return false;
+      const encoder = new TextEncoder();
+      return crypto.subtle.timingSafeEqual(encoder.encode(stored), encoder.encode(secret));
+    }
+
     private async handAllowed(connection: string): Promise<boolean> {
       const descriptor = this.handAuthority.get(connection);
       return !descriptor || await this.allowed(descriptor);
@@ -1242,10 +1259,12 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
   async function fetch(request: Request, env: E): Promise<Response> {
     const started = performance.now();
-    const principal = await options.authenticate(request, env);
+    const url = new URL(request.url);
+    const minted = HAND_TOKEN.exec(/^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "");
+    const handing = minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null;
+    const principal = handing ? handTokenAccount(handing[1]!) : await options.authenticate(request, env);
     if (!principal) return json({ error: "unauthorized" }, 401);
     const account = typeof principal === "string" ? principal : principal.account;
-    const url = new URL(request.url);
     const claude = env.CLAUDE_MODEL ?? "claude-opus-5-5";
     if (url.pathname === "/health") return json({ ok: true, model: claude, models: { claude, codex: "gpt-6.1-sol" }, auth: env.MODEL_AUTH ?? "api_key" });
     const head = request.method === "HEAD";
@@ -1260,7 +1279,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     const mode = (provider: ModelProvider) => options.subscription ? options.subscription(account, env, provider) : env.MODEL_AUTH === "subscription";
     const [subscription, codex_subscription] = await Promise.all([mode("claude"), mode("codex")]);
     const caller = typeof principal === "object" ? principal : undefined;
-    const descriptor: SessionDescriptor = { account_id: account, session_id: "", session_name: name, subscription, codex_subscription, ...(caller?.read_only ? { read_only: true } : {}), ...(caller?.grant !== undefined ? { grant: caller.grant } : {}), ...(typeof caller?.expires_at === "number" ? { expires_at: caller.expires_at } : {}) };
+    const descriptor: SessionDescriptor = { account_id: account, session_id: "", session_name: name, subscription, codex_subscription, ...(handing ? { hand_token: handing[2]! } : {}), ...(caller?.read_only ? { read_only: true } : {}), ...(caller?.grant !== undefined ? { grant: caller.grant } : {}), ...(typeof caller?.expires_at === "number" ? { expires_at: caller.expires_at } : {}) };
     let path = files ? `/internal/files${files[2] ?? ""}` : `/internal/${match![2] ?? "metrics"}`;
     if (match?.[4]) path = `/internal/cancel/${match[3]}`;
     else if (match?.[3]) path += `/${match[3]}`;

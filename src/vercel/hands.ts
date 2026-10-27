@@ -201,37 +201,66 @@ async function elsewhere(world: World, runId: string, signal: AbortSignal, moved
   }
 }
 
+async function attachedHand(world: World, runId: string, signal: AbortSignal): Promise<{ current?: HandLine; attached: AsyncGenerator<[number, HandLine]> } | undefined> {
+  const attach = handStreams(runId).attach;
+  const info = await world.streams.getInfo(runId, attach).catch(() => undefined);
+  if (!info || info.tailIndex < 0) return undefined;
+  const attached = tailLines(world, runId, attach, Math.max(0, info.tailIndex - 15), signal);
+  let current: HandLine | undefined;
+  for (;;) {
+    const next = await attached.next();
+    if (next.done) break;
+    const [index, line] = next.value;
+    if (line.closed) {
+      if (current?.connection === line.connection) current = undefined;
+    } else if (line.catalog !== undefined && typeof line.connection === "string" && HAND_CONNECTION.test(line.connection)) current = line;
+    if (index > info.tailIndex) break;
+  }
+  return { ...(current ? { current } : {}), attached };
+}
+
+function handName(catalog: string): string | null {
+  try {
+    const name = (JSON.parse(catalog) as { name?: unknown }).name;
+    return typeof name === "string" ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function attachedHands(world: World, runId: string): Promise<(string | null)[]> {
+  const nearby = local.get(runId);
+  if (nearby?.socket.readyState === OPEN) return [handName(nearby.catalog)];
+  const stop = new AbortController();
+  try {
+    const found = await attachedHand(world, runId, stop.signal);
+    return found?.current?.catalog !== undefined ? [handName(found.current.catalog)] : [];
+  } finally {
+    stop.abort();
+  }
+}
+
 export type DialOptions = { resumes?: boolean };
 
 export async function dialHand(world: World, runId: string, signal: AbortSignal, options: DialOptions = {}): Promise<MessageSocket> {
   const resumes = options.resumes === true;
   const nearby = local.get(runId);
   if (nearby && nearby.socket.readyState === OPEN) return dialLocal(world, runId, nearby, resumes);
-  const streams = handStreams(runId);
-  const info = await world.streams.getInfo(runId, streams.attach).catch(() => undefined);
-  if (!info || info.tailIndex < 0) throw new Error("no hand is attached to this session");
   const watch = new AbortController();
   const dialing = () => watch.abort();
   signal.addEventListener("abort", dialing, { once: true });
-  const attached = tailLines(world, runId, streams.attach, Math.max(0, info.tailIndex - 15), watch.signal);
-  let current: HandLine | undefined;
+  let found: { current?: HandLine; attached: AsyncGenerator<[number, HandLine]> } | undefined;
   try {
-    for (;;) {
-      const next = await attached.next();
-      if (next.done) break;
-      const [index, line] = next.value;
-      if (line.closed) {
-        if (current?.connection === line.connection) current = undefined;
-      } else if (line.catalog !== undefined && typeof line.connection === "string" && HAND_CONNECTION.test(line.connection)) current = line;
-      if (index > info.tailIndex) break;
-    }
+    found = await attachedHand(world, runId, watch.signal);
   } finally {
     signal.removeEventListener("abort", dialing);
   }
-  if (!current || watch.signal.aborted) {
+  const current = found?.current;
+  if (!found || !current || watch.signal.aborted) {
     watch.abort();
     throw new Error("no hand is attached to this session");
   }
+  const attached = found.attached;
   let connection = current.connection!;
   const catalog = current.catalog!;
   const named = handStreams(runId, connection);

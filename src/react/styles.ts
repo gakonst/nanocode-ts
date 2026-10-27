@@ -392,6 +392,28 @@ export const statusText = style({ flex: "1 !custom", minWidth: "0", opacity: "di
 
 export const actions = style({ columnGap: "indent", display: "flex", flexWrap: "wrap", rowGap: "xs" });
 
+export const hand = variants({
+  base: { borderTop: "1px solid", borderTopColor: "rule", display: "flex", flexDirection: "column", gap: "xs", paddingBlock: "sm", paddingInline: "md" },
+  variants: { attached: { false: {}, true: { borderTopColor: "agent" } } },
+  defaultVariants: { attached: false },
+});
+
+export const handTitle = style({ color: "accent", fontVariationSettings: '"wght" 700', margin: "0" });
+
+export const handText = style({ margin: "0", opacity: "dim", selectors: { "& code": { color: "text", fontVariationSettings: '"wght" 500', overflowWrap: "anywhere" } } });
+
+export const handCommand = style({ border: "1px solid", borderColor: "rule", margin: "0", overflowX: "auto", paddingBlock: "xs", paddingInline: "sm", userSelect: "all", whiteSpace: "pre-wrap", wordBreak: "break-all" });
+
+export const handActions = style({ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "md", margin: "0" });
+
+export const handButton = style({ background: "none", border: "1px solid", borderColor: "rule", color: "accent", cursor: "pointer", font: "inherit !custom", paddingInline: "sm" });
+
+export const handStatus = variants({
+  base: { opacity: "dim" },
+  variants: { attached: { false: {}, true: { color: "agent", opacity: "1 !custom" } } },
+  defaultVariants: { attached: false },
+});
+
 export const expand = style({
   backgroundColor: "transparent",
   border: "none",

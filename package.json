@@ -47,6 +47,10 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
+    "./install": {
+      "types": "./dist/install.d.ts",
+      "default": "./dist/install.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"

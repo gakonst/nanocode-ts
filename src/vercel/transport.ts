@@ -5,7 +5,7 @@ export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
 export const FIRST_CURSOR = "0.0";
 
-export type VercelSession = { id?: string; cursor?: string; open?: boolean };
+export type VercelSession = { id?: string; cursor?: string; open?: boolean; hand?: string };
 
 export type VercelSelection = { harness: string; model: string; effort?: string };
 
@@ -17,12 +17,14 @@ export type VercelTransportOptions = {
   session?: { load(): VercelSession; save(session: VercelSession): void };
   reconnectMs?: number;
   hand?(session?: string): Promise<string | undefined>;
+  hands?: boolean;
 };
 
 export type VercelTransport = Transport & {
   session(): VercelSession;
   warm(): void;
   open(): Promise<string | undefined>;
+  hands(): Promise<(string | null)[]>;
   crash(options?: { at?: "tool" | "any"; afterMs?: number }): Promise<Response>;
   forget(): void;
 };
@@ -85,15 +87,25 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     return false;
   };
 
+  const channel = () => options.hands ? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("") : undefined;
+  const begun = new Map<string, string>();
+  const adopt = (session: VercelSession, id: string) => {
+    session.id = id;
+    const hand = begun.get(id);
+    if (hand) session.hand = hand;
+  };
+
   const begin = async (hand: string | undefined, signal?: AbortSignal) => {
     const response = await fetch(url, { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ ...chosen(), ...(hand ? { hand } : {}), warm: true }), ...(signal ? { signal } : {}) });
-    return response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
+    const id = response.ok ? (await response.json() as { sessionId?: string }).sessionId : undefined;
+    if (id && hand) begun.set(id, hand);
+    return id;
   };
 
   const prepare = async () => {
-    const hand = await options.hand?.().catch(() => undefined);
+    const hand = await options.hand?.().catch(() => undefined) ?? channel();
     const id = await begin(hand).catch(() => undefined);
-    if (id && hand) await options.hand!(id).catch(() => undefined);
+    if (id && hand && options.hand) await options.hand(id).catch(() => undefined);
     return id;
   };
 
@@ -168,12 +180,13 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         let hand = await options.hand?.(existing);
         if (signal?.aborted) return;
         if (!existing) {
+          hand ??= channel();
           existing = await begin(hand, signal).catch(() => undefined);
           if (signal?.aborted) return;
-          if (existing && hand) hand = await options.hand!(existing);
+          if (existing && hand && options.hand) hand = await options.hand(existing);
         }
         if (existing && existing !== session.id) {
-          session.id = existing;
+          adopt(session, existing);
           save(session);
           changed?.();
         }
@@ -239,10 +252,16 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       const id = await pending;
       if (warmed?.session === pending) warmed = undefined;
       if (id && !session.id) {
-        session.id = id;
+        adopt(session, id);
         save(session);
       }
       return session.id;
+    },
+    async hands() {
+      if (!state.id) return [];
+      const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&hands`, { headers: headers() });
+      if (!response.ok) return [];
+      return (await response.json() as { hands?: (string | null)[] }).hands ?? [];
     },
     crash(crash = {}) {
       return fetch(options.chaosUrl ?? url.replace(/chat$/, "chaos"), { method: "POST", headers: headers({ "content-type": "application/json" }), body: JSON.stringify({ sessionId: state.id, at: crash.at ?? "tool", afterMs: crash.afterMs ?? 1500 }) });
