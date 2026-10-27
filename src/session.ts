@@ -32,6 +32,8 @@ export async function openSession(options: SessionOptions): Promise<Session> {
   const { scope } = options;
   let hand: RelayedHand | undefined;
   let placed: RelayedHand | undefined;
+  let disposed = false;
+  const arrivals = new Set<() => void>();
   const launch = async () => {
     placed = hand;
     const runtime = await options.open(placed);
@@ -41,21 +43,31 @@ export async function openSession(options: SessionOptions): Promise<Session> {
   let runtime = await launch();
   let leases = 0;
   let reopening: Promise<void> | undefined;
-  const settle = () => {
-    if (leases || reopening || placed === hand) return;
+  const reopen = () => {
     reopening = (async () => {
-      await runtime.dispose();
-      runtime = await launch().catch(error => {
-        if (placed) hand = undefined;
-        throw error;
-      });
+      if (!runtime.closed) await runtime.dispose();
+      try {
+        runtime = await launch();
+      } catch (error) {
+        if (!placed) throw error;
+        hand = undefined;
+        runtime = await launch();
+      }
     })().catch(() => {}).finally(() => {
       reopening = undefined;
-      settle();
+      if (!runtime.closed) settle();
     });
+  };
+  const settle = () => {
+    if (disposed || leases || reopening) return;
+    if (placed !== hand || runtime.closed) reopen();
   };
   const lease = async <T>(work: () => Promise<T>): Promise<T> => {
     while (reopening) await reopening;
+    if (runtime.closed && !disposed) {
+      reopen();
+      await reopening;
+    }
     leases++;
     try {
       return await work();
@@ -72,13 +84,24 @@ export async function openSession(options: SessionOptions): Promise<Session> {
     relaying = true;
     relayHands(options.relay.url, token, options.relay.policy, found => {
       hand = found;
+      if (found) for (const arrived of arrivals) arrived();
       settle();
     }, relay.signal);
   };
   connect();
+  const arrival = (ms: number) => new Promise<void>(resolve => {
+    const done = () => {
+      clearTimeout(timer);
+      arrivals.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    arrivals.add(done);
+  });
   const submit = async (prompt: string) => {
     const request = crypto.randomUUID();
-    const submitted = await runtime.submit(scope, { ...(placed ? { hand: handName(placed) } : {}), metadata: {}, prompt, request_id: request });
+    const on = placed && handName(placed);
+    const submitted = await runtime.submit(scope, { ...(on ? { hand: on } : {}), metadata: on ? { hand: on } : {}, prompt, request_id: request });
     if (submitted.submitted !== "accepted") throw new Error(`The session refused the prompt (${submitted.submitted}).`);
     return request;
   };
@@ -113,12 +136,20 @@ export async function openSession(options: SessionOptions): Promise<Session> {
       void drain();
       return "queued";
     }),
-    resume: () => lease(async () => {
-      const pending = (await runtime.pending(scope))[0];
-      if (!pending) return undefined;
-      await drain();
-      return (await runtime.turn(scope, pending.report.request_id))?.report;
-    }),
+    async resume() {
+      const waiting = (await lease(() => runtime.pending(scope)))[0];
+      const wanted = (waiting?.metadata as { hand?: unknown } | null | undefined)?.hand;
+      if (typeof wanted === "string" && !placed && options.relay && token) {
+        connect();
+        if (!hand) await arrival(options.relay.policy.timeout_ms);
+      }
+      return lease(async () => {
+        const pending = (await runtime.pending(scope))[0];
+        if (!pending) return undefined;
+        await drain();
+        return (await runtime.turn(scope, pending.report.request_id))?.report;
+      });
+    },
     hand() {
       if (!options.relay) return undefined;
       if (!token) {
@@ -131,9 +162,10 @@ export async function openSession(options: SessionOptions): Promise<Session> {
     hands: () => (hand ? [hand.name] : []),
     runtime: () => runtime,
     async dispose() {
+      disposed = true;
       relay.abort();
       while (reopening) await reopening;
-      await runtime.dispose();
+      if (!runtime.closed) await runtime.dispose();
     },
   };
 }
