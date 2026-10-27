@@ -1,4 +1,4 @@
-import { type Attachment, attachedPrompt, type LiveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
+import { type Attachment, attachedPrompt, type HandAccess, type HandSource, type LiveEvent, serverEvents, socketUrl, type Transport, type TransportParameters } from "../client.ts";
 import { safeName, sniff } from "../files.ts";
 
 export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024;
@@ -20,7 +20,7 @@ export type VercelTransportOptions = {
   hands?: boolean;
 };
 
-export type VercelTransport = Transport & {
+export type VercelTransport = Transport & HandSource & {
   session(): VercelSession;
   warm(): void;
   open(): Promise<string | undefined>;
@@ -256,6 +256,12 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         save(session);
       }
       return session.id;
+    },
+    async hand(): Promise<HandAccess | undefined> {
+      const id = await this.open();
+      const hand = state.hand;
+      if (!id || !hand || state.id !== id) return undefined;
+      return { url: `${socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand };
     },
     async hands() {
       if (!state.id) return [];

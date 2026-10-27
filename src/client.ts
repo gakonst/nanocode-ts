@@ -959,6 +959,38 @@ export type Transport = {
   files?: TransportFiles;
 };
 
+export const INSTALL_URL = "https://nanocode.xyz/install";
+
+export type HandAccess = { url: string; token: string };
+
+export type HandSource = { hand(): Promise<HandAccess | undefined>; hands(): Promise<readonly (string | null)[]> };
+
+export function handCommands(access: HandAccess, install = INSTALL_URL): { command: string; short: string } {
+  return { command: `curl -fsSL ${install} | sh -s -- hand '${access.url}' --token ${access.token}`, short: `nc hand '${access.url}' --token ${access.token}` };
+}
+
+const page = () => (globalThis as { location?: { href: string } }).location?.href;
+
+export function socketUrl(path: string, base = page()): string {
+  return new URL(path, base).href.replace(/^http/, "ws");
+}
+
+export function relaySource(url: string, token: () => string): HandSource {
+  const http = new URL(url, page()).href.replace(/^ws/, "http");
+  return {
+    hand: async () => ({ url: socketUrl(url), token: token() }),
+    hands: async () => {
+      const response = await fetch(`${http}${http.includes("?") ? "&" : "?"}token=${encodeURIComponent(token())}`, { cache: "no-store" }).catch(() => undefined);
+      if (!response?.ok) return [];
+      return (await response.json() as { hands?: (string | null)[] }).hands ?? [];
+    },
+  };
+}
+
+export function createRelayToken(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export type TurnBlock = Entry & { live: boolean };
 
 export type Turn = { id: string; prompt: Entry | undefined; blocks: TurnBlock[]; live: boolean; started_at?: number; ended_at?: number };

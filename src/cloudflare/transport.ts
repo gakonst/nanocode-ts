@@ -1,4 +1,4 @@
-import { type Attachment, attachedPrompt, type EntryKind, type LiveEvent, liveEvent, serverEvents, type Transport, type TransportParameters } from "../client.ts";
+import { type Attachment, attachedPrompt, type EntryKind, type HandAccess, type HandSource, type LiveEvent, liveEvent, serverEvents, socketUrl, type Transport, type TransportParameters } from "../client.ts";
 import type { LoggedEvent } from "../contracts.ts";
 
 export type CloudflareSession = { id?: string; cursor?: number; open?: string };
@@ -15,7 +15,7 @@ export type CloudflareTransportOptions = {
   hand?(session: string, signal?: AbortSignal): Promise<string | undefined>;
 };
 
-export type CloudflareTransport = Transport & {
+export type CloudflareTransport = Transport & HandSource & {
   session(): CloudflareSession;
   warm(): void;
   crash(afterMs?: number): Promise<Response>;
@@ -236,6 +236,10 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       const response = await fetch(path("hands", { id }), { method: "POST", headers: headers() });
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
       return { session: id, token: (await response.json() as { token: string }).token };
+    },
+    async hand(): Promise<HandAccess | undefined> {
+      const { session, token } = await this.handToken();
+      return { url: socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`), token };
     },
     async hands() {
       const id = state.id ?? warmed;

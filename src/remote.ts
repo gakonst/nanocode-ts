@@ -1,6 +1,10 @@
-import { RemoteRefusal, type MessageSocket, type RemoteRequest } from "./contracts.ts";
+import { RemoteRefusal, type MessageSocket, type RemoteRequest, type RuntimeOptions } from "./contracts.ts";
 
 export type RemotePolicy = { max_frame_bytes: number; timeout_ms: number; resumes?: boolean };
+
+export const HAND_LEFT = 4001;
+
+export const BRAIN_REPLACED = 4002;
 
 const encoder = new TextEncoder();
 
@@ -81,6 +85,21 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
 
   get failure(): string | undefined {
     return this.#failure;
+  }
+
+  host(): NonNullable<RuntimeOptions["remote"]> {
+    const owner = {};
+    this.claim(owner);
+    return {
+      failed: () => this.#failure !== undefined,
+      execute: async (request, id) => {
+        if (this.owns(owner)) return this.execute(request, id);
+        if (request.op === "remote_send") throw new RemoteRefusal("hand connection moved to a newer runtime");
+        return request.op === "remote_poll" ? { closed: "connection moved to a newer runtime" } : null;
+      },
+      cancel: id => this.cancel(id),
+      dispose: async () => {},
+    };
   }
 
   get catalog(): string | undefined {

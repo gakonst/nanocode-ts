@@ -1,76 +1,103 @@
 import { DurableObject } from "cloudflare:workers";
+import { BRAIN_REPLACED, HAND_LEFT } from "../remote.ts";
 
-export const RELAY_PATH = /^\/relay\/([A-Za-z0-9_-]{16,64})\/(hand|brain)$/;
+export const RELAY_TOKEN = /^[0-9a-f]{32,128}$/;
+
+const HAND_REPLACED = "another hand attached under this name";
 
 type Side = "hand" | "brain";
 
-export class HandRelay extends DurableObject {
-  #hand: WebSocket | undefined;
-  #brain: WebSocket | undefined;
-  #catalog: string | undefined;
+function text(message: string | ArrayBuffer): string {
+  return typeof message === "string" ? message : new TextDecoder().decode(message);
+}
 
+function catalogField(catalog: string | undefined, field: "name" | "runtime_id"): string | null {
+  if (catalog === undefined) return null;
+  try {
+    const value = (JSON.parse(catalog) as Record<string, unknown>)[field];
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export class HandRelay extends DurableObject {
   override async fetch(request: Request): Promise<Response> {
-    const side = new URL(request.url).pathname.split("/").pop() as Side;
-    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return Response.json({ hand: this.#hand !== undefined && this.#catalog !== undefined, brain: this.#brain !== undefined });
+    const query = new URL(request.url).searchParams;
+    const side: Side = query.get("role") === "brain" ? "brain" : "hand";
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      const hand = this.#hand();
+      return Response.json({ hands: hand ? [catalogField(await this.ctx.storage.get<string>("catalog"), "name")] : [] }, { headers: { "cache-control": "no-store" } });
+    }
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
-    server.accept();
-    if (side === "hand") this.#attachHand(server);
-    else this.#attachBrain(server);
+    this.ctx.acceptWebSocket(server, [side]);
+    if (side === "brain" && !query.has("wait") && !this.#hand()) server.close(HAND_LEFT, "no hand is attached");
+    else if (side === "brain") {
+      for (const older of this.ctx.getWebSockets("brain")) if (older !== server) { try { older.close(BRAIN_REPLACED, "a newer brain took the hand"); } catch {} }
+      const catalog = await this.ctx.storage.get<string>("catalog");
+      if (catalog !== undefined && this.#hand()) this.#offer(server, catalog);
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  #attachHand(socket: WebSocket) {
-    const previous = this.#hand;
-    this.#hand = socket;
-    this.#catalog = undefined;
-    try { previous?.close(1000, "another tab attached"); } catch {}
-    try { this.#brain?.close(1011, "the hand reconnected"); } catch {}
-    this.#brain = undefined;
-    socket.addEventListener("message", event => {
-      if (this.#hand !== socket) return;
-      const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
-      if (this.#catalog === undefined) {
-        this.#catalog = text;
-        if (this.#brain) this.#brain.send(text);
+  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.ctx.getTags(socket)[0] === "hand") {
+      if (socket.deserializeAttachment() !== null) {
+        for (const brain of this.ctx.getWebSockets("brain")) if (brain.deserializeAttachment() !== null) { try { brain.send(message); } catch {} }
         return;
       }
-      try { this.#brain?.send(text); } catch {}
-    });
-    const gone = () => {
-      if (this.#hand !== socket) return;
-      this.#hand = undefined;
-      this.#catalog = undefined;
-      try { this.#brain?.close(1011, "the hand disconnected"); } catch {}
-      this.#brain = undefined;
-    };
-    socket.addEventListener("close", gone);
-    socket.addEventListener("error", gone);
-  }
-
-  #attachBrain(socket: WebSocket) {
-    if (!this.#hand) {
-      socket.close(1011, "no hand is attached to this channel");
+      const catalog = text(message);
+      const previous = catalogField(await this.ctx.storage.get<string>("catalog"), "runtime_id");
+      const same = previous !== null && previous === catalogField(catalog, "runtime_id");
+      for (const other of this.ctx.getWebSockets("hand")) if (other !== socket) { try { other.close(same ? 1000 : 1008, same ? "the hand reconnected" : HAND_REPLACED); } catch {} }
+      socket.serializeAttachment({ cataloged: true });
+      await this.ctx.storage.put("catalog", catalog);
+      for (const brain of this.ctx.getWebSockets("brain")) {
+        if (brain.deserializeAttachment() === null) this.#offer(brain, catalog);
+        else { try { brain.close(HAND_LEFT, "the hand reconnected"); } catch {} }
+      }
       return;
     }
-    const previous = this.#brain;
-    this.#brain = socket;
-    try { previous?.close(1000, "a newer drive attached"); } catch {}
-    if (this.#catalog !== undefined) socket.send(this.#catalog);
-    socket.addEventListener("message", event => {
-      if (this.#brain !== socket) return;
-      try { this.#hand?.send(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)); } catch {}
-    });
-    const gone = () => {
-      if (this.#brain === socket) this.#brain = undefined;
-    };
-    socket.addEventListener("close", gone);
-    socket.addEventListener("error", gone);
+    if (socket.deserializeAttachment() === null) return;
+    const hand = this.#hand();
+    if (hand) { try { hand.send(message); } catch {} }
+  }
+
+  override async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    await this.#gone(socket);
+    try { socket.close(code, reason); } catch {}
+  }
+
+  override async webSocketError(socket: WebSocket): Promise<void> {
+    await this.#gone(socket);
+  }
+
+  #offer(brain: WebSocket, catalog: string): void {
+    try {
+      brain.send(catalog);
+      brain.serializeAttachment({ cataloged: true });
+    } catch {}
+  }
+
+  #hand(): WebSocket | undefined {
+    return this.ctx.getWebSockets("hand").find(socket => socket.readyState === WebSocket.OPEN && socket.deserializeAttachment() !== null);
+  }
+
+  async #gone(socket: WebSocket): Promise<void> {
+    if (this.ctx.getTags(socket)[0] !== "hand" || socket.deserializeAttachment() === null) return;
+    if (this.ctx.getWebSockets("hand").some(other => other !== socket && other.readyState === WebSocket.OPEN && other.deserializeAttachment() !== null)) return;
+    await this.ctx.storage.delete("catalog");
+    for (const brain of this.ctx.getWebSockets("brain")) { try { brain.close(HAND_LEFT, "the hand disconnected"); } catch {} }
   }
 }
 
-export function relay(request: Request, namespace: DurableObjectNamespace<HandRelay>): Response | Promise<Response> | undefined {
-  const match = RELAY_PATH.exec(new URL(request.url).pathname);
-  if (!match) return undefined;
-  return namespace.get(namespace.idFromName(match[1]!)).fetch(request);
+export function relayToken(request: Request): string | undefined {
+  const token = /^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? new URL(request.url).searchParams.get("token") ?? "";
+  return RELAY_TOKEN.test(token) ? token : undefined;
 }
 
+export function relay(request: Request, namespace: DurableObjectNamespace<HandRelay>): Response | Promise<Response> {
+  const token = relayToken(request);
+  if (!token) return Response.json({ error: "hands and brains connect with the relay's token, as Authorization: Bearer or ?token=" }, { status: 403 });
+  return namespace.get(namespace.idFromName(token)).fetch(request);
+}

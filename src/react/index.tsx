@@ -1,7 +1,7 @@
 "use client";
 
 import { type ChangeEvent, type ClipboardEvent, createContext, type DragEvent, Fragment, type KeyboardEvent, lazy, type ReactNode, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { type Activity, activity, type Attachment, bytes, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type PickerItem, type ToolCell as Cell, type TransportFiles, type Turn, turns, workspaceFile } from "../client.ts";
+import { type Activity, activity, type Attachment, bytes, type ChatState, type Config, type Conversation, duration, type Entry, type EntryKind, type HandAccess, handCommands, type HandSource, type PickerItem, type ToolCell as Cell, type TransportFiles, type Turn, turns, workspaceFile } from "../client.ts";
 
 export type Token = { content: string; color?: string; italic?: boolean };
 
@@ -900,6 +900,76 @@ export function Hand(props: HandProps) {
         </p>
       )}
     </div>
+  );
+}
+
+export type HandState = {
+  open: boolean;
+  access?: HandAccess;
+  hands: readonly (string | null)[];
+  error?: string;
+  show(): void;
+  hide(): void;
+  reset(): void;
+};
+
+export function useHand(source: HandSource | undefined): HandState {
+  const [open, setOpen] = useState(false);
+  const [access, setAccess] = useState<HandAccess>();
+  const [hands, setHands] = useState<readonly (string | null)[]>([]);
+  const [error, setError] = useState<string>();
+  const connected = hands.length > 0;
+
+  useEffect(() => {
+    if (!source || !access || (!open && !connected)) return;
+    let stopped = false;
+    const poll = async () => {
+      const found = await source.hands().catch(() => []);
+      if (!stopped) setHands(found);
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), open ? 3000 : 20_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [source, access, open, connected]);
+
+  const show = useCallback(() => {
+    setOpen(true);
+    setError(undefined);
+    if (!source) return;
+    void source.hand().then(found => {
+      if (found) setAccess(found);
+      else setError("this session cannot take a machine; start a new one");
+    }, (failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)));
+  }, [source]);
+
+  const reset = useCallback(() => {
+    setOpen(false);
+    setAccess(undefined);
+    setHands([]);
+    setError(undefined);
+  }, []);
+
+  return { open, access, hands, error, show, hide: () => setOpen(false), reset };
+}
+
+export function HandConnect(props: { hand: HandState; install?: string }) {
+  const { hand } = props;
+  const part = usePart();
+  const names = hand.hands.map(name => name ?? "your machine").join(", ");
+  if (hand.open && hand.access) {
+    const { command, short } = handCommands(hand.access, props.install);
+    return <Hand command={command} hands={hand.hands} onClose={hand.hide} short={short} />;
+  }
+  return (
+    <p {...part("row")}>
+      <span aria-hidden="true" {...part("chevron")}>❯</span>
+      <button onClick={hand.show} type="button" {...part("suggestion")}>
+        {hand.error ?? (hand.hands.length ? `running on ${names} · show the command` : hand.open ? "preparing the command…" : "Run this session on your own machine with nc →")}
+      </button>
+    </p>
   );
 }
 
