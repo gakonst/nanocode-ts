@@ -716,7 +716,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     }
 
     private handLimits() {
-      return { max_frame_bytes: policy(this.env.REMOTE_MAX_FRAME_BYTES, "REMOTE_MAX_FRAME_BYTES"), timeout_ms: policy(this.env.REMOTE_TIMEOUT_MS, "REMOTE_TIMEOUT_MS") };
+      return { max_frame_bytes: policy(this.env.REMOTE_MAX_FRAME_BYTES, "REMOTE_MAX_FRAME_BYTES"), timeout_ms: policy(this.env.REMOTE_TIMEOUT_MS, "REMOTE_TIMEOUT_MS"), resumes: true };
     }
 
     private async registerHand(scope: string, requested: string | undefined, executor: Executor, descriptor: SessionDescriptor): Promise<void> {
@@ -731,6 +731,19 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (!handName(hand)) {
         this.handSockets.delete(executor.socket);
         return executor.refuse(INVALID_HAND);
+      }
+      const resumed = this.hands.get(scope)?.get(hand);
+      if (resumed && advertised.runtime_id !== null && resumed.executor.failure === undefined && (await (await this.instance(scope)).identity(resumed.executor.catalog!, this.handLimits().max_frame_bytes).catch(() => undefined))?.runtime_id === advertised.runtime_id) {
+        const earlier = resumed.executor.socket;
+        if (resumed.executor.rebind(executor.socket, executor.catalog!)) {
+          this.handSockets.delete(earlier);
+          this.handSockets.set(executor.socket, resumed.executor);
+          executor.socket.serializeAttachment({ connection: resumed.connection });
+          this.handAuthority.set(resumed.connection, descriptor);
+          this.ctx.storage.sql.exec("UPDATE hand_sockets SET descriptor = ? WHERE connection = ?", JSON.stringify(descriptor), resumed.connection);
+          if (earlier !== executor.socket) { try { earlier.close(1000, "the hand reconnected"); } catch {} }
+          return;
+        }
       }
       const connection = `${hand}#${crypto.randomUUID()}`;
       this.ctx.storage.sql.exec("INSERT INTO hand_sockets (connection, scope, hand, catalog, descriptor) VALUES (?, ?, ?, ?, ?)", connection, scope, hand, executor.catalog!, JSON.stringify(descriptor));
@@ -791,7 +804,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     async webSocketClose(socket: WebSocket): Promise<void> {
       if (this.deleted) return;
-      this.handSockets.get(socket)?.disconnected();
+      this.handSockets.get(socket)?.park();
       this.handSockets.delete(socket);
       this.forgetWatcher(socket);
       try { socket.close(1000, "closed"); } catch {}
@@ -799,7 +812,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     async webSocketError(socket: WebSocket): Promise<void> {
       if (this.deleted) return;
-      this.handSockets.get(socket)?.disconnected("runner connection failed");
+      this.handSockets.get(socket)?.park("runner connection failed");
       this.handSockets.delete(socket);
       this.forgetWatcher(socket);
     }

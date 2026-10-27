@@ -1,6 +1,6 @@
 import { RemoteRefusal, type MessageSocket, type RemoteRequest } from "./contracts.ts";
 
-export type RemotePolicy = { max_frame_bytes: number; timeout_ms: number };
+export type RemotePolicy = { max_frame_bytes: number; timeout_ms: number; resumes?: boolean };
 
 const encoder = new TextEncoder();
 
@@ -19,6 +19,8 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
   #waiter: { id: number; resolve(value: unknown): void } | undefined;
   #failure: string | undefined;
   #owner: object | undefined;
+  #parked: ReturnType<typeof setTimeout> | undefined;
+  #queued: string[] = [];
   #closed!: (reason: string) => void;
   readonly closed = new Promise<string>(resolve => { this.#closed = resolve; });
 
@@ -93,6 +95,28 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
     this.#fail(reason, reason === "runner disconnected" ? 1000 : 1011);
   }
 
+  park(reason = "runner disconnected"): void {
+    if (!this.#policy.resumes || this.#catalog === undefined || this.#failure !== undefined) return this.disconnected(reason);
+    if (this.#parked !== undefined) return;
+    this.#parked = setTimeout(() => this.disconnected(reason), this.#policy.timeout_ms);
+  }
+
+  get parked(): boolean {
+    return this.#parked !== undefined;
+  }
+
+  rebind(socket: S, catalog: string): boolean {
+    if (this.#failure !== undefined) return false;
+    if (this.#parked !== undefined) clearTimeout(this.#parked);
+    this.#parked = undefined;
+    this.#socket = socket;
+    this.receive(catalog);
+    const frames = this.#queued;
+    this.#queued = [];
+    for (const frame of frames) socket.send(frame);
+    return true;
+  }
+
   reject(reason: string): void {
     this.#fail(reason, 1002);
   }
@@ -104,10 +128,14 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
   async execute(request: RemoteRequest, id: number): Promise<unknown> {
     switch (request.op) {
       case "remote_catalog":
-        return { frame: this.#catalog, max_frame_bytes: this.#policy.max_frame_bytes, timeout_ms: this.#policy.timeout_ms };
+        return { frame: this.#catalog, max_frame_bytes: this.#policy.max_frame_bytes, timeout_ms: this.#policy.timeout_ms, ...(this.#policy.resumes ? { resumes: true } : {}) };
       case "remote_send": {
         if (this.#failure !== undefined) throw new RemoteRefusal(this.#failure);
         const refused = new Set(request.refused);
+        if (this.#parked !== undefined) {
+          for (const [index, frame] of (request.frames ?? []).entries()) if (!refused.has(index)) this.#queued.push(frame);
+          return refused.size ? { refused: [...refused], reason: request.reason } : null;
+        }
         let sent = 0;
         try {
           for (const [index, frame] of (request.frames ?? []).entries()) if (!refused.has(index)) { this.#socket.send(frame); sent++; }
@@ -181,6 +209,9 @@ export class RemoteExecutor<S extends MessageSocket = MessageSocket> {
   #fail(reason: string, code: number, told?: string) {
     if (this.#failure !== undefined) return;
     this.#failure = reason;
+    if (this.#parked !== undefined) clearTimeout(this.#parked);
+    this.#parked = undefined;
+    this.#queued = [];
     this.#closed(reason);
     try { this.#socket.close(code, told); } catch {}
     this.#catalogWaiter?.reject(new Error(reason));

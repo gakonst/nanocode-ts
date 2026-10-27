@@ -139,7 +139,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const channel = (ctx.config as { hand?: unknown } | undefined)?.hand;
     const hands = options.hands || undefined;
     const executor = hands && typeof channel === "string" && HAND_CHANNEL.test(channel)
-      ? await RemoteExecutor.connect(signal => hands.relay ? openSocket(hands.relay(channel), signal) : dialHand(ctx.world, ctx.runId, signal), { max_frame_bytes: hands.maxFrameBytes ?? 1_048_576, timeout_ms: hands.timeoutMs ?? 30_000 }).catch(() => undefined)
+      ? await RemoteExecutor.connect(signal => hands.relay ? openSocket(hands.relay(channel), signal) : dialHand(ctx.world, ctx.runId, signal, { resumes: true }), { max_frame_bytes: hands.maxFrameBytes ?? 1_048_576, timeout_ms: hands.timeoutMs ?? 30_000, ...(hands.relay ? {} : { resumes: true }) }).catch(() => undefined)
       : undefined;
     const handName = hands?.name ?? "browser";
     const connection = executor ? handName + "#" + sessionUuid() : undefined;

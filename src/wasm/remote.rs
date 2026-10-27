@@ -77,6 +77,7 @@ struct WorkerLink {
     connection: Option<String>,
     tool_selection: bool,
     caches_local_tools: bool,
+    resumes: Option<String>,
     max_frame_bytes: usize,
 }
 
@@ -86,6 +87,9 @@ impl RemoteLink for WorkerLink {
     }
     fn caches_local_tools(&self) -> bool {
         self.caches_local_tools
+    }
+    fn resumes(&self) -> Option<String> {
+        self.resumes.clone()
     }
     fn send(
         &self,
@@ -194,6 +198,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     if max_frame_bytes == 0 || timeout_ms == 0 {
         return Err("max_frame_bytes and timeout_ms must be positive".into());
     }
+    let resumes = catalog["resumes"].as_bool() == Some(true);
     let text = catalog["frame"]
         .as_str()
         .ok_or("remote catalog frame must be text")?;
@@ -203,6 +208,10 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
             connection,
             tool_selection: catalog.tool_selection,
             caches_local_tools: catalog.caches_local_tools,
+            resumes: catalog
+                .resumes()
+                .filter(|_| resumes)
+                .map(str::to_owned),
             max_frame_bytes: catalog
                 .max_frame_bytes
                 .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),

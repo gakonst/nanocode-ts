@@ -20,13 +20,15 @@ export type HandSocket = {
 
 export type UpgradeWebSocket = (handler: (socket: HandSocket) => void | Promise<void>, options?: { maxPayload?: number }) => Promise<Response>;
 
-type Brain = { receive(frame: string): void; shut(code: number, reason: string): void };
+type Brain = { receive(frame: string): void; shut(code: number, reason: string): void; lost(hand: LocalHand): void; rebind(hand: LocalHand): void };
 
 type LocalHand = { connection: string; catalog: string; socket: HandSocket; brain?: Brain };
 
 const OPEN = 1;
 
 const local: Map<string, LocalHand> = ((globalThis as { [key: symbol]: unknown })[Symbol.for("nanocode-ts.vercel.hands")] ??= new Map()) as Map<string, LocalHand>;
+
+const parked: Map<string, Brain> = ((globalThis as { [key: symbol]: unknown })[Symbol.for("nanocode-ts.vercel.parked")] ??= new Map()) as Map<string, Brain>;
 
 const encoder = new TextEncoder();
 
@@ -115,13 +117,17 @@ export async function* tailLines(world: World, runId: string, name: string, star
   }
 }
 
-function dialLocal(hand: LocalHand): MessageSocket {
+function dialLocal(world: World, runId: string, first: LocalHand, resumes: boolean): MessageSocket {
   const listeners: Record<"close" | "error" | "message", ((event: any) => void)[]> = { close: [], error: [], message: [] };
   const emit = (type: "close" | "error" | "message", event: unknown) => {
     for (const listener of listeners[type]) listener(event);
   };
   let closed = false;
+  let current: LocalHand | undefined = first;
+  let catalog = first.catalog;
   let held: string[] | undefined = [];
+  let queued: string[] = [];
+  let watching: AbortController | undefined;
   const brain: Brain = {
     receive(frame) {
       if (held) held.push(frame);
@@ -130,23 +136,51 @@ function dialLocal(hand: LocalHand): MessageSocket {
     shut(code, reason) {
       if (closed) return;
       closed = true;
-      if (hand.brain === brain) hand.brain = undefined;
+      watching?.abort();
+      if (current?.brain === brain) current.brain = undefined;
+      if (parked.get(runId) === brain) parked.delete(runId);
       emit("close", { code, reason });
     },
+    lost(hand) {
+      if (closed || current !== hand) return;
+      if (!resumes) return brain.shut(1011, "the hand disconnected");
+      current = undefined;
+      parked.set(runId, brain);
+      watching = new AbortController();
+      void elsewhere(world, runId, watching.signal, () => brain.shut(1011, "the hand reconnected to another instance"));
+    },
+    rebind(hand) {
+      if (closed) return;
+      if (!resumes) return brain.shut(1011, "the hand reconnected");
+      watching?.abort();
+      watching = undefined;
+      if (parked.get(runId) === brain) parked.delete(runId);
+      if (current?.brain === brain) current.brain = undefined;
+      current = hand;
+      hand.brain = brain;
+      if (held) catalog = hand.catalog;
+      else emit("message", { data: hand.catalog });
+      const frames = queued;
+      queued = [];
+      for (const frame of frames) hand.socket.send(frame);
+    },
   };
-  hand.brain?.shut(1011, "the hand moved to a newer brain");
-  hand.brain = brain;
+  parked.get(runId)?.shut(1011, "the hand moved to a newer brain");
+  first.brain?.shut(1011, "the hand moved to a newer brain");
+  first.brain = brain;
   setTimeout(() => {
     const frames = held ?? [];
     held = undefined;
     if (closed) return;
-    emit("message", { data: hand.catalog });
+    emit("message", { data: catalog });
     for (const frame of frames) emit("message", { data: frame });
   }, 0);
   return {
     send(message: string) {
-      if (closed || hand.socket.readyState !== OPEN) throw new Error("the hand disconnected");
-      hand.socket.send(message);
+      if (closed) throw new Error("the hand disconnected");
+      if (current?.socket.readyState === OPEN) current.socket.send(message);
+      else if (resumes) queued.push(message);
+      else throw new Error("the hand disconnected");
     },
     close(code?: number, reason?: string) {
       brain.shut(code ?? 1000, reason ?? "");
@@ -157,9 +191,22 @@ function dialLocal(hand: LocalHand): MessageSocket {
   };
 }
 
-export async function dialHand(world: World, runId: string, signal: AbortSignal): Promise<MessageSocket> {
+async function elsewhere(world: World, runId: string, signal: AbortSignal, moved: () => void): Promise<void> {
+  const attach = handStreams(runId).attach;
+  const info = await world.streams.getInfo(runId, attach).catch(() => undefined);
+  for await (const [, line] of tailLines(world, runId, attach, (info?.tailIndex ?? -1) + 1, signal)) {
+    if (line.catalog === undefined || line.connection === local.get(runId)?.connection) continue;
+    moved();
+    return;
+  }
+}
+
+export type DialOptions = { resumes?: boolean };
+
+export async function dialHand(world: World, runId: string, signal: AbortSignal, options: DialOptions = {}): Promise<MessageSocket> {
+  const resumes = options.resumes === true;
   const nearby = local.get(runId);
-  if (nearby && nearby.socket.readyState === OPEN) return dialLocal(nearby);
+  if (nearby && nearby.socket.readyState === OPEN) return dialLocal(world, runId, nearby, resumes);
   const streams = handStreams(runId);
   const info = await world.streams.getInfo(runId, streams.attach).catch(() => undefined);
   if (!info || info.tailIndex < 0) throw new Error("no hand is attached to this session");
@@ -185,7 +232,7 @@ export async function dialHand(world: World, runId: string, signal: AbortSignal)
     watch.abort();
     throw new Error("no hand is attached to this session");
   }
-  const connection = current.connection!;
+  let connection = current.connection!;
   const catalog = current.catalog!;
   const named = handStreams(runId, connection);
   const up = await world.streams.getInfo(runId, named.up).catch(() => ({ tailIndex: -1 }));
@@ -195,39 +242,61 @@ export async function dialHand(world: World, runId: string, signal: AbortSignal)
     for (const listener of listeners[type]) listener(event);
   };
   let closed = false;
+  let lost = false;
+  let queued: string[] = [];
+  let following = new AbortController();
   const close = (code: number, reason: string) => {
     if (closed) return;
     closed = true;
     watch.abort();
+    following.abort();
     void attached.return(undefined);
     emit("close", { code, reason });
   };
-  const write = frameWriter(appendLines(world, runId, named.down), () => close(1011, "the hand stream refused a frame"));
+  const writer = (to: string) => frameWriter(appendLines(world, runId, handStreams(runId, to).down), () => close(1011, "the hand stream refused a frame"));
+  let write = writer(connection);
+  const follow = async (name: string, start: number, stop: AbortSignal) => {
+    for await (const [, line] of tailLines(world, runId, name, start, stop)) {
+      if (closed) return;
+      if (line.brain !== brain) continue;
+      for (const frame of line.frames ?? []) emit("message", { data: frame });
+    }
+  };
   setTimeout(() => {
     if (closed) return;
     emit("message", { data: catalog });
-    void (async () => {
-      for await (const [, line] of tailLines(world, runId, named.up, up.tailIndex + 1, watch.signal)) {
-        if (closed) return;
-        if (line.brain !== brain) continue;
-        for (const frame of line.frames ?? []) emit("message", { data: frame });
-      }
-    })();
+    void follow(named.up, up.tailIndex + 1, following.signal);
     void (async () => {
       for (;;) {
         const next = await attached.next().catch(() => ({ done: true as const, value: undefined }));
         if (next.done || closed) return;
         const line = next.value[1];
-        if (line.closed && line.connection !== connection) continue;
-        close(1011, line.closed ? "the hand disconnected" : "the hand reconnected");
-        return;
+        if (line.closed) {
+          if (line.connection !== connection) continue;
+          if (!resumes) return close(1011, "the hand disconnected");
+          lost = true;
+          continue;
+        }
+        if (line.catalog === undefined || typeof line.connection !== "string" || !HAND_CONNECTION.test(line.connection) || line.connection === connection) continue;
+        if (!resumes) return close(1011, "the hand reconnected");
+        following.abort();
+        following = new AbortController();
+        connection = line.connection;
+        write = writer(connection);
+        lost = false;
+        emit("message", { data: line.catalog });
+        void follow(handStreams(runId, connection).up, 0, following.signal);
+        const frames = queued;
+        queued = [];
+        for (const frame of frames) write(brain, frame);
       }
     })();
   }, 0);
   return {
     send(message: string) {
       if (closed) throw new Error("the hand disconnected");
-      write(brain, message);
+      if (lost) queued.push(message);
+      else write(brain, message);
     },
     close(code?: number, reason?: string) {
       close(code ?? 1000, reason ?? "");
@@ -258,8 +327,9 @@ function serveSocket(world: World, sessionId: string, socket: HandSocket): void 
     const frame = typeof data === "string" ? data : decoder.decode(data);
     if (!hand) {
       hand = { connection, catalog: frame, socket };
-      local.get(sessionId)?.brain?.shut(1011, "the hand reconnected");
+      const waiting = parked.get(sessionId) ?? local.get(sessionId)?.brain;
       local.set(sessionId, hand);
+      waiting?.rebind(hand);
       void attach({ catalog: frame, connection }).catch(() => socket.close(1011, "the hand stream refused the catalog"));
       void (async () => {
         for await (const [, line] of tailLines(world, sessionId, streams.down, 0, stop.signal)) {
@@ -277,7 +347,7 @@ function serveSocket(world: World, sessionId: string, socket: HandSocket): void 
     stop.abort();
     if (!hand) return;
     if (local.get(sessionId) === hand) local.delete(sessionId);
-    hand.brain?.shut(1011, "the hand disconnected");
+    hand.brain?.lost(hand);
     void attach({ closed: true, connection }).catch(() => undefined);
   };
   socket.on("close", closed);
