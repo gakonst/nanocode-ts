@@ -1,4 +1,4 @@
-import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type Engine, type EngineCall, type EngineHost, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
+import { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type Compacted, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Driven, type Engine, type EngineCall, type EngineHost, type HostEvent, type HostOptions, type HostTool, type LoggedEvent, type McpServer, type LogPage, type LogPageOptions, type MessageSocket, type ModelCatalog, type ModelTiming, type MovedQueued, type Replaced, type RuntimeOptions, type RuntimeSettings, type RuntimeTiming, type SqlHost, type SqlValue, type Statement, type WorkspaceHost, type Submitted, type Thinking, type SubagentSummary, type TurnView } from "./contracts.ts";
 import { deferMcp, type McpPolicy } from "./mcp.ts";
 import { Timings, type TimingSnapshot } from "./timing.ts";
 
@@ -694,7 +694,7 @@ export class AgentRuntime {
       case "store": {
         this.counters.store_calls++;
         const started = performance.now();
-        try { return this.rows(await this.sql.transaction("store", request.operation, request.statements)); }
+        try { return this.rows(await this.sql.transaction("store", request.operation, this.statements(request.statements))); }
         finally { this.checkpointTimings.record(request.operation, performance.now() - started); }
       }
       case "blob_put": {
@@ -704,7 +704,7 @@ export class AgentRuntime {
       case "blob_get": return await this.blobs().get(request.key);
       case "log": {
         this.counters.log_calls++;
-        return this.rows(await this.sql.transaction("log", request.operation, request.statements));
+        return this.rows(await this.sql.transaction("log", request.operation, this.statements(request.statements)));
       }
       default: throw new Error("unsupported host operation");
     }
@@ -722,6 +722,23 @@ export class AgentRuntime {
 
   private notify() {
     for (const watcher of [...this.watchers]) watcher();
+  }
+
+  private readonly queries = new Map<number, string>();
+
+  private statements(statements: any[]): Statement[] {
+    for (const statement of statements) {
+      const head = statement[0];
+      if (typeof head === "number") {
+        const query = this.queries.get(head);
+        if (query === undefined) throw new Error("unknown interned SQL statement " + head);
+        statement[0] = query;
+      } else if (Array.isArray(head)) {
+        this.queries.set(head[0], head[1]);
+        statement[0] = head[1];
+      }
+    }
+    return statements as Statement[];
   }
 
   private rows(statements: SqlValue[][][]): Uint8Array {

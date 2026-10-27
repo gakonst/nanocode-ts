@@ -24,7 +24,49 @@ impl WorkerStore {
 struct Transaction<'a> {
     op: &'static str,
     operation: &'static str,
-    statements: &'a [SqlStatement<'a>],
+    statements: Interned<'a>,
+}
+
+thread_local! {
+    static SENT: std::cell::RefCell<std::collections::HashMap<usize, u32>> = std::cell::RefCell::default();
+}
+
+struct Interned<'a>(&'a [SqlStatement<'a>]);
+
+impl Serialize for Interned<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut statements = serializer.serialize_seq(Some(self.0.len()))?;
+        for statement in self.0 {
+            statements.serialize_element(&Statement(statement))?;
+        }
+        statements.end()
+    }
+}
+
+struct Statement<'a>(&'a SqlStatement<'a>);
+
+impl Serialize for Statement<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let statement = self.0;
+        let mut sequence = serializer.serialize_seq(Some(statement.params.len() + 1))?;
+        let known = SENT.with_borrow_mut(|sent| {
+            let next = u32::try_from(sent.len()).unwrap_or(u32::MAX);
+            match sent.entry(statement.sql.as_ptr() as usize) {
+                std::collections::hash_map::Entry::Occupied(entry) => Ok(*entry.get()),
+                std::collections::hash_map::Entry::Vacant(entry) => Err(*entry.insert(next)),
+            }
+        });
+        match known {
+            Ok(id) => sequence.serialize_element(&id)?,
+            Err(id) => sequence.serialize_element(&(id, statement.sql))?,
+        }
+        for param in &statement.params {
+            sequence.serialize_element(param)?;
+        }
+        sequence.end()
+    }
 }
 
 struct Rows<'a> {
@@ -97,7 +139,7 @@ impl Sql for WorkerStore {
             let bytes = call_bytes_with(&Transaction {
                 op: self.0,
                 operation,
-                statements,
+                statements: Interned(statements),
             })
             .await
             .map_err(|error| StoreError::Backend(error.to_string()))?;

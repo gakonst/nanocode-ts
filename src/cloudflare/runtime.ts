@@ -660,7 +660,6 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           },
           dispatch: async (request, signal, timing) => {
             if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
-            await this.durable(scope);
             this.counts.model_dispatches++;
             if (request.provider == null && mcpServers.length) return mcpFetch(request.endpoint, { method: request.method, headers: request.headers, body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body as Uint8Array<ArrayBuffer>, signal });
             const dispatch: ModelDispatch = { endpoint: request.endpoint, headers: request.headers, authority, provider: request.provider ?? descriptor.provider ?? "claude", subscription: descriptor.subscription };
@@ -1154,7 +1153,6 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     }
 
     private async socketEffect(scope: string): Promise<void> {
-      await this.durable(scope);
       if (this.dispatchBlocked(scope)) throw new Error("request authority stopped");
     }
 

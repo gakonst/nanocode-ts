@@ -195,7 +195,7 @@ impl Tool for Callback {
             NEXT.set(id + 1);
             let (tx, rx) = oneshot::channel();
             PENDING.with_borrow_mut(|pending| pending.insert(id, tx));
-            if let Err(issue) = send(&Frame::Callback { id, name, input, freeform, context, hand: None, compact: true }) {
+            if let Err(issue) = send(&Frame::Callback { id, name, input, freeform, context, hand: None, compact: true, output_prefix: false }) {
                 PENDING.with_borrow_mut(|pending| pending.remove(&id));
                 return Err(format!("{issue}; the call was not dispatched").into());
             }
