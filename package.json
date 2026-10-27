@@ -92,10 +92,6 @@
       "types": "./dist/machines/index.d.ts",
       "default": "./dist/machines/index.js"
     },
-    "./machines/local": {
-      "types": "./dist/machines/local.d.ts",
-      "default": "./dist/machines/local.js"
-    },
     "./machines/server": {
       "types": "./dist/machines/account.d.ts",
       "default": "./dist/machines/account.js"

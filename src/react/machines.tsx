@@ -1,37 +1,37 @@
 "use client";
 
 import { Fragment, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { type Entry, type ToolCell, liveEvent } from "../client.ts";
-import { commands, Cloud, type Keyring, limits, localKey, message, Models, Payment, Payments, type Runtime, until, unlockCommands, Wallet } from "../machines/index.ts";
+import { type Entry, type HandSource, type ToolCell } from "../client.ts";
+import { commands, Cloud, type Keyring, limits, message, Models, Payment, Payments, type Runtime, until, unlockCommands, Wallet } from "../machines/index.ts";
 import type * as Mcp from "../machines/mcp.ts";
-import type * as Local from "../machines/local.ts";
-import { useConfig, useConversations, usePart, useSend, useTranscript } from "./index.tsx";
+import { useConfig, useConversations, useHand, usePart, useSend, useTranscript } from "./index.tsx";
 
 export type Machine = ReturnType<typeof useMachine>;
 
 export function useMachine(runtime: Runtime, model: Models.Model, options: { greet?: boolean } = {}) {
   const { servers } = runtime.payment;
-  const keyed = runtime.payment.inference === "apiKey";
   const config = useConfig();
-  const { send, isPending: busy } = useSend();
+  const { isPending: busy } = useSend();
   const { current: conversation } = useConversations();
   const note = config.note;
   const [connected, setConnected] = useState<Wallet.Wallet>();
-  const [ready, setReady] = useState(false);
   const [working, setWorking] = useState(false);
-  const [status, setStatus] = useState("");
   const [device, setDevice] = useState<Wallet.Prompt>();
   const [checkout, setCheckout] = useState<{ address: string; url: string }>();
-  const [cloud, setCloudState] = useState<Cloud.Cloud | undefined>(runtime.cloud);
-  const payments = useMemo(() => connected && Payments.create(connected, { servers }), [connected]);
-  const metered = useMemo(() => cloud && Cloud.meter(cloud), [cloud?.token]);
-  const paid = useRef<typeof fetch | undefined>(undefined);
-  paid.current = payments?.fetch;
-
-  function setCloud(next: Cloud.Cloud | undefined) {
-    runtime.cloud = next;
-    setCloudState(next);
-  }
+  const [link, setLink] = useState<Cloud.Cloud | undefined>(() => Cloud.restore());
+  const metered = useMemo(() => link && Cloud.meter(link), [link?.token]);
+  const machine = useRef<HandSource>({
+    hand: async () => {
+      const current = Cloud.restore();
+      return current && await Cloud.hand(current);
+    },
+    hands: async () => {
+      const current = Cloud.restore();
+      return current ? await Cloud.hands(current) : [];
+    },
+  }).current;
+  const hand = useHand(machine);
+  const { send } = useSend();
 
   useEffect(() => {
     Wallet.preload();
@@ -39,64 +39,38 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
   }, []);
 
   useEffect(() => {
+    hand.reset();
     void config.resume();
   }, [conversation]);
 
   useEffect(() => {
     const restored = config.getState().entries.length > 0;
     const saved = Wallet.restore();
-    if (!saved) return options.greet === false || keyed ? undefined : note("tool", `Not logged in. Type /login to connect your Tempo Wallet. It asks you to approve a key that this page keeps and pays with, ${limits}, and only for payments. The agent then pays for its own model and every service it calls.`);
+    if (!saved) return options.greet === false ? undefined : note("tool", `Not logged in. Type /login to connect your Tempo Wallet. It asks you to approve a key that this site's Worker keeps encrypted and pays with, ${limits}, and only for payments. The agent then pays for its own model and every service it calls.`);
     void Wallet.published(saved).then(onChain => {
       if (!onChain) return note("tool", "Tempo Wallet approved a key earlier, but it is not on Tempo yet. Type /login to publish it.");
       setConnected(saved);
       if (!restored && options.greet !== false) note("tool", `Logged in as ${Wallet.short(saved.address)} with key ${Wallet.short(saved.keyAddress)} until ${until(saved)}. Type /wallet to see your MACH.`);
-      if (!keyed && !Cloud.restore() && localStorage.getItem(localKey) !== "1") void enableCloud(saved).catch((error: unknown) => note("error", message(error)));
+      if (!Cloud.restore()) void attach(saved).catch((error: unknown) => note("error", message(error)));
     }, (error: unknown) => note("error", message(error)));
   }, []);
 
-  useEffect(() => {
-    if (!payments && !keyed) return;
-    let disposed = false;
-    const locked = Payment.locked(servers);
-    const tools: typeof fetch = keyed ? (input, init) => (paid.current ?? locked)(input, init) : payments!.fetch;
-    const chosen = keyed ? Models.route(runtime.options.inference!, model, tools, servers) : Models.agent(payments!, model, servers).model;
-    setStatus("Loading nanocode-ts…");
-    const { archive, codeMode, instructions, sqlite, wasm } = runtime.options;
-    void import("../machines/local.ts")
-      .then(module => module.create({ archive, codeMode, fetch: tools, instructions, model: chosen, servers, sqlite, wasm, onEvent: logged => {
-        const event = liveEvent(logged);
-        if (event) config.push(event);
-      } }))
-      .then(created => {
-        if (disposed) return void created.dispose();
-        runtime.agent = created;
-        setReady(true);
-        setStatus(summary(created));
-      }, (error: unknown) => setStatus(`The agent could not start: ${message(error)}`));
-    return () => {
-      disposed = true;
-      setReady(false);
-      void runtime.agent?.dispose();
-      runtime.agent = undefined;
-    };
-  }, [keyed ? undefined : payments, model.model]);
-
-  useEffect(() => {
-    if (!busy && runtime.agent) setStatus(summary(runtime.agent));
-  }, [busy]);
+  async function attach(account: Wallet.Wallet) {
+    setLink(Cloud.restore() ?? await Cloud.enable(account));
+  }
 
   async function login() {
     if (connected) return note("tool", `Already logged in as ${Wallet.short(connected.address)}. Type /logout first to use another wallet.`);
     const pending = await approve(note);
     setConnected(pending);
-    if (!keyed && !cloud && localStorage.getItem(localKey) !== "1") await enableCloud(pending);
-    await greet(pending, note, keyed, runtime.options.suggestion);
+    if (!Cloud.restore()) await attach(pending);
+    await greet(pending, note, false, runtime.options.suggestion);
   }
 
   async function logout() {
     const saved = connected ?? Wallet.restore();
     if (!saved) return note("tool", "Not logged in.");
-    const current = cloud ?? Cloud.restore();
+    const current = link ?? Cloud.restore();
     if (current) await Cloud.logout(current).catch((error: unknown) => note("error", `The Worker did not forget the key (${message(error)}).`));
     note("tool", "Opening Tempo Wallet to revoke the key.");
     try {
@@ -107,43 +81,25 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
     }
     Wallet.forget();
     Cloud.forget();
-    setCloud(undefined);
+    setLink(undefined);
     setConnected(undefined);
-  }
-
-  async function enableCloud(account = connected) {
-    if (!account) return note("tool", "Not logged in. Type /login first.");
-    if (keyed) return note("tool", "This chat pays for its model with the host's API key, so it runs in this tab; the wallet pays only for tools.");
-    localStorage.removeItem(localKey);
-    const current = Cloud.restore();
-    if (current) return note("tool", `Running in the cloud as session ${current.session}. Type /local to run in this tab.`);
-    setCloud(await Cloud.enable(account));
-    note("tool", "The agent runs in the cloud, in a Durable Object with subagents and a workspace, paid from your key within its limit until it expires: this site's Worker keeps the key encrypted. Refresh or close the tab whenever you like; the turn keeps going and this page reconnects to it. Type /local to run in this tab instead, or /logout to revoke the key everywhere.");
+    hand.reset();
   }
 
   function clear() {
     config.clear();
-    if (cloud) {
-      note("tool", "New session. The previous one's files stay in the cloud.");
-    } else note("tool", "Cleared.");
-  }
-
-  function disableCloud() {
-    if (!cloud) return note("tool", "Already running in this tab.");
-    Cloud.forget();
-    localStorage.setItem(localKey, "1");
-    setCloud(undefined);
-    note("tool", "Running in this tab again. The cloud keeps the key until it expires; type /logout to revoke it.");
+    hand.reset();
+    note("tool", link ? "New session. The previous one's files stay in the Worker." : "Cleared.");
   }
 
   async function wallet() {
     if (!connected) return note("tool", "Not logged in. Type /login.");
     const { balance, fees, remaining } = await Wallet.balances(connected);
-    note("tool", `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${until(connected)}${payments ? `, and this page has paid ${Wallet.format(payments.ledger().total)} MACH since it opened` : ""}.`);
-    if (cloud) {
-      const { spent } = await Cloud.status(cloud);
+    note("tool", `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${until(connected)}.`);
+    if (link) {
+      const { spent } = await Cloud.status(link);
       const total = Object.values(spent).reduce((sum, value) => sum + BigInt(value), 0n);
-      note("tool", `The cloud has paid ${Wallet.format(total)} MACH: ${Object.entries(spent).map(([host, value]) => `${host.split(".")[0]} ${Wallet.format(BigInt(value))}`).join(", ") || "nothing yet"}.`);
+      note("tool", `The agent has paid ${Wallet.format(total)} MACH: ${Object.entries(spent).map(([host, value]) => `${host.split(".")[0]} ${Wallet.format(BigInt(value))}`).join(", ") || "nothing yet"}.`);
     }
   }
 
@@ -165,8 +121,7 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
       else if (name === "/logout") await logout();
       else if (name === "/wallet") await wallet();
       else if (name === "/fund") await fund();
-      else if (name === "/cloud") await enableCloud();
-      else if (name === "/local") disableCloud();
+      else if (name === "/hand") link ? hand.show() : note("tool", "Log in first: type /login. The machine then runs the session the Worker keeps for this conversation.");
       else if (name === "/clear") clear();
       else note("tool", commands.map(entry => `${entry.label.padEnd(8)} ${entry.detail}`).join("\n"));
     } catch (error) {
@@ -178,43 +133,35 @@ export function useMachine(runtime: Runtime, model: Models.Model, options: { gre
 
   function submit(text: string) {
     if (text.startsWith("/")) return void command(text);
-    if (!connected && !keyed) {
+    if (!connected || !link) {
       note("user", text);
-      return note("error", "Log in first: type /login.");
-    }
-    if (!cloud && !runtime.agent) {
-      note("user", text);
-      return note("tool", "The agent is still loading.");
+      return note("error", connected ? "The Worker is still taking the key; try again in a moment." : "Log in first: type /login.");
     }
     void send(text);
   }
 
+  const machines = hand.hands.map(name => name ?? "your machine");
+  const detail = `${model.model}${machines.length ? ` · on ${machines.join(", ")}` : ""}`;
+
   return {
     busy,
     checkout,
-    cloud,
     command,
     connected,
+    detail,
     device,
+    hand,
+    keyed: false,
+    locked: false,
     open,
-    payments,
-    ready,
-    detail: cloud ? `cloud · ${model.model}` : status,
-    spend: metered ?? payments,
-    status: connected ? `${cloud ? `cloud · ${model.model}` : status} · ${Wallet.short(connected.address)}` : keyed ? `${status} · tools locked · /login` : "not logged in · /login",
-    keyed,
-    locked: keyed && !connected,
+    ready: Boolean(link),
     servers,
+    spend: metered,
+    status: connected ? `${detail} · ${Wallet.short(connected.address)}` : "not logged in · /login",
     submit,
     working,
   };
 }
-
-function summary(agent: Local.Agent) {
-  const { requests, rows } = agent.stats();
-  return `${agent.model} · ${requests} req · ${rows} rows`;
-}
-
 
 type Note = (kind: Entry["kind"], text: string) => void;
 

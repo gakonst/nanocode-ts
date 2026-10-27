@@ -1,6 +1,3 @@
-import type * as Local from "./local.ts";
-import * as Mcp from "./mcp.ts";
-import type * as Payments from "./payments.ts";
 import * as Wallet from "./wallet.ts";
 
 export const endpoint = "https://openai.mpp.tempo.xyz/v1";
@@ -22,21 +19,6 @@ export const models = {
 
 export const luna: Model = models.codex[0];
 
-export function agent(payments: Payments.Payments, chosen: Model = luna, servers: readonly Mcp.Server[] = Mcp.servers) {
-  const model: Local.Model = {
-    dispatch: (request, signal) => payments.fetch(request.endpoint, { body: Mcp.body(request, servers), headers: request.headers, method: request.method, signal }).catch((error: unknown) => {
-      throw explain(error);
-    }),
-    endpoint: chosen.provider === "claude" ? anthropic : endpoint,
-    model: chosen.model,
-    provider: chosen.provider,
-    subagents: true,
-    thinking: chosen.thinking,
-  };
-
-  return { fetch: payments.fetch, model };
-}
-
 export function explain(error: unknown) {
   const text = error instanceof Error ? error.message : String(error);
   if (/insufficient funds for gas/.test(text) || (/InsufficientBalance/.test(text) && text.toLowerCase().includes(Wallet.usdc.address))) return new Error(`Publishing the key needs a little ${Wallet.usdc.symbol} for its fee, and your wallet holds too little. Add ${Wallet.usdc.symbol} in Tempo Wallet, then type /login again.`, { cause: error });
@@ -46,15 +28,3 @@ export function explain(error: unknown) {
   return error instanceof Error ? error : new Error(text);
 }
 
-export type Inference = { endpoint: string; dispatch: Local.Model["dispatch"] };
-
-export function route(inference: Inference, chosen: Model, tools: typeof fetch, servers: readonly Mcp.Server[] = Mcp.servers): Local.Model {
-  return {
-    dispatch: (request, signal) => Mcp.server(request.endpoint, servers) ? tools(request.endpoint, { body: Mcp.body(request, servers), headers: request.headers, method: request.method, signal }) : inference.dispatch(request, signal),
-    endpoint: inference.endpoint,
-    model: chosen.model,
-    provider: chosen.provider,
-    subagents: true,
-    thinking: chosen.thinking,
-  };
-}

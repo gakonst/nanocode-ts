@@ -1,4 +1,4 @@
-import { serverEvents } from "../client.ts";
+import { type HandAccess, serverEvents, socketUrl } from "../client.ts";
 import type { LoggedEvent } from "../contracts.ts";
 import type * as Payments from "./payments.ts";
 import type * as Wallet from "./wallet.ts";
@@ -175,6 +175,20 @@ export async function steer(cloud: Cloud, prompt: string, model: Model = luna): 
   if (response.ok) return "steered";
   if (response.status === 409) return "queued";
   throw await failure(response);
+}
+
+export async function hand(cloud: Cloud): Promise<HandAccess> {
+  const path = `sessions/${encodeURIComponent(cloud.session)}/hands`;
+  const response = await fetch(path, { headers: headers(cloud), method: "POST" });
+  if (!response.ok) throw await failure(response);
+  const { token } = await response.json() as { token: string };
+  return { token, url: socketUrl(`${path}/machine`) };
+}
+
+export async function hands(cloud: Cloud): Promise<string[]> {
+  const response = await fetch(`sessions/${encodeURIComponent(cloud.session)}/hands`, { cache: "no-store", headers: headers(cloud) }).catch(() => undefined);
+  if (!response?.ok) return [];
+  return (await response.json() as { hands?: string[] }).hands ?? [];
 }
 
 export function meter(cloud: Cloud, interval = 1000) {
