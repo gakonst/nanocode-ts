@@ -1,5 +1,5 @@
 import { socketUrl } from "./client.ts";
-import { BRAIN_REPLACED, RemoteExecutor, type RemotePolicy } from "./remote.ts";
+import { BRAIN_REPLACED, bearerProtocols, RemoteExecutor, type RemotePolicy } from "./remote.ts";
 
 export type RelayedHand = { executor: RemoteExecutor<WebSocket>; name: string | null; connection: string };
 
@@ -13,7 +13,7 @@ function field(catalog: string, key: "name" | "runtime_id"): string | null {
 }
 
 export function relayHands(url: string, token: string, policy: RemotePolicy, onHand: (hand: RelayedHand | undefined) => void, signal: AbortSignal): void {
-  const address = `${socketUrl(url)}${url.includes("?") ? "&" : "?"}role=brain&wait&token=${encodeURIComponent(token)}`;
+  const address = `${socketUrl(url)}${url.includes("?") ? "&" : "?"}role=brain&wait`;
   let current: RelayedHand | undefined;
   let runtime: string | null = null;
   const lost = (executor: RemoteExecutor<WebSocket>) => {
@@ -24,7 +24,7 @@ export function relayHands(url: string, token: string, policy: RemotePolicy, onH
   signal.addEventListener("abort", () => current?.executor.disconnected("the brain left"), { once: true });
   const dial = (delay: number) => {
     if (signal.aborted) return;
-    const socket = new WebSocket(address);
+    const socket = new WebSocket(address, bearerProtocols(token));
     let cataloged = false;
     const stop = () => { try { socket.close(1000, "the brain left"); } catch {} };
     signal.addEventListener("abort", stop, { once: true });

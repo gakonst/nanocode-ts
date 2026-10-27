@@ -8,6 +8,7 @@ import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
+import { bearerAccepted, bearerToken } from "../remote.ts";
 import { DEFAULT_EXECUTOR, EXECUTOR_ID, HAND_TOKEN, handSecret, handToken, handTokenAccount, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
 
 export type { HostTool, ModelProvider } from "../index.ts";
@@ -717,12 +718,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private attachHand(scope: string, requested: string | undefined, request: Request, descriptor: SessionDescriptor): Response {
       if (requested !== undefined && !handName(requested)) return json({ error: "invalid hand" }, 400);
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return json({ error: "hands attach over WebSocket" }, 426);
+      const accepted = bearerAccepted(request);
       const [client, server] = Object.values(new WebSocketPair());
       this.ctx.acceptWebSocket(server, [HAND_TAG]);
       const executor = RemoteExecutor.accept(server, this.handLimits());
       this.handSockets.set(server, executor);
       this.ctx.waitUntil(this.registerHand(scope, requested, executor, descriptor));
-      return new Response(null, { status: 101, webSocket: client });
+      return new Response(null, { status: 101, webSocket: client, headers: accepted });
     }
 
     private handLimits() {
@@ -1260,7 +1262,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
   async function fetch(request: Request, env: E): Promise<Response> {
     const started = performance.now();
     const url = new URL(request.url);
-    const minted = HAND_TOKEN.exec(/^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "");
+    const minted = HAND_TOKEN.exec(bearerToken(request) ?? "");
     const handing = minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null;
     const principal = handing ? handTokenAccount(handing[1]!) : await options.authenticate(request, env);
     if (!principal) return json({ error: "unauthorized" }, 401);

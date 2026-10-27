@@ -3236,6 +3236,7 @@ dependencies = [
  "nanocode-code-mode",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

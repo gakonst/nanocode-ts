@@ -306,10 +306,13 @@ enum Command {
         #[serde(default)]
         max_frame_bytes: Option<usize>,
         #[serde(default)]
+        runtime_id: Option<String>,
+        #[serde(default)]
         tools: Vec<tools::HostTool>,
         #[serde(default)]
         mcp_servers: Vec<mcp::Server>,
     },
+    HandConnect {},
     HandFrame {
         text: String,
     },
@@ -1415,16 +1418,15 @@ fn execute(command: Command) -> Executed {
             name,
             workspace,
             max_frame_bytes,
+            runtime_id,
             tools,
             mcp_servers,
         } => executed(async move {
-            hand::open(name, workspace, max_frame_bytes, tools, mcp_servers).await
+            hand::open_hand(name, workspace, max_frame_bytes, runtime_id, tools, mcp_servers).await
         }),
+        Command::HandConnect {} => executed(hand::connect()),
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
-        Command::HandClosed {} => executed(async move {
-            hand::closed();
-            Ok(Value::Null)
-        }),
+        Command::HandClosed {} => executed(hand::closed()),
         Command::Configure {
             value_limit,
             logical_limit,

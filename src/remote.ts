@@ -6,6 +6,21 @@ export const HAND_LEFT = 4001;
 
 export const BRAIN_REPLACED = 4002;
 
+export function bearerProtocols(token: string): string[] {
+  return ["bearer", token];
+}
+
+export function bearerToken(request: Request): string | undefined {
+  const header = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
+  if (header) return header;
+  const [scheme, token] = (request.headers.get("sec-websocket-protocol") ?? "").split(",").map(value => value.trim());
+  return scheme === "bearer" && token ? token : undefined;
+}
+
+export function bearerAccepted(request: Request): Record<string, string> {
+  return /^\s*bearer\s*,/.test(request.headers.get("sec-websocket-protocol") ?? "") ? { "sec-websocket-protocol": "bearer" } : {};
+}
+
 const encoder = new TextEncoder();
 
 function validate(policy: RemotePolicy) {

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { BRAIN_REPLACED, HAND_LEFT } from "../remote.ts";
+import { BRAIN_REPLACED, bearerAccepted, bearerToken, HAND_LEFT } from "../remote.ts";
 
 export const RELAY_TOKEN = /^[0-9a-f]{32,128}$/;
 
@@ -37,7 +37,7 @@ export class HandRelay extends DurableObject {
       const catalog = await this.ctx.storage.get<string>("catalog");
       if (catalog !== undefined && this.#hand()) this.#offer(server, catalog);
     }
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client, headers: bearerAccepted(request) });
   }
 
   override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -92,12 +92,12 @@ export class HandRelay extends DurableObject {
 }
 
 export function relayToken(request: Request): string | undefined {
-  const token = /^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? new URL(request.url).searchParams.get("token") ?? "";
+  const token = bearerToken(request) ?? new URL(request.url).searchParams.get("token") ?? "";
   return RELAY_TOKEN.test(token) ? token : undefined;
 }
 
 export function relay(request: Request, namespace: DurableObjectNamespace<HandRelay>): Response | Promise<Response> {
   const token = relayToken(request);
-  if (!token) return Response.json({ error: "hands and brains connect with the relay's token, as Authorization: Bearer or ?token=" }, { status: 403 });
+  if (!token) return Response.json({ error: "hands and brains connect with the relay's token, as Authorization: Bearer, the bearer WebSocket subprotocol or ?token=" }, { status: 403 });
   return namespace.get(namespace.idFromName(token)).fetch(request);
 }

@@ -148,7 +148,7 @@ export class AgentRuntime {
   private failure?: Error;
   private disposal?: Promise<void>;
   private readonly attached = new Set<string>();
-  private options: Partial<RuntimeOptions> & HostOptions & { handSend?(text: string): void };
+  private options: Partial<RuntimeOptions> & HostOptions & { handSend?(text: string, connection: number): void; handFailed?(reason: string, connection: number): void };
   private readonly sql: SqlHost;
   hands = false;
   remote = false;
@@ -171,13 +171,14 @@ export class AgentRuntime {
     return runtime;
   }
 
-  async serveHand(options: { workspace: WorkspaceHost; cwd: string; fetch?: RuntimeOptions["fetch"]; dispatch?: RuntimeOptions["dispatch"]; tools?: { definitions: HostTool[]; call: NonNullable<RuntimeOptions["tools"]>["call"] }; mcp_servers?: McpServer[]; mcp?: McpPolicy; name?: string; max_frame_bytes?: number; send(text: string): void }): Promise<{ catalog: string; receive(text: string): Promise<void>; closed(): Promise<void> }> {
+  async serveHand(options: { workspace: WorkspaceHost; cwd: string; fetch?: RuntimeOptions["fetch"]; dispatch?: RuntimeOptions["dispatch"]; tools?: { definitions: HostTool[]; call: NonNullable<RuntimeOptions["tools"]>["call"] }; mcp_servers?: McpServer[]; mcp?: McpPolicy; name?: string; max_frame_bytes?: number; runtime_id?: string; send(text: string, connection: number): void; failed?(reason: string, connection: number): void }): Promise<{ catalog: string; connect(): Promise<{ catalog: string; connection: number }>; receive(text: string): Promise<void>; closed(): Promise<void> }> {
     if (this.opened || this.closed) throw new Error("agent runtime cannot be opened again");
     this.opened = true;
-    this.options = { ...this.options, workspace: options.workspace, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.dispatch ? { dispatch: deferMcp(options.dispatch, options.mcp_servers, options.mcp) } : {}), ...(options.tools ? { tools: options.tools } : {}), handSend: options.send };
-    const catalog = await this.command("hand_open", { name: options.name ?? null, workspace: options.cwd, max_frame_bytes: options.max_frame_bytes ?? null, tools: options.tools?.definitions ?? [], mcp_servers: options.mcp_servers ?? [] }) as string;
+    this.options = { ...this.options, workspace: options.workspace, ...(options.fetch ? { fetch: options.fetch } : {}), ...(options.dispatch ? { dispatch: deferMcp(options.dispatch, options.mcp_servers, options.mcp) } : {}), ...(options.tools ? { tools: options.tools } : {}), handSend: options.send, ...(options.failed ? { handFailed: options.failed } : {}) };
+    const catalog = await this.command("hand_open", { name: options.name ?? null, workspace: options.cwd, max_frame_bytes: options.max_frame_bytes ?? null, runtime_id: options.runtime_id ?? null, tools: options.tools?.definitions ?? [], mcp_servers: options.mcp_servers ?? [] }) as string;
     return {
       catalog,
+      connect: async () => await this.command("hand_connect", {}) as { catalog: string; connection: number },
       receive: async text => { await this.command("hand_frame", { text }); },
       closed: async () => { await this.command("hand_closed", {}); },
     };
@@ -481,7 +482,11 @@ export class AgentRuntime {
     }
     switch (request.op) {
       case "hand_send": {
-        this.options.handSend?.(request.text);
+        this.options.handSend?.(request.text, request.connection);
+        return null;
+      }
+      case "hand_failed": {
+        this.options.handFailed?.(request.reason, request.connection);
         return null;
       }
       case "wake":

@@ -1,5 +1,6 @@
 import type { DriveContext } from "durable-harness";
 import type { MessageSocket } from "../index.ts";
+import { bearerToken } from "../remote.ts";
 
 type World = DriveContext["world"];
 
@@ -451,7 +452,7 @@ export function handRoute(options: HandRouteOptions) {
   }
 
   async function SOCKET(request: Request, upgrade: UpgradeWebSocket): Promise<Response> {
-    const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
+    const bearer = bearerToken(request);
     const admitted = await admit(new URL(request.url), bearer);
     if (admitted instanceof Response) return new Response(admitted.body, { status: 403 });
     const world = await options.world();

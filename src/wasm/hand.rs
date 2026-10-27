@@ -1,21 +1,17 @@
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{cell::RefCell, sync::Arc};
 
-use futures_channel::oneshot;
-use nanocode::{Tool, tool_contract::ToolContext};
+use nanocode::{Tool, tool_contract::ToolInput};
 use nanocode_code_mode::{
-    ToolDefinition, ToolInput, ToolResult,
-    code_mode::{CodeModeExecution, CodeModeObserver, CodeModeUpdate, LocalCells},
-    embedded::CodeModeHost,
+    ToolDefinition, ToolOutput,
+    code_mode::{CodeModeExecution, CodeModeObserver, LocalCells},
+    embedded::{CodeModeHost, CodeModeHostError, HostFuture, OwnedToolContext},
     remote::{
-        NOT_RECEIVED, RemoteContext, RemoteFrame as Frame, RemoteOperation, SentCalls,
-        output_from_wire,
+        DetachedObservers, ExecutorOptions, HandActivity, HandBrain, HandCore, HandHost,
+        HandSession, RemoteFrame as Frame,
     },
 };
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
 use super::{
     bridge::{call, spawn},
@@ -24,37 +20,195 @@ use super::{
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+struct Open {
+    core: HandCore,
+    limit: usize,
+    connection: Option<u64>,
+}
+
 thread_local! {
-    static CELLS: RefCell<Option<Arc<LocalCells>>> = const { RefCell::new(None) };
-    static OWN: RefCell<Vec<Arc<dyn Tool>>> = const { RefCell::new(Vec::new()) };
-    static LIMIT: Cell<usize> = const { Cell::new(DEFAULT_MAX_FRAME_BYTES) };
-    static NEXT: Cell<u64> = const { Cell::new(0) };
-    static PENDING: RefCell<HashMap<u64, oneshot::Sender<Result<Value, String>>>> = RefCell::new(HashMap::new());
+    static HAND: RefCell<Option<Open>> = const { RefCell::new(None) };
 }
 
-fn send(frame: &Frame) -> Result<(), String> {
-    let text = frame
-        .encode(LIMIT.get())
-        .map_err(|error| error.to_string())?;
-    spawn(async move {
-        let _ = call(json!({"op": "hand_send", "text": text})).await;
-    });
-    Ok(())
+struct Host {
+    cells: Arc<LocalCells>,
+    own: Vec<Arc<dyn Tool>>,
+    workspace: Option<String>,
 }
 
-fn cells() -> Result<Arc<LocalCells>, String> {
-    CELLS.with_borrow(|cells| cells.clone().ok_or_else(|| "the hand is not open".to_owned()))
+impl HandHost for Host {
+    fn definitions(&self) -> HostFuture<'_, Vec<ToolDefinition>> {
+        let definitions = self.own.iter().map(|tool| tool.definition()).collect();
+        Box::pin(async move { definitions })
+    }
+
+    fn workspace(&self) -> Option<String> {
+        self.workspace.clone()
+    }
+
+    fn selects_tools(&self) -> bool {
+        true
+    }
+
+    fn open(
+        &self,
+        session_id: &str,
+        excluded: Vec<String>,
+        brain: HandBrain,
+    ) -> Result<Arc<dyn HandSession>, CodeModeHostError> {
+        let own = self
+            .own
+            .iter()
+            .filter(|tool| !excluded.iter().any(|name| name == tool.definition().name()))
+            .cloned()
+            .collect();
+        Ok(Arc::new(Session {
+            cells: Arc::clone(&self.cells),
+            session_id: session_id.to_owned(),
+            own,
+            brain,
+        }))
+    }
+
+    fn end_turn<'a>(
+        &'a self,
+        session_id: &'a str,
+        turn_id: &'a str,
+        hook_event_name: &'a str,
+    ) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            for tool in &self.own {
+                if let Err(issue) = tool.end_turn(session_id, turn_id, hook_event_name).await {
+                    tracing::warn!(%issue, "hand tool turn cleanup failed; not retried");
+                }
+            }
+        })
+    }
+
+    fn spawn(&self, task: HostFuture<'static, ()>) {
+        spawn(task);
+    }
 }
 
-pub async fn open(
+struct Session {
+    cells: Arc<LocalCells>,
+    session_id: String,
+    own: Vec<Arc<dyn Tool>>,
+    brain: HandBrain,
+}
+
+impl HandSession for Session {
+    fn execute<'a>(
+        &'a self,
+        source: &'a str,
+        context: OwnedToolContext,
+        observer: &'a mut dyn CodeModeObserver,
+    ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+        Box::pin(async move {
+            let mut tools = self.own.clone();
+            tools.extend(
+                self.brain
+                    .tools(&context.call_id)
+                    .into_iter()
+                    .filter(|tool| !self.own.iter().any(|own| own.definition().name() == tool.definition().name())),
+            );
+            self.cells
+                .execute_with_local_tools(source, context.as_context(), tools, Some(observer))
+                .await
+        })
+    }
+
+    fn wait<'a>(
+        &'a self,
+        input: &'a str,
+        context: OwnedToolContext,
+        observer: &'a mut dyn CodeModeObserver,
+    ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+        Box::pin(async move {
+            self.cells
+                .wait_with_updates(input, context.as_context(), observer)
+                .await
+        })
+    }
+
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        input: Value,
+        context: OwnedToolContext,
+    ) -> HostFuture<'a, ToolOutput> {
+        Box::pin(async move {
+            let Some(tool) = self.own.iter().find(|tool| tool.definition().name() == name) else {
+                return ToolOutput::error(format!("this browser hand has no tool `{name}`"));
+            };
+            let raw = match serde_json::value::to_raw_value(&input) {
+                Ok(raw) => raw,
+                Err(error) => return ToolOutput::error(error.to_string()),
+            };
+            tool.execute(ToolInput::Function(raw), context.as_context())
+                .await
+                .unwrap_or_else(|error| ToolOutput::error(error.to_string()))
+        })
+    }
+
+    fn cancel<'a>(&'a self, observer: &'a mut dyn CodeModeObserver) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            let _ = self.cells.cancel_with_updates(&self.session_id, observer).await;
+        })
+    }
+
+    fn cancel_turn<'a>(&'a self, observer: &'a mut dyn CodeModeObserver) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            let _ = self
+                .cells
+                .cancel_turn_with_updates(&self.session_id, observer)
+                .await;
+        })
+    }
+
+    fn detach_turn<'a>(&'a self, observers: DetachedObservers<'a>) -> HostFuture<'a, ()> {
+        self.cells.detach_turn(&self.session_id, observers);
+        Box::pin(async {})
+    }
+
+    fn begin_turn(&self) {
+        self.cells.begin_turn(&self.session_id);
+    }
+
+    fn preempt(&self) -> HostFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self.cells.preempt_turn(&self.session_id).await;
+        })
+    }
+
+    fn settle_preempt(&self) {
+        self.cells.settle_preempt(&self.session_id);
+    }
+
+    fn close(&self) -> HostFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = CodeModeHost::cancel(&*self.cells, &self.session_id).await;
+        })
+    }
+}
+
+fn open() -> Result<(HandCore, usize), String> {
+    HAND.with_borrow(|hand| {
+        hand.as_ref()
+            .map(|open| (open.core.clone(), open.limit))
+            .ok_or_else(|| "the hand is not open".to_owned())
+    })
+}
+
+pub async fn open_hand(
     name: Option<String>,
     workspace: Option<String>,
     max_frame_bytes: Option<usize>,
+    runtime_id: Option<String>,
     host_tools: Vec<tools::HostTool>,
     mcp_servers: Vec<mcp::Server>,
 ) -> Result<Value, String> {
     let limit = max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES);
-    LIMIT.set(limit);
     let mut own: Vec<Arc<dyn Tool>> = tools::tools(host_tools)
         .map(|tool| Arc::new(tool) as Arc<dyn Tool>)
         .collect();
@@ -67,221 +221,71 @@ pub async fn open(
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
-    let definitions = own.iter().map(|tool| tool.definition()).collect();
-    OWN.set(own);
-    CELLS.set(Some(Arc::new(cells::host(workspace.as_deref()))));
-    let catalog = Frame::Catalog {
-        definitions,
-        name,
+    let host = Host {
+        cells: Arc::new(cells::host(workspace.as_deref())),
+        own,
         workspace,
-        runtime_id: None,
-        max_frame_bytes: Some(limit),
-        resumable: false,
-        tool_selection: true,
-        cancels_calls: false,
-        caches_local_tools: false,
     };
-    catalog
-        .encode(limit)
-        .map(Value::String)
-        .map_err(|error| error.to_string())
+    let options = ExecutorOptions {
+        name,
+        runtime_id,
+        callback_timeout: None,
+        callback_hold: None,
+    };
+    let (core, driver) = HandCore::new(Arc::new(host), options, HandActivity::default());
+    spawn(driver);
+    let catalog = core.catalog(limit).await.map_err(|error| error.to_string())?;
+    HAND.set(Some(Open {
+        core,
+        limit,
+        connection: None,
+    }));
+    Ok(Value::String(catalog))
 }
 
-pub fn closed() {
-    for (_, reply) in PENDING.with_borrow_mut(std::mem::take) {
-        let _ = reply.send(Err("the hand's connection to the session closed".into()));
-    }
+pub async fn connect() -> Result<Value, String> {
+    let (core, limit) = open()?;
+    let catalog = core.catalog(limit).await.map_err(|error| error.to_string())?;
+    let (wire, mut frames) = mpsc::unbounded_channel::<String>();
+    let connection = core.connect(wire, limit);
+    let id = connection.id;
+    HAND.with_borrow_mut(|hand| {
+        if let Some(open) = hand.as_mut() {
+            open.connection = Some(id);
+        }
+    });
+    spawn(async move {
+        while let Some(text) = frames.recv().await {
+            let _ = call(json!({"op": "hand_send", "text": text, "connection": id})).await;
+        }
+    });
+    let failed = connection.failed;
+    spawn(async move {
+        if let Ok(issue) = failed.await {
+            let _ = call(json!({"op": "hand_failed", "reason": issue.to_string(), "connection": id})).await;
+        }
+    });
+    Ok(json!({"catalog": catalog, "connection": id}))
 }
 
 pub fn receive(text: &str) -> Result<Value, String> {
-    let frame = Frame::decode(text, LIMIT.get()).map_err(|error| error.to_string())?;
-    match frame {
-        Frame::CallbackResult { id, result } => {
-            if let Some(reply) = PENDING.with_borrow_mut(|pending| pending.remove(&id)) {
-                let _ = reply.send(result);
-            }
-        }
-        Frame::Ack { .. } => {}
-        Frame::Resume { pending } => {
-            for id in pending {
-                send(&Frame::Reply { id, result: Err(NOT_RECEIVED.into()) })?;
-            }
-        }
-        Frame::Request { id, operation, max_frame_bytes, compact, .. } => {
-            if let Some(bytes) = max_frame_bytes {
-                LIMIT.set(LIMIT.get().min(bytes));
-            }
-            let cells = cells()?;
-            spawn(async move {
-                let result = run(&cells, id, operation, compact).await;
-                let _ = send(&reply(id, result));
-            });
-        }
-        _ => return Err("unexpected frame from the session".into()),
-    }
+    let (core, limit) = open()?;
+    let connection = HAND
+        .with_borrow(|hand| hand.as_ref().and_then(|open| open.connection))
+        .ok_or("the hand has no connection")?;
+    let frame = Frame::decode(text, limit).map_err(|error| error.to_string())?;
+    core.receive(connection, frame);
     Ok(Value::Null)
 }
 
-fn reply(id: u64, result: Result<Option<Value>, String>) -> Frame {
-    let frame = Frame::Reply { id, result };
-    match frame.encode(LIMIT.get()) {
-        Ok(_) => frame,
-        Err(issue) => Frame::Reply { id, result: Err(format!("{issue}; the result was not sent")) },
+pub async fn closed() -> Result<Value, String> {
+    let Ok((core, _)) = open() else {
+        return Ok(Value::Null);
+    };
+    let connection = HAND.with_borrow_mut(|hand| hand.as_mut().and_then(|open| open.connection.take()));
+    if let Some(connection) = connection {
+        core.closed(connection).await;
     }
-}
-
-struct Observer {
-    id: u64,
-    calls: SentCalls,
-}
-
-impl CodeModeObserver for Observer {
-    fn update(&mut self, update: CodeModeUpdate<'_>) {
-        if send(&Frame::Update { id: self.id, update: self.calls.update(&update) }).is_ok() {
-            self.calls.sent(&update);
-        }
-    }
-}
-
-struct Detached {
-    session_id: String,
-    origin_call_id: String,
-    calls: SentCalls,
-}
-
-impl CodeModeObserver for Detached {
-    fn update(&mut self, update: CodeModeUpdate<'_>) {
-        let _ = send(&Frame::DetachedUpdate {
-            session_id: self.session_id.clone(),
-            origin_call_id: self.origin_call_id.clone(),
-            update: self.calls.update(&update),
-        });
-    }
-
-    fn completed(&mut self) {
-        let _ = send(&Frame::DetachedComplete {
-            session_id: self.session_id.clone(),
-            origin_call_id: self.origin_call_id.clone(),
-        });
-    }
-}
-
-struct Callback {
-    definition: ToolDefinition,
-}
-
-impl Tool for Callback {
-    fn definition(&self) -> ToolDefinition {
-        self.definition.clone()
-    }
-
-    fn execute<'life0, 'life1, 'async_trait>(
-        &'life0 self,
-        input: ToolInput,
-        context: ToolContext<'life1>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
-        let context = RemoteContext::from_context(context);
-        let name = self.definition.name().to_owned();
-        Box::pin(async move {
-            let (input, freeform) = match input {
-                ToolInput::Function(input) => (serde_json::from_str(input.get())?, false),
-                ToolInput::Freeform(input) => (Value::String(input), true),
-            };
-            let id = NEXT.get();
-            NEXT.set(id + 1);
-            let (tx, rx) = oneshot::channel();
-            PENDING.with_borrow_mut(|pending| pending.insert(id, tx));
-            if let Err(issue) = send(&Frame::Callback { id, name, input, freeform, context, hand: None, compact: true, output_prefix: false }) {
-                PENDING.with_borrow_mut(|pending| pending.remove(&id));
-                return Err(format!("{issue}; the call was not dispatched").into());
-            }
-            let value = rx
-                .await
-                .map_err(|_| "the hand's connection to the session closed; outcome unknown".to_owned())??;
-            output_from_wire(value).map_err(|error| error.to_string().into())
-        })
-    }
-}
-
-fn wire(execution: CodeModeExecution, observer: Observer) -> Value {
-    observer.calls.execution(execution)
-}
-
-async fn run(cells: &LocalCells, id: u64, operation: RemoteOperation, compact: bool) -> Result<Option<Value>, String> {
-    let mut observer = Observer { id, calls: SentCalls::new(compact) };
-    match operation {
-        RemoteOperation::Execute { source, context, local_tools, .. } => {
-            let mut tools: Vec<Arc<dyn Tool>> = OWN.with_borrow(Clone::clone);
-            tools.extend(
-                local_tools
-                    .into_iter()
-                    .filter(|definition| !tools.iter().any(|own| own.definition().name() == definition.name()))
-                    .map(|definition| Arc::new(Callback { definition }) as Arc<dyn Tool>)
-                    .collect::<Vec<_>>(),
-            );
-            let owned = context.owned();
-            let execution = cells
-                .execute_with_local_tools(&source, owned.as_context(), tools, Some(&mut observer))
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(Some(wire(execution, observer)))
-        }
-        RemoteOperation::Wait { input, context } => {
-            let owned = context.owned();
-            let execution = cells
-                .wait_with_updates(&input, owned.as_context(), &mut observer)
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(Some(wire(execution, observer)))
-        }
-        RemoteOperation::Call { name, input, context, .. } => {
-            let tool = OWN.with_borrow(|own| own.iter().find(|tool| tool.definition().name() == name).cloned());
-            let Some(tool) = tool else {
-                return Err(format!("this browser hand has no tool `{name}`"));
-            };
-            let owned = context.owned();
-            let raw = serde_json::value::to_raw_value(&input).map_err(|error| error.to_string())?;
-            let output = tool
-                .execute(ToolInput::Function(raw), owned.as_context())
-                .await
-                .unwrap_or_else(|error| nanocode_code_mode::ToolOutput::error(error.to_string()));
-            nanocode_code_mode::remote::output_to_wire(output, compact)
-                .map(Some)
-                .map_err(|error| error.to_string())
-        }
-        RemoteOperation::Cancel { session_id } => {
-            cells.cancel_with_updates(&session_id, &mut observer).await.map_err(|error| error.to_string())?;
-            Ok(None)
-        }
-        RemoteOperation::CancelTurn { session_id, .. } => {
-            cells.cancel_turn_with_updates(&session_id, &mut observer).await.map_err(|error| error.to_string())?;
-            Ok(None)
-        }
-        RemoteOperation::DetachTurn { session_id } => {
-            let id = session_id.clone();
-            cells.detach_turn(&session_id, &mut |origin| {
-                Box::new(Detached { session_id: id.clone(), origin_call_id: origin.into(), calls: SentCalls::new(compact) })
-            });
-            Ok(None)
-        }
-        RemoteOperation::BeginTurn { session_id } => {
-            cells.begin_turn(&session_id);
-            Ok(None)
-        }
-        RemoteOperation::Preempt { session_id } => {
-            cells.preempt_turn(&session_id).await.map_err(|error| error.to_string())?;
-            Ok(None)
-        }
-        RemoteOperation::SettlePreempt { session_id } => {
-            cells.settle_preempt(&session_id);
-            Ok(None)
-        }
-        RemoteOperation::CancelCall { .. } | RemoteOperation::EndTurn { .. } => Ok(None),
-    }
+    Ok(Value::Null)
 }
 

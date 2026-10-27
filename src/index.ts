@@ -2,7 +2,7 @@ export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
 export { EventHub, type LiveCursor } from "./events.ts";
 export { compileModule, connectHand, handKeeper, prepareHand, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus, type PreparedHand } from "./hand.ts";
 export { deferMcp, type McpPolicy } from "./mcp.ts";
-export { RemoteExecutor, type RemotePolicy } from "./remote.ts";
+export { bearerAccepted, bearerProtocols, bearerToken, RemoteExecutor, type RemotePolicy } from "./remote.ts";
 export { relayHands, type RelayedHand } from "./bridge.ts";
 export { handName, openSession, type Session, type SessionOptions, type SessionRelay } from "./session.ts";
 export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from "./timing.ts";

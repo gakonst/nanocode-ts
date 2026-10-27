@@ -1,5 +1,6 @@
 import { serverEvents } from "./client.ts";
 import { AgentRuntime, readBytes, writeBytes } from "./host.ts";
+import { bearerProtocols } from "./remote.ts";
 import type { HostTool, McpServer, RuntimeOptions, WorkspaceHost } from "./contracts.ts";
 
 export type HandOptions = {
@@ -14,6 +15,7 @@ export type HandOptions = {
   protocols?: string | string[];
   maxFrameBytes?: number;
   WebSocket?: typeof WebSocket;
+  token?: string;
   transport?: "websocket" | "stream";
   reconnectMs?: number;
   batchMs?: number;
@@ -61,12 +63,21 @@ export async function compileModule(url: string, options: { cache?: string | fal
   return compile(response);
 }
 
+const HAND_REPLACED = "another hand attached under this name";
+
+function tokened(token: string | undefined, protocols: string | string[] | undefined, Socket: typeof WebSocket): { protocols?: string | string[]; init?: unknown } {
+  if (!token) return protocols === undefined ? {} : { protocols };
+  const node = Socket === globalThis.WebSocket && typeof (globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node === "string";
+  if (node) return { init: { headers: { authorization: `Bearer ${token}` }, ...(protocols === undefined ? {} : { protocols }) } };
+  return { protocols: bearerProtocols(token) };
+}
+
 export async function prepareHand(module: WebAssembly.Module, options: Omit<HandOptions, "url" | "onStatus">): Promise<PreparedHand> {
   const runtime = await AgentRuntime.instantiate(module, NO_SQL, { published() {} });
   const send = options.fetch ?? ((input: string, init: RequestInit) => globalThis.fetch(input, init));
   const dispatch: RuntimeOptions["dispatch"] = (request, signal) => send(request.endpoint, { method: request.method, headers: request.headers, ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: request.body as Uint8Array<ArrayBuffer> }), signal });
   const cwd = options.cwd ?? "/workspace";
-  let link: { send(text: string): void; close(): void } | undefined;
+  let link: { connection: number; send(text: string): void; close(code: number, reason: string): void } | undefined;
   let hand: Awaited<ReturnType<AgentRuntime["serveHand"]>>;
   try {
     hand = await runtime.serveHand({
@@ -79,7 +90,9 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
       ...(options.mcp ? { mcp: options.mcp } : {}),
       ...(options.name ? { name: options.name } : {}),
       ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
-      send: text => link?.send(text),
+      runtime_id: crypto.randomUUID(),
+      send: (text, connection) => { if (link?.connection === connection) link.send(text); },
+      failed: (reason, connection) => { if (link?.connection === connection) link.close(1011, reason.slice(0, 120)); },
     });
   } catch (error) {
     void runtime.dispose().catch(() => {});
@@ -100,42 +113,93 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
       let done!: (status: HandStatus) => void;
       const closed = new Promise<HandStatus>(resolve => { done = resolve; });
       let finished = false;
+      let stopped = false;
+      let socket: WebSocket | undefined;
       const finish = (reason: string) => {
         if (finished) return;
         finished = true;
+        stopped = true;
         void runtime.dispose().catch(() => {});
         const status: HandStatus = { state: "closed", reason };
         onStatus?.(status);
         done(status);
       };
-      let queue = Promise.resolve();
-      const receive = (text: string) => {
-        queue = queue.then(() => hand.receive(text)).catch(() => {});
-      };
-      const gone = (reason: string) => {
-        void hand.closed().catch(() => {});
-        finish(reason);
-      };
       if (options.transport === "stream") {
-        link = await streamLink({ ...options, url }, hand.catalog, receive, gone, closed);
+        const { catalog, connection } = await hand.connect();
+        let queue = Promise.resolve();
+        const receive = (text: string) => { queue = queue.then(() => hand.receive(text)).catch(() => {}); };
+        const gone = (reason: string) => { void hand.closed().catch(() => {}); finish(reason); };
+        const stream = await streamLink({ ...options, url }, catalog, receive, gone, closed);
+        link = { connection, send: text => stream.send(text), close: () => stream.close() };
         onStatus?.({ state: "attached" });
-        return { closed, close: () => link!.close() };
+        return { closed, close: () => stream.close() };
       }
-      const socket = new Socket(url, options.protocols);
-      link = { send: text => { if (socket.readyState === 1) socket.send(text); }, close: () => socket.close(1000, "the hand closed") };
-      const opened = new Promise<void>((resolve, reject) => {
-        socket.addEventListener("open", () => {
-          socket.send(hand.catalog);
-          onStatus?.({ state: "attached" });
-          resolve();
-        });
-        void closed.then(status => reject(new Error(status.reason ?? "the hand closed")));
+      const reconnectMs = options.reconnectMs ?? 500;
+      let delay = reconnectMs;
+      const attached = new Promise<void>((resolve, reject) => {
+        const dial = () => {
+          if (stopped) return;
+          const target = tokened(options.token, options.protocols, Socket);
+          const current = target.init === undefined ? new Socket(url, target.protocols) : new (Socket as unknown as new (url: string, init: unknown) => WebSocket)(url, target.init);
+          socket = current;
+          let connection: number | undefined;
+          let ready = false;
+          const buffered: string[] = [];
+          const connecting = new Promise<void>(settled => {
+            current.addEventListener("open", () => {
+              void hand.connect().then(opened => {
+                connection = opened.connection;
+                link = {
+                  connection: opened.connection,
+                  send: text => { if (!ready) buffered.push(text); else if (current.readyState === 1) current.send(text); },
+                  close: (code, reason) => { try { current.close(code, reason); } catch {} },
+                };
+                current.send(opened.catalog);
+                ready = true;
+                for (const text of buffered.splice(0)) current.send(text);
+                delay = reconnectMs;
+                onStatus?.({ state: "attached" });
+                resolve();
+              }, (error: unknown) => {
+                try { current.close(1011, "the hand could not open a connection"); } catch {}
+                reject(error);
+              }).finally(settled);
+            }, { once: true });
+          });
+          let queue: Promise<void> = connecting;
+          current.addEventListener("message", event => {
+            const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
+            queue = queue.then(() => hand.receive(text)).catch(() => {});
+          });
+          let ended = false;
+          const end = (code: number, reason: string) => {
+            if (ended) return;
+            ended = true;
+            if (link?.connection === connection) link = undefined;
+            const closing = connection === undefined ? Promise.resolve() : queue.then(() => hand.closed()).catch(() => {});
+            void closing.then(() => {
+              if (stopped) return finish(reason || "the hand closed");
+              if (code === 1008) return finish(reason || "the brain refused this hand");
+              if (reason === HAND_REPLACED) return finish(reason);
+              onStatus?.({ state: "connecting", reason: reason || `closed with code ${code}` });
+              setTimeout(dial, delay);
+              delay = Math.min(delay * 2, reconnectMs * 64);
+            });
+          };
+          current.addEventListener("close", event => end(event.code, event.reason));
+          current.addEventListener("error", () => end(1006, "the connection failed"));
+        };
+        dial();
       });
-      socket.addEventListener("message", event => receive(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)));
-      socket.addEventListener("close", event => gone(event.reason || "closed with code " + event.code));
-      socket.addEventListener("error", () => finish("the connection failed"));
-      await opened;
-      return { closed, close: () => link!.close() };
+      await Promise.race([attached, closed.then(status => { throw new Error(status.reason ?? "the hand closed"); })]);
+      return {
+        closed,
+        close: () => {
+          stopped = true;
+          try { socket?.close(1000, "the hand closed"); } catch {}
+          finish("the hand closed");
+        },
+      };
     },
   };
 }
