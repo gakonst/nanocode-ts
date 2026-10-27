@@ -76,12 +76,16 @@ fn origin(frame: &Frame) -> Option<&str> {
 struct WorkerLink {
     connection: Option<String>,
     tool_selection: bool,
+    caches_local_tools: bool,
     max_frame_bytes: usize,
 }
 
 impl RemoteLink for WorkerLink {
     fn supports_tool_selection(&self) -> bool {
         self.tool_selection
+    }
+    fn caches_local_tools(&self) -> bool {
+        self.caches_local_tools
     }
     fn send(
         &self,
@@ -198,6 +202,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
         WorkerLink {
             connection,
             tool_selection: catalog.tool_selection,
+            caches_local_tools: catalog.caches_local_tools,
             max_frame_bytes: catalog
                 .max_frame_bytes
                 .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),

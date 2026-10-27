@@ -79,6 +79,7 @@ pub async fn open(
         resumable: false,
         tool_selection: true,
         cancels_calls: false,
+        caches_local_tools: false,
     };
     catalog
         .encode(limit)

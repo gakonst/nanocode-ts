@@ -9,7 +9,28 @@ export const HAND_CONNECTION = /^[A-Za-z0-9_-]{8,64}$/;
 
 export const DEFAULT_HOLD_MS = 240_000;
 
+export type HandSocket = {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  on(event: "message", listener: (data: Uint8Array | string, isBinary: boolean) => void): unknown;
+  on(event: "close", listener: () => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+};
+
+export type UpgradeWebSocket = (handler: (socket: HandSocket) => void | Promise<void>, options?: { maxPayload?: number }) => Promise<Response>;
+
+type Brain = { receive(frame: string): void; shut(code: number, reason: string): void };
+
+type LocalHand = { connection: string; catalog: string; socket: HandSocket; brain?: Brain };
+
+const OPEN = 1;
+
+const local: Map<string, LocalHand> = ((globalThis as { [key: symbol]: unknown })[Symbol.for("nanocode-ts.vercel.hands")] ??= new Map()) as Map<string, LocalHand>;
+
 const encoder = new TextEncoder();
+
+const decoder = new TextDecoder();
 
 export function handStreams(runId: string, connection = "") {
   return { attach: runId + "_hand", down: runId + "_hand_down_" + connection, up: runId + "_hand_up_" + connection };
@@ -25,6 +46,35 @@ export function appendLines(world: World, runId: string, name: string): (line: H
     const next = tail.then(() => world.streams.write(runId, name, encoder.encode(JSON.stringify(line) + "\n")));
     tail = next.catch(() => undefined);
     return next;
+  };
+}
+
+function frameWriter(write: (line: HandLine) => Promise<void>, failed: () => void): (brain: string, frame: string) => void {
+  let pending: { brain: string; frames: string[] }[] = [];
+  let writing = false;
+  const pump = async () => {
+    while (pending.length) {
+      const lines = pending;
+      pending = [];
+      for (const line of lines) {
+        try {
+          await write(line);
+        } catch {
+          writing = false;
+          failed();
+          return;
+        }
+      }
+    }
+    writing = false;
+  };
+  return (brain, frame) => {
+    const last = pending.at(-1);
+    if (last?.brain === brain) last.frames.push(frame);
+    else pending.push({ brain, frames: [frame] });
+    if (writing) return;
+    writing = true;
+    queueMicrotask(() => void pump());
   };
 }
 
@@ -65,7 +115,51 @@ export async function* tailLines(world: World, runId: string, name: string, star
   }
 }
 
+function dialLocal(hand: LocalHand): MessageSocket {
+  const listeners: Record<"close" | "error" | "message", ((event: any) => void)[]> = { close: [], error: [], message: [] };
+  const emit = (type: "close" | "error" | "message", event: unknown) => {
+    for (const listener of listeners[type]) listener(event);
+  };
+  let closed = false;
+  let held: string[] | undefined = [];
+  const brain: Brain = {
+    receive(frame) {
+      if (held) held.push(frame);
+      else emit("message", { data: frame });
+    },
+    shut(code, reason) {
+      if (closed) return;
+      closed = true;
+      if (hand.brain === brain) hand.brain = undefined;
+      emit("close", { code, reason });
+    },
+  };
+  hand.brain?.shut(1011, "the hand moved to a newer brain");
+  hand.brain = brain;
+  setTimeout(() => {
+    const frames = held ?? [];
+    held = undefined;
+    if (closed) return;
+    emit("message", { data: hand.catalog });
+    for (const frame of frames) emit("message", { data: frame });
+  }, 0);
+  return {
+    send(message: string) {
+      if (closed || hand.socket.readyState !== OPEN) throw new Error("the hand disconnected");
+      hand.socket.send(message);
+    },
+    close(code?: number, reason?: string) {
+      brain.shut(code ?? 1000, reason ?? "");
+    },
+    addEventListener(type: "close" | "error" | "message", listener: (event: any) => void) {
+      listeners[type].push(listener);
+    },
+  };
+}
+
 export async function dialHand(world: World, runId: string, signal: AbortSignal): Promise<MessageSocket> {
+  const nearby = local.get(runId);
+  if (nearby && nearby.socket.readyState === OPEN) return dialLocal(nearby);
   const streams = handStreams(runId);
   const info = await world.streams.getInfo(runId, streams.attach).catch(() => undefined);
   if (!info || info.tailIndex < 0) throw new Error("no hand is attached to this session");
@@ -96,13 +190,11 @@ export async function dialHand(world: World, runId: string, signal: AbortSignal)
   const named = handStreams(runId, connection);
   const up = await world.streams.getInfo(runId, named.up).catch(() => ({ tailIndex: -1 }));
   const brain = handId();
-  const write = appendLines(world, runId, named.down);
   const listeners: Record<"close" | "error" | "message", ((event: any) => void)[]> = { close: [], error: [], message: [] };
   const emit = (type: "close" | "error" | "message", event: unknown) => {
     for (const listener of listeners[type]) listener(event);
   };
   let closed = false;
-  let pending: string[] = [];
   const close = (code: number, reason: string) => {
     if (closed) return;
     closed = true;
@@ -110,11 +202,7 @@ export async function dialHand(world: World, runId: string, signal: AbortSignal)
     void attached.return(undefined);
     emit("close", { code, reason });
   };
-  const flush = () => {
-    const frames = pending;
-    pending = [];
-    if (frames.length) void write({ brain, frames }).catch(() => close(1011, "the hand stream refused a frame"));
-  };
+  const write = frameWriter(appendLines(world, runId, named.down), () => close(1011, "the hand stream refused a frame"));
   setTimeout(() => {
     if (closed) return;
     emit("message", { data: catalog });
@@ -139,8 +227,7 @@ export async function dialHand(world: World, runId: string, signal: AbortSignal)
   return {
     send(message: string) {
       if (closed) throw new Error("the hand disconnected");
-      if (!pending.length) queueMicrotask(flush);
-      pending.push(message);
+      write(brain, message);
     },
     close(code?: number, reason?: string) {
       close(code ?? 1000, reason ?? "");
@@ -155,13 +242,53 @@ export type HandRouteOptions = {
   world(): Promise<World>;
   owns(sessionId: string, channel: string): Promise<boolean>;
   holdMs?: number;
+  maxFrameBytes?: number;
 };
+
+function serveSocket(world: World, sessionId: string, socket: HandSocket): void {
+  const connection = handId();
+  const streams = handStreams(sessionId, connection);
+  const attach = appendLines(world, sessionId, streams.attach);
+  const up = frameWriter(appendLines(world, sessionId, streams.up), () => socket.close(1011, "the hand stream refused a frame"));
+  const stop = new AbortController();
+  let hand: LocalHand | undefined;
+  let brain: string | undefined;
+  socket.on("message", (data, binary) => {
+    if (binary) return socket.close(1003, "remote code mode requires JSON text frames");
+    const frame = typeof data === "string" ? data : decoder.decode(data);
+    if (!hand) {
+      hand = { connection, catalog: frame, socket };
+      local.get(sessionId)?.brain?.shut(1011, "the hand reconnected");
+      local.set(sessionId, hand);
+      void attach({ catalog: frame, connection }).catch(() => socket.close(1011, "the hand stream refused the catalog"));
+      void (async () => {
+        for await (const [, line] of tailLines(world, sessionId, streams.down, 0, stop.signal)) {
+          if (typeof line.brain === "string") brain = line.brain;
+          for (const sent of line.frames ?? []) if (socket.readyState === OPEN) socket.send(sent);
+        }
+      })();
+      return;
+    }
+    if (hand.brain) return hand.brain.receive(frame);
+    if (brain) up(brain, frame);
+  });
+  const closed = () => {
+    if (stop.signal.aborted) return;
+    stop.abort();
+    if (!hand) return;
+    if (local.get(sessionId) === hand) local.delete(sessionId);
+    hand.brain?.shut(1011, "the hand disconnected");
+    void attach({ closed: true, connection }).catch(() => undefined);
+  };
+  socket.on("close", closed);
+  socket.on("error", closed);
+}
 
 export function handRoute(options: HandRouteOptions) {
   const known = new Map<string, Promise<boolean>>();
-  const admit = async (url: URL): Promise<{ sessionId: string; channel: string } | Response> => {
+  const admit = async (url: URL, bearer = ""): Promise<{ sessionId: string; channel: string } | Response> => {
     const sessionId = url.searchParams.get("sessionId") ?? "";
-    const channel = url.searchParams.get("hand") ?? "";
+    const channel = url.searchParams.get("hand") ?? bearer;
     if (!sessionId || !/^[A-Za-z0-9_-]{8,128}$/.test(sessionId) || !/^[A-Za-z0-9_-]{16,64}$/.test(channel)) return new Response("sessionId and hand must name a session and its hand channel", { status: 400 });
     const key = sessionId + "/" + channel;
     let owned = known.get(key);
@@ -224,5 +351,13 @@ export function handRoute(options: HandRouteOptions) {
     return new Response(null, { status: 204 });
   }
 
-  return { GET, POST };
+  async function SOCKET(request: Request, upgrade: UpgradeWebSocket): Promise<Response> {
+    const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
+    const admitted = await admit(new URL(request.url), bearer);
+    if (admitted instanceof Response) return new Response(admitted.body, { status: 403 });
+    const world = await options.world();
+    return upgrade(socket => serveSocket(world, admitted.sessionId, socket), { maxPayload: options.maxFrameBytes ?? 1_048_576 });
+  }
+
+  return { GET, POST, SOCKET };
 }

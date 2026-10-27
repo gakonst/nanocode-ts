@@ -1,5 +1,5 @@
 import { durableAgent, getWorld, type HostTool } from "durable-harness";
-import { handRoute } from "./hands.ts";
+import { handId, handRoute } from "./hands.ts";
 import { ATTACHMENT_PATH, CANCEL, type CarriedFile, carryAttachments, HAND_CHANNEL, nanocodeHarness, type NanocodeHarnessOptions, type NanocodeSession, SCOPE, type ServiceTier, type Thinking } from "./harness.ts";
 import { committedBatches, LocalSql } from "./journal.ts";
 import { SqlFileSystem } from "../bash/index.ts";
@@ -82,7 +82,9 @@ export function createNanocode(options: NanocodeAppOptions) {
     world: getWorld,
     owns: async (sessionId, channel) => ((await agent.sessions.inspect(sessionId)).config as { hand?: unknown } | undefined)?.hand === channel,
     ...(hands && hands.holdMs ? { holdMs: hands.holdMs } : {}),
+    ...(hands && hands.maxFrameBytes ? { maxFrameBytes: hands.maxFrameBytes } : {}),
   });
+  const upgrade = hands ? hands.upgrade : undefined;
   const streamsHands = hands !== false && !hands.relay;
 
   const admit = async (request: Request): Promise<Response | undefined> => {
@@ -99,15 +101,15 @@ export function createNanocode(options: NanocodeAppOptions) {
     return undefined;
   };
 
-  const start = async (request: Request, body: Body): Promise<string | Response> => {
+  const start = async (request: Request, body: Body): Promise<{ sessionId: string; hand?: string } | Response> => {
     const selection = body.harness === undefined && body.model === undefined ? defaultSelection : selectionOf(harnesses, body.harness, body.model, body.effort);
     if (!selection) return new Response(`harness, model and effort must name one of ${harnesses.map(entry => `${entry.id} (${entry.models.map(model => `${model.id}: ${model.efforts.join("|")}`).join(", ")})`).join(" or ")}`, { status: 400 });
     const refused = await admit(request);
     if (refused) return refused;
-    const hand = harness.hands && typeof body.hand === "string" && HAND_CHANNEL.test(body.hand) ? { hand: body.hand } : {};
+    const hand = !harness.hands ? {} : body.hand === true ? { hand: handId() } : typeof body.hand === "string" && HAND_CHANNEL.test(body.hand) ? { hand: body.hand } : {};
     const config = { ...hand, durability: kernel === "on" ? "run-ahead" : "strict", nanocode: selection satisfies Omit<NanocodeSession, "session_id">, traceAudience: traceAudience ?? (authorize === "public" ? "public" : "unknown") };
     const { sessionId } = await agent.sessions.start({ config });
-    return sessionId;
+    return { sessionId, ...hand };
   };
 
   const file = async (request: Request, params: URLSearchParams): Promise<Response> => {
@@ -129,6 +131,7 @@ export function createNanocode(options: NanocodeAppOptions) {
   async function GET(request: Request): Promise<Response> {
     const params = new URL(request.url).searchParams;
     if (params.has("file")) return file(request, params);
+    if (upgrade && request.headers.get("upgrade")?.toLowerCase() === "websocket") return handRoutes.SOCKET(request, upgrade);
     if (streamsHands && params.has("hand")) return handRoutes.GET(request);
     if (params.get("cursor") === FIRST_CURSOR && params.get("sessionId")) {
       const state = await agent.sessions.inspect(params.get("sessionId")!).catch(() => undefined);
@@ -165,14 +168,15 @@ export function createNanocode(options: NanocodeAppOptions) {
     }
     if (typeof body.sessionId === "string") return chat.POST(request);
     if (body.warm === true) {
-      const sessionId = await start(request, body);
-      if (sessionId instanceof Response) return sessionId;
+      const started = await start(request, body);
+      if (started instanceof Response) return started;
       void nanocodeModule();
-      return Response.json({ sessionId });
+      return Response.json(started);
     }
     if (body.sessionId !== undefined || typeof body.text !== "string" || !body.text) return chat.POST(request);
-    const sessionId = await start(request, body);
-    if (sessionId instanceof Response) return sessionId;
+    const started = await start(request, body);
+    if (started instanceof Response) return started;
+    const { sessionId } = started;
     return chat.POST(new Request(request.url, { body: JSON.stringify({ ...body, sessionId }), headers: request.headers, method: "POST", signal: request.signal }));
   }
 

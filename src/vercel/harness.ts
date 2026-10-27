@@ -7,7 +7,7 @@ import { threadEngine } from "../thread.ts";
 import { nanocodeModule } from "./module.ts";
 import { Bash, type FileSystem, SqlFileSystem, withGitHub } from "../bash/index.ts";
 import { dataUrl, MAX_PROMPT_IMAGES, PROMPT_IMAGE_TYPES, sniff, writeFile } from "../files.ts";
-import { dialHand } from "./hands.ts";
+import { dialHand, type UpgradeWebSocket } from "./hands.ts";
 import { egress } from "./egress.ts";
 
 export const SCOPE = "session";
@@ -59,7 +59,7 @@ export interface NanocodeHarnessOptions {
   promptImages?: (session: NanocodeSession) => boolean;
 }
 
-export type NanocodeHands = { relay?(channel: string): string; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
+export type NanocodeHands = { relay?(channel: string): string; upgrade?: UpgradeWebSocket; name?: string; timeoutMs?: number; maxFrameBytes?: number; holdMs?: number };
 
 export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/;
 
