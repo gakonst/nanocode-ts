@@ -275,6 +275,18 @@ function executorFailure(error: unknown): Contracts.HostFailureError {
 }
 
 /**
+ * Shares MCP listings through a Workers KV namespace, so that sessions in other isolates open
+ * without discovering their MCP servers again. KV keeps an entry at least 60 seconds.
+ */
+export function mcpStore(namespace: KVNamespace): Contracts.McpStore {
+  return {
+    get: (key) => namespace.get(key),
+    put: (key, value, ttlMs) =>
+      namespace.put(key, value, { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) }),
+  }
+}
+
+/**
  * Returns the `AgentSession` Durable Object class and the Worker handler of a deployment. Export
  * `AgentSession` from the Worker under the class name that the `SESSIONS` binding names.
  */
@@ -1159,6 +1171,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const mcpFetch =
             options.mcp?.fetch?.(authority, this.env) ??
             ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init))
+          const mcpStore = mcpServers.length ? options.mcp?.store?.(this.env) : undefined
           const shell =
             options.workspace === false || enabled || this.handsMode(scope, descriptor)
               ? undefined
@@ -1234,6 +1247,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               },
               {
                 ...(shell ? { workspace: shell.workspace() } : {}),
+                ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
                 fetch: cellFetch,
                 tools: options.tools && {
                   call: async (name, input, signal, context) => {
@@ -2496,12 +2510,13 @@ export declare namespace create {
     instructions?: string
     /** Whether the runtime emits live deltas. Defaults to `true`. */
     liveDeltas?: boolean
-    /** MCP servers of a session, and the `fetch` that reaches them. */
+    /** MCP servers of a session, the `fetch` that reaches them, and the store that shares their listings. */
     mcp?: {
       servers:
         | Contracts.McpServer[]
         | ((authority: SessionAuthority, env: E) => Contracts.McpServer[])
       fetch?(authority: SessionAuthority, env: E): typeof fetch
+      store?(env: E): Contracts.McpStore | undefined
     }
     /** Records a new session, and returns `false` to delete it and refuse the request. */
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean

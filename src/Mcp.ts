@@ -71,6 +71,31 @@ async function payload(
   }
 }
 
+type Stored = { at: number; init: unknown; tools: Tool[] }
+
+async function digest(url: string) {
+  const hash = await crypto.subtle.digest('SHA-256', encoder.encode(url))
+  return (
+    'nanocode-mcp:' +
+    Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  )
+}
+
+async function stored(store: Contracts.McpStore, url: string, ttl: number) {
+  const value = await store.get(await digest(url)).catch(() => undefined)
+  if (!value) return undefined
+
+  const parsed = (() => {
+    try {
+      return JSON.parse(value) as Stored
+    } catch {
+      return undefined
+    }
+  })()
+  if (!parsed || !Array.isArray(parsed.tools) || Date.now() - parsed.at > ttl) return undefined
+  return parsed
+}
+
 function reply(id: unknown, result: unknown) {
   return new Response(JSON.stringify({ jsonrpc: '2.0', id, result }), {
     headers: { 'content-type': 'application/json' },
@@ -152,6 +177,17 @@ export function defer<R extends Request, A extends unknown[]>(
           const result = await listing.init.catch(() => undefined)
           if (result) return reply(body.id, result)
         }
+
+        const shared = !listing && policy.store ? await stored(policy.store, url, ttl) : undefined
+        if (shared) {
+          listings.set(url, {
+            at: shared.at,
+            init: Promise.resolve(shared.init),
+            tools: Promise.resolve(shared.tools),
+          })
+          return reply(body.id, shared.init)
+        }
+
         const fresh: Listing = { at: Date.now() }
         const response = await send(request, signal, ...rest)
         if (!response.ok || response.headers.has('mcp-session-id')) {
@@ -168,6 +204,16 @@ export function defer<R extends Request, A extends unknown[]>(
         fresh.init = Promise.resolve(parsed.result)
         fresh.tools = listing?.tools ?? list()
         listings.set(url, fresh)
+
+        const store = policy.store
+        if (store)
+          void fresh.tools
+            .then(async (tools) => {
+              if (!tools) return
+              const value: Stored = { at: fresh.at, init: parsed.result, tools }
+              await store.put(await digest(url), JSON.stringify(value), ttl)
+            })
+            .catch(() => undefined)
         return reply(body.id, parsed.result)
       }
       case 'notifications/initialized':

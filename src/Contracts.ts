@@ -97,6 +97,17 @@ export type McpServer = {
   bearer_token?: string
 }
 
+/**
+ * Store that shares MCP listings beyond one process, such as a Workers KV namespace. Keys are
+ * digests of a server and its request headers.
+ */
+export type McpStore = {
+  /** Reads a stored listing, or nothing when none is stored. */
+  get(key: string): Promise<string | null | undefined>
+  /** Stores a listing for `ttlMs`. */
+  put(key: string, value: string, ttlMs: number): Promise<void>
+}
+
 /** Gateway that serves a model. */
 export type ModelGateway = 'direct' | 'vercel' | 'workers_ai'
 
@@ -424,7 +435,7 @@ export type RuntimeOptions = {
   }
   workspace?: WorkspaceHost
   fetch?(input: string, init: RequestInit): Promise<Response>
-  mcp?: { cacheMs?: number }
+  mcp?: { cacheMs?: number; store?: McpStore }
   remote?: {
     failed?(): boolean
     execute(request: RemoteRequest, id: number): Promise<unknown>
