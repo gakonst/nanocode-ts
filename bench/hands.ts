@@ -4,6 +4,7 @@ import {
   histogram,
   bytesHist,
   hand,
+  handCpu,
   Session,
   median,
   p90,
@@ -82,11 +83,15 @@ for (const [cell, code] of Object.entries(cells)) {
   const bb = { ...bytesHist }
   const t = [],
     c = []
+  const brain0 = process.cpuUsage()
+  const hand0 = handCpu(attached)
   for (let i = 0; i < N; i++) {
     const r = await session.once(code)
     t.push(r.turn)
     c.push(r.cell)
   }
+  const brain1 = process.cpuUsage(brain0)
+  const handMs = (handCpu(attached) - hand0) / N
   const per = (key) => (stats[key] - before[key]) / N
   if (process.env.HIST) {
     console.log(
@@ -122,6 +127,8 @@ for (const [cell, code] of Object.entries(cells)) {
     sql: per('statements'),
     sql_kb: per('bytes') / 1024,
     req_kb: per('request_bytes') / 1024,
+    brain_cpu: (brain1.user + brain1.system) / 1000 / N,
+    hand_cpu: handMs,
   })
   if (process.env.TOP) {
     for (const row of session.sql.db
@@ -171,7 +178,9 @@ const out = [
     pad('tx', 7) +
     pad('sql', 7) +
     pad('sql KB', 9) +
-    'req KB',
+    pad('req KB', 9) +
+    pad('brain cpu', 11) +
+    'hand cpu',
 ]
 for (const r of rows)
   out.push(
@@ -189,7 +198,9 @@ for (const r of rows)
           pad(f(r.tx), 7) +
           pad(f(r.sql), 7) +
           pad(f(r.sql_kb), 9) +
-          f(r.req_kb),
+          pad(f(r.req_kb), 9) +
+          pad(f(r.brain_cpu), 11) +
+          f(r.hand_cpu),
   )
 report('hands-' + LABEL, out)
 process.exit(0)

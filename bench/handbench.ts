@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocketServer } from 'ws'
 import * as AgentRuntime from '../src/AgentRuntime.ts'
@@ -267,6 +267,7 @@ export async function hand(kind, binary) {
   return {
     executor,
     name,
+    pid: child.pid,
     close() {
       child.kill()
       if (kind === 'docker') spawn('docker', ['rm', '-f', 'handbench-' + port], { stdio: 'ignore' })
@@ -410,6 +411,15 @@ export class Session {
       cell: this.marks.length > 1 ? this.marks[1] - this.marks[0] : 0,
     }
   }
+}
+
+export function handCpu(attached) {
+  if (!attached.pid) return 0
+  const out = spawnSync('ps', ['-o', 'time=', '-p', String(attached.pid)], {
+    encoding: 'utf8',
+  }).stdout.trim()
+  const [min, sec] = out.split(':')
+  return out ? (Number(min) * 60 + Number(sec)) * 1000 : 0
 }
 
 export const median = (xs) => {
