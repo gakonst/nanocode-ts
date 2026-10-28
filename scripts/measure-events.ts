@@ -2,7 +2,7 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import * as EventHub from '../src/EventHub.ts'
 
 if (typeof globalThis.gc !== 'function')
-  throw new Error('run with node --expose-gc scripts/measure-events.mjs')
+  throw new Error('run with node --expose-gc scripts/measure-events.ts')
 const count = Number(process.env.EVENT_PAGE_SIZE ?? 128)
 const budget = Number(process.env.EVENT_TAIL_BYTES ?? 4194304)
 const sizes = (process.env.EVENT_SIZES ?? '300,4096,65536,1048576').split(',').map(Number)

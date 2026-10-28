@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs'
-import { probes } from './probes.mjs'
+import { probes } from './probes.ts'
 
 const MODELS = {
   haiku: ['claude', 'claude-haiku-5-5'],
@@ -36,7 +36,7 @@ await Promise.all(
   Array.from({ length: conc }, async () => {
     while (next < jobs.length) {
       const job = jobs[next++]
-      drivers[job.target] ??= await import('./targets/' + job.target + '.mjs')
+      drivers[job.target] ??= await import('./targets/' + job.target + '.ts')
       const [provider, model] = MODELS[job.model] ?? ['codex', job.model]
       let r
       try {
