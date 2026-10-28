@@ -129,6 +129,12 @@ export type Session = {
 
 export type Thinking = Contracts.Thinking
 
+/** ChatGPT or Claude plan of a session: the model dispatch and, for Codex, the WebSocket that carry its credential. */
+export type Subscription = {
+  dispatch: Gateway.Dispatch
+  socket?: NonNullable<Contracts.RuntimeOptions['socket']> | undefined
+}
+
 function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url)
@@ -203,6 +209,15 @@ export function create(options: create.Options = {}): Harness {
         : undefined
     const handName = hands?.name ?? 'browser'
     const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
+    const account = (ctx.config as { account?: unknown } | undefined)?.account
+    const plan =
+      typeof account === 'string' && options.subscription
+        ? await options.subscription({
+            account,
+            provider: session.provider,
+            ...(session.model ? { model: session.model } : {}),
+          })
+        : undefined
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
     const cellFetch = GitHub.wrap(Egress.guard(configuredFetch), {
@@ -242,9 +257,11 @@ export function create(options: create.Options = {}): Harness {
               executor && options.handInstructions
                 ? [options.instructions, options.handInstructions].filter(Boolean).join('\n\n')
                 : options.instructions,
-            subscription: false,
-            endpoint: options.endpoint ?? Gateway.endpoint(session.provider),
-            gateway,
+            subscription: plan !== undefined,
+            endpoint: plan
+              ? Gateway.planEndpoint(session.provider)
+              : (options.endpoint ?? Gateway.endpoint(session.provider)),
+            gateway: plan ? undefined : gateway,
             event_coalesce_ms: options.eventCoalesceMs ?? defaultEventCoalesceMs,
             stream_tool_input: options.streamToolInput,
             code_mode: executor ? false : options.codeMode,
@@ -284,8 +301,9 @@ export function create(options: create.Options = {}): Harness {
                   signal,
                 })
               counts.model_requests++
-              return dispatch(request, signal)
+              return plan ? plan.dispatch(request, signal) : dispatch(request, signal)
             },
+            ...(plan?.socket ? { socket: plan.socket } : {}),
             tools: {
               call: (name, input, signal, { call_id }) => {
                 counts.tool_calls++
@@ -513,6 +531,15 @@ export declare namespace create {
     sessionFetch?(sessionId: string): typeof fetch
     /** Whether the runtime streams tool input. */
     streamToolInput?: boolean
+    /**
+     * Returns the ChatGPT or Claude plan that a session's model requests use, or `undefined` for the AI Gateway.
+     * The account is the session config's `account`, which `App.create`'s `account` sets; each drive asks again.
+     */
+    subscription?(session: {
+      account: string
+      provider: Contracts.ModelProvider
+      model?: string
+    }): Promise<Subscription | undefined> | Subscription | undefined
     /** Whether the agent starts subagents. */
     subagents?: boolean
     /** Default reasoning effort, when the session config names none. */
