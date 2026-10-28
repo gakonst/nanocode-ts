@@ -3,6 +3,7 @@
  *
  * @module
  */
+import { models } from 'nanocode-ts/models'
 import { describe, expect, test } from 'vite-plus/test'
 import * as Plans from './Plans.ts'
 
@@ -75,6 +76,18 @@ describe('create', () => {
 })
 
 describe('serves', () => {
+  test('serves the models of the catalog that the provider’s own API serves', () => {
+    expect(
+      models.harnesses.flatMap((harness) =>
+        harness.models
+          .filter(
+            (model) => Plans.serves(harness.id, model.id) !== model.gateways.includes('direct'),
+          )
+          .map((model) => model.id),
+      ),
+    ).toMatchInlineSnapshot(`[]`)
+  })
+
   test('serves the provider’s own models', () => {
     expect(
       [
