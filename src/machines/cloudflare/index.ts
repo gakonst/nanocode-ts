@@ -3,7 +3,7 @@ import {
   type NanocodeOptions,
   type SessionAuthority,
 } from '../../cloudflare/runtime.ts'
-import { githubArchives } from '../../bash/index.ts'
+import * as GitHub from '../../bash/GitHub.ts'
 import * as Mcp from '../mcp.ts'
 import * as Payment from '../payment.ts'
 import { device, type Holder, keys } from '../account.ts'
@@ -190,7 +190,7 @@ export function createWallets<E extends MachinesEnv>(options: WalletsOptions<E>)
             fetch: (authority: SessionAuthority, env: E) => paying(env, authority.account_id),
           },
         }
-      : { codeMode: { fetch: () => githubArchives() } }),
+      : { codeMode: { fetch: () => GitHub.archives() } }),
     ...(servers.length
       ? {
           mcp: {

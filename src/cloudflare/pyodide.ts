@@ -1,6 +1,6 @@
 import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from 'nanocode-ts/pyodide-modules'
-import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from '../bash/commands/python.ts'
-import { restorePyodide } from '../bash/commands/pysnapshot.ts'
+import * as Python from '../bash/Python.ts'
+import { restorePyodide } from '../bash/internal/commands/pysnapshot.ts'
 import * as Fingerprint from '../internal/Fingerprint.ts'
 
 export type SnapshotParts = (name: string) => Promise<Response>
@@ -35,7 +35,7 @@ function install(): void {
       scope.process.type = 'renderer'
     } catch {}
   }
-  scope.location ??= new URL(PYODIDE_URL)
+  scope.location ??= new URL(Python.pyodideUrl)
   const wasm = WebAssembly as unknown as Record<string, unknown>
   const Compiled = WebAssembly.Module
   const instantiate = WebAssembly.instantiate.bind(WebAssembly) as unknown as Instantiate
@@ -115,9 +115,11 @@ function joined(parts: SnapshotParts, names: string[]): ReadableStream<Uint8Arra
 
 let restorable = true
 
-export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide> {
-  if (BUILT !== PYODIDE_VERSION)
-    throw new Error('nanocode-ts precompiled Pyodide ' + BUILT + ' but expects ' + PYODIDE_VERSION)
+export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Python.Pyodide> {
+  if (BUILT !== Python.pyodideVersion)
+    throw new Error(
+      'nanocode-ts precompiled Pyodide ' + BUILT + ' but expects ' + Python.pyodideVersion,
+    )
   install()
   const [loader, asm] = await Promise.all([
     import('pyodide/pyodide.mjs'),
@@ -133,8 +135,8 @@ export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide
         BUILT,
     )
   const config = {
-    indexURL: PYODIDE_URL,
-    packageBaseUrl: PYODIDE_URL,
+    indexURL: Python.pyodideUrl,
+    packageBaseUrl: Python.pyodideUrl,
     stdout: () => {},
     stderr: () => {},
   }
@@ -159,5 +161,8 @@ export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide
       )
     }
   }
-  return (await loader.loadPyodide({ ...config, createPyodideModule: asm.default })) as Pyodide
+  return (await loader.loadPyodide({
+    ...config,
+    createPyodideModule: asm.default,
+  })) as Python.Pyodide
 }

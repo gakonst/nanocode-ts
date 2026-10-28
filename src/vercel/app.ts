@@ -14,7 +14,7 @@ import {
   type Thinking,
 } from './harness.ts'
 import { committedBatches, LocalSql } from './journal.ts'
-import { SqlFileSystem } from '../bash/index.ts'
+import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from './transport.ts'
 import { nanocodeModule } from './module.ts'
@@ -234,9 +234,9 @@ export function createNanocode(options: NanocodeAppOptions) {
     const sql = new LocalSql(committedBatches(state))
     try {
       return await Files.response(
-        new SqlFileSystem(
+        SqlFileSystem.create(
           { transaction: (_kind, _operation, statements) => sql.run(statements) },
-          SCOPE,
+          { scope: SCOPE },
         ),
         params.get('file') ?? '',
         { root: harness.workspace?.cwd ?? '/workspace' },

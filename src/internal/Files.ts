@@ -1,4 +1,4 @@
-import type { FileSystem } from '../bash/fs.ts'
+import type { FileSystem } from '../bash/FileSystem.ts'
 
 export const workspace = '/workspace'
 

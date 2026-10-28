@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'vite-plus/test'
 import * as Sqlite from '../../test/Sqlite.ts'
-import { Bash, MemoryFileSystem, mounted, SqlFileSystem } from './index.ts'
+import { Bash, MemoryFileSystem, Mount, SqlFileSystem } from './index.ts'
 
 describe('create', () => {
   test('runs pipelines, loops, and expansions', async () => {
@@ -150,8 +150,10 @@ describe('create', () => {
   })
 
   test('serves mounted file systems', async () => {
-    const archive = new MemoryFileSystem({ '/report.txt': 'archived\n' })
-    const bash = await Bash.create({ fs: mounted(new MemoryFileSystem(), { '/archive': archive }) })
+    const archive = MemoryFileSystem.create({ files: { '/report.txt': 'archived\n' } })
+    const bash = await Bash.create({
+      fs: Mount.create(MemoryFileSystem.create(), { mounts: { '/archive': archive } }),
+    })
 
     expect(await bash.exec('cat /archive/report.txt; ls /archive')).toMatchInlineSnapshot(`
       {
@@ -170,11 +172,11 @@ describe('SqlFileSystem', () => {
   test('keeps files across shells on one SQL host', async () => {
     const store = Sqlite.open()
 
-    const first = await Bash.create({ fs: new SqlFileSystem(store.sql, 'session') })
+    const first = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'session' }) })
     await first.exec('mkdir -p /work && echo persisted > /work/state.txt')
 
-    const second = await Bash.create({ fs: new SqlFileSystem(store.sql, 'session') })
-    const other = await Bash.create({ fs: new SqlFileSystem(store.sql, 'other') })
+    const second = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'session' }) })
+    const other = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'other' }) })
 
     expect(await second.exec('cat /work/state.txt')).toMatchInlineSnapshot(`
       {

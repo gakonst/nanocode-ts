@@ -5,16 +5,12 @@ import * as Contracts from '../Contracts.ts'
 import * as EventHub from '../EventHub.ts'
 import * as AgentRuntime from '../AgentRuntime.ts'
 import * as Remote from '../Remote.ts'
-import {
-  Bash,
-  SqlFileSystem,
-  githubArchives,
-  mounted,
-  withGitHub,
-  type FileSystem,
-  type Limits,
-  type PythonRemote,
-} from '../bash/index.ts'
+import * as Bash from '../bash/Bash.ts'
+import type * as FileSystem from '../bash/FileSystem.ts'
+import * as GitHub from '../bash/GitHub.ts'
+import * as Mount from '../bash/Mount.ts'
+import type * as Python from '../bash/Python.ts'
+import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Egress from '../internal/Egress.ts'
 import * as Files from '../internal/Files.ts'
 import wasm from 'nanocode-ts/nanocode_wasm.wasm'
@@ -124,10 +120,10 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
     | {
         cwd?: string
         files?: Record<string, string>
-        limits?: Partial<Limits>
+        limits?: Partial<Bash.Limits>
         maxFileBytes?: number
-        mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem>
-        python?(authority: SessionAuthority, env: E): PythonRemote | undefined
+        mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>
+        python?(authority: SessionAuthority, env: E): Python.Remote | undefined
       }
   workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   liveDeltas?: boolean
@@ -694,9 +690,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             options.workspace === false ||
             (descriptor.provider === 'codex' && WORKERS_AI_MODELS.has(descriptor.model ?? ''))
               ? []
-              : await Files.promptImages(new SqlFileSystem(this.store, scope), input.images, {
-                  root: options.workspace?.cwd ?? '/workspace',
-                })
+              : await Files.promptImages(
+                  SqlFileSystem.create(this.store, { scope }),
+                  input.images,
+                  {
+                    root: options.workspace?.cwd ?? '/workspace',
+                  },
+                )
           submitted = await (
             await this.instance(scope)
           ).submit(scope, {
@@ -1104,7 +1104,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
           const hostFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env)
           const cellFetch = Egress.guard(
-            hostFetch ? withGitHub(hostFetch, github) : githubArchives(undefined, github),
+            hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
           )
           const pythonRemote = options.workspace
             ? options.workspace.python?.(authority, this.env)
@@ -1120,15 +1120,16 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             options.workspace === false || enabled || this.handsMode(scope, descriptor)
               ? undefined
               : await Bash.create({
-                  fs: mounted(
-                    new SqlFileSystem(
-                      this.store,
+                  fs: Mount.create(
+                    SqlFileSystem.create(this.store, {
+                      maxFileBytes: options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES,
                       scope,
-                      options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES,
-                    ),
-                    options.workspace
-                      ? (options.workspace.mounts?.(authority, this.env) ?? {})
-                      : {},
+                    }),
+                    {
+                      mounts: options.workspace
+                        ? (options.workspace.mounts?.(authority, this.env) ?? {})
+                        : {},
+                    },
                   ),
                   cwd: options.workspace?.cwd ?? '/workspace',
                   ...(options.workspace?.files ? { files: options.workspace.files } : {}),
@@ -2271,7 +2272,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (options.workspace === false)
         return json({ error: 'this deployment has no workspace' }, 404)
       const root = options.workspace?.cwd ?? '/workspace'
-      const fs = new SqlFileSystem(this.store, scope)
+      const fs = SqlFileSystem.create(this.store, { scope })
       const rest = url.pathname.slice('/internal/files'.length)
       if (request.method === 'GET') return await Files.response(fs, rest, { root })
       if (request.method !== 'POST' || rest) return json({ error: 'method not allowed' }, 405)

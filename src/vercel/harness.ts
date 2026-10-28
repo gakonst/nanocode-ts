@@ -17,7 +17,10 @@ import { type Dispatch, gatewayDispatch, gatewayEndpoint } from './gateway.ts'
 import { type Durability, type JournalStats, SqlJournal } from './journal.ts'
 import * as Thread from '../internal/Thread.ts'
 import { nanocodeModule } from './module.ts'
-import { Bash, type FileSystem, SqlFileSystem, withGitHub } from '../bash/index.ts'
+import * as Bash from '../bash/Bash.ts'
+import type * as FileSystem from '../bash/FileSystem.ts'
+import * as GitHub from '../bash/GitHub.ts'
+import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import { dialHand, type UpgradeWebSocket } from './hands.ts'
 import { egress } from './egress.ts'
@@ -235,11 +238,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
-    const cellFetch = withGitHub(egress(configuredFetch), {
+    const cellFetch = GitHub.wrap(egress(configuredFetch), {
       token: githubToken ? () => githubToken(ctx.runId) : undefined,
     })
     const files =
-      options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE)
+      options.workspace === false || executor
+        ? undefined
+        : SqlFileSystem.create(journal, { scope: SCOPE })
     const shell =
       !files || options.workspace === false
         ? undefined
@@ -525,7 +530,7 @@ async function place(
   thinking: Contracts.Thinking | undefined,
   limit: number | undefined,
   hand?: string,
-  workspace?: FileSystem,
+  workspace?: FileSystem.FileSystem,
   seesImages = true,
 ): Promise<Contracts.Thinking | undefined> {
   if (cancels(submission)) {
