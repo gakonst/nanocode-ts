@@ -1,3 +1,8 @@
+/**
+ * Browser transport for a nanocode deployment on Vercel: prompts over `POST`, and events over a resumable event stream.
+ *
+ * @module
+ */
 import {
   type Attachment,
   attachedPrompt,
@@ -6,44 +11,61 @@ import {
   type LiveEvent,
   serverEvents,
   socketUrl,
-  type Transport,
+  type Transport as ClientTransport,
   type TransportParameters,
 } from '../client.ts'
 import * as Files from '../internal/Files.ts'
 
-export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024
+/** Largest total size in bytes of the attachments of one message. */
+export const attachmentBytes = 3 * 1024 * 1024
 
-export const FIRST_CURSOR = '0.0'
+/** Event stream cursor of a session's first event. */
+export const firstCursor = '0.0'
 
-export type VercelSession = { id?: string; cursor?: string; open?: boolean; hand?: string }
-
-export type VercelSelection = { harness: string; model: string; effort?: string }
-
-export type VercelTransportOptions = {
-  url?: string
-  chaosUrl?: string
-  selection(): VercelSelection
-  headers?(): Record<string, string>
-  session?: { load(): VercelSession; save(session: VercelSession): void }
-  reconnectMs?: number
-  hand?(session?: string): Promise<string | undefined>
-  hands?: boolean
+/** Model choice that a new session sends. */
+export type Selection = {
+  /** Reasoning effort. Defaults to the model's effort. */
+  effort?: string
+  /** Harness ID. */
+  harness: string
+  /** Model ID. */
+  model: string
 }
 
-export type VercelTransport = Transport &
+/** Saved state of the transport's session. */
+export type Session = {
+  /** Event stream cursor of the last event read. */
+  cursor?: string
+  /** Hand channel of the session. */
+  hand?: string
+  /** Session ID, once the server started the session. */
+  id?: string
+  /** Whether a turn is in flight. */
+  open?: boolean
+}
+
+/** Transport of a deployment on Vercel, with its session and hand operations. */
+export type Transport = ClientTransport &
   HandSource & {
-    session(): VercelSession
-    warm(): void
-    open(): Promise<string | undefined>
-    hands(): Promise<(string | null)[]>
+    /** Arms a crash of the session's drive, for tests of a deployment with `chaos`. */
     crash(options?: { at?: 'tool' | 'any'; afterMs?: number }): Promise<Response>
+    /** Clears the session. */
     forget(): void
+    /** Returns the names of the hands attached to the session. */
+    hands(): Promise<(string | null)[]>
+    /** Starts the session when it has none, and returns its ID. */
+    open(): Promise<string | undefined>
+    /** Returns the session state. */
+    session(): Session
+    /** Starts a session for the current selection ahead of the first prompt. */
+    warm(): void
   }
 
-export function vercel(options: VercelTransportOptions): VercelTransport {
+/** Returns a browser transport that talks to the route handlers of `App.create`. */
+export function create(options: create.Options): Transport {
   const url = options.url ?? '/api/chat'
   const reconnectMs = options.reconnectMs ?? 1000
-  let state: VercelSession = options.session?.load() ?? {}
+  let state: Session = options.session?.load() ?? {}
   let warmed: { key: string; session: Promise<string | undefined> } | undefined
   const pending = new Map<string, { bytes: Uint8Array; type: string }>()
 
@@ -77,7 +99,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
   const follow = async (
     response: Response,
     parameters: Omit<TransportParameters, 'prompt'>,
-    session: VercelSession,
+    session: Session,
   ): Promise<boolean> => {
     const { signal } = parameters
     if (!response.ok || !response.body) {
@@ -114,7 +136,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         ).join('')
       : undefined
   const begun = new Map<string, string>()
-  const adopt = (session: VercelSession, id: string) => {
+  const adopt = (session: Session, id: string) => {
     session.id = id
     const hand = begun.get(id)
     if (hand) session.hand = hand
@@ -144,11 +166,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
   const reconnect = async (
     id: string,
     parameters: Omit<TransportParameters, 'prompt'>,
-    session: VercelSession,
+    session: Session,
   ) => {
     const { signal } = parameters
     let delay = reconnectMs
-    session.cursor ??= FIRST_CURSOR
+    session.cursor ??= firstCursor
     if (session.cursor.endsWith(';end')) return
     while (!signal?.aborted) {
       const response = await fetch(
@@ -185,11 +207,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
 
   return {
     files: {
-      maxBytes: VERCEL_ATTACHMENT_BYTES,
+      maxBytes: attachmentBytes,
       scope: () => state.id,
       async upload(file, name) {
-        if (file.size > VERCEL_ATTACHMENT_BYTES)
-          throw new Error(`attachments are at most ${VERCEL_ATTACHMENT_BYTES} bytes here`)
+        if (file.size > attachmentBytes)
+          throw new Error(`attachments are at most ${attachmentBytes} bytes here`)
         const bytes = new Uint8Array(await file.arrayBuffer())
         const safe = Files.safeName(name)
         const dot = safe.lastIndexOf('.')
@@ -222,10 +244,8 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         (sum, item) => sum + (pending.get(item.path)?.bytes.length ?? 0),
         0,
       )
-      if (total > VERCEL_ATTACHMENT_BYTES)
-        throw new Error(
-          `a message carries at most ${VERCEL_ATTACHMENT_BYTES} bytes of attachments here`,
-        )
+      if (total > attachmentBytes)
+        throw new Error(`a message carries at most ${attachmentBytes} bytes of attachments here`)
       const carried = encoded(attachments)
       const session = state
       session.open = true
@@ -311,7 +331,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     session: () => state,
     snapshot: () => ({ ...state }),
     restore(saved) {
-      state = saved && typeof saved === 'object' ? { ...(saved as VercelSession) } : {}
+      state = saved && typeof saved === 'object' ? { ...(saved as Session) } : {}
       warmed = undefined
     },
     warm() {
@@ -362,5 +382,26 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       warmed = undefined
       save()
     },
+  }
+}
+
+export declare namespace create {
+  type Options = {
+    /** Chaos route. Defaults to `url` with `chat` replaced by `chaos`. */
+    chaosUrl?: string
+    /** Returns the hand channel for a session, or for a new session without `session`. */
+    hand?(session?: string): Promise<string | undefined>
+    /** Whether new sessions get a random hand channel. */
+    hands?: boolean
+    /** Returns headers that every request carries. */
+    headers?(): Record<string, string>
+    /** Base delay in milliseconds before a reconnect. Defaults to 1000. */
+    reconnectMs?: number
+    /** Returns the model choice of a new session. */
+    selection(): Selection
+    /** Loads and saves the session state. */
+    session?: { load(): Session; save(session: Session): void }
+    /** Chat route. Defaults to `/api/chat`. */
+    url?: string
   }
 }
