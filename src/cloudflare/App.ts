@@ -26,6 +26,7 @@ import * as Executor from './internal/Executor.ts'
 import * as HandToken from './internal/HandToken.ts'
 import { headerJson, json } from './internal/Http.ts'
 import * as Metadata from './internal/Metadata.ts'
+import * as PlanModels from '../client/Plans.ts'
 import * as Plans from './Plans.ts'
 import * as Relay from './Relay.ts'
 import * as Sql from './Sql.ts'
@@ -294,6 +295,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     (plans &&
       ((account: string, env: E, provider: Contracts.ModelProvider) =>
         plans.subscription(account, env as E & Plans.Env, provider)))
+  const served = (
+    provider: Contracts.ModelProvider,
+    model: string | undefined,
+    subscribed: boolean,
+  ) => subscribed && (!plans || PlanModels.serves(provider, model))
   const valueLimit = options.valueLimit ?? Sql.valueLimitBytes
   const tooLarge = `request bodies are limited to ${valueLimit} bytes`
   class AgentSession extends DurableObject<E> {
@@ -739,6 +745,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           descriptor.web_search = input.web_search
           if (descriptor.provider === 'codex')
             descriptor.subscription = descriptor.codex_subscription ?? true
+          descriptor.subscription = served(
+            descriptor.provider ?? 'claude',
+            descriptor.model,
+            descriptor.subscription,
+          )
           policy(this.env.RECOVERY_DELAY_MS, 'RECOVERY_DELAY_MS')
           const current = this.metadata.get('authority')
           if (current && current !== identity) throw new Error('session authority mismatch')
@@ -2008,7 +2019,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         hand: undefined,
         provider,
         ...(model === undefined ? {} : { model }),
-        subscription: provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+        subscription: served(
+          provider,
+          model,
+          provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+        ),
       }
       const resident = this.runtimes.get(scope)
       const busy = this.pumping || !this.queueKnownEmpty() || !!this.metadata.first('background:')
@@ -2052,7 +2067,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         hand: undefined,
         provider,
         model,
-        subscription: provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+        subscription: served(
+          provider,
+          model,
+          provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+        ),
       }
       const runtime = await this.runtime(scope, entry.session, descriptor)
       await runtime.preconnect()

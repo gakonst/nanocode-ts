@@ -6,6 +6,7 @@
  */
 import type { Store } from 'nanocode-egress'
 import { Egress, Redis } from 'nanocode-egress/vercel'
+import * as Client from '../client/Plans.ts'
 import type * as Harness from './Harness.ts'
 
 /** Plans of a deployment, as `App.create` takes them. */
@@ -45,15 +46,17 @@ export function create(options: Options, account: Options['account']): create.Re
   const routes = Egress.routes({ plans, account: owner, prefix: options.prefix ?? '/api/plans' })
   const handle = async (request: Request) =>
     (await routes(request)) ?? Response.json({ error: 'plan route not found' }, { status: 404 })
+  const subscription = Egress.subscription(plans)
   return {
-    subscription: Egress.subscription(plans),
+    subscription: async (session) =>
+      Client.serves(session.provider, session.model) ? await subscription(session) : undefined,
     routes: { GET: handle, POST: handle, DELETE: handle },
   }
 }
 
 export declare namespace create {
   type ReturnType = {
-    /** `subscription` of the harness: the session's plan while its account is signed in. */
+    /** `subscription` of the harness: the session's plan while its account is signed in and the plan serves its model. */
     subscription: NonNullable<Harness.create.Options['subscription']>
     /** Route handlers of the sign-in routes. */
     routes: Routes

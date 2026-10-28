@@ -5,6 +5,7 @@
  * @module
  */
 import type { ChatGpt, Claude } from 'nanocode-egress'
+import { models } from 'nanocode-ts/models'
 
 /** Model provider of a plan: `codex` for ChatGPT, `claude` for Claude. */
 export type Provider = 'claude' | 'codex'
@@ -70,6 +71,20 @@ export declare namespace create {
     /** `fetch` of the requests. Defaults to the global `fetch`. */
     fetch?: typeof fetch
   }
+}
+
+/**
+ * Returns whether the plan of `provider` serves `model`: a ChatGPT plan serves OpenAI's models and a Claude plan
+ * Anthropic's, the models that the catalog lists on the provider's `direct` API. Other models of the harness, such as
+ * GLM-5.3 or Kimi K3 through a gateway, run on the deployment's gateway. A session that names no model takes its
+ * harness's default, which the plan serves.
+ */
+export function serves(provider: Provider, model?: string | undefined): boolean {
+  if (!model) return true
+  const entry = models.harnesses
+    .find((harness) => harness.id === provider)
+    ?.models.find((candidate) => candidate.id === model)
+  return entry?.gateways.includes('direct') ?? false
 }
 
 /** Display name of the plan of `provider`. */
