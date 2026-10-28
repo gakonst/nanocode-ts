@@ -83,7 +83,10 @@ export type ModelDispatch = {
   subscription: boolean
 }
 
-export type SocketDispatch = Pick<ModelDispatch, 'provider' | 'authority' | 'headers'>
+export type SocketDispatch = Pick<
+  ModelDispatch,
+  'provider' | 'authority' | 'endpoint' | 'headers' | 'subscription'
+>
 
 export type PrivateBinding = {
   fetch(request: Request): Promise<Response>
@@ -1142,6 +1145,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     : {}),
                   limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
                 })
+          const codexEndpoint = descriptor.subscription
+            ? 'https://chatgpt.com/backend-api/codex'
+            : 'https://api.openai.com/v1'
           try {
             const created = await this.instance(scope, true)
             await created.open(
@@ -1155,9 +1161,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 subscription: descriptor.subscription,
                 endpoint:
                   descriptor.provider === 'codex'
-                    ? descriptor.subscription
-                      ? 'https://chatgpt.com/backend-api/codex'
-                      : 'https://api.openai.com/v1'
+                    ? codexEndpoint
                     : `https://api.anthropic.com/v1/messages${descriptor.subscription ? '?beta=true' : ''}`,
                 ...(descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? '')
                   ? {
@@ -1341,8 +1345,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                           'x-nanocode-socket': headerJson({
                             authority,
                             provider: request.provider,
+                            endpoint: codexEndpoint + '/responses',
                             headers: request.headers,
-                          }),
+                            subscription: descriptor.subscription,
+                          } satisfies SocketDispatch),
                         },
                       }),
                     )

@@ -1,0 +1,58 @@
+import type * as App from './App.ts'
+
+export function create(options: create.Options): App.PrivateBinding {
+  return {
+    async fetch(request) {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/model' && request.method === 'POST') {
+        const dispatch = header<App.ModelDispatch>(request, 'x-nanocode-model')
+        if (!dispatch) return refuse(400, 'invalid model dispatch')
+        return options.fetch(
+          new Request(dispatch.endpoint, {
+            method: 'POST',
+            headers: dispatch.headers,
+            body: request.body,
+            signal: request.signal,
+          }),
+          dispatch,
+        )
+      }
+      if (pathname === '/socket') {
+        const dispatch = header<App.SocketDispatch>(request, 'x-nanocode-socket')
+        if (!dispatch) return refuse(400, 'invalid socket dispatch')
+        const headers = new Headers(dispatch.headers)
+        headers.set('upgrade', 'websocket')
+        return options.fetch(
+          new Request(dispatch.endpoint, { headers, signal: request.signal }),
+          dispatch,
+        )
+      }
+      if (pathname === '/warm') return new Response(null, { status: 204 })
+      if (pathname === '/metrics') return Response.json({ ok: true, egress: 'forward' })
+      if (pathname === '/remote')
+        return Response.json(
+          { error: 'this deployment has no remote executors; attach a hand instead' },
+          { status: 501 },
+        )
+      return refuse(404, 'not_found')
+    },
+  }
+}
+
+export declare namespace create {
+  type Options = {
+    fetch(request: Request, dispatch: App.ModelDispatch | App.SocketDispatch): Promise<Response>
+  }
+}
+
+function header<T>(request: Request, name: string): T | undefined {
+  try {
+    return JSON.parse(request.headers.get(name) ?? '') as T
+  } catch {
+    return undefined
+  }
+}
+
+function refuse(status: number, message: string): Response {
+  return Response.json({ error: { type: 'invalid_request_error', message } }, { status })
+}
