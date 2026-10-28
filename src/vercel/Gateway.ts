@@ -63,6 +63,13 @@ export function endpoint(provider: Contracts.ModelProvider): string {
   return provider === 'codex' ? `${url()}/v1` : `${url()}/v1/messages`
 }
 
+/** Returns the endpoint of a provider's plan: the Codex Responses API of ChatGPT, or Claude's Messages API on OAuth. */
+export function planEndpoint(provider: Contracts.ModelProvider): string {
+  return provider === 'codex'
+    ? 'https://chatgpt.com/backend-api/codex'
+    : 'https://api.anthropic.com/v1/messages?beta=true'
+}
+
 /** Returns the AI Gateway base URL: `AI_GATEWAY_BASE_URL`, or else `https://ai-gateway.vercel.sh`. */
 export function url(): string {
   return process.env.AI_GATEWAY_BASE_URL ?? 'https://ai-gateway.vercel.sh'

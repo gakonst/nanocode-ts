@@ -122,6 +122,7 @@ function carried(value: unknown): Attachments.File[] | string {
 export function create(options: create.Options) {
   const {
     harnesses,
+    account,
     authorize,
     maxPromptCharacters,
     chaos,
@@ -212,8 +213,10 @@ export function create(options: create.Options) {
         : typeof body.hand === 'string' && Harness.handChannel.test(body.hand)
           ? { hand: body.hand }
           : {}
+    const owner = account ? await account(request) : undefined
     const config = {
       ...hand,
+      ...(owner ? { account: owner } : {}),
       durability: kernel === 'on' ? 'run-ahead' : 'strict',
       nanocode: selection satisfies Omit<Harness.Session, 'session_id'>,
       traceAudience: traceAudience ?? (authorize === 'public' ? 'public' : 'unknown'),
@@ -361,6 +364,8 @@ export declare namespace create {
     Harness.create.Options,
     'provider' | 'model' | 'thinking' | 'tools' | 'durability'
   > & {
+    /** Returns the account that a new session runs as, such as a signed-in user's ID, which `subscription` receives. */
+    account?(request: Request): string | null | undefined | Promise<string | null | undefined>
     /** Authorizes requests that start or read sessions. Production deployments need one. */
     authorize?: Authorize
     /** Whether `chaos.POST` arms crashes for tests. */
