@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use super::{
     bridge::{call, spawn},
-    cells, mcp, tools,
+    cells, mcp, tools, workspace,
 };
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -209,9 +209,29 @@ pub async fn open_hand(
     mcp_servers: Vec<mcp::Server>,
 ) -> Result<Value, String> {
     let limit = max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES);
-    let mut own: Vec<Arc<dyn Tool>> = tools::tools(host_tools)
-        .map(|tool| Arc::new(tool) as Arc<dyn Tool>)
-        .collect();
+    let mut own: Vec<Arc<dyn Tool>> = Vec::new();
+    if let Some(root) = workspace.as_deref() {
+        let codex = nanocode::codex_tools::host_tools(
+            root.into(),
+            Arc::new(workspace::HostFiles),
+            Arc::new(workspace::HostShell),
+        )
+        .map_err(|error| error.to_string())?;
+        let claude = nanocode::claude::host_tools(
+            root.into(),
+            Arc::new(workspace::HostFiles),
+            Arc::new(workspace::HostShell),
+        )
+        .map_err(|error| error.to_string())?;
+        own.extend(
+            codex
+                .registered_tools()
+                .chain(claude.registered_tools())
+                .filter(|tool| tool.definition().name() != "update_plan")
+                .cloned(),
+        );
+    }
+    own.extend(tools::tools(host_tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     own.extend(
         mcp::tools(mcp_servers)
             .await
