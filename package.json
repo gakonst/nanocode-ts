@@ -15,8 +15,9 @@
   "scripts": {
     "build": "node scripts/build.mjs && npm run build:ts",
     "build:ts": "tsc -p tsconfig.build.json && tsc -p tsconfig.cloudflare.build.json && node scripts/zyzz.mjs && node scripts/pyodide.mjs",
+    "check:types": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json && tsc --noEmit -p tsconfig.cloudflare.json && tsc --noEmit -p tsconfig.test.json",
     "prepare": "node scripts/prepare.mjs",
-    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.vercel.json && tsc --noEmit -p tsconfig.cloudflare.json"
+    "test": "vp test run"
   },
   "exports": {
     ".": {
@@ -169,6 +170,7 @@
     "@vercel/sandbox": "3.9.0",
     "durable-harness": "0.0.1-beta.6",
     "pyodide": "^314.0.7",
-    "typescript": "6.0.2"
+    "typescript": "6.0.2",
+    "vite-plus": "0.2.4"
   }
 }

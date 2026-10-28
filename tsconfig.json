@@ -32,6 +32,7 @@
     "src/react/*.tsx"
   ],
   "exclude": [
-    "src/machines/vercel.ts"
+    "src/machines/vercel.ts",
+    "src/**/*.test.ts"
   ]
 }

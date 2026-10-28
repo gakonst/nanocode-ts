@@ -114,7 +114,7 @@ jobs:
 
       - name: Check Types
         working-directory: nanocode-ts
-        run: npm run check
+        run: npm run check:types && npm test
 
       - name: Pack
         id: pack
