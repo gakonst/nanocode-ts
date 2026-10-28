@@ -122,7 +122,7 @@ export async function turn(runtime: AgentRuntime.AgentRuntime, requestId: string
 let calls = 0
 
 /** Stand-in for the Anthropic Messages API, in its Server-Sent Events wire format. */
-function claude(input: any) {
+export function claude(input: any) {
   const call = calls++
   const last = input.messages.at(-1).content
   const answered =
