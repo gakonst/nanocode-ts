@@ -55,7 +55,14 @@ for (const size of sizes) {
   const before = await settle()
   const hub = fill(size)
   const after = await settle()
-  const tail = hub['tail']
+  let low = -1
+  let high = count
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (hub.recent(middle) === undefined) low = middle + 1
+    else high = middle
+  }
+  const tail = hub.recent(low)?.events ?? []
   rows.push({
     event_bytes: size,
     published: count,
