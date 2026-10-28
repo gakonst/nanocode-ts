@@ -1,7 +1,7 @@
 import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from 'nanocode-ts/pyodide-modules'
 import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from '../bash/commands/python.ts'
 import { restorePyodide } from '../bash/commands/pysnapshot.ts'
-import * as Fingerprint from '../Fingerprint.ts'
+import * as Fingerprint from '../internal/Fingerprint.ts'
 
 export type SnapshotParts = (name: string) => Promise<Response>
 

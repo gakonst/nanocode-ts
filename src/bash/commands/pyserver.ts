@@ -1,4 +1,4 @@
-import * as Fingerprint from '../../Fingerprint.ts'
+import * as Fingerprint from '../../internal/Fingerprint.ts'
 import {
   HELPER,
   type Pyodide,

@@ -15,7 +15,7 @@ import {
 } from './harness.ts'
 import { committedBatches, LocalSql } from './journal.ts'
 import { SqlFileSystem } from '../bash/index.ts'
-import * as Files from '../Files.ts'
+import * as Files from '../internal/Files.ts'
 import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from './transport.ts'
 import { nanocodeModule } from './module.ts'
 import type * as Contracts from '../Contracts.ts'

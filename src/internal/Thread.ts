@@ -1,5 +1,5 @@
-import type * as Contracts from './Contracts.ts'
-import * as AgentRuntime from './AgentRuntime.ts'
+import type * as Contracts from '../Contracts.ts'
+import * as AgentRuntime from '../AgentRuntime.ts'
 
 type Port = {
   postMessage(message: unknown, transfer?: unknown[]): void

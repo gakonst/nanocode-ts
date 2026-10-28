@@ -11,7 +11,7 @@ import {
   type NewFile,
 } from '../fs.ts'
 import { TarReader } from './archive.ts'
-import * as Egress from '../../Egress.ts'
+import * as Egress from '../../internal/Egress.ts'
 
 const MAX_BYTES = 200 * 1024 * 1024
 

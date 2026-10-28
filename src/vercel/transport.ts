@@ -9,7 +9,7 @@ import {
   type Transport,
   type TransportParameters,
 } from '../client.ts'
-import * as Files from '../Files.ts'
+import * as Files from '../internal/Files.ts'
 
 export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024
 

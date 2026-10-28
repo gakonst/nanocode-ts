@@ -1,4 +1,4 @@
-import * as Egress from '../../Egress.ts'
+import * as Egress from '../../internal/Egress.ts'
 import type { NanocodeEnv } from '../../cloudflare/runtime.ts'
 import { forward, json } from '../account.ts'
 import type { Wallet } from './wallet.ts'

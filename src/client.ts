@@ -1,7 +1,7 @@
 import type * as Contracts from './Contracts.ts'
-import type * as Files from './Files.ts'
+import type * as Files from './internal/Files.ts'
 
-export type { Attachment } from './Files.ts'
+export type { Attachment } from './internal/Files.ts'
 
 export type EntryKind = 'assistant' | 'error' | 'reasoning' | 'tool' | 'user'
 

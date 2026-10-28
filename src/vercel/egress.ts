@@ -1,7 +1,7 @@
 import { lookup as dnsLookup, type LookupAddress, type LookupOptions } from 'node:dns'
 import { lookup } from 'node:dns/promises'
 import { Agent, fetch as undiciFetch } from 'undici'
-import * as Egress from '../Egress.ts'
+import * as Egress from '../internal/Egress.ts'
 
 export const resolve: Egress.Resolve = async (host) =>
   (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address)

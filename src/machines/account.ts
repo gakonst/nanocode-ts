@@ -2,7 +2,7 @@ import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
 import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
 import { Account, Actions, createClient, http } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
-import * as Egress from '../Egress.ts'
+import * as Egress from '../internal/Egress.ts'
 import * as Mcp from './mcp.ts'
 import * as Payment from './payment.ts'
 
@@ -445,7 +445,7 @@ export function account(options: AccountOptions) {
 
 export type Account = ReturnType<typeof account>
 
-export { publicTarget } from '../Egress.ts'
+export { publicTarget } from '../internal/Egress.ts'
 
 export async function envelope(
   request: Request,

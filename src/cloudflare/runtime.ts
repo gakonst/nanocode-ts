@@ -15,8 +15,8 @@ import {
   type Limits,
   type PythonRemote,
 } from '../bash/index.ts'
-import * as Egress from '../Egress.ts'
-import * as Files from '../Files.ts'
+import * as Egress from '../internal/Egress.ts'
+import * as Files from '../internal/Files.ts'
 import wasm from 'nanocode-ts/nanocode_wasm.wasm'
 import interpreter from 'nanocode-ts/interpreter.wasm'
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from './store.ts'
