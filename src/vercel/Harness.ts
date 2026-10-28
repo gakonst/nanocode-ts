@@ -264,7 +264,6 @@ export function create(options: create.Options = {}): Harness {
             gateway: plan ? undefined : gateway,
             event_coalesce_ms: options.eventCoalesceMs ?? defaultEventCoalesceMs,
             stream_tool_input: options.streamToolInput,
-            code_mode: executor ? false : options.codeMode,
             ...(executor ? { hands: true } : {}),
             tools: definitions,
             ...(options.webSearch === false ? { web_search: false } : {}),
@@ -483,8 +482,6 @@ export declare namespace create {
   type Options = {
     /** Minimum time in milliseconds between two SQL batches with `on` durability. */
     batchMs?: number
-    /** Whether the runtime runs agent code in Code Mode cells. */
-    codeMode?: boolean
     /** Sends model requests. Defaults to `Gateway.dispatch()`. */
     dispatch?: Gateway.Dispatch
     /** Defaults to `on`. */

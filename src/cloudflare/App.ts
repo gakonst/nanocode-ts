@@ -1145,7 +1145,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           void connecting?.catch(() => {})
           const githubToken = options.github?.token
           const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
-          const hostFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env)
+          const hostFetch = options.codeMode?.fetch?.(authority, this.env)
           const cellFetch = Egress.guard(
             hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
           )
@@ -1184,7 +1184,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     : {}),
                   limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
                 })
-          const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor)
           try {
             const created = await this.instance(scope, true)
             await created.open(
@@ -1209,7 +1208,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     }
                   : {}),
                 remote: enabled,
-                code_mode: local,
                 executor: descriptor.executor_id,
                 ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
                 ...withHand(
@@ -2481,8 +2479,8 @@ export declare namespace create {
     ): Promise<string | Principal | null> | string | Principal | null
     /** Whether a session serves `POST /sessions/:name/crash`, to test recovery. */
     chaos?: boolean
-    /** Code Mode of the runtime, or `false` to turn it off. `fetch` serves its network requests. */
-    codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch }
+    /** Network of Code Mode cells: `fetch` serves their requests. Without it, cells reach only GitHub archives. */
+    codeMode?: { fetch?(authority: SessionAuthority, env: E): typeof fetch }
     /** Returns the egress binding that serves model requests and remote executors. */
     egress(env: E): PrivateBinding
     /** Source of the GitHub token of a session's workspace. */

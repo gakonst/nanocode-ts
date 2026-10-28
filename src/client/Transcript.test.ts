@@ -43,12 +43,12 @@ describe('Transcript', () => {
         [
           {
             "kind": "tool",
-            "text": "lookup alpha · <duration>",
+            "text": "code · <duration>",
             "tool": {
-              "input": "",
-              "name": "lookup",
+              "input": "text(JSON.stringify(await tools.lookup({ key: 'alpha' })))",
+              "name": "code",
               "status": "completed",
-              "title": "alpha",
+              "title": "",
             },
           },
           {

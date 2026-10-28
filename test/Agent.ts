@@ -28,6 +28,12 @@ export const lookup = {
 /** Session scope of every session. */
 export const scope = 'owner'
 
+/** Code Mode cell that the stand-in models run: it looks up `alpha` with the host tool. */
+export const cell = "text(JSON.stringify(await tools.lookup({ key: 'alpha' })))"
+
+/** Text that the stand-in models answer once the cell returned the host tool's value. */
+export const answer = 'the value is bravo'
+
 /** Compiles the WebAssembly module from `dist/`. */
 export function compile() {
   return WebAssembly.compile(fs.readFileSync('dist/nanocode_wasm.wasm'))
@@ -115,7 +121,7 @@ export async function turn(runtime: AgentRuntime.AgentRuntime, requestId: string
   while (!(await runtime.settle())) await new Promise((resolve) => setTimeout(resolve, 10))
 
   const report = (await runtime.turn(scope, requestId))?.report
-  if (!JSON.stringify(report).includes('the value is bravo')) return 'missing answer'
+  if (!JSON.stringify(report).includes(answer)) return 'missing answer'
   return report?.status
 }
 
@@ -131,13 +137,13 @@ export function claude(input: any) {
     ? [
         [
           { text: '', type: 'text' },
-          { text: 'the value is bravo', type: 'text_delta' },
+          { text: reply(last), type: 'text_delta' },
         ],
       ]
     : [
         [
-          { id: `toolu_${call}`, input: {}, name: lookup.name, type: 'tool_use' },
-          { partial_json: JSON.stringify({ key: 'alpha' }), type: 'input_json_delta' },
+          { id: `toolu_${call}`, input: {}, name: 'exec', type: 'tool_use' },
+          { partial_json: JSON.stringify({ code: cell }), type: 'input_json_delta' },
         ],
       ]
 
@@ -176,31 +182,33 @@ export function claude(input: any) {
 }
 
 /** Stand-in for the OpenAI Responses API, in its Server-Sent Events wire format. */
-function codex(input: any) {
+export function codex(input: any) {
   const items = input.input
   const user = items.findLastIndex(
     (item: { role?: string; type: string }) => item.type === 'message' && item.role === 'user',
   )
-  const answered = items.some(
-    (item: { type: string }, index: number) => index > user && item.type === 'function_call_output',
+  const output = items.find(
+    (item: { type: string }, index: number) =>
+      index > user && item.type === 'custom_tool_call_output',
   )
   const call = calls++
   const id = `resp_${call}`
-  const item = answered
+  const text = output ? reply(output) : ''
+  const item = output
     ? {
-        content: [{ text: 'the value is bravo', type: 'output_text' }],
+        content: [{ text, type: 'output_text' }],
         id: `msg_${call}`,
         role: 'assistant',
         status: 'completed',
         type: 'message',
       }
     : {
-        arguments: JSON.stringify({ key: 'alpha' }),
         call_id: `call_${call}`,
-        id: `fc_${call}`,
-        name: lookup.name,
+        id: `ctc_${call}`,
+        input: cell,
+        name: 'exec',
         status: 'completed',
-        type: 'function_call',
+        type: 'custom_tool_call',
       }
 
   return sse([
@@ -208,25 +216,34 @@ function codex(input: any) {
     [
       null,
       {
-        item: item.type === 'message' ? { ...item, content: [], status: 'in_progress' } : item,
+        item:
+          item.type === 'message'
+            ? { ...item, content: [], status: 'in_progress' }
+            : { ...item, input: '', status: 'in_progress' },
         output_index: 0,
         type: 'response.output_item.added',
       },
     ],
-    ...(item.type === 'message'
+    item.type === 'message'
       ? [
-          [
-            null,
-            {
-              content_index: 0,
-              delta: 'the value is bravo',
-              item_id: item.id,
-              output_index: 0,
-              type: 'response.output_text.delta',
-            },
-          ] as [null, unknown],
+          null,
+          {
+            content_index: 0,
+            delta: text,
+            item_id: item.id,
+            output_index: 0,
+            type: 'response.output_text.delta',
+          },
         ]
-      : []),
+      : [
+          null,
+          {
+            delta: cell,
+            item_id: item.id,
+            output_index: 0,
+            type: 'response.custom_tool_call_input.delta',
+          },
+        ],
     [null, { item, output_index: 0, type: 'response.output_item.done' }],
     [
       null,
@@ -242,6 +259,10 @@ function codex(input: any) {
       },
     ],
   ])
+}
+
+function reply(result: unknown) {
+  return JSON.stringify(result).includes('bravo') ? answer : 'the cell did not return the value'
 }
 
 function sse(events: readonly [string | null, unknown][]) {

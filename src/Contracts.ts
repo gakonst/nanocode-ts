@@ -72,7 +72,6 @@ export type AgentConfiguration = {
   remote?: boolean
   executor?: string
   hands?: boolean
-  code_mode?: boolean
   event_coalesce_ms?: number
   live_deltas?: boolean
   stream_tool_input?: boolean

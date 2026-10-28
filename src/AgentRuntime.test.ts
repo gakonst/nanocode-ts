@@ -24,7 +24,7 @@ afterAll(() => {
 
 describe('instantiate', () => {
   for (const provider of ['claude', 'codex'] as const)
-    test(`runs host tool turns and replays them after reopening (${provider})`, async () => {
+    test(`runs host tools in Code Mode cells and replays them after reopening (${provider})`, async () => {
       const database = path.join(directory, `${provider}.sqlite`)
       const requests: Agent.Request[] = []
       const sessionId = Contracts.sessionUuid()
@@ -49,17 +49,16 @@ describe('instantiate', () => {
         const payload = event.payload as { call_id: string; text: string; tool: string }
         inputs.set(payload.call_id, (inputs.get(payload.call_id) ?? '') + payload.text)
       }
-      expect([...inputs.values()]).toMatchInlineSnapshot(`
-        [
-          "{"key":"alpha"}",
-          "{"key":"alpha"}",
-        ]
-      `)
+      expect(
+        [...inputs.values()].map((input) =>
+          provider === 'claude' ? (JSON.parse(input) as { code: string }).code : input,
+        ),
+      ).toEqual([Agent.cell, Agent.cell])
 
       expect(requests.length).toMatchInlineSnapshot(`6`)
       expect(requests.every((request) => request.credentialFree)).toMatchInlineSnapshot(`true`)
       expect(
-        requests.every((request) => request.tools.includes(Agent.lookup.name)),
+        requests.every((request) => request.tools.join() === 'exec,wait'),
       ).toMatchInlineSnapshot(`true`)
       expect(requests.at(-1)!.messages > requests[0]!.messages).toMatchInlineSnapshot(`true`)
 

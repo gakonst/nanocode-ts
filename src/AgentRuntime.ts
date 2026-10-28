@@ -1129,7 +1129,7 @@ async function create(
             provider: config.provider ?? 'claude',
             remote: state.remote,
             hands: state.hands,
-            code_mode: config.code_mode ?? false,
+            code_mode: !(state.remote || state.hands),
             event_coalesce_ms: config.event_coalesce_ms ?? 0,
             tools: config.tools ?? [],
           },

@@ -117,7 +117,6 @@ await runtime.open(
     endpoint: 'https://api.anthropic.com/v1/messages',
     event_coalesce_ms: 100,
     live_deltas: true,
-    code_mode: true,
     workspace: shell.cwd,
     tools: [
       {
