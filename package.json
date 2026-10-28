@@ -126,8 +126,10 @@
     }
   },
   "dependencies": {
+    "@cloudflare/containers": "0.3.7",
     "accounts": "0.21.0",
     "mppx": "0.13.6",
+    "nanocode-egress": "https://github.com/nanocodexyz/egress/releases/download/build-a0ff241/nanocode-egress-a0ff241.tgz",
     "ox": "0.14.56",
     "streamdown": "2.7.1",
     "undici": "7.30.1",

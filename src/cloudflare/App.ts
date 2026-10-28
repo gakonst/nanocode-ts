@@ -26,6 +26,7 @@ import * as Executor from './internal/Executor.ts'
 import * as HandToken from './internal/HandToken.ts'
 import { headerJson, json } from './internal/Http.ts'
 import * as Metadata from './internal/Metadata.ts'
+import * as Plans from './Plans.ts'
 import * as Relay from './Relay.ts'
 import * as Sql from './Sql.ts'
 
@@ -279,6 +280,20 @@ function executorFailure(error: unknown): Contracts.HostFailureError {
  * `AgentSession` from the Worker under the class name that the `SESSIONS` binding names.
  */
 export function create<E extends Env>(options: create.Options<E>): create.ReturnType<E> {
+  const plans = options.plans
+    ? Plans.create<E & Plans.Env>({
+        ...options.plans,
+        egress: options.egress,
+        authenticate: options.authenticate,
+      })
+    : undefined
+  const egress = (env: E): PrivateBinding =>
+    plans ? plans.egress(env as E & Plans.Env) : options.egress(env)
+  const subscribes =
+    options.subscription ??
+    (plans &&
+      ((account: string, env: E, provider: Contracts.ModelProvider) =>
+        plans.subscription(account, env as E & Plans.Env, provider)))
   const valueLimit = options.valueLimit ?? Sql.valueLimitBytes
   const tooLarge = `request bodies are limited to ${valueLimit} bytes`
   class AgentSession extends DurableObject<E> {
@@ -585,7 +600,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           }
           const [, warmed] = await Promise.all([
             this.instance(scope),
-            options.egress(this.env).fetch(
+            egress(this.env).fetch(
               new Request('https://egress.internal/warm', {
                 method: 'POST',
                 headers: { 'x-nanocode-model': headerJson({ provider, model }) },
@@ -1126,7 +1141,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const owner = {}
           const connectStarted = performance.now()
           const connecting = enabled
-            ? Executor.connect(options.egress(this.env), { authority, policy: this.handLimits() })
+            ? Executor.connect(egress(this.env), { authority, policy: this.handLimits() })
                 .then(
                   (value) => (remote = value),
                   (error) => {
@@ -1347,7 +1362,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     provider: request.provider ?? descriptor.provider ?? 'claude',
                     subscription: descriptor.subscription,
                   }
-                  const response = await options.egress(this.env).fetch(
+                  const response = await egress(this.env).fetch(
                     new Request('https://egress.internal/model', {
                       method: 'POST',
                       signal,
@@ -1375,7 +1390,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 socket: {
                   open: async (request, signal, timing) => {
                     if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
-                    const response = await options.egress(this.env).fetch(
+                    const response = await egress(this.env).fetch(
                       new Request('https://egress.internal/socket', {
                         signal,
                         headers: {
@@ -2343,6 +2358,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
   async function fetch(request: Request, env: E): Promise<Response> {
     const started = performance.now()
     const url = new URL(request.url)
+    const planned = await plans?.routes(request, env as E & Plans.Env)
+    if (planned) return planned
     const minted = HandToken.pattern.exec(Remote.bearerToken(request) ?? '')
     const handing =
       minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null
@@ -2361,15 +2378,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       })
     const head = request.method === 'HEAD'
     if (url.pathname === '/metrics' && (request.method === 'GET' || head))
-      return options
-        .egress(env)
-        .fetch(
-          new Request(
-            url.searchParams.get('probe') === 'codex'
-              ? 'https://egress.internal/probe/codex'
-              : 'https://egress.internal/metrics',
-          ),
-        )
+      return egress(env).fetch(
+        new Request(
+          url.searchParams.get('probe') === 'codex'
+            ? 'https://egress.internal/probe/codex'
+            : 'https://egress.internal/metrics',
+        ),
+      )
     const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname)
     const match = files
       ? undefined
@@ -2393,9 +2408,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     if (Number(request.headers.get('content-length') ?? 0) > valueLimit)
       return json({ error: tooLarge }, 413)
     const mode = (provider: Contracts.ModelProvider) =>
-      options.subscription
-        ? options.subscription(account, env, provider)
-        : env.MODEL_AUTH === 'subscription'
+      subscribes ? subscribes(account, env, provider) : env.MODEL_AUTH === 'subscription'
     const [subscription, codex_subscription] = await Promise.all([mode('claude'), mode('codex')])
     const caller = typeof principal === 'object' ? principal : undefined
     const descriptor: SessionDescriptor = {
@@ -2504,13 +2517,19 @@ export declare namespace create {
       fetch?(authority: SessionAuthority, env: E): typeof fetch
       store?(env: E): Contracts.McpStore | undefined
     }
+    /**
+     * ChatGPT and Claude plans of the deployment's accounts, sealed with `PLAN_SECRET`: a signed-in account's model
+     * requests go out on its plan instead of `egress`, and `/plans` serves the sign-in routes. The Worker exports
+     * `PlanVault` and, for ChatGPT plans, `RelayContainer` from this package.
+     */
+    plans?: Plans.Options<E>
     /** Records a new session, and returns `false` to delete it and refuse the request. */
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
     /** Whether the runtime streams tool input. Defaults to `true`. */
     streamToolInput?: boolean
     /** Whether the runtime runs subagents. Defaults to the runtime's default. */
     subagents?: boolean
-    /** Returns whether requests of `provider` use the account's subscription. */
+    /** Returns whether requests of `provider` use the account's subscription. Defaults to whether `plans` has its plan signed in. */
     subscription?(
       account: string,
       env: E,

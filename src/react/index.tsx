@@ -24,6 +24,7 @@ export { Code, fences } from './Code.tsx'
 export { Hand, HandConnect, type HandState, useHand } from './Hand.tsx'
 export { Image, imageSource, useWorkspaceFile } from './Image.tsx'
 export { Markdown, Reply } from './Markdown.tsx'
+export { PlanConnect, type PlanState, usePlans } from './Plans.tsx'
 export {
   type Highlighter,
   NanocodeProvider,
