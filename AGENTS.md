@@ -1,14 +1,3 @@
-# Adapted from wevm/zyzz, wevm/ondine, wevm/ox, and wevm/monoshot
-
-Sources, retrieved 2026-10-28:
-
-- https://github.com/wevm/zyzz/blob/main/AGENTS.md (blob `c011a86`, commit `a9f0ccb`)
-- https://github.com/wevm/ondine/blob/main/AGENTS.md (blob `27f62c3`, commit `0b589ec`)
-- https://github.com/wevm/ox/blob/main/AGENTS.md (blob `4b73b58`, commit `0fc913d`)
-- https://github.com/wevm/monoshot/blob/main/AGENTS.md (blob `2ea42a7`, commit `0a89eaa`)
-
-General TypeScript, Rust, module, inference, abstraction, documentation, prose, testing, workflow, Git, and tooling conventions are retained. Project principles, layout, and commands are adapted for nanocode-ts. Project Reference, at the end, keeps the record of the SDK, hosts, and measurements.
-
 # Agent Guidelines
 
 ## Project Principles
