@@ -147,7 +147,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const githubToken = options.github?.token;
     const cellFetch = withGitHub(egress(configuredFetch), { token: githubToken ? () => githubToken(ctx.runId) : undefined });
     const files = options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE);
-    const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(configuredFetch ? { fetch: cellFetch } : {}) });
+    const shell = !files || options.workspace === false ? undefined : await Bash.create({ fs: files, cwd: options.workspace?.cwd ?? "/workspace", python: { mirror: ctx.runId }, ...(options.workspace?.files ? { files: options.workspace.files } : {}), ...(configuredFetch ? { fetch: cellFetch } : {}) });
     const mcpServers = options.mcp?.servers ?? [];
     const mcpFetch = options.mcp?.fetch?.(ctx.runId) ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
     const stop = () => void runtime.dispose().catch(() => undefined);

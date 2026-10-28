@@ -1,6 +1,9 @@
-import { MODULES, PYODIDE_VERSION as BUILT } from "nanocode-ts/pyodide-modules";
+import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from "nanocode-ts/pyodide-modules";
 import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from "../bash/commands/python.ts";
+import { restorePyodide } from "../bash/commands/pysnapshot.ts";
 import { fingerprint } from "../fingerprint.ts";
+
+export type SnapshotParts = (name: string) => Promise<Response>;
 
 type Instantiate = (source: unknown, imports?: WebAssembly.Imports) => Promise<unknown>;
 
@@ -61,11 +64,55 @@ function install(): void {
   };
 }
 
-export async function loadWorkersPyodide(): Promise<Pyodide> {
+const AHEAD = 2;
+
+function joined(parts: SnapshotParts, names: string[]): ReadableStream<Uint8Array> {
+  const pending: Promise<ArrayBuffer>[] = [];
+  let next = 0;
+  const fill = () => {
+    while (next < names.length && pending.length < AHEAD) {
+      const name = names[next++]!;
+      pending.push(parts(name).then(response => {
+        if (!response.ok) throw new Error("Pyodide snapshot part " + name + ": HTTP " + response.status);
+        return response.arrayBuffer();
+      }));
+    }
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      fill();
+      const part = pending.shift();
+      if (!part) return controller.close();
+      const bytes = await part;
+      fill();
+      controller.enqueue(new Uint8Array(bytes));
+    },
+    cancel() {
+      for (const part of pending.splice(0)) part.catch(() => {});
+    },
+  }, { highWaterMark: 0 });
+}
+
+let restorable = true;
+
+export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide> {
   if (BUILT !== PYODIDE_VERSION) throw new Error("nanocode-ts precompiled Pyodide " + BUILT + " but expects " + PYODIDE_VERSION);
   install();
   const [loader, asm] = await Promise.all([import("pyodide/pyodide.mjs"), import("pyodide/pyodide.asm.mjs")]);
   if (loader.version !== BUILT) throw new Error("the pyodide package is " + loader.version + ", but nanocode-ts precompiled " + BUILT + ": install pyodide@" + BUILT);
-  return await loader.loadPyodide({ indexURL: PYODIDE_URL, packageBaseUrl: PYODIDE_URL, createPyodideModule: asm.default, stdout: () => {}, stderr: () => {} }) as Pyodide;
+  const config = { indexURL: PYODIDE_URL, packageBaseUrl: PYODIDE_URL, stdout: () => {}, stderr: () => {} };
+  if (parts && restorable && SNAPSHOT.parts.length) {
+    try {
+      return await restorePyodide({ loadPyodide: loader.loadPyodide, createPyodideModule: asm.default }, config, joined(parts, SNAPSHOT.parts), key => {
+        const found = MODULES[key];
+        if (!found) throw new Error("Pyodide snapshot: module " + key + " is not built in");
+        return found;
+      }, BUILT);
+    } catch (error) {
+      restorable = false;
+      console.error("nanocode-ts: booting Pyodide without its snapshot: " + (error instanceof Error ? error.message : String(error)));
+    }
+  }
+  return await loader.loadPyodide({ ...config, createPyodideModule: asm.default }) as Pyodide;
 }
 

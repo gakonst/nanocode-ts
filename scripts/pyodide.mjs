@@ -1,12 +1,14 @@
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fingerprint } from "../src/fingerprint.ts";
+import { snapshotPyodide } from "../src/bash/commands/pysnapshot.ts";
 
 const require = createRequire(import.meta.url);
 const root = new URL("..", import.meta.url).pathname;
 const version = require("pyodide/package.json").version;
 const out = root + "dist/pyodide/";
-const stamp = version + ":" + fingerprint(readFileSync(new URL(import.meta.url))) + ":" + fingerprint(readFileSync(root + "src/fingerprint.ts"));
+const stamp = version + ":" + fingerprint(readFileSync(new URL(import.meta.url))) + ":" + fingerprint(readFileSync(root + "src/fingerprint.ts")) + ":" + fingerprint(readFileSync(root + "src/bash/commands/pysnapshot.ts"));
+const PART_BYTES = 8 * 1024 * 1024;
 if (existsSync(out + "stamp") && readFileSync(out + "stamp", "utf8") === stamp) process.exit(0);
 
 const PROBE = Buffer.from("AGFzbQEAAAABDANfAGAAAW9gAW8BfwMDAgECBygCE0pzdl9HZXRFcnJvcl9pbXBvcnQAAA5Kc3ZFcnJvcl9DaGVjawABChMCBwD7AQD7GwsJACAA+xr7FAAL", "base64");
@@ -75,6 +77,13 @@ for (const result of ["v", ...types]) for (const list of params) {
 }
 record(PROBE);
 WebAssembly.Module = Compiled;
+WebAssembly.instantiate = instantiate;
+WebAssembly.compile = compile;
+
+const asm = (await import("pyodide/pyodide.asm.mjs")).default;
+const made = await snapshotPyodide({ loadPyodide, createPyodideModule: asm }, { packageCacheDir: root + "target/pyodide-cache/", stdout: () => {}, stderr: () => {} }, version);
+for (const [, key] of made.meta.libs) if (!seen.has(key)) throw new Error("the snapshot preloads " + key + ", which was not recorded");
+const packed = Buffer.concat(made.chunks.map(chunk => Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
 
 const main = [...seen].reduce((best, entry) => entry[1].length > best[1].length ? entry : best);
 rmSync(out, { recursive: true, force: true });
@@ -87,9 +96,16 @@ for (const [key, bytes] of seen) {
   entries.push(JSON.stringify(key) + ": " + name + ",");
   if (key === main[0]) entries.push(JSON.stringify(fingerprint(new TextEncoder().encode("nanocode-pyodide:" + version))) + ": " + name + ",");
 }
-writeFileSync(out + "modules.js", imports.join("\n") + "\nexport const PYODIDE_VERSION = " + JSON.stringify(version) + ";\nexport const MODULES = {\n" + entries.join("\n") + "\n};\n");
-writeFileSync(out + "modules.d.ts", "export declare const PYODIDE_VERSION: string;\nexport declare const MODULES: Record<string, WebAssembly.Module>;\n");
+mkdirSync(out + "snapshot");
+const parts = [];
+for (let offset = 0; offset < packed.length; offset += PART_BYTES) {
+  const name = "part-" + parts.length + ".bin";
+  writeFileSync(out + "snapshot/" + name, packed.subarray(offset, offset + PART_BYTES));
+  parts.push(name);
+}
+writeFileSync(out + "modules.js", imports.join("\n") + "\nexport const PYODIDE_VERSION = " + JSON.stringify(version) + ";\nexport const SNAPSHOT = " + JSON.stringify({ parts, bytes: packed.length }) + ";\nexport const MODULES = {\n" + entries.join("\n") + "\n};\n");
+writeFileSync(out + "modules.d.ts", "export declare const PYODIDE_VERSION: string;\nexport declare const SNAPSHOT: { parts: string[]; bytes: number };\nexport declare const MODULES: Record<string, WebAssembly.Module>;\n");
 writeFileSync(out + "stamp", stamp);
 const total = [...seen.values()].reduce((sum, bytes) => sum + bytes.length, 0);
-console.log("pyodide " + version + ": " + seen.size + " precompiled modules, " + (total / 1048576).toFixed(1) + " MiB");
+console.log("pyodide " + version + ": " + seen.size + " precompiled modules, " + (total / 1048576).toFixed(1) + " MiB; snapshot of " + made.meta.packages.length + " packages in " + parts.length + " parts, " + (packed.length / 1048576).toFixed(1) + " MiB");
 

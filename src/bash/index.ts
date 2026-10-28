@@ -1,5 +1,5 @@
 import type { HostTool, WorkspaceHost } from "../contracts.ts";
-import { FsError, MemoryFileSystem, decode, display, encode, parentOf, resolvePath, type FileInput, type FileSystem } from "./fs.ts";
+import { FsError, MemoryFileSystem, decode, display, encode, parentOf, resolvePath, type FileInput, type FileSystem, type NewFile } from "./fs.ts";
 import { BUILTINS, Input, LimitError, Output, Runner, State, megabytes, run, type CommandHandler, type Limits } from "./shell.ts";
 import { fileCommands, mkdirs } from "./commands/files.ts";
 import { textCommands } from "./commands/text.ts";
@@ -217,6 +217,10 @@ function budgeted(fs: FileSystem, limit: number, budget: { used: number; refused
     ...(fs.search ? { search: (dir: string, literals: string[]) => (charge(), fs.search!(dir, literals)) } : {}),
     ...(fs.excerpt ? { excerpt: (path: string, literals: string[]) => (charge(), fs.excerpt!(path, literals)) } : {}),
     ...(fs.matches ? { matches: (dir: string, literals: string[], ignoreCase: boolean) => (charge(), fs.matches!(dir, literals, ignoreCase)) } : {}),
+    ...(fs.writeMany ? { writeMany: (dirs: string[], files: NewFile[]) => {
+      for (let index = 0; index < dirs.length + files.length; index++) charge();
+      return fs.writeMany!(dirs, files.filter(file => !DEVICES.has(file.path)));
+    } } : {}),
   };
 }
 

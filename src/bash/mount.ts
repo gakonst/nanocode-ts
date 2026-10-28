@@ -1,4 +1,4 @@
-import { FsError, normalize, type FileStat, type FileSystem } from "./fs.ts";
+import { FsError, normalize, writeMany, type FileStat, type FileSystem, type NewFile } from "./fs.ts";
 
 type Mount = { point: string; fs: FileSystem };
 
@@ -45,6 +45,32 @@ export function mounted(base: FileSystem, mounts: Record<string, FileSystem>): F
       return extra.length ? [...new Set([...own, ...extra])].sort() : own;
     },
     mkdir: path => call(path, (fs, inner) => fs.mkdir(inner)),
+    writeMany: async (dirs, files) => {
+      const groups = new Map<FileSystem, { point: string; dirs: string[]; files: NewFile[]; outer: NewFile[] }>();
+      const group = (path: string) => {
+        const target = route(path);
+        let found = groups.get(target.fs);
+        if (!found) groups.set(target.fs, found = { point: target.point, dirs: [], files: [], outer: [] });
+        return { found, inner: target.path };
+      };
+      for (const dir of dirs) {
+        const { found, inner } = group(dir);
+        found.dirs.push(inner);
+      }
+      for (const file of files) {
+        const { found, inner } = group(file.path);
+        found.files.push({ ...file, path: inner });
+        found.outer.push(file);
+      }
+      const refused: string[] = [];
+      for (const [fs, found] of groups) {
+        for (const path of await writeMany(fs, found.dirs, found.files)) refused.push(full(found.point, path));
+        found.files.forEach((file, index) => {
+          found.outer[index]!.mtime = file.mtime;
+        });
+      }
+      return refused;
+    },
     remove: async path => {
       if (table.some(mount => mount.point === path)) throw new FsError("EBUSY", path);
       return call(path, (fs, inner) => fs.remove(inner));

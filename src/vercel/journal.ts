@@ -1,4 +1,5 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib";
 import { type DriveContext, Fatal, Restart, type SessionState } from "durable-harness";
 import type { SqlHost, SqlKind, SqlValue, Statement } from "../index.ts";
 
@@ -6,7 +7,11 @@ export const SQL_STEP = "nanocode.sql";
 
 export type Transaction = { kind: SqlKind; operation: string; statements: Statement[] };
 
-type Batch = { transactions: Transaction[] };
+type Batch = { transactions: Transaction[] } | { packed: Uint8Array };
+
+type Packed = { transactions: Transaction[]; sizes: number[] };
+
+const BROTLI_QUALITY = 3;
 
 type Committed = { writer: string };
 
@@ -28,10 +33,42 @@ function weight(transaction: Transaction | undefined): number {
   return bytes;
 }
 
+function pack(transactions: Transaction[]): Uint8Array {
+  const blobs: Uint8Array[] = [];
+  const encoded = transactions.map(transaction => ({ ...transaction, statements: transaction.statements.map(statement => statement.map(value => {
+    if (value instanceof ArrayBuffer) return { $b: blobs.push(new Uint8Array(value)) - 1 };
+    if (typeof value === "number" && (!Number.isFinite(value) || Object.is(value, -0))) return { $n: String(value) };
+    return value;
+  })) }));
+  const header = Buffer.from(JSON.stringify({ transactions: encoded, sizes: blobs.map(blob => blob.length) }));
+  const length = Buffer.alloc(4);
+  length.writeUInt32LE(header.length);
+  const raw = Buffer.concat([length, header, ...blobs]);
+  return new Uint8Array(brotliCompressSync(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY, [constants.BROTLI_PARAM_SIZE_HINT]: raw.length } }));
+}
+
+function unpack(packed: Uint8Array): Transaction[] {
+  const raw = brotliDecompressSync(packed);
+  const length = raw.readUInt32LE(0);
+  const header = JSON.parse(raw.subarray(4, 4 + length).toString("utf8")) as Packed;
+  const blobs: ArrayBuffer[] = [];
+  let offset = 4 + length;
+  for (const size of header.sizes) {
+    blobs.push(raw.buffer.slice(raw.byteOffset + offset, raw.byteOffset + offset + size) as ArrayBuffer);
+    offset += size;
+  }
+  return header.transactions.map(transaction => ({ ...transaction, statements: transaction.statements.map(statement => statement.map(value => {
+    if (value && typeof value === "object" && "$b" in value) return blobs[(value as { $b: number }).$b]!;
+    if (value && typeof value === "object" && "$n" in value) return Number((value as { $n: string }).$n);
+    return value;
+  }) as Statement) }));
+}
+
 export function committedBatches(state: SessionState): Transaction[][] {
   const batches: Transaction[][] = [];
   for (let record = state.effects.get(batchKey(0)); record?.status === "completed"; record = state.effects.get(batchKey(batches.length))) {
-    batches.push((record.input as Batch).transactions);
+    const input = record.input as Batch;
+    batches.push("packed" in input ? unpack(input.packed) : input.transactions);
   }
   return batches;
 }
@@ -202,7 +239,7 @@ export class SqlJournal implements SqlHost {
   private async commit(transactions: Transaction[]): Promise<void> {
     const n = this.committed;
     const started = performance.now();
-    const output = await this.ctx.effect(batchKey(n), { name: SQL_STEP, replay: "safe", input: { transactions } satisfies Batch }, async (): Promise<Committed> => ({ writer: this.writer }));
+    const output = await this.ctx.effect(batchKey(n), { name: SQL_STEP, replay: "safe", input: { packed: pack(transactions) } satisfies Batch }, async (): Promise<Committed> => ({ writer: this.writer }));
     this.stats.batch_wait_ms += performance.now() - started;
     if (output.writer !== this.writer) throw new Restart(`SQL batch ${n} was committed by another drive`);
     this.committed = n + 1;

@@ -1,5 +1,5 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
-import { breathe, decode, encode, FsError, normalize, parentOf, type FileSystem } from "../fs.ts";
+import { breathe, decode, encode, FsError, normalize, parentOf, writeMany, type FileSystem, type NewFile } from "../fs.ts";
 import { TarReader } from "./archive.ts";
 import { guarded, mark } from "../../egress.ts";
 
@@ -12,6 +12,8 @@ const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_FILES = 50_000;
 
 const STALL_MS = 30_000;
+
+const BATCH_BYTES = 4 * 1024 * 1024;
 
 const ATTEMPTS = 2;
 
@@ -213,6 +215,34 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
   let written = 0;
   let count = 0;
   let skipped = 0;
+  let queued: { relative: string; file: NewFile }[] = [];
+  let dirs: string[] = [];
+  let queuedBytes = 0;
+  const folder = (path: string) => {
+    if (known.has(path)) return;
+    folder(parentOf(path));
+    known.add(path);
+    dirs.push(path);
+  };
+  const flush = async () => {
+    const batch = queued;
+    const made = dirs;
+    queued = [];
+    dirs = [];
+    queuedBytes = 0;
+    if (!batch.length && !made.length) return;
+    const [refused, ids] = await Promise.all([writeMany(ctx.fs, made, batch.map(entry => entry.file)), Promise.all(batch.map(entry => blobId(entry.file.data)))]);
+    const failed = new Set(refused);
+    batch.forEach((entry, index) => {
+      if (!failed.has(entry.file.path)) {
+        files[entry.relative] = [entry.file.data.length, entry.file.mtime, ids[index]!];
+        return;
+      }
+      omitted.push({ path: entry.relative, bytes: entry.file.data.length, reason: "larger than this filesystem stores" });
+      count--;
+      written -= entry.file.data.length;
+    });
+  };
   for (let attempt = 1; ; attempt++) {
     files = {};
     reader = new TarReader(maxFileBytes);
@@ -220,6 +250,9 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
     written = 0;
     count = 0;
     skipped = 0;
+    queued = [];
+    dirs = [];
+    queuedBytes = 0;
     known.clear();
     let watch: Watch | undefined;
     let stream: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -247,7 +280,7 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
           const relative = parts.slice(1).join("/");
           const path = target + "/" + relative;
           if (entry.type === "directory") {
-            await ensure(path);
+            folder(path);
             continue;
           }
           if (entry.type !== "file") {
@@ -261,22 +294,15 @@ async function clone(ctx: CommandContext, github: GitHubOptions, args: string[])
           }
           count++;
           written += entry.data.length;
-          await breathe();
-          await ensure(parentOf(path));
-          try {
-            await ctx.fs.write(path, entry.data);
-          } catch (error) {
-            if (!(error instanceof FsError) || error.code !== "EFBIG") throw error;
-            omitted.push({ path: relative, bytes: entry.data.length, reason: "larger than this filesystem stores" });
-            count--;
-            written -= entry.data.length;
-            continue;
-          }
-          const stat = await ctx.fs.stat(path);
-          files[relative] = [entry.data.length, stat?.mtime ?? 0, await blobId(entry.data)];
+          folder(parentOf(path));
+          queued.push({ relative, file: { path, data: entry.data, mtime: Date.now() } });
+          queuedBytes += entry.data.length + 512;
+          if (queuedBytes >= BATCH_BYTES) await flush();
         }
+        await breathe();
         if (reader.done) break;
       }
+      await flush();
       if (!root) throw new CommandError("fatal: repository archive is empty", 128);
       watch.stop();
       await stream.cancel().catch(() => {});

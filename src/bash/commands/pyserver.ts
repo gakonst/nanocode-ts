@@ -3,9 +3,33 @@ import { HELPER, type Pyodide, type PyodideFS, type PythonReply, type PythonRequ
 
 type Stat = { mode: number; size: number; mtime: Date | number };
 
-type FS = PyodideFS & { lstat(path: string): Stat; isLink(mode: number): boolean };
+type Tracking = { dirty: Set<string>; gone: Set<string> };
 
-type Runner = { pyodide: Pyodide; fs: FS; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; micropip: boolean; installed: Set<string> };
+type FS = PyodideFS & { lstat(path: string): Stat; isLink(mode: number): boolean; cwd(): string; trackingDelegate: Record<string, unknown>; truncate(path: unknown, length: number): void };
+
+type Runner = { pyodide: Pyodide; fs: FS; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; micropip: boolean; installed: Set<string>; tracking: Tracking | null };
+
+const WRITES = 1 | 2 | 64 | 512 | 1024;
+
+function track(runner: Runner): void {
+  const { fs } = runner;
+  const absolute = (path: string) => path.startsWith("/") ? path : (fs.cwd() === "/" ? "" : fs.cwd()) + "/" + path;
+  const delegate = fs.trackingDelegate;
+  delegate.onOpenFile = (path: string, flags: number) => {
+    if (runner.tracking && flags & WRITES) runner.tracking.dirty.add(absolute(path));
+  };
+  delegate.onWriteToFile = (path: string) => runner.tracking?.dirty.add(absolute(path));
+  delegate.onMovePath = (from: string, to: string) => {
+    runner.tracking?.gone.add(absolute(from));
+    runner.tracking?.dirty.add(absolute(to));
+  };
+  delegate.onDeletePath = (path: string) => runner.tracking?.gone.add(absolute(path));
+  const truncate = fs.truncate.bind(fs);
+  fs.truncate = (path: unknown, length: number) => {
+    if (typeof path === "string") runner.tracking?.dirty.add(absolute(path));
+    truncate(path, length);
+  };
+}
 
 const ALLOWED = ["/workspace", "/tmp", "/home/user"];
 const LIMIT = 4 * 1024 * 1024;
@@ -15,6 +39,10 @@ const decoder = new TextDecoder("utf-8");
 
 function allowed(path: string): boolean {
   return ALLOWED.some(root => path === root || path.startsWith(root + "/"));
+}
+
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(root + "/");
 }
 
 function join(base: string, name: string): string {
@@ -103,7 +131,9 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
       for (const root of ALLOWED) mkdirs(fs, root);
       const namespace = (pyodide.globals.get("dict") as () => { get(name: string): unknown })();
       pyodide.runPython(HELPER, { globals: namespace });
-      return { pyodide, fs, start: namespace.get("start") as Runner["start"], cancel: namespace.get("cancel") as Runner["cancel"], micropip: false, installed: new Set<string>() };
+      const created: Runner = { pyodide, fs, start: namespace.get("start") as Runner["start"], cancel: namespace.get("cancel") as Runner["cancel"], micropip: false, installed: new Set<string>(), tracking: null };
+      track(created);
+      return created;
     })();
     runner.catch(() => { runner = undefined; });
     return runner;
@@ -177,7 +207,7 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
     return { files, more, large };
   };
 
-  const changed = (fs: FS, roots: string[], before: Map<string, string | undefined>) => {
+  const changed = (fs: FS, roots: string[], touched: Set<string>) => {
     const dirs: string[] = [], files: [string, string | null][] = [], more: string[] = [], large: [string, number][] = [];
     const seen = new Set<string>();
     let budget = REPLY_BYTES;
@@ -191,11 +221,14 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
         return;
       }
       if (found !== "file") return;
+      if (!touched.has(path) && stamps.has(path)) {
+        files.push([path, null]);
+        return;
+      }
       const data = fs.readFile(path);
       const now = fingerprint(data);
-      if (before.get(path) === now) {
+      if (stamps.get(path) === now) {
         files.push([path, null]);
-        stamps.set(path, now);
         return;
       }
       if (data.length > LARGE_BYTES) {
@@ -253,16 +286,16 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
     }
   };
 
-  const execute = async (python: Runner, request: PythonRequest, state?: PythonServerState): Promise<{ status: number; stdout: string; stderr: string }> => {
+  const execute = async (python: Runner, request: PythonRequest, state?: PythonServerState): Promise<{ status: number; stdout: string; stderr: string; touched: Set<string> }> => {
     const { pyodide, fs } = python;
     const out: Uint8Array[] = [], err: Uint8Array[] = [];
     const errText = (message: string) => err.push(new TextEncoder().encode(message));
-    if (request.kind === "version") return { status: 0, stdout: "Python " + String(pyodide.runPython("import sys; sys.version.split()[0]")) + "\n", stderr: "" };
+    if (request.kind === "version") return { status: 0, stdout: "Python " + String(pyodide.runPython("import sys; sys.version.split()[0]")) + "\n", stderr: "", touched: new Set() };
     const cwd = allowed(request.cwd) ? request.cwd : "/workspace";
     mkdirs(fs, cwd);
     let target = request.target;
     if (request.kind === "file") {
-      if (kind(fs, request.filename) !== "file") return { status: 2, stdout: "", stderr: "python3: can't open file '" + request.filename + "': [Errno 2] No such file or directory\n" };
+      if (kind(fs, request.filename) !== "file") return { status: 2, stdout: "", stderr: "python3: can't open file '" + request.filename + "': [Errno 2] No such file or directory\n", touched: new Set() };
       target = decoder.decode(fs.readFile(request.filename));
     }
     const messages = { messageCallback: () => {}, errorCallback: (message: string) => errText(message + "\n") };
@@ -289,9 +322,12 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
     const path0 = request.kind === "file" ? parentOf(request.filename) : request.kind === "module" ? cwd : "";
     const timer = setTimeout(() => { quiet = true; try { python.cancel(); } catch {} quiet = false; }, Math.max(0, deadline - Date.now()));
     let status: number;
+    const tracking: Tracking = { dirty: new Set(), gone: new Set() };
+    python.tracking = tracking;
     try {
       status = Number(await python.start(JSON.stringify({ kind: request.kind, target, argv: request.argv, filename: request.filename, cwd, env, path0 })));
     } finally {
+      python.tracking = null;
       clearTimeout(timer);
       pyodide.setInterruptBuffer(undefined);
     }
@@ -299,7 +335,7 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
       python.installed.add(JSON.stringify(request.argv));
       if (state) await state.save([...((await state.load()) ?? []), request.argv]);
     }
-    return { status, stdout: text(out), stderr: text(err) };
+    return { status, stdout: text(out), stderr: text(err), touched: new Set([...tracking.dirty, ...tracking.gone]) };
   };
 
   const mirrored = async (python: Runner, request: PythonRequest, roots: string[], state?: PythonServerState): Promise<PythonReply> => {
@@ -314,18 +350,12 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
     place(fs, request.files, request.dirs, Boolean(request.append));
     if (request.sync) return empty;
     const keep = request.keep ?? [];
-    const missing = keep.filter(path => !allowed(path) || stamps.get(path) === undefined || stamp(fs, path) !== stamps.get(path));
+    const missing = keep.filter(path => !allowed(path) || stamps.get(path) === undefined || kind(fs, path) !== "file");
     if (missing.length) return { ...empty, missing };
     prune(fs, roots, new Set([...keep, ...request.files.map(([path]) => path)]), new Set(request.dirs));
-    const before = new Map<string, string | undefined>();
-    const walk = (path: string) => {
-      const found = kind(fs, path);
-      if (found === "dir") for (const name of names(fs, path)) walk(join(path, name));
-      else if (found === "file") before.set(path, stamp(fs, path));
-    };
-    for (const root of roots) walk(root);
-    const result = await execute(python, request, state);
-    return { ...empty, ...result, ...changed(fs, roots, before) };
+    const { touched, ...result } = await execute(python, request, state);
+    for (const path of touched) if (!roots.some(root => within(path, root))) stamps.delete(path);
+    return { ...empty, ...result, ...changed(fs, roots, touched) };
   };
 
   const run = async (request: PythonRequest, state?: PythonServerState): Promise<PythonReply> => {
@@ -347,7 +377,7 @@ export function pythonServer(load: () => Promise<Pyodide>): (request: PythonRequ
       mkdirs(fs, parentOf(path));
       fs.writeFile(path, data);
     }
-    const result = await execute(python, request, state);
+    const { touched: _touched, ...result } = await execute(python, request, state);
     return { ...result, ...collect(fs, roots, before) };
   };
 

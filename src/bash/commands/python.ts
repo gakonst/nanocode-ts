@@ -1,7 +1,7 @@
 import { CommandError, type CommandContext, type CommandHandler } from "../shell.ts";
 import { breathe, decode, encode, FsError, parentOf, type FileSystem } from "../fs.ts";
 import { mkdirs } from "./files.ts";
-import { pythonWorkers, workerPreload, workerRun, workerVersion } from "./pyworker.ts";
+import { pythonWorkers, workerExclusive, workerPreload, workerRun, workerStamps, workerSync, workerVersion } from "./pyworker.ts";
 
 export const PYODIDE_VERSION = "314.0.7";
 
@@ -51,6 +51,7 @@ export type PythonOptions = {
   maxFiles?: number;
   batchBytes?: number;
   worker?: boolean;
+  mirror?: string;
 };
 
 type Mode = { kind: "code" | "stdin" | "file" | "module" | "pip"; target: string; argv: string[]; filename: string };
@@ -62,6 +63,8 @@ type Snapshot = Tree & { partial: Set<string>; bytes: number; entries: number; l
 type Listing = { files: Map<string, string>; dirs: Set<string>; partial: Set<string>; bytes: number; left: number; leftBytes: number };
 
 type Mirror = { id: string; known: Map<string, string> };
+
+const THREADED_BYTES = 256 * 1024 * 1024;
 
 type Instance = { pyodide: Pyodide; start: (request: string) => PromiseLike<unknown>; cancel: () => unknown; mirrored: Set<string>; queue: Promise<unknown>; micropip: boolean };
 
@@ -552,6 +555,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
   const maxFiles = options.maxFiles ?? 20_000;
   const mirror: Mirror = { id: "", known: new Map() };
+  let local = options.mirror ?? "";
   const handler: CommandHandler = async ctx => {
     const mode = parse(ctx, ctx.args.slice());
     if (mode === "help") {
@@ -574,7 +578,10 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
       }
     }
     const stdin = ctx.stdin.read();
-    if (threaded(options)) return executeThreaded(ctx, mode, stdin, maxBytes, maxFiles);
+    if (threaded(options)) {
+      local ||= crypto.randomUUID();
+      return executeThreaded(ctx, mode, stdin, options.maxBytes ?? THREADED_BYTES, maxFiles, local);
+    }
     const python = await instance(options);
     const task = python.queue.then(() => execute(ctx, python, mode, stdin, maxBytes, maxFiles));
     python.queue = task.catch(() => {});
@@ -756,21 +763,47 @@ async function executeRemote(ctx: CommandContext, remote: PythonRemote, mode: Mo
 }
 
 
-async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number): Promise<number> {
+async function executeThreaded(ctx: CommandContext, mode: Mode | "version", stdin: string, maxBytes: number, maxFiles: number, mirror: string): Promise<number> {
   if (mode === "version") {
     ctx.stdout.write("Python " + await workerVersion(HELPER, packageCacheDir()) + "\n");
     return 0;
   }
   const roots = [ctx.cwd, "/tmp", ...(mode.kind === "file" ? [mode.filename] : [])].filter(root => !reserved(root));
   const unique = roots.filter((root, index) => roots.indexOf(root) === index && !roots.some(other => other !== root && within(root, other)));
-  const snap = await snapshot(ctx.fs, unique, maxBytes, maxFiles);
-  leftOut(ctx, snap.left, snap.leftBytes, snap.partial, "the " + (maxBytes / 1024 / 1024).toFixed(0) + " MiB or " + maxFiles + "-file limit for Python");
-  const target = mode.kind === "stdin" ? stdin : mode.kind === "file" ? new TextDecoder().decode(snap.files.get(mode.filename) ?? (await ctx.fs.read(mode.filename))) : mode.target;
-  if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+  const target = mode.kind === "stdin" ? stdin : mode.kind === "file" ? new TextDecoder().decode(await ctx.fs.read(mode.filename)) : mode.target;
   const env = { ...ctx.env, PWD: ctx.cwd, PYTHONDONTWRITEBYTECODE: "1" };
   const path0 = mode.kind === "file" ? parentOf(mode.filename) : mode.kind === "module" ? ctx.cwd : "";
-  const done = await workerRun(HELPER, packageCacheDir(), ctx, { kind: mode.kind, name: ctx.name, target, argv: mode.argv, filename: mode.filename, cwd: ctx.cwd, env, path0, roots: unique, dirs: [...snap.dirs], files: [...snap.files], stdin: encode(mode.kind === "stdin" ? "" : stdin) });
-  await writeBack(ctx.fs, snap, done.tree);
+  const cacheDir = packageCacheDir();
+  const done = await workerExclusive(async () => {
+    const listing = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes);
+    leftOut(ctx, listing.left, listing.leftBytes, listing.partial, "the " + (maxBytes / 1024 / 1024).toFixed(0) + " MiB or " + maxFiles + "-file limit for Python");
+    if (ctx.signal.aborted) throw new CommandError("interrupted", 130);
+    const need = await workerSync(HELPER, cacheDir, { mirror, roots: unique, files: [...listing.files], dirs: [...listing.dirs] });
+    const files: [string, Uint8Array, string][] = [];
+    for (const path of need) {
+      await breathe();
+      const data = await ctx.fs.read(path).catch(() => null);
+      if (data) files.push([path, data, listing.files.get(path)!]);
+    }
+    const result = await workerRun(HELPER, cacheDir, ctx, { kind: mode.kind, name: ctx.name, target, argv: mode.argv, filename: mode.filename, cwd: ctx.cwd, env, path0, roots: unique, files, stdin: encode(mode.kind === "stdin" ? "" : stdin) });
+    const { changes } = result;
+    for (const path of [...changes.deleted].sort((a, b) => b.length - a.length)) {
+      await ctx.fs.remove(path).catch(error => {
+        if (!(error instanceof FsError)) throw error;
+      });
+    }
+    for (const dir of [...changes.dirs].sort()) if (!listing.dirs.has(dir)) await mkdirs(ctx.fs, dir);
+    const stamps: [string, string][] = [];
+    for (const [path, data] of changes.files) {
+      await breathe();
+      await mkdirs(ctx.fs, parentOf(path));
+      await ctx.fs.write(path, data);
+      const stat = await ctx.fs.stat(path);
+      if (stat) stamps.push([path, stat.size + ":" + stat.mtime]);
+    }
+    if (stamps.length) await workerStamps(HELPER, cacheDir, stamps);
+    return result;
+  });
   if (done.failure !== undefined) throw done.failure;
   if (done.status >= 0) return done.status;
   if (ctx.signal.aborted) throw new CommandError("interrupted", 130);

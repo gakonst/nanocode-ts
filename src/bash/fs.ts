@@ -20,9 +20,33 @@ export interface FileSystem {
   search?(dir: string, literals: string[]): Promise<string[] | null>;
   excerpt?(path: string, literals: string[]): Promise<Uint8Array | null>;
   matches?(dir: string, literals: string[], ignoreCase: boolean): Promise<string[] | null>;
+  writeMany?(dirs: string[], files: NewFile[]): Promise<string[]>;
 }
 
+export type NewFile = { path: string; data: Uint8Array; mtime: number };
+
 export type FileInput = string | Uint8Array;
+
+export function writeMany(fs: FileSystem, dirs: string[], files: NewFile[]): Promise<string[]> {
+  return fs.writeMany ? fs.writeMany(dirs, files) : writeEach(fs, dirs, files);
+}
+
+export async function writeEach(fs: FileSystem, dirs: string[], files: NewFile[]): Promise<string[]> {
+  for (const dir of dirs) if (!(await fs.stat(dir))) await fs.mkdir(dir);
+  const refused: string[] = [];
+  for (const file of files) {
+    try {
+      await fs.write(file.path, file.data);
+    } catch (error) {
+      if (!(error instanceof FsError) || error.code !== "EFBIG") throw error;
+      refused.push(file.path);
+      continue;
+    }
+    if (fs.utimes) await fs.utimes(file.path, file.mtime);
+    else file.mtime = (await fs.stat(file.path))?.mtime ?? file.mtime;
+  }
+  return refused;
+}
 
 export function masked(fs: FileSystem, umask: number): FileSystem {
   const chmod = fs.chmod?.bind(fs);
@@ -305,6 +329,21 @@ export class MemoryFileSystem implements FileSystem {
     const bytes = append && existing ? existing.data : data;
     if (bytes.length > this.maxFileBytes) throw new FsError("EFBIG", path);
     parent.set(name, { kind: "file", data: bytes, mtime: Date.now(), mode: existing?.mode ?? 0o644 });
+  }
+
+  async writeMany(dirs: string[], files: NewFile[]): Promise<string[]> {
+    for (const dir of dirs) if (this.#find(this.#real(dir))?.kind !== "directory") await this.mkdir(dir);
+    const refused: string[] = [];
+    for (const file of files) {
+      if (file.data.length > this.maxFileBytes) {
+        refused.push(file.path);
+        continue;
+      }
+      await this.write(file.path, file.data);
+      const node = this.#find(this.#real(file.path));
+      if (node?.kind === "file") node.mtime = file.mtime;
+    }
+    return refused;
   }
 
   async list(path: string): Promise<string[]> {

@@ -1,5 +1,5 @@
 import type { SqlHost, SqlValue, Statement } from "../contracts.ts";
-import { baseOf, decode, encode, FsError, normalize, parentOf, resolvePath, type FileStat, type FileSystem, type LinkStat } from "./fs.ts";
+import { baseOf, decode, encode, FsError, normalize, parentOf, resolvePath, writeEach, type FileStat, type FileSystem, type LinkStat, type NewFile } from "./fs.ts";
 
 const TABLE = "nanocode_files";
 
@@ -242,6 +242,38 @@ export class SqlFileSystem implements FileSystem {
     const tail = last?.[0] ? bytes(last[0][1] ?? null) : new Uint8Array();
     const fill = tail.length < this.chunkBytes;
     await this.#run("append", [[`UPDATE ${TABLE} SET mtime = ? WHERE scope = ? AND path = ?`, Date.now(), this.scope, target], ...this.#chunks(target, fill ? joined([tail, data], tail.length + data.length) : data, fill ? seq : seq + 1)]);
+  }
+
+  async writeMany(dirs: string[], files: NewFile[]): Promise<string[]> {
+    this.#links ??= this.#run("links", [[`SELECT 1 FROM ${TABLE} WHERE scope = ? AND kind = 'link' LIMIT 1`, this.scope]]).then(([rows]) => Boolean(rows?.length));
+    if (await this.#links) return writeEach(this, dirs, files);
+    const refused: string[] = [];
+    let batch: Statement[] = dirs.filter(dir => dir !== "/").map(dir => [`INSERT OR IGNORE INTO ${TABLE} (scope, path, parent, kind, data, mtime, mode) VALUES (?, ?, ?, 'directory', NULL, ?, ?)`, this.scope, dir, parentOf(dir), Date.now(), 0o755]);
+    let bytes = 0;
+    const flush = async () => {
+      if (batch.length) await this.#run("write.many", batch);
+      batch = [];
+      bytes = 0;
+    };
+    for (const file of files) {
+      if (file.data.length > this.maxFileBytes) {
+        refused.push(file.path);
+        continue;
+      }
+      if (file.data.length > STAGED_BYTES) {
+        await flush();
+        await this.#staged(file.path, file.data, 0o644);
+        await this.#run("utimes", [[`UPDATE ${TABLE} SET mtime = ? WHERE scope = ? AND path = ?`, file.mtime, this.scope, file.path]]);
+        continue;
+      }
+      if (bytes + file.data.length > STAGED_BYTES) await flush();
+      batch.push(this.#drop(file.path));
+      if (file.data.length <= this.chunkBytes) batch.push(this.#insert(file.path, "file", file.data, 0o644, file.mtime));
+      else batch.push(this.#insert(file.path, "file", null, 0o644, file.mtime), ...this.#chunks(file.path, file.data, 0));
+      bytes += file.data.length;
+    }
+    await flush();
+    return refused;
   }
 
   async list(path: string): Promise<string[]> {

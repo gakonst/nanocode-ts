@@ -1,9 +1,11 @@
 import { CommandError, type CommandContext } from "../shell.ts";
 
 
-export type PythonJob = { kind: string; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; path0: string; roots: string[]; dirs: string[]; files: [string, Uint8Array][]; stdin: Uint8Array };
+export type PythonJob = { kind: string; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; path0: string; roots: string[]; files: [string, Uint8Array, string][]; stdin: Uint8Array };
 
-export type PythonTree = { files: Map<string, Uint8Array>; dirs: Set<string> };
+export type PythonSync = { mirror: string; roots: string[]; files: [string, string][]; dirs: string[] };
+
+export type PythonChanges = { files: Map<string, Uint8Array>; dirs: string[]; deleted: string[] };
 
 type Port = { postMessage(message: unknown, transfer?: unknown[]): void; on(event: string, listener: (value: unknown) => void): void; terminate(): Promise<number>; unref?(): void; ref?(): void };
 
@@ -22,7 +24,38 @@ const join = (base, name) => base === "/" ? "/" + name : base + "/" + name;
 const within = (path, dir) => path === dir || path.startsWith(dir === "/" ? "/" : dir + "/");
 const parentOf = path => { const i = path.lastIndexOf("/"); return i <= 0 ? "/" : path.slice(0, i); };
 const decoder = new TextDecoder();
-let py, start, cancel, loading, micropip = false, mirrored = [];
+let py, start, cancel, loading, micropip = false, mirrored = [], mirror = null, known = new Map(), tracking = null;
+const WRITES = 1 | 2 | 64 | 512 | 1024;
+function absolute(path) {
+  if (path.startsWith("/")) return path;
+  const cwd = py.FS.cwd();
+  return (cwd === "/" ? "" : cwd) + "/" + path;
+}
+function track(fs) {
+  const delegate = fs.trackingDelegate;
+  delegate.onOpenFile = (path, flags) => { if (tracking && (flags & WRITES)) tracking.dirty.add(absolute(path)); };
+  delegate.onWriteToFile = path => { if (tracking) tracking.dirty.add(absolute(path)); };
+  delegate.onMovePath = (from, to) => { if (tracking) { tracking.gone.add(absolute(from)); tracking.dirty.add(absolute(to)); } };
+  delegate.onDeletePath = path => { if (tracking) tracking.gone.add(absolute(path)); };
+  delegate.onMakeDirectory = path => { if (tracking) tracking.dirty.add(absolute(path)); };
+  const truncate = fs.truncate.bind(fs);
+  fs.truncate = (path, length) => { if (tracking && typeof path === "string") tracking.dirty.add(absolute(path)); return truncate(path, length); };
+}
+function changes(fs, roots) {
+  const files = new Map(), dirs = new Set(), deleted = new Set();
+  const inside = path => !reserved(path) && roots.some(root => within(path, root));
+  const visit = path => {
+    if (!inside(path)) return;
+    if (!fs.analyzePath(path).exists) return void deleted.add(path);
+    const mode = fs.stat(path).mode;
+    if (fs.isFile(mode)) return void files.set(path, fs.readFile(path));
+    if (!fs.isDir(mode) || dirs.has(path)) return;
+    dirs.add(path);
+    for (const name of fs.readdir(path)) if (name !== "." && name !== "..") visit(join(path, name));
+  };
+  for (const path of [...tracking.gone, ...tracking.dirty]) visit(path);
+  return { files, dirs: [...dirs], deleted: [...deleted] };
+}
 async function load() {
   let mod;
   for (const from of [process.cwd() + "/package.json", workerData.from]) {
@@ -30,6 +63,7 @@ async function load() {
   }
   if (!mod) mod = await import("pyodide");
   py = await mod.loadPyodide({ packageCacheDir: workerData.cacheDir, stdout: () => {}, stderr: () => {} });
+  track(py.FS);
   const ns = py.globals.get("dict")();
   py.runPython(workerData.helper, { globals: ns });
   start = ns.get("start");
@@ -41,27 +75,44 @@ function unmirror(fs, path) {
   for (const name of fs.readdir(path)) if (name !== "." && name !== "..") unmirror(fs, join(path, name));
   if (path !== "/" && !RESERVED.some(prefix => within(prefix, path))) fs.rmdir(path);
 }
-function collect(fs, roots) {
-  const files = new Map(), dirs = new Set();
-  const visit = path => {
-    if (reserved(path) || files.has(path) || dirs.has(path) || !fs.analyzePath(path).exists) return;
-    const mode = fs.stat(path).mode;
-    if (fs.isFile(mode)) files.set(path, fs.readFile(path));
-    if (!fs.isDir(mode)) return;
-    dirs.add(path);
-    for (const name of fs.readdir(path)) if (name !== "." && name !== "..") visit(join(path, name));
-  };
-  for (const root of roots) visit(root);
-  return { files, dirs };
+function prune(fs, path, dirs, listing) {
+  if (reserved(path) || !fs.analyzePath(path).exists) return;
+  if (!fs.isDir(fs.stat(path).mode)) {
+    if (!listing.has(path)) unmirror(fs, path);
+    return;
+  }
+  if (!dirs.has(path) && !mirrored.includes(path)) return unmirror(fs, path);
+  for (const name of fs.readdir(path)) if (name !== "." && name !== "..") prune(fs, join(path, name), dirs, listing);
+}
+function sync(message) {
+  const fs = py.FS;
+  fs.chdir("/");
+  if (message.mirror !== mirror) {
+    for (const path of mirrored) unmirror(fs, path);
+    mirrored = [];
+    known.clear();
+    mirror = message.mirror;
+  }
+  const listing = new Map(message.files);
+  const dirs = new Set(message.dirs);
+  for (const path of [...known.keys()]) {
+    if (listing.has(path)) continue;
+    unmirror(fs, path);
+    known.delete(path);
+  }
+  for (const root of message.roots) if (!mirrored.includes(root)) mirrored.push(root);
+  for (const root of mirrored) prune(fs, root, dirs, listing);
+  for (const dir of [...dirs].sort()) fs.mkdirTree(dir);
+  return [...listing].filter(([path, stamp]) => known.get(path) !== stamp).map(([path]) => path);
 }
 async function run(id, job) {
   const fs = py.FS;
   const out = (fd, text) => parentPort.postMessage({ id, type: "out", fd, text });
-  fs.chdir("/");
-  for (const path of mirrored) unmirror(fs, path);
-  mirrored = job.roots;
-  for (const dir of job.dirs) fs.mkdirTree(dir);
-  for (const [path, data] of job.files) { fs.mkdirTree(parentOf(path)); fs.writeFile(path, data); }
+  for (const [path, data, stamp] of job.files) {
+    fs.mkdirTree(parentOf(path));
+    fs.writeFile(path, data);
+    known.set(path, stamp);
+  }
   fs.mkdirTree(job.cwd);
   const messages = { messageCallback: () => {}, errorCallback: message => out(2, message + "\n") };
   try {
@@ -78,13 +129,16 @@ async function run(id, job) {
   py.setStderr(sink(2));
   py.setInterruptBuffer(new Int32Array(job.interrupt));
   let status;
+  tracking = { dirty: new Set(), gone: new Set() };
   try {
     status = Number(await start(JSON.stringify({ kind: job.kind, target: job.target, argv: job.argv, filename: job.filename, cwd: job.cwd, env: job.env, path0: job.path0 })));
   } finally {
     py.setInterruptBuffer(undefined);
   }
-  const tree = collect(fs, job.roots);
-  parentPort.postMessage({ id, type: "done", status, files: tree.files, dirs: tree.dirs });
+  const found = changes(fs, job.roots);
+  tracking = null;
+  for (const path of [...found.files.keys(), ...found.deleted]) known.delete(path);
+  parentPort.postMessage({ id, type: "done", status, files: found.files, dirs: found.dirs, deleted: found.deleted });
 }
 parentPort.on("message", async message => {
   if (message.type === "cancel") { try { cancel && cancel(); } catch {} return; }
@@ -92,6 +146,8 @@ parentPort.on("message", async message => {
     await (loading ??= load());
     if (message.type === "version") return parentPort.postMessage({ id: message.id, type: "done", version: String(py.runPython("import sys; sys.version.split()[0]")) });
     if (message.type === "preload") { await py.loadPackage(message.packages, { messageCallback: () => {}, errorCallback: () => {} }); return parentPort.postMessage({ id: message.id, type: "done" }); }
+    if (message.type === "sync") return parentPort.postMessage({ id: message.id, type: "done", need: sync(message.sync) });
+    if (message.type === "stamps") { for (const [path, stamp] of message.stamps) known.set(path, stamp); return parentPort.postMessage({ id: message.id, type: "done" }); }
     await run(message.id, message.job);
   } catch (error) {
     parentPort.postMessage({ id: message.id, type: "error", message: error && error.stack || String(error) });
@@ -168,8 +224,20 @@ export function workerPreload(helper: string, cacheDir: string, packages: string
   return serial(async () => void await call(helper, cacheDir, { type: "preload", packages }).result);
 }
 
-export function workerRun(helper: string, cacheDir: string, ctx: CommandContext, job: PythonJob): Promise<{ status: number; tree: PythonTree; failure?: unknown }> {
-  return serial(async () => {
+export function workerExclusive<T>(work: () => Promise<T>): Promise<T> {
+  return serial(work);
+}
+
+export async function workerSync(helper: string, cacheDir: string, sync: PythonSync): Promise<string[]> {
+  return (await call(helper, cacheDir, { type: "sync", sync }).result)["need"] as string[];
+}
+
+export async function workerStamps(helper: string, cacheDir: string, stamps: [string, string][]): Promise<void> {
+  await call(helper, cacheDir, { type: "stamps", stamps }).result;
+}
+
+export function workerRun(helper: string, cacheDir: string, ctx: CommandContext, job: PythonJob): Promise<{ status: number; changes: PythonChanges; failure?: unknown }> {
+  return (async () => {
     const interrupt = new SharedArrayBuffer(4);
     const flag = new Int32Array(interrupt);
     const deadline = Date.now() + ctx.limits.timeoutMs;
@@ -205,10 +273,10 @@ export function workerRun(helper: string, cacheDir: string, ctx: CommandContext,
         if (killed === "interrupted") throw new CommandError("interrupted", 130);
         throw new CommandError("timed out after " + ctx.limits.timeoutMs + " ms (the python process was killed)", 124);
       }
-      return { status: Number(done["status"]), tree: { files: done["files"] as Map<string, Uint8Array>, dirs: done["dirs"] as Set<string> }, ...(failure !== undefined ? { failure } : {}) };
+      return { status: Number(done["status"]), changes: { files: done["files"] as Map<string, Uint8Array>, dirs: done["dirs"] as string[], deleted: done["deleted"] as string[] }, ...(failure !== undefined ? { failure } : {}) };
     } finally {
       clearInterval(watch);
     }
-  });
+  })();
 }
 

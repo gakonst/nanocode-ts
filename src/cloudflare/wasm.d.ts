@@ -5,6 +5,7 @@ declare module "*.wasm" {
 
 declare module "nanocode-ts/pyodide-modules" {
   export const PYODIDE_VERSION: string;
+  export const SNAPSHOT: { parts: string[]; bytes: number };
   export const MODULES: Record<string, WebAssembly.Module>;
 }
 
