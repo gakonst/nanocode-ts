@@ -1,3 +1,8 @@
+/**
+ * Runs the WebAssembly engine on a Node worker thread.
+ *
+ * @module
+ */
 import type * as Contracts from '../Contracts.ts'
 import * as AgentRuntime from '../AgentRuntime.ts'
 
@@ -26,6 +31,7 @@ type Call = [kind: 0 | 1 | 2 | 3, id: number, bytes?: Uint8Array, body?: Uint8Ar
 
 type Reply = { calls: Call[]; error?: string; memory: number }
 
+/** Options of `engine`. */
 export type Options = { stackSizeMb?: number; timeoutMs?: number }
 
 const SOURCE = (engine: string) => String.raw`
@@ -58,6 +64,7 @@ localEngine(module, host).then(engine => {
 }, thrown => parentPort.postMessage({ calls: [], memory: 0, error: thrown instanceof Error ? thrown.message : String(thrown) }));
 `
 
+/** Returns an engine factory that runs the module on a worker thread, or `undefined` outside Node. */
 export function engine(options: Options = {}): Contracts.EngineFactory | undefined {
   const threads = (
     globalThis as { process?: { getBuiltinModule?(name: string): unknown } }

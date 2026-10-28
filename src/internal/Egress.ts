@@ -1,5 +1,11 @@
+/**
+ * Guards outbound `fetch` against private addresses, with DNS-over-HTTPS resolution.
+ *
+ * @module
+ */
 export type Resolve = (host: string, signal?: AbortSignal) => Promise<readonly string[]>
 
+/** Options of `guard`. */
 export type Options = { resolve?: Resolve; redirects?: number }
 
 const LOCAL_NAME =
@@ -9,6 +15,7 @@ const GUARDED = Symbol.for('nanocode-ts.egress')
 const DOH = 'https://cloudflare-dns.com/dns-query'
 const CACHE_LIMIT = 1024
 
+/** Parses an IPv4 address into its octets. */
 export function ipv4(text: string): number[] | undefined {
   const parts = text.split('.')
   if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255))
@@ -16,6 +23,7 @@ export function ipv4(text: string): number[] | undefined {
   return parts.map(Number)
 }
 
+/** Parses an IPv6 address into its 16-bit groups. */
 export function ipv6(text: string): number[] | undefined {
   let host = text
     .replace(/^\[|\]$/g, '')
@@ -82,6 +90,7 @@ function publicIpv6(groups: readonly number[]): boolean {
   return true
 }
 
+/** Whether an IP address is publicly routable. */
 export function publicAddress(address: string): boolean {
   const four = ipv4(address)
   if (four) return publicIpv4(four)
@@ -100,6 +109,7 @@ function literal(host: string): boolean {
   return ipv4(host) !== undefined || (host.includes(':') && ipv6(host) !== undefined)
 }
 
+/** Whether a URL names a public host. */
 export function publicTarget(target: string): boolean {
   return refusal(target) === undefined
 }
@@ -123,6 +133,7 @@ function refusal(target: string): string | undefined {
   return undefined
 }
 
+/** Resolves a URL's host and rejects it when any address is not public. */
 export async function check(
   target: string,
   resolve: Resolve = doh(),
@@ -150,6 +161,7 @@ export async function check(
     : 'fetch refused: ' + host + ' resolves to ' + bad + ', which is not a public address'
 }
 
+/** Returns the response for a refused request. */
 export function refused(message: string): Response {
   return new Response(JSON.stringify({ error: message }), {
     status: 403,
@@ -159,6 +171,7 @@ export function refused(message: string): Response {
 
 const answers = new Map<string, { until: number; addresses: readonly string[] }>()
 
+/** Returns a resolver that queries DNS over HTTPS. */
 export function doh(
   fetcher: typeof fetch = (input, init) => globalThis.fetch(input, init),
   endpoint = DOH,
@@ -196,15 +209,18 @@ export function doh(
   }
 }
 
+/** Whether a fetch is already guarded. */
 export function guarded(fetcher: typeof fetch): boolean {
   return (fetcher as unknown as Record<symbol, unknown>)[GUARDED] === true
 }
 
+/** Marks a fetch as guarded. */
 export function mark<F extends typeof fetch>(fetcher: F): F {
   Object.defineProperty(fetcher, GUARDED, { value: true })
   return fetcher
 }
 
+/** Returns a fetch that refuses private targets and follows redirects only to public ones. */
 export function guard(fetcher: typeof fetch, options: Options = {}): typeof fetch {
   if (guarded(fetcher)) return fetcher
   const resolve = options.resolve ?? doh()

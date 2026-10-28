@@ -1,3 +1,8 @@
+/**
+ * Syntax highlighting for code blocks and tool cells.
+ *
+ * @module
+ */
 import { codeToTokens, isSupportedLanguage, type Theme } from '@pierre/highlights'
 import type { Token } from './react/index.tsx'
 
@@ -39,6 +44,7 @@ function theme(palette: Palette): Theme {
   } as Theme
 }
 
+/** Token colors for the light and dark color schemes. */
 export const themes = {
   dark: theme({
     comment: '#6c6a66',
@@ -77,6 +83,7 @@ const ALIASES: Record<string, string> = {
   console: 'bash',
 }
 
+/** Returns the tokens of each line of `code` in `language`, as plain text when the language is unknown. */
 export function highlight(code: string, language: string): Token[][] {
   const wanted = ALIASES[language] ?? language
   const lang = isSupportedLanguage(wanted)

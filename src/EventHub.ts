@@ -1,3 +1,8 @@
+/**
+ * Retains a tail of logged session events for readers, wakes waiters, and serves Server-Sent Events streams.
+ *
+ * @module
+ */
 import type * as Contracts from './Contracts.ts'
 
 type Event = Contracts.LoggedEvent & { [key: string]: unknown }
@@ -18,6 +23,7 @@ type Stream = {
   flushed: number
 }
 
+/** Read position of one live reader: the last sequence number sent, and the text sent for each open stream. */
 export type Cursor = { sent: Map<string, number>; cursor: number }
 
 const STREAM_BYTES = 4_194_304
@@ -67,6 +73,7 @@ function chunk(stream: Stream, from: number): Contracts.LoggedEvent {
   }
 }
 
+/** Creates a hub that retains at most `retained()` events and `retainedBytes()` bytes. */
 export function create(retained: () => number, retainedBytes: () => number) {
   const state: {
     listeners: Set<() => void>
@@ -338,4 +345,6 @@ export function create(retained: () => number, retainedBytes: () => number) {
   }
   return self
 }
+
+/** Hub that `create` returns. */
 export type EventHub = ReturnType<typeof create>

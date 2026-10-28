@@ -1,9 +1,15 @@
+/**
+ * Sessions: one runtime per scope that reopens when its hand changes, with an optional relay for remote hands.
+ *
+ * @module
+ */
 import * as Bridge from './Bridge.ts'
 import { createRelayToken, type HandAccess, socketUrl } from './client.ts'
 import type * as Contracts from './Contracts.ts'
 import type * as AgentRuntime from './AgentRuntime.ts'
 import type * as Remote from './Remote.ts'
 
+/** Relay that a session dials for remote hands. */
 export type Relay = {
   url: string
   token?: string
@@ -11,6 +17,7 @@ export type Relay = {
   keep?(token: string): void
 }
 
+/** Options of `open`. */
 export type Options = {
   scope: string
   open(hand: Bridge.Hand | undefined): Promise<AgentRuntime.AgentRuntime>
@@ -18,6 +25,7 @@ export type Options = {
   waitMs?: number
 }
 
+/** Open session. */
 export type Session = {
   readonly interrupted: boolean
   ask(prompt: string): Promise<Contracts.TurnReport | undefined>
@@ -29,10 +37,12 @@ export type Session = {
   dispose(): Promise<void>
 }
 
+/** Returns the name that a relayed hand attaches as. */
 export function handName(hand: Bridge.Hand): string {
   return hand.name ?? 'machine'
 }
 
+/** Opens a session and its runtime, and reopens the runtime when a hand attaches or leaves. */
 export async function open(options: Options): Promise<Session> {
   const { scope } = options
   let hand: Bridge.Hand | undefined

@@ -1,6 +1,14 @@
+/**
+ * Span timings that runtimes record and report.
+ *
+ * @module
+ */
 export type Value = { count: number; total_ms: number; max_ms: number }
+
+/** Timings by span name. */
 export type Snapshot = Record<string, Value>
 
+/** Creates an empty timing record. */
 export function create() {
   const state: { values: Snapshot } = {
     values: {},
@@ -22,8 +30,11 @@ export function create() {
   }
   return self
 }
+
+/** Timing record that `create` returns. */
 export type Timings = ReturnType<typeof create>
 
+/** Returns the count and total duration of each span recorded between two snapshots. */
 export function difference(
   after: Snapshot,
   before: Snapshot,
