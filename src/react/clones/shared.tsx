@@ -1,6 +1,7 @@
 'use client'
 
-import type { ToolCell as Cell, TurnBlock } from '../../client.ts'
+import type * as Tool from '../../client/Tool.ts'
+import type * as Transcript from '../../client/Transcript.ts'
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -11,7 +12,7 @@ import {
 } from 'react'
 import { Code, type Skin, useAttachments, useConfig, useConversations, useSend } from '../index.tsx'
 
-export type Block = TurnBlock | { kind: 'tools'; cells: Cell[]; live: boolean }
+export type Block = Transcript.TurnBlock | { kind: 'tools'; cells: Tool.Cell[]; live: boolean }
 
 export type CloneModel = { id: string; label: string; detail?: string }
 
@@ -39,7 +40,7 @@ export type CloneProps = {
   warm?(): void
 }
 
-export function grouped(blocks: readonly TurnBlock[]): Block[] {
+export function grouped(blocks: readonly Transcript.TurnBlock[]): Block[] {
   const result: Block[] = []
   for (const block of blocks) {
     const last = result[result.length - 1]
@@ -52,7 +53,7 @@ export function grouped(blocks: readonly TurnBlock[]): Block[] {
   return result
 }
 
-export function seconds(block: TurnBlock): number | undefined {
+export function seconds(block: Transcript.TurnBlock): number | undefined {
   return block.live || block.started_at === undefined || block.ended_at === undefined
     ? undefined
     : Math.max(1, Math.round((block.ended_at - block.started_at) / 1000))

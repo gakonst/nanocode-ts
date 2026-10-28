@@ -10,43 +10,35 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import { type Entry, type HandSource, type ToolCell } from '../client.ts'
+import type * as Relay from '../client/Relay.ts'
+import type * as Tool from '../client/Tool.ts'
+import type * as Transcript from '../client/Transcript.ts'
 import {
-  commands,
   Cloud,
   type Keyring,
-  limits,
-  message,
+  Machine,
   Models,
   Payment,
   Payments,
-  type Runtime,
-  until,
-  unlockCommands,
   Wallet,
 } from '../machines/index.ts'
-import type * as Mcp from '../machines/mcp.ts'
+import type * as Mcp from '../machines/Mcp.ts'
 import { useConfig, useConversations, useHand, usePart, useSend, useTranscript } from './index.tsx'
 
-export type Machine = ReturnType<typeof useMachine>
-
-export function useMachine(
-  runtime: Runtime,
-  model: Models.Model,
-  options: { greet?: boolean } = {},
-) {
+export function useMachine(runtime: Machine.Runtime, options: useMachine.Options) {
+  const { model } = options
   const { servers } = runtime.payment
   const config = useConfig()
   const { isPending: busy } = useSend()
   const { current: conversation } = useConversations()
   const note = config.note
-  const [connected, setConnected] = useState<Wallet.Wallet>()
+  const [connected, setConnected] = useState<Wallet.AccessKey>()
   const [working, setWorking] = useState(false)
   const [device, setDevice] = useState<Wallet.Prompt>()
   const [checkout, setCheckout] = useState<{ address: string; url: string }>()
-  const [link, setLink] = useState<Cloud.Cloud | undefined>(() => Cloud.restore())
+  const [link, setLink] = useState<Cloud.Link | undefined>(() => Cloud.restore())
   const metered = useMemo(() => link && Cloud.meter(link), [link?.token])
-  const machine = useRef<HandSource>({
+  const machine = useRef<Relay.Source>({
     hand: async () => {
       const current = Cloud.restore()
       return current && (await Cloud.hand(current))
@@ -77,7 +69,7 @@ export function useMachine(
         ? undefined
         : note(
             'tool',
-            `Not logged in. Type /login to connect your Tempo Wallet. It asks you to approve a key that this site's Worker keeps encrypted and pays with, ${limits}, and only for payments. The agent then pays for its own model and every service it calls.`,
+            `Not logged in. Type /login to connect your Tempo Wallet. It asks you to approve a key that this site's Worker keeps encrypted and pays with, ${Machine.limits}, and only for payments. The agent then pays for its own model and every service it calls.`,
           )
     void Wallet.published(saved).then(
       (onChain) => {
@@ -90,16 +82,16 @@ export function useMachine(
         if (!restored && options.greet !== false)
           note(
             'tool',
-            `Logged in as ${Wallet.short(saved.address)} with key ${Wallet.short(saved.keyAddress)} until ${until(saved)}. Type /wallet to see your MACH.`,
+            `Logged in as ${Wallet.short(saved.address)} with key ${Wallet.short(saved.keyAddress)} until ${Machine.until(saved)}. Type /wallet to see your MACH.`,
           )
         if (!Cloud.restore())
-          void attach(saved).catch((error: unknown) => note('error', message(error)))
+          void attach(saved).catch((error: unknown) => note('error', Machine.message(error)))
       },
-      (error: unknown) => note('error', message(error)),
+      (error: unknown) => note('error', Machine.message(error)),
     )
   }, [])
 
-  async function attach(account: Wallet.Wallet) {
+  async function attach(account: Wallet.AccessKey) {
     setLink(Cloud.restore() ?? (await Cloud.enable(account)))
   }
 
@@ -121,7 +113,7 @@ export function useMachine(
     const current = link ?? Cloud.restore()
     if (current)
       await Cloud.logout(current).catch((error: unknown) =>
-        note('error', `The Worker did not forget the key (${message(error)}).`),
+        note('error', `The Worker did not forget the key (${Machine.message(error)}).`),
       )
     note('tool', 'Opening Tempo Wallet to revoke the key.')
     try {
@@ -130,7 +122,7 @@ export function useMachine(
     } catch (error) {
       note(
         'error',
-        `Tempo Wallet did not revoke the key (${message(error)}). It stays valid until ${until(saved)} with what is left of its limit, but this page no longer keeps it.`,
+        `Tempo Wallet did not revoke the key (${Machine.message(error)}). It stays valid until ${Machine.until(saved)} with what is left of its limit, but this page no longer keeps it.`,
       )
     }
     Wallet.forget()
@@ -151,7 +143,7 @@ export function useMachine(
     const { balance, fees, remaining } = await Wallet.balances(connected)
     note(
       'tool',
-      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${until(connected)}.`,
+      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${Machine.until(connected)}.`,
     )
     if (link) {
       const { spent } = await Cloud.status(link)
@@ -194,7 +186,10 @@ export function useMachine(
             )
       else if (name === '/clear') clear()
       else
-        note('tool', commands.map((entry) => `${entry.label.padEnd(8)} ${entry.detail}`).join('\n'))
+        note(
+          'tool',
+          Machine.commands.map((entry) => `${entry.label.padEnd(8)} ${entry.detail}`).join('\n'),
+        )
     } catch (error) {
       note('error', Models.explain(error).message)
     }
@@ -239,9 +234,22 @@ export function useMachine(
   }
 }
 
-type Note = (kind: Entry['kind'], text: string) => void
+export declare namespace useMachine {
+  type Options = {
+    /** Whether to post the login greeting. Defaults to `true`. */
+    greet?: boolean | undefined
+    /** Model of the chat's turns. */
+    model: Models.Model
+  }
 
-async function approve(note: Note): Promise<Wallet.Wallet> {
+  type ReturnType = MachineState
+}
+
+type MachineState = ReturnType<typeof useMachine>
+
+type Note = (kind: Transcript.Entry['kind'], text: string) => void
+
+async function approve(note: Note): Promise<Wallet.AccessKey> {
   let pending = Wallet.restore()
   if (!pending) {
     note(
@@ -253,7 +261,7 @@ async function approve(note: Note): Promise<Wallet.Wallet> {
     pending = await Wallet.connect()
     note(
       'tool',
-      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${limits}, at ${until(pending)}.`,
+      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${Machine.limits}, at ${Machine.until(pending)}.`,
     )
   }
   note(
@@ -270,7 +278,7 @@ async function approve(note: Note): Promise<Wallet.Wallet> {
   return pending
 }
 
-async function greet(connected: Wallet.Wallet, note: Note, keyed: boolean, suggestion?: string) {
+async function greet(connected: Wallet.AccessKey, note: Note, keyed: boolean, suggestion?: string) {
   const { balance } = await Wallet.balances(connected)
   note(
     'tool',
@@ -281,7 +289,7 @@ async function greet(connected: Wallet.Wallet, note: Note, keyed: boolean, sugge
 }
 
 async function fundWallet(
-  connected: Wallet.Wallet | undefined,
+  connected: Wallet.AccessKey | undefined,
   note: Note,
   setCheckout: (checkout: { address: string; url: string }) => void,
 ) {
@@ -331,10 +339,10 @@ export type Keyed = {
 
 export type Unlocking = Keyed & {
   checkout: { address: string; url: string } | undefined
-  connected: Wallet.Wallet | undefined
+  connected: Wallet.AccessKey | undefined
   device: Wallet.Prompt | undefined
   open(event: MouseEvent<HTMLAnchorElement>): void
-  commands: typeof unlockCommands
+  commands: typeof Machine.unlockCommands
   handles(text: string): boolean
 }
 
@@ -347,7 +355,7 @@ export function useUnlock(
   const { send, isPending: busy } = useSend()
   const { current: conversation } = useConversations()
   const note = config.note
-  const [connected, setConnected] = useState<Wallet.Wallet>()
+  const [connected, setConnected] = useState<Wallet.AccessKey>()
   const [working, setWorking] = useState(false)
   const [device, setDevice] = useState<Wallet.Prompt>()
   const [checkout, setCheckout] = useState<{ address: string; url: string }>()
@@ -370,12 +378,14 @@ export function useUnlock(
         await keyring.register(saved)
         setConnected(saved)
       })
-      .catch((error: unknown) => note('error', message(error)))
+      .catch((error: unknown) => note('error', Machine.message(error)))
   }, [])
 
   useEffect(() => {
     if (connected)
-      void keyring.register(connected).catch((error: unknown) => note('error', message(error)))
+      void keyring
+        .register(connected)
+        .catch((error: unknown) => note('error', Machine.message(error)))
   }, [conversation, connected])
 
   async function login() {
@@ -400,7 +410,7 @@ export function useUnlock(
     } catch (error) {
       note(
         'error',
-        `Tempo Wallet did not revoke the key (${message(error)}). It stays valid until ${until(saved)} with what is left of its limit, but this page no longer keeps it.`,
+        `Tempo Wallet did not revoke the key (${Machine.message(error)}). It stays valid until ${Machine.until(saved)} with what is left of its limit, but this page no longer keeps it.`,
       )
     }
     await keyring.logout().catch(() => undefined)
@@ -415,12 +425,12 @@ export function useUnlock(
     const total = Object.values(spent?.spent ?? {}).reduce((sum, value) => sum + BigInt(value), 0n)
     note(
       'tool',
-      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${until(connected)}; this site's server has paid ${Wallet.format(total)} MACH for tools with it.`,
+      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${Machine.until(connected)}; this site's server has paid ${Wallet.format(total)} MACH for tools with it.`,
     )
   }
 
   function handles(text: string) {
-    return unlockCommands.some((entry) => entry.label === text.split(/\s/)[0])
+    return Machine.unlockCommands.some((entry) => entry.label === text.split(/\s/)[0])
   }
 
   async function command(text: string, echo = true) {
@@ -444,7 +454,7 @@ export function useUnlock(
     busy,
     checkout,
     command,
-    commands: unlockCommands,
+    commands: Machine.unlockCommands,
     connected,
     device,
     handles,
@@ -460,7 +470,7 @@ export function useUnlock(
 
 const bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as const
 
-export type Source = Pick<Payments.Payments, 'ledger' | 'subscribe'>
+export type Source = Pick<Payments.Client, 'ledger' | 'subscribe'>
 
 export function useSpend(source: Source, window: number = Payments.window) {
   const ledger = useSyncExternalStore(source.subscribe, source.ledger, source.ledger)
@@ -566,7 +576,9 @@ export function Meter(props: { source: Source; window?: number; chevron?: ReactN
   )
 }
 
-export function Prompts(props: { machine: Pick<Machine, 'checkout' | 'device' | 'open'> }) {
+export function Prompts(props: {
+  machine: Pick<useMachine.ReturnType, 'checkout' | 'device' | 'open'>
+}) {
   const part = usePart()
   const { checkout, device, open } = props.machine
   const link = device && (device.verificationUriFull ?? device.verificationUri)
@@ -593,7 +605,7 @@ export function Prompts(props: { machine: Pick<Machine, 'checkout' | 'device' | 
   )
 }
 
-export function SignIn(props: { machine: Machine; children?: ReactNode }) {
+export function SignIn(props: { machine: useMachine.ReturnType; children?: ReactNode }) {
   const part = usePart()
   const { machine } = props
   return (
@@ -603,7 +615,7 @@ export function SignIn(props: { machine: Machine; children?: ReactNode }) {
           <>
             This chat is a nanocode agent in Code Mode. It pays for its model and every service its
             scripts call from your Tempo Wallet, in MACH over MPP. Sign in to approve a key that may
-            spend {limits}.
+            spend {Machine.limits}.
           </>
         )}
       </p>
@@ -619,7 +631,7 @@ export function SignIn(props: { machine: Machine; children?: ReactNode }) {
   )
 }
 
-export function Account(props: { machine: Machine }) {
+export function Account(props: { machine: useMachine.ReturnType }) {
   const part = usePart()
   const { machine } = props
   const connected = machine.connected
@@ -696,15 +708,15 @@ export function Unlock(props: { machine: Keyed }) {
   )
 }
 
-function blocked(cell: ToolCell | undefined): boolean {
+function blocked(cell: Tool.Cell | undefined): boolean {
   return Boolean(cell && (Payment.needsWallet(cell.output) || cell.children.some(blocked)))
 }
 
-export function needsWallet(entry: Entry) {
+export function needsWallet(entry: Transcript.Entry) {
   return blocked(entry.tool)
 }
 
-export function WalletCard(props: { machine: Keyed; entry: Entry }) {
+export function WalletCard(props: { machine: Keyed; entry: Transcript.Entry }) {
   const part = usePart()
   const { entries } = useTranscript()
   const { machine } = props
@@ -743,7 +755,8 @@ export function WalletCard(props: { machine: Keyed; entry: Entry }) {
       <p {...part('walletCardTitle')}>This tool is paid with Tempo</p>
       <p {...part('walletCardText')}>
         Connect Tempo Wallet to unlock {Payment.unlocks(machine.servers, machine.scripts)}. You
-        approve a key that may spend {limits}; the model still runs on this site&apos;s API key.
+        approve a key that may spend {Machine.limits}; the model still runs on this site&apos;s API
+        key.
       </p>
       <div {...part('walletCardActions')}>
         <button
@@ -760,7 +773,7 @@ export function WalletCard(props: { machine: Keyed; entry: Entry }) {
 }
 
 export function walletCards(machine: Keyed) {
-  return (entry: Entry) => (
+  return (entry: Transcript.Entry) => (
     <Fragment>{needsWallet(entry) && <WalletCard entry={entry} machine={machine} />}</Fragment>
   )
 }

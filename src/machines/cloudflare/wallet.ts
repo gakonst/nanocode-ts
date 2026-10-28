@@ -1,9 +1,16 @@
 import { DurableObject } from 'cloudflare:workers'
-import * as Mcp from '../mcp.ts'
-import { account, type Account, envelope, json, type KeyRecord, type Store } from '../account.ts'
+import * as Mcp from '../Mcp.ts'
+import {
+  type Account,
+  create as createAccount,
+  envelope,
+  json,
+  type KeyRecord,
+  type Store,
+} from '../Account.ts'
 import type { MachinesEnv } from './env.ts'
 
-export { digest, type KeyRecord, MACH, RPC } from '../account.ts'
+export { digest, type KeyRecord, mach, rpc } from '../Account.ts'
 
 function kvStore(kv: SyncKvStorage): Store {
   return {
@@ -25,7 +32,7 @@ export class Wallet extends DurableObject<MachinesEnv> {
   private holder?: Account
 
   private core(): Account {
-    this.holder ??= account({
+    this.holder ??= createAccount({
       store: kvStore(this.ctx.storage.kv),
       secret: this.env.KEY_SECRET,
       servers: this.servers,

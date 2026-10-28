@@ -1,6 +1,7 @@
 'use client'
 
-import type { Config, TurnBlock } from '../../client.ts'
+import type * as Config from '../../client/Config.ts'
+import type * as Transcript from '../../client/Transcript.ts'
 import {
   AttachmentList,
   type Highlighter,
@@ -107,7 +108,7 @@ function ModelMenu(props: { picker: NonNullable<CloneProps['picker']> }) {
   )
 }
 
-function Thought(props: { block: TurnBlock }) {
+function Thought(props: { block: Transcript.TurnBlock }) {
   const [open, setOpen] = useState<boolean>()
   const done = !props.block.live
   const took = seconds(props.block)
@@ -412,7 +413,7 @@ function App(props: CloneProps) {
 }
 
 export function ChatGpt(
-  props: CloneProps & { config: Config; highlight?: () => Promise<Highlighter> },
+  props: CloneProps & { config: Config.Config; highlight?: () => Promise<Highlighter> },
 ) {
   return (
     <NanocodeProvider

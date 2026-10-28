@@ -1,7 +1,7 @@
 'use client'
 
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
-import type { Config } from '../client.ts'
+import type * as Config from '../client/Config.ts'
 import {
   Chat,
   Markdown,
@@ -30,7 +30,7 @@ export { styles }
 export type FormFactor = 'button' | 'chat' | 'rewrite'
 
 export type PlaygroundProps = {
-  configs: Record<FormFactor, Config>
+  configs: Record<FormFactor, Config.Config>
   highlight?: () => Promise<Highlighter>
   themes?: readonly Theme[]
   suggestions?: readonly string[]
@@ -491,7 +491,7 @@ function snippet(theme: Theme, form: FormFactor): string {
       '}',
       '',
       '<div style={' + style + '}>',
-      '  <NanocodeProvider config={createConfig({ transport })} skin={' + skin + '}>',
+      '  <NanocodeProvider config={Config.create({ transport })} skin={' + skin + '}>',
       '    <SummarizeButton text={notes} />',
       '  </NanocodeProvider>',
       '</div>',

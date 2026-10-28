@@ -1,25 +1,48 @@
-import * as Mcp from './mcp.ts'
+/**
+ * Payment policy of nanocode machines: which inference and tools pay with Tempo, and the refusal
+ * that a paid call returns before a wallet connects.
+ *
+ * @module
+ */
+import * as Mcp from './Mcp.ts'
 
+/** How model calls pay: with the host's API key, or with Tempo. */
 export type Inference = 'apiKey' | 'tempo'
 
+/** Whether paid tools pay with Tempo, or are off. */
 export type Tools = 'tempo' | 'off'
 
+/** Payment configuration of a host. */
 export type Config = {
+  /** How model calls pay. Defaults to `tempo`. */
   inference?: Inference
-  tools?: Tools
+  /** Paid MCP servers, or `false` for none. Defaults to `Mcp.servers`. */
   servers?: readonly Mcp.Server[] | false
+  /** Whether paid tools pay with Tempo. Defaults to `tempo`. */
+  tools?: Tools
 }
 
-export type Payment = { inference: Inference; tools: Tools; servers: readonly Mcp.Server[] }
+/** Resolved payment policy. */
+export type Policy = {
+  /** How model calls pay. */
+  inference: Inference
+  /** Paid MCP servers. */
+  servers: readonly Mcp.Server[]
+  /** Whether paid tools pay with Tempo. */
+  tools: Tools
+}
 
+/** Error code of a paid call before a wallet connects. */
 export const required = 'tempo_wallet_required'
 
+/** Interface text of what each paid MCP server unlocks, by server name. */
 export const unlocked: Record<string, string> = {
   gateway: 'gateway storage, AI and compute',
   mercator: "Mercator's paid APIs",
 }
 
-export function resolve(config: Config = {}): Payment {
+/** Resolves a payment configuration with its defaults. */
+export function resolve(config: Config = {}): Policy {
   const inference = config.inference ?? 'tempo'
   const tools = config.tools ?? 'tempo'
   const servers =
@@ -27,6 +50,7 @@ export function resolve(config: Config = {}): Payment {
   return { inference, servers, tools }
 }
 
+/** Returns the interface text of what a wallet unlocks. */
 export function unlocks(servers: readonly Mcp.Server[], scripts = true) {
   return [
     ...servers.map((server) => unlocked[server.name] ?? server.name),
@@ -34,19 +58,19 @@ export function unlocks(servers: readonly Mcp.Server[], scripts = true) {
   ].join(', ')
 }
 
+/** Returns the tool result text that asks the model to have the user connect a wallet. */
 export function explanation(servers: readonly Mcp.Server[], scripts = true) {
   return `${required}: this tool is paid with Tempo machine payments, and the user has not connected a Tempo Wallet, so nothing was paid or done. Tell the user to connect their Tempo Wallet with the Connect button in the chat, which unlocks ${unlocks(servers, scripts)}; then retry the call. Do not retry it before they connect.`
 }
 
+/** Whether a tool result is the refusal of a paid call before a wallet connects. */
 export function needsWallet(text: string | undefined) {
   return Boolean(text?.includes(required))
 }
 
-export function locked(
-  servers: readonly Mcp.Server[],
-  send: typeof fetch = globalThis.fetch.bind(globalThis),
-  scripts = true,
-): typeof fetch {
+/** Returns a fetch that replaces each payment challenge with the refusal of a paid call. */
+export function locked(servers: readonly Mcp.Server[], options: locked.Options = {}): typeof fetch {
+  const { fetch: send = globalThis.fetch.bind(globalThis), scripts = true } = options
   return async (input, init) => {
     const url = String(input instanceof Request ? input.url : input)
     const mcp = Mcp.server(url, servers)
@@ -74,13 +98,23 @@ export function locked(
   }
 }
 
-const RECEIPT = /^event: ?payment-receipt\r?$/m
-const DATA = /^data: ?(.*?)\r?$/m
-const SEPARATOR = /\r?\n\r?\n/g
-const FINAL =
-  /^(event: ?(response\.(completed|failed|incomplete)|message_stop)|data: ?\[DONE\])\r?$/m
-const DRAIN_MS = 10_000
+export declare namespace locked {
+  type Options = {
+    /** Fetch of the calls. Defaults to the global `fetch`. */
+    fetch?: typeof fetch | undefined
+    /** Whether the refusal names script payments. Defaults to `true`. */
+    scripts?: boolean | undefined
+  }
+}
 
+const receiptEvent = /^event: ?payment-receipt\r?$/m
+const dataLine = /^data: ?(.*?)\r?$/m
+const separator = /\r?\n\r?\n/g
+const finalEvent =
+  /^(event: ?(response\.(completed|failed|incomplete)|message_stop)|data: ?\[DONE\])\r?$/m
+const drainMs = 10_000
+
+/** Returns `body` without its payment receipt events, and passes each receipt to `onReceipt`. */
 export function receipts(
   body: ReadableStream<Uint8Array>,
   onReceipt: (data: string) => unknown,
@@ -92,9 +126,9 @@ export function receipts(
   let final = false
   let pending: Promise<unknown> = Promise.resolve()
   const take = (event: string) => {
-    if (FINAL.test(event)) final = true
-    if (!RECEIPT.test(event)) return false
-    const data = DATA.exec(event)?.[1]
+    if (finalEvent.test(event)) final = true
+    if (!receiptEvent.test(event)) return false
+    const data = dataLine.exec(event)?.[1]
     if (data) pending = pending.then(() => onReceipt(data)).catch(() => undefined)
     return true
   }
@@ -102,7 +136,7 @@ export function receipts(
     buffer += chunk ? decoder.decode(chunk, { stream: true }) : decoder.decode()
     let out = ''
     let start = 0
-    for (const match of buffer.matchAll(SEPARATOR)) {
+    for (const match of buffer.matchAll(separator)) {
       const end = match.index + match[0].length
       if (!take(buffer.slice(start, match.index))) out += buffer.slice(start, end)
       start = end
@@ -113,7 +147,7 @@ export function receipts(
     return out
   }
   const drain = async () => {
-    const timer = setTimeout(() => void reader.cancel().catch(() => undefined), DRAIN_MS)
+    const timer = setTimeout(() => void reader.cancel().catch(() => undefined), drainMs)
     try {
       for (;;) {
         const { done, value } = await reader.read()

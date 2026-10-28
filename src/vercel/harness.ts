@@ -9,7 +9,7 @@ import {
   type SessionState,
   type Submission,
 } from 'durable-harness'
-import { liveEvent } from '../client.ts'
+import * as LiveEvent from '../client/LiveEvent.ts'
 import * as Contracts from '../Contracts.ts'
 import * as AgentRuntime from '../AgentRuntime.ts'
 import * as Remote from '../Remote.ts'
@@ -795,7 +795,9 @@ function publisher(ctx: DriveContext): (events: Contracts.LoggedEvent[]) => void
         'assistant.message'
       )
         continue
-      const live = liveEvent(logged) as (Record<string, unknown> & { type: string }) | undefined
+      const live = LiveEvent.fromLogged(logged) as
+        | (Record<string, unknown> & { type: string })
+        | undefined
       if (!live) continue
       const parent = typeof live['parent'] === 'string' ? live['parent'] : undefined
       const id = typeof live['call_id'] === 'string' ? live['call_id'] : undefined

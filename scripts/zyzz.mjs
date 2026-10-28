@@ -21,11 +21,9 @@ const result = spawnSync(
     '--external',
     'react/*',
     '--external',
-    '../client.js',
+    '../client/*',
     '--external',
-    '../machines/index.js',
-    '--external',
-    '../machines/local.js',
+    '../machines/*',
   ],
   { stdio: 'inherit' },
 )

@@ -4,9 +4,9 @@ import {
   type SessionAuthority,
 } from '../../cloudflare/runtime.ts'
 import { githubArchives } from '../../bash/index.ts'
-import * as Mcp from '../mcp.ts'
-import * as Payment from '../payment.ts'
-import { device, type Holder, keys } from '../account.ts'
+import * as Mcp from '../Mcp.ts'
+import * as Payment from '../Payment.ts'
+import { device, type Holder, keys } from '../Account.ts'
 import { egress } from './egress.ts'
 import { json, type MachinesEnv, paying, wallet } from './env.ts'
 import { tools } from './tools.ts'
@@ -15,8 +15,8 @@ import { walletClass } from './wallet.ts'
 export { egress, PROXIES } from './egress.ts'
 export { json, type MachinesEnv, paying, wallet } from './env.ts'
 export { tools } from './tools.ts'
-export { digest, type KeyRecord, MACH, RPC, Wallet, walletClass } from './wallet.ts'
-export { visitor, VISITOR } from '../account.ts'
+export { digest, type KeyRecord, mach, rpc, Wallet, walletClass } from './wallet.ts'
+export { visitor, visitorHeader } from '../Account.ts'
 
 const SECRET_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/
 

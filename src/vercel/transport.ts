@@ -1,14 +1,7 @@
-import {
-  type Attachment,
-  attachedPrompt,
-  type HandAccess,
-  type HandSource,
-  type LiveEvent,
-  serverEvents,
-  socketUrl,
-  type Transport,
-  type TransportParameters,
-} from '../client.ts'
+import type * as LiveEvent from '../client/LiveEvent.ts'
+import * as Relay from '../client/Relay.ts'
+import * as ServerEvents from '../client/ServerEvents.ts'
+import * as Transport from '../client/Transport.ts'
 import * as Files from '../internal/Files.ts'
 
 export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024
@@ -30,8 +23,8 @@ export type VercelTransportOptions = {
   hands?: boolean
 }
 
-export type VercelTransport = Transport &
-  HandSource & {
+export type VercelTransport = Transport.Transport &
+  Relay.Source & {
     session(): VercelSession
     warm(): void
     open(): Promise<string | undefined>
@@ -76,7 +69,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
 
   const follow = async (
     response: Response,
-    parameters: Omit<TransportParameters, 'prompt'>,
+    parameters: Omit<Transport.Parameters, 'prompt'>,
     session: VercelSession,
   ): Promise<boolean> => {
     const { signal } = parameters
@@ -86,14 +79,14 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       return true
     }
     try {
-      for await (const message of serverEvents(response.body)) {
+      for await (const message of ServerEvents.parse(response.body)) {
         if (signal?.aborted) break
         if (message.id) {
           session.cursor = message.id
           save(session)
         }
         if (message.event === 'end') return true
-        if (message.data) parameters.push(JSON.parse(message.data) as LiveEvent)
+        if (message.data) parameters.push(JSON.parse(message.data) as LiveEvent.LiveEvent)
       }
     } catch {
       if (signal?.aborted) return true
@@ -143,7 +136,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
 
   const reconnect = async (
     id: string,
-    parameters: Omit<TransportParameters, 'prompt'>,
+    parameters: Omit<Transport.Parameters, 'prompt'>,
     session: VercelSession,
   ) => {
     const { signal } = parameters
@@ -171,7 +164,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
     }
   }
 
-  const encoded = (attachments: readonly Attachment[] = []) => {
+  const encoded = (attachments: readonly Transport.Attachment[] = []) => {
     const files = attachments.flatMap((item) => {
       const found = pending.get(item.path)
       if (!found) return []
@@ -216,8 +209,8 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         return await response.blob()
       },
     },
-    async send({ prompt: typed, attachments, push, note, changed, signal }: TransportParameters) {
-      const prompt = attachedPrompt(typed, attachments)
+    async send({ prompt: typed, attachments, push, note, changed, signal }: Transport.Parameters) {
+      const prompt = Transport.prompt(typed, { attachments })
       const total = (attachments ?? []).reduce(
         (sum, item) => sum + (pending.get(item.path)?.bytes.length ?? 0),
         0,
@@ -275,7 +268,7 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         }
       }
     },
-    async steer({ prompt }: TransportParameters) {
+    async steer({ prompt }: Transport.Parameters) {
       if (!state.id) return false
       const kind = /^\/effort\s/.test(prompt) ? 'prompt' : 'steer'
       const response = await fetch(url, {
@@ -332,11 +325,11 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
       }
       return session.id
     },
-    async hand(): Promise<HandAccess | undefined> {
+    async hand(): Promise<Relay.Access | undefined> {
       const id = await this.open()
       const hand = state.hand
       if (!id || !hand || state.id !== id) return undefined
-      return { url: `${socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand }
+      return { url: `${Relay.socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand }
     },
     async hands() {
       if (!state.id) return []

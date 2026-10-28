@@ -1,4 +1,4 @@
-import { socketUrl } from './client.ts'
+import * as Relay from './client/Relay.ts'
 import * as Remote from './Remote.ts'
 
 export type Hand = {
@@ -23,7 +23,7 @@ export function relay(
   onHand: (hand: Hand | undefined) => void,
   signal: AbortSignal,
 ): void {
-  const address = `${socketUrl(url)}${url.includes('?') ? '&' : '?'}role=brain&wait`
+  const address = `${Relay.socketUrl(url)}${url.includes('?') ? '&' : '?'}role=brain&wait`
   let current: Hand | undefined
   let runtime: string | null = null
   const lost = (executor: Remote.Executor<WebSocket>) => {

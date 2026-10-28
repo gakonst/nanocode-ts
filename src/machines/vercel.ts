@@ -1,8 +1,16 @@
 import { defineDoc, type DurableSessions } from 'durable-harness'
 import { egress } from '../vercel/egress.ts'
-import * as Mcp from './mcp.ts'
-import * as Payment from './payment.ts'
-import { account, type Account, device, json, keys, paying, type Store } from './account.ts'
+import * as Mcp from './Mcp.ts'
+import * as Payment from './Payment.ts'
+import {
+  type Account,
+  create as createAccount,
+  device,
+  json,
+  keys,
+  paying,
+  type Store,
+} from './Account.ts'
 
 const WalletDoc = defineDoc<{ entries: Record<string, string | number> }>({
   kind: 'nanocode.wallet',
@@ -70,7 +78,7 @@ export function createWallets(options: WalletsOptions) {
   const holder = (sessionId: string) => {
     let found = holders.get(sessionId)
     if (!found) {
-      found = account({
+      found = createAccount({
         store: docStore(options.sessions, sessionId),
         secret: options.secret,
         servers,

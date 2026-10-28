@@ -1,16 +1,8 @@
-import {
-  type Attachment,
-  attachedPrompt,
-  type EntryKind,
-  type HandAccess,
-  type HandSource,
-  type LiveEvent,
-  liveEvent,
-  serverEvents,
-  socketUrl,
-  type Transport,
-  type TransportParameters,
-} from '../client.ts'
+import * as LiveEvent from '../client/LiveEvent.ts'
+import * as Relay from '../client/Relay.ts'
+import * as ServerEvents from '../client/ServerEvents.ts'
+import type * as Transcript from '../client/Transcript.ts'
+import * as Transport from '../client/Transport.ts'
 import type * as Contracts from '../Contracts.ts'
 
 export type CloudflareSession = { id?: string; cursor?: number; open?: string }
@@ -32,8 +24,8 @@ export type CloudflareTransportOptions = {
   hand?(session: string, signal?: AbortSignal): Promise<string | undefined>
 }
 
-export type CloudflareTransport = Transport &
-  HandSource & {
+export type CloudflareTransport = Transport.Transport &
+  Relay.Source & {
     session(): CloudflareSession
     warm(): void
     crash(afterMs?: number): Promise<Response>
@@ -43,7 +35,10 @@ export type CloudflareTransport = Transport &
     hands(): Promise<string[]>
   }
 
-type Sink = { push(event: LiveEvent): void; note(kind: EntryKind, text: string): void }
+type Sink = {
+  push(event: LiveEvent.LiveEvent): void
+  note(kind: Transcript.EntryKind, text: string): void
+}
 
 function identifier(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12))
@@ -79,7 +74,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   const receive = (logged: Contracts.LoggedEvent, requestId: string, sink: Sink): boolean => {
     const body = (logged.event ?? {}) as { source?: string; type?: string }
     if (body.source !== undefined) {
-      const event = liveEvent(logged)
+      const event = LiveEvent.fromLogged(logged)
       if (event) sink.push(event)
       return false
     }
@@ -90,7 +85,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
         'The session object reset. Its alarm started it again, and the turn continues from its checkpoint.',
       )
     if (body.type !== 'retrying' && body.type !== 'result') return false
-    const event = liveEvent(logged)
+    const event = LiveEvent.fromLogged(logged)
     if (event) sink.push(event)
     return body.type === 'result'
   }
@@ -109,7 +104,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     }
     let settled = false
     try {
-      for await (const message of serverEvents(response.body)) {
+      for await (const message of ServerEvents.parse(response.body)) {
         if (signal?.aborted) break
         if (message.id) {
           session.cursor = Number(message.id)
@@ -164,7 +159,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     prompt: string,
     sink: Sink,
     signal?: AbortSignal,
-    attachments: readonly Attachment[] = [],
+    attachments: readonly Transport.Attachment[] = [],
   ) => {
     state.id ??= warmed ?? identifier('web')
     const session = state
@@ -180,7 +175,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
         headers: headers({ accept: 'text/event-stream', 'content-type': 'application/json' }),
         body: JSON.stringify({
           request_id: requestId,
-          prompt: attachedPrompt(prompt, attachments),
+          prompt: Transport.prompt(prompt, { attachments }),
           ...(images(attachments).length ? { images: images(attachments) } : {}),
           provider: model.provider,
           model: model.model,
@@ -204,7 +199,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     }
   }
 
-  const images = (attachments: readonly Attachment[]) =>
+  const images = (attachments: readonly Transport.Attachment[]) =>
     attachments.filter((item) => item.type.startsWith('image/')).map((item) => item.path)
 
   const failure = async (response: Response) => {
@@ -232,7 +227,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
           ...(signal ? { signal } : {}),
         })
         if (!response.ok) throw new Error(await failure(response))
-        return (await response.json()) as Attachment
+        return (await response.json()) as Transport.Attachment
       },
       async read(file, signal) {
         if (!state.id) throw new Error('no session yet')
@@ -244,12 +239,12 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
         return await response.blob()
       },
     },
-    async send({ prompt, attachments, push, note, signal }: TransportParameters) {
+    async send({ prompt, attachments, push, note, signal }: Transport.Parameters) {
       await turn(prompt, { push, note }, signal, attachments)
       for (let next = queued.shift(); next && !signal?.aborted; next = queued.shift())
         await turn(next, { push, note }, signal)
     },
-    async steer({ prompt }: TransportParameters) {
+    async steer({ prompt }: Transport.Parameters) {
       if (!state.id) return false
       const model = options.model()
       const response = await fetch(path('turns'), {
@@ -332,10 +327,10 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
       return { session: id, token: ((await response.json()) as { token: string }).token }
     },
-    async hand(): Promise<HandAccess | undefined> {
+    async hand(): Promise<Relay.Access | undefined> {
       const { session, token } = await this.handToken()
       return {
-        url: socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`),
+        url: Relay.socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`),
         token,
       }
     },

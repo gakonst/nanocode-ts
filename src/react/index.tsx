@@ -19,27 +19,14 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import {
-  type Activity,
-  activity,
-  type Attachment,
-  bytes,
-  type ChatState,
-  type Config,
-  type Conversation,
-  duration,
-  type Entry,
-  type EntryKind,
-  type HandAccess,
-  handCommands,
-  type HandSource,
-  type PickerItem,
-  type ToolCell as Cell,
-  type TransportFiles,
-  type Turn,
-  turns,
-  workspaceFile,
-} from '../client.ts'
+import type * as Config from '../client/Config.ts'
+import * as Format from '../client/internal/Format.ts'
+import * as Workspace from '../client/internal/Workspace.ts'
+import type * as Pickers from '../client/Pickers.ts'
+import * as Relay from '../client/Relay.ts'
+import type * as Tool from '../client/Tool.ts'
+import * as Transcript from '../client/Transcript.ts'
+import type * as Transport from '../client/Transport.ts'
 
 export type Token = { content: string; color?: string; italic?: boolean }
 
@@ -51,10 +38,10 @@ export type Suggestion = string | { label: string; onClick(): void; disabled?: b
 
 export type Picker = {
   title?: string
-  items(query: string): PickerItem[]
+  items(query: string): Pickers.Item[]
   filter?: boolean
   hint?: string
-  onChoose(item: PickerItem): void
+  onChoose(item: Pickers.Item): void
 }
 
 export type Part =
@@ -176,7 +163,7 @@ export type PartProps = {
 
 export type Skin = {
   parts?: Partial<Record<Part, (state: PartState) => PartProps>>
-  icons?: Partial<Record<Cell['status'], string | readonly string[]>>
+  icons?: Partial<Record<Tool.Cell['status'], string | readonly string[]>>
 }
 
 const EMPTY_SKIN: Skin = {}
@@ -203,7 +190,7 @@ export function usePart(): (name: Part, state?: PartState) => PartProps {
   )
 }
 
-const ConfigContext = createContext<Config | undefined>(undefined)
+const ConfigContext = createContext<Config.Config | undefined>(undefined)
 
 const ExpandedContext = createContext<{
   open: ReadonlySet<string>
@@ -226,7 +213,7 @@ export function useLinks() {
 const HighlightContext = createContext<{ highlighter?: Highlighter; request?(): void }>({})
 
 export function NanocodeProvider(props: {
-  config: Config
+  config: Config.Config
   highlight?: () => Promise<Highlighter>
   skin?: Skin
   links?(href: string): string | undefined
@@ -287,13 +274,13 @@ export function NanocodeProvider(props: {
   )
 }
 
-export function useConfig(): Config {
+export function useConfig(): Config.Config {
   const config = useContext(ConfigContext)
   if (!config) throw new Error('useConfig must be used within NanocodeProvider')
   return config
 }
 
-function useChatState<T>(select: (state: ChatState) => T): T {
+function useChatState<T>(select: (state: Config.State) => T): T {
   const config = useConfig()
   return useSyncExternalStore(
     config.subscribe,
@@ -302,14 +289,17 @@ function useChatState<T>(select: (state: ChatState) => T): T {
   )
 }
 
-export function useTranscript(): { entries: readonly Entry[]; live: readonly Entry[] } {
+export function useTranscript(): {
+  entries: readonly Transcript.Entry[]
+  live: readonly Transcript.Entry[]
+} {
   const entries = useChatState((state) => state.entries)
   const live = useChatState((state) => state.live)
   return useMemo(() => ({ entries, live }), [entries, live])
 }
 
 export function useSend(): {
-  send(prompt: string, attachments?: readonly Attachment[]): Promise<void>
+  send(prompt: string, attachments?: readonly Transport.Attachment[]): Promise<void>
   cancel(): Promise<void>
   canCancel: boolean
   isPending: boolean
@@ -329,16 +319,16 @@ export function useSend(): {
   }
 }
 
-export function useTurns(): Turn[] {
+export function useTurns(): Transcript.Turn[] {
   const { entries, live } = useTranscript()
   const pending = useChatState((state) => state.status === 'pending')
-  return useMemo(() => turns(entries, live, pending), [entries, live, pending])
+  return useMemo(() => Transcript.turns(entries, { live, pending }), [entries, live, pending])
 }
 
-export function useActivity(): Activity {
+export function useActivity(): Transcript.Activity {
   const live = useChatState((state) => state.live)
   const pending = useChatState((state) => state.status === 'pending')
-  return useMemo(() => activity(live, pending), [live, pending])
+  return useMemo(() => Transcript.activity(live, { pending }), [live, pending])
 }
 
 export function useAnswer(): {
@@ -346,7 +336,7 @@ export function useAnswer(): {
   prompt: string | undefined
   live: boolean
   busy: boolean
-  activity: Activity
+  activity: Transcript.Activity
   error: Error | undefined
 } {
   const all = useTurns()
@@ -372,7 +362,7 @@ export function useAnswer(): {
 }
 
 export function useConversations(): {
-  conversations: readonly Conversation[]
+  conversations: readonly Config.Conversation[]
   current: string | undefined
   enabled: boolean
   canCreate: boolean
@@ -399,7 +389,7 @@ export function useConversations(): {
   }
 }
 
-export function useNote(): (kind: EntryKind, text: string) => void {
+export function useNote(): (kind: Transcript.EntryKind, text: string) => void {
   return useConfig().note
 }
 
@@ -505,13 +495,13 @@ const IMAGE = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i
 export function imageSource(src: unknown): string | undefined {
   if (typeof src !== 'string') return undefined
   const value = src.trim()
-  return IMAGE.test(value) || workspaceFile(value) ? value : undefined
+  return IMAGE.test(value) || Workspace.path(value) ? value : undefined
 }
 
 const FILE_TTL_MS = 15_000
 
 const fileCache = new WeakMap<
-  TransportFiles,
+  Transport.Files,
   Map<string, { at: number; url: Promise<{ url: string; type: string }> }>
 >()
 
@@ -624,7 +614,7 @@ export function Image(props: { src: string; alt?: string; title?: string }) {
   const skin = useSkin()
   const [failed, setFailed] = useState(false)
   const src = imageSource(props.src)
-  const path = workspaceFile(src)
+  const path = Workspace.path(src)
   if (path)
     return (
       <WorkspaceImage
@@ -701,7 +691,7 @@ export function Reply(props: MarkdownProps) {
 
 const SPINNER = ['◐', '◓', '◑', '◒']
 
-const ICONS: Record<Cell['status'], string> = {
+const ICONS: Record<Tool.Cell['status'], string> = {
   running: SPINNER[0],
   completed: '✓',
   failed: '✗',
@@ -763,7 +753,7 @@ function lineCount(text: string): string {
 }
 
 export function ToolCell(props: {
-  cell: Cell
+  cell: Tool.Cell
   live?: boolean
   nested?: boolean
   collapsed?: boolean
@@ -801,9 +791,9 @@ export function ToolCell(props: {
         {cell.title && <span {...part('title')}>{cell.title}</span>}
         <span {...part('meta')}>
           {running
-            ? ` · ${duration(now - cell.started_at)}`
+            ? ` · ${Format.duration(now - cell.started_at)}`
             : cell.duration_ms !== undefined
-              ? ` · ${duration(cell.duration_ms)}`
+              ? ` · ${Format.duration(cell.duration_ms)}`
               : ''}
           {cell.status === 'cancelled' || cell.status === 'failed' ? ` · ${cell.status}` : ''}
           {cell.details.map((detail) => ` · ${detail}`).join('')}
@@ -858,13 +848,13 @@ export type PendingAttachment = {
   preview?: string
   status: 'uploading' | 'ready' | 'failed'
   error?: string
-  attachment?: Attachment
+  attachment?: Transport.Attachment
 }
 
 export type Attachments = {
   enabled: boolean
   items: readonly PendingAttachment[]
-  ready: Attachment[]
+  ready: Transport.Attachment[]
   uploading: boolean
   dragging: boolean
   add(files: Iterable<File> | ArrayLike<File>): void
@@ -933,7 +923,7 @@ export function useAttachments(options: { max?: number } = {}): Attachments {
         if (files.maxBytes !== undefined && file.size > files.maxBytes) {
           setItems((current) => [
             ...current,
-            { ...base, status: 'failed', error: `larger than ${bytes(files.maxBytes!)}` },
+            { ...base, status: 'failed', error: `larger than ${Format.bytes(files.maxBytes!)}` },
           ])
           continue
         }
@@ -1023,7 +1013,7 @@ export function useAttachments(options: { max?: number } = {}): Attachments {
 }
 
 export function AttachmentList(props: {
-  items: readonly (PendingAttachment | Attachment)[]
+  items: readonly (PendingAttachment | Transport.Attachment)[]
   onRemove?(id: string): void
 }) {
   const part = usePart()
@@ -1032,7 +1022,7 @@ export function AttachmentList(props: {
     <div {...part('attachments', { editable: Boolean(props.onRemove) })}>
       {props.items.map((item, index) => {
         const pending = 'status' in item ? item : undefined
-        const path = pending ? pending.attachment?.path : (item as Attachment).path
+        const path = pending ? pending.attachment?.path : (item as Transport.Attachment).path
         const image = item.type.startsWith('image/')
         const status = pending?.status ?? 'ready'
         return (
@@ -1051,7 +1041,7 @@ export function AttachmentList(props: {
               ) : null)}
             <span {...part('attachmentName')}>{item.name}</span>
             <span {...part('attachmentSize')}>
-              {pending?.error ?? (status === 'uploading' ? 'uploading' : bytes(item.size))}
+              {pending?.error ?? (status === 'uploading' ? 'uploading' : Format.bytes(item.size))}
             </span>
             {props.onRemove && pending && (
               <button
@@ -1072,7 +1062,7 @@ export function AttachmentList(props: {
 
 export type Disclosure = 'expanded' | 'collapsed' | 'hidden'
 
-export function Thinking(props: { entry: Entry; live?: boolean; collapsed?: boolean }) {
+export function Thinking(props: { entry: Transcript.Entry; live?: boolean; collapsed?: boolean }) {
   const part = usePart()
   const { entry, live = false, collapsed = true } = props
   const expanded = useContext(ExpandedContext)
@@ -1087,7 +1077,7 @@ export function Thinking(props: { entry: Entry; live?: boolean; collapsed?: bool
   const label = live
     ? 'Thinking'
     : entry.started_at !== undefined && end !== undefined
-      ? 'Thought for ' + duration(Math.max(0, end - entry.started_at))
+      ? 'Thought for ' + Format.duration(Math.max(0, end - entry.started_at))
       : 'Thought'
   const shown = open || live || !collapsed
   return (
@@ -1113,8 +1103,8 @@ export function Thinking(props: { entry: Entry; live?: boolean; collapsed?: bool
 }
 
 export function EntryView(props: {
-  entry: Entry
-  previous?: Entry
+  entry: Transcript.Entry
+  previous?: Transcript.Entry
   live?: boolean
   tools?: Disclosure
   reasoning?: Disclosure
@@ -1206,7 +1196,7 @@ export type ChatProps = {
   status?: ReactNode
   actions?: ReactNode
   extras?: ReactNode
-  after?(entry: Entry, index: number): ReactNode
+  after?(entry: Transcript.Entry, index: number): ReactNode
   link?: { href: string; label: string }
   placeholder?: string
   steering?: string
@@ -1285,7 +1275,7 @@ export function Chat(props: ChatProps) {
     [entries],
   )
   const query = !picker && /^\/\S*$/.test(prompt) ? prompt : undefined
-  const items: PickerItem[] = picker
+  const items: Pickers.Item[] = picker
     ? picker.items(picker.filter ? prompt : '')
     : query === undefined
       ? []
@@ -1309,7 +1299,7 @@ export function Chat(props: ChatProps) {
     attachments.clear()
   }
 
-  const choose = (item: PickerItem) => {
+  const choose = (item: Pickers.Item) => {
     if (!picker) return submit(item.label)
     setPrompt('')
     if (picker === own) setOwn(null)
@@ -1397,7 +1387,7 @@ export function Chat(props: ChatProps) {
         const words = query.toLowerCase().split(/\s+/).filter(Boolean)
         const listed = threads.conversations
           .map(
-            (item): PickerItem => ({
+            (item): Pickers.Item => ({
               kind: 'choice',
               label: item.title || 'New conversation',
               detail: ago(item.updated),
@@ -1704,7 +1694,7 @@ export function Hand(props: HandProps) {
 
 export type HandState = {
   open: boolean
-  access?: HandAccess
+  access?: Relay.Access
   hands: readonly (string | null)[]
   error?: string
   show(): void
@@ -1712,9 +1702,9 @@ export type HandState = {
   reset(): void
 }
 
-export function useHand(source: HandSource | undefined): HandState {
+export function useHand(source: Relay.Source | undefined): HandState {
   const [open, setOpen] = useState(false)
-  const [access, setAccess] = useState<HandAccess>()
+  const [access, setAccess] = useState<Relay.Access>()
   const [hands, setHands] = useState<readonly (string | null)[]>([])
   const [error, setError] = useState<string>()
   const connected = hands.length > 0
@@ -1762,7 +1752,7 @@ export function HandConnect(props: { hand: HandState; install?: string }) {
   const part = usePart()
   const names = hand.hands.map((name) => name ?? 'your machine').join(', ')
   if (hand.open && hand.access) {
-    const { command, short } = handCommands(hand.access, props.install)
+    const { command, short } = Relay.commands(hand.access, { install: props.install })
     return <Hand command={command} hands={hand.hands} onClose={hand.hide} short={short} />
   }
   return (

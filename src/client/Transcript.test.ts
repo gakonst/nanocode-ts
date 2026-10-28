@@ -7,9 +7,10 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { describe, expect, test } from 'vite-plus/test'
-import * as Agent from '../test/Agent.ts'
-import { liveEvent, Transcript, turns, type Entry } from './client.ts'
-import * as Contracts from './Contracts.ts'
+import * as Agent from '../../test/Agent.ts'
+import * as Contracts from '../Contracts.ts'
+import * as LiveEvent from './LiveEvent.ts'
+import * as Transcript from './Transcript.ts'
 
 describe('Transcript', () => {
   for (const provider of ['claude', 'codex'] as const)
@@ -26,14 +27,14 @@ describe('Transcript', () => {
       await Agent.turn(session.runtime, 'turn-1')
       const logged = await session.runtime.page(Agent.scope, 0, 1000)
 
-      const entries: Entry[] = []
-      const transcript = new Transcript({
+      const entries: Transcript.Entry[] = []
+      const transcript = Transcript.create({
         add: (entry) => entries.push(entry),
         live: () => {},
         revealMs: 0,
       })
       for (const event of logged.events) {
-        const live = liveEvent(event)
+        const live = LiveEvent.fromLogged(event)
         if (live) transcript.push(live)
       }
       await expect.poll(() => transcript.pending()).toBe(false)
@@ -56,8 +57,11 @@ describe('Transcript', () => {
           },
         ]
       `)
-      expect(turns(entries, [], false).map((turn) => turn.blocks.map((block) => block.kind)))
-        .toMatchInlineSnapshot(`
+      expect(
+        Transcript.turns(entries, { live: [], pending: false }).map((turn) =>
+          turn.blocks.map((block) => block.kind),
+        ),
+      ).toMatchInlineSnapshot(`
         [
           [
             "tool",
@@ -73,7 +77,7 @@ describe('Transcript', () => {
 })
 
 /** Drops identifiers, timestamps, and durations, which differ between runs. */
-function shape(entry: Entry) {
+function shape(entry: Transcript.Entry) {
   const tool = entry.tool
   return {
     kind: entry.kind,

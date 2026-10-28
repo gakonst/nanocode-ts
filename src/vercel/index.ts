@@ -16,7 +16,7 @@ export {
   type Thinking,
   WAIT_POLL_MS,
 } from './harness.ts'
-export { liveEvent } from '../client.ts'
+export { fromLogged as liveEvent } from '../client/LiveEvent.ts'
 export {
   type Dispatch,
   gatewayCredential,
