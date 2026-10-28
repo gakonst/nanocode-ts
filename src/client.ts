@@ -858,6 +858,12 @@ export class Transcript {
         this.options.checkpoint?.(event);
         continue;
       }
+      if (event && !kind && !TOOL_EVENTS.has(event.type) && event.type !== "turn" && !describe(event, this.options.limit)) {
+        this.queue.shift();
+        this.options.apply?.(event);
+        this.options.checkpoint?.(event);
+        continue;
+      }
       if (next && "aside" in next && current.kind === "assistant" && current.text.slice(current.posted).trim()) {
         this.queue.shift();
         this.held.push(next.aside);
