@@ -222,46 +222,24 @@ export async function connect(): Promise<AccessKey> {
   return connected
 }
 
-export async function published(connected: AccessKey) {
-  const [, , , { isAddressEqual }, , , { Actions }] = await load()
-  const metadata = await Actions.accessKey.getMetadata(await reader(), {
-    accessKey: connected.keyAddress,
-    account: connected.address,
-  })
-  return isAddressEqual(metadata.address, connected.keyAddress) && !metadata.isRevoked
-}
-
 export async function publish(connected: AccessKey): Promise<Hash | undefined> {
-  if (await published(connected)) return undefined
-  const [
-    ,
-    ,
-    { KeyAuthorization },
-    { encodeFunctionData },
-    ,
-    { prepareTransactionRequest, sendRawTransactionSync, signTransaction },
-    { Abis },
-  ] = await load()
-  const client = await reader()
-  const account = await signer(connected)
-  const request = await prepareTransactionRequest(client, {
+  const [[, , , { encodeFunctionData }, , , { Abis }], keys, account] = await Promise.all([
+    load(),
+    import('./AccessKey.ts'),
+    signer(connected),
+  ])
+  return await keys.publish({
     account,
-    calls: [
-      {
-        data: encodeFunctionData({ abi: Abis.tip20, args: [swapper, 0n], functionName: 'approve' }),
-        to: mach.address,
-      },
-    ],
+    address: connected.address,
+    authorization: connected.authorization,
+    call: {
+      data: encodeFunctionData({ abi: Abis.tip20, args: [swapper, 0n], functionName: 'approve' }),
+      to: mach.address,
+    },
     feeToken: usdc.address,
-    keyAuthorization: KeyAuthorization.fromRpc(connected.authorization),
-    nonceKey: 'expiring',
-  } as never)
-  const receipt = await sendRawTransactionSync(client, {
-    serializedTransaction: await signTransaction(client, request as never),
+    keyAddress: connected.keyAddress,
+    rpc,
   })
-  if (receipt.status !== 'success')
-    throw new Error(`Tempo did not accept the key (transaction ${receipt.transactionHash}).`)
-  return receipt.transactionHash
 }
 
 export async function revoke(connected: AccessKey) {

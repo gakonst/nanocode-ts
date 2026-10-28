@@ -1,12 +1,16 @@
 import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
-import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
-import { Account, Actions, createClient, http } from 'viem/tempo'
+import type { KeyAuthorization } from 'ox/tempo'
+import { type Address, encodeFunctionData, type Hex, isAddressEqual, isHex } from 'viem'
+import { Abis, Account, Actions, createClient, http } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
 import * as Egress from '../internal/Egress.ts'
+import * as AccessKey from './AccessKey.ts'
 import * as Mcp from './Mcp.ts'
 import * as Payment from './Payment.ts'
 
 export const mach: Address = '0x20c000000000000000000000f37de3740adec032'
+const usdc: Address = '0x20c000000000000000000000b9537d11c60e8b50'
+const swapper: Address = '0xF72E5107c32C655ffA7539a3C8e97B7C3cE16A3F'
 export const rpc = 'https://rpc.tempo.xyz'
 export const visitorHeader = 'x-nanocode-visitor'
 const opening = '200000'
@@ -22,6 +26,7 @@ export type KeyRecord = {
   keyType: 'secp256k1' | 'p256'
   key: Hex
   expiry: number
+  authorization?: KeyAuthorization.Rpc | undefined
 }
 
 export type Store = {
@@ -298,6 +303,23 @@ export function create(options: create.Options) {
       current.keyType === 'p256'
         ? Account.fromP256(current.key, { access: current.address })
         : Account.fromSecp256k1(current.key, { access: current.address })
+    if (current.authorization)
+      await AccessKey.publish({
+        account: signer,
+        address: current.address,
+        authorization: current.authorization,
+        call: {
+          data: encodeFunctionData({
+            abi: Abis.tip20,
+            args: [swapper, 0n],
+            functionName: 'approve',
+          }),
+          to: mach,
+        },
+        feeToken: usdc,
+        keyAddress: current.keyAddress,
+        rpc: endpoint,
+      })
     const client = createClient({ chain: tempo, transport: http(endpoint) })
     const prefix = `channel:${current.keyAddress.toLowerCase()}:`
     const mppx = Mppx.create({
@@ -517,7 +539,14 @@ export function paying(
 }
 
 export async function verify(
-  body: { address?: string; key_type?: string; private_key?: string } | undefined,
+  body:
+    | {
+        address?: string
+        key_authorization?: KeyAuthorization.Rpc
+        key_type?: string
+        private_key?: string
+      }
+    | undefined,
   endpoint = rpc,
 ): Promise<(KeyRecord & { spendPolicy: string }) | Response> {
   const address = body?.address
@@ -540,7 +569,28 @@ export async function verify(
     const metadata = await Actions.accessKey
       .getMetadata(client, { account: address as Address, accessKey: keyAddress })
       .catch(() => undefined)
-    if (!metadata || !isAddressEqual(metadata.address, keyAddress) || metadata.isRevoked) continue
+    const onChain = !!metadata && isAddressEqual(metadata.address, keyAddress)
+    if (onChain && metadata.isRevoked) return json({ error: 'the access key was revoked' }, 403)
+    if (!onChain) {
+      const authorization =
+        body?.key_authorization &&
+        AccessKey.verify({
+          address: address as Address,
+          authorization: body.key_authorization,
+          chainId: tempo.id,
+          keyAddress,
+        })
+      if (!authorization) continue
+      return {
+        address: address.toLowerCase() as Address,
+        keyAddress,
+        keyType,
+        key,
+        expiry: Number(authorization.expiry),
+        authorization: body.key_authorization,
+        spendPolicy: authorization.limits === undefined ? 'unlimited' : 'limited',
+      }
+    }
     const expiry = Number(metadata.expiry)
     if (expiry * 1000 <= Date.now()) return json({ error: 'the access key has expired' }, 403)
     return {
@@ -553,7 +603,9 @@ export async function verify(
     }
   }
   return json(
-    { error: `this key is not an active access key of ${address} on Tempo; publish it first` },
+    {
+      error: `this key is neither an active access key of ${address} on Tempo nor one that key_authorization authorizes`,
+    },
     403,
   )
 }

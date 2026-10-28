@@ -71,24 +71,14 @@ export function useMachine(runtime: Machine.Runtime, options: useMachine.Options
             'tool',
             `Not logged in. Type /login to connect your Tempo Wallet. It asks you to approve a key that this site's Worker keeps encrypted and pays with, ${Machine.limits}, and only for payments. The agent then pays for its own model and every service it calls.`,
           )
-    void Wallet.published(saved).then(
-      (onChain) => {
-        if (!onChain)
-          return note(
-            'tool',
-            'Tempo Wallet approved a key earlier, but it is not on Tempo yet. Type /login to publish it.',
-          )
-        setConnected(saved)
-        if (!restored && options.greet !== false)
-          note(
-            'tool',
-            `Logged in as ${Wallet.short(saved.address)} with key ${Wallet.short(saved.keyAddress)} until ${Machine.until(saved)}. Type /wallet to see your MACH.`,
-          )
-        if (!Cloud.restore())
-          void attach(saved).catch((error: unknown) => note('error', Machine.message(error)))
-      },
-      (error: unknown) => note('error', Machine.message(error)),
-    )
+    setConnected(saved)
+    if (!restored && options.greet !== false)
+      note(
+        'tool',
+        `Logged in as ${Wallet.short(saved.address)} with key ${Wallet.short(saved.keyAddress)} until ${Machine.until(saved)}. Type /wallet to see your MACH.`,
+      )
+    if (!Cloud.restore())
+      void attach(saved).catch((error: unknown) => note('error', Machine.message(error)))
   }, [])
 
   async function attach(account: Wallet.AccessKey) {
@@ -259,20 +249,9 @@ async function approve(note: Note): Promise<Wallet.AccessKey> {
     pending = await Wallet.connect()
     note(
       'tool',
-      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${Machine.limits}, at ${Machine.until(pending)}.`,
+      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${Machine.limits}, at ${Machine.until(pending)}. It goes on Tempo just before its first payment, with its fee sponsored by Tempo Wallet when it sponsors this site.`,
     )
   }
-  note(
-    'tool',
-    `Publishing the key on Tempo. Its one transaction pays its fee in ${Wallet.usdc.symbol} from your wallet.`,
-  )
-  const hash = await Wallet.publish(pending)
-  note(
-    'tool',
-    hash
-      ? `The key is on Tempo (transaction ${Wallet.short(hash)}).`
-      : 'The key is already on Tempo.',
-  )
   return pending
 }
 
@@ -366,16 +345,9 @@ export function useUnlock(
   useEffect(() => {
     const saved = Wallet.restore()
     if (!saved) return
-    void Wallet.published(saved)
-      .then(async (onChain) => {
-        if (!onChain)
-          return note(
-            'tool',
-            'Tempo Wallet approved a key earlier, but it is not on Tempo yet. Type /login to publish it.',
-          )
-        await keyring.register(saved)
-        setConnected(saved)
-      })
+    void keyring
+      .register(saved)
+      .then(() => setConnected(saved))
       .catch((error: unknown) => note('error', Machine.message(error)))
   }, [])
 

@@ -59,6 +59,7 @@ export function create(options: create.Options): Keyring {
         const response = await fetch(url, {
           body: JSON.stringify({
             address: wallet.address,
+            key_authorization: wallet.authorization,
             key_type: 'secp256k1',
             private_key: wallet.key,
           }),

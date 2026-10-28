@@ -56,7 +56,7 @@ export function explain(error: unknown) {
     (/InsufficientBalance/.test(text) && text.toLowerCase().includes(Wallet.usdc.address))
   )
     return new Error(
-      `Publishing the key needs a little ${Wallet.usdc.symbol} for its fee, and your wallet holds too little. Add ${Wallet.usdc.symbol} in Tempo Wallet, then type /login again.`,
+      `Putting the key on Tempo before its first payment needs a little ${Wallet.usdc.symbol} for its fee, which Tempo Wallet did not sponsor, and your wallet holds too little. Add ${Wallet.usdc.symbol} in Tempo Wallet, then ask again.`,
       { cause: error },
     )
   if (/InsufficientBalance/.test(text))
@@ -70,6 +70,11 @@ export function explain(error: unknown) {
       { cause: error },
     )
   if (/keyAuthorization is not allowed/.test(text))
-    return new Error('The key is not on Tempo yet. Type /login to publish it.', { cause: error })
+    return new Error(
+      'The key is not on Tempo yet, and this service does not publish keys. Ask again.',
+      {
+        cause: error,
+      },
+    )
   return error instanceof Error ? error : new Error(text)
 }
