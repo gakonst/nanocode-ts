@@ -130,8 +130,11 @@ export type ModelDispatch = {
   subscription: boolean
 }
 
-/** Model socket request that a session sends to the egress binding. */
-export type SocketDispatch = Pick<ModelDispatch, 'provider' | 'authority' | 'headers'>
+/** Model socket request that a session sends to the egress binding: `endpoint` is the Codex Responses URL it opens. */
+export type SocketDispatch = Pick<
+  ModelDispatch,
+  'provider' | 'authority' | 'endpoint' | 'headers' | 'subscription'
+>
 
 /**
  * Private binding, such as a service binding, that serves `/model`, `/warm`, `/socket`,
@@ -1210,6 +1213,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     : {}),
                   limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
                 })
+          const codexEndpoint = descriptor.subscription
+            ? 'https://chatgpt.com/backend-api/codex'
+            : 'https://api.openai.com/v1'
           try {
             const created = await this.instance(scope, true)
             await created.open(
@@ -1223,9 +1229,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 subscription: descriptor.subscription,
                 endpoint:
                   descriptor.provider === 'codex'
-                    ? descriptor.subscription
-                      ? 'https://chatgpt.com/backend-api/codex'
-                      : 'https://api.openai.com/v1'
+                    ? codexEndpoint
                     : `https://api.anthropic.com/v1/messages${descriptor.subscription ? '?beta=true' : ''}`,
                 ...(descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? '')
                   ? {
@@ -1409,8 +1413,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                           'x-nanocode-socket': headerJson({
                             authority,
                             provider: request.provider,
+                            endpoint: codexEndpoint + '/responses',
                             headers: request.headers,
-                          }),
+                            subscription: descriptor.subscription,
+                          } satisfies SocketDispatch),
                         },
                       }),
                     )

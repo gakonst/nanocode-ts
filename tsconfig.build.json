@@ -11,6 +11,7 @@
   "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": [
     "src/cloudflare/App.ts",
+    "src/cloudflare/Forward.ts",
     "src/cloudflare/Gateway.ts",
     "src/cloudflare/index.ts",
     "src/cloudflare/internal/**",

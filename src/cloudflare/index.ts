@@ -5,6 +5,7 @@
  * @module
  */
 export * as App from './App.ts'
+export * as Forward from './Forward.ts'
 export * as Gateway from './Gateway.ts'
 export * as Limit from './Limit.ts'
 export * as Listings from './Listings.ts'
