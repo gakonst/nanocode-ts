@@ -1119,7 +1119,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init))
           const mcpStore = mcpServers.length ? options.mcp?.store?.(this.env) : undefined
           const shell =
-            options.workspace === false || enabled || this.handsMode(scope, descriptor)
+            options.workspace === false || enabled
               ? undefined
               : await Bash.create({
                   fs: Mount.create(
