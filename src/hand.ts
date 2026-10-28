@@ -26,7 +26,7 @@ export type HandStatus = { state: "connecting" | "attached" | "closed"; reason?:
 
 export type Hand = { closed: Promise<HandStatus>; close(): void };
 
-export type PreparedHand = { cwd: string; connect(url: string, onStatus?: (status: HandStatus) => void): Promise<Hand>; dispose(): void };
+export type PreparedHand = { cwd: string; connect(url: string, onStatus?: (status: HandStatus) => void, token?: string): Promise<Hand>; dispose(): void };
 
 const NO_SQL = { transaction() { throw new Error("a hand runs no SQL"); } };
 
@@ -106,7 +106,7 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
       used = true;
       void runtime.dispose().catch(() => {});
     },
-    async connect(url, onStatus) {
+    async connect(url, onStatus, token = options.token) {
       if (used) throw new Error("a prepared hand connects once");
       used = true;
       const Socket = options.WebSocket ?? globalThis.WebSocket;
@@ -139,7 +139,7 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
       const attached = new Promise<void>((resolve, reject) => {
         const dial = () => {
           if (stopped) return;
-          const target = tokened(options.token, options.protocols, Socket);
+          const target = tokened(token, options.protocols, Socket);
           const current = target.init === undefined ? new Socket(url, target.protocols) : new (Socket as unknown as new (url: string, init: unknown) => WebSocket)(url, target.init);
           socket = current;
           let connection: number | undefined;
@@ -292,8 +292,9 @@ async function streamLink(options: HandOptions, catalog: string, receive: (text:
   };
 }
 
-export type HandKeeperOptions = Omit<HandOptions, "url" | "workspace" | "cwd"> & {
+export type HandKeeperOptions = Omit<HandOptions, "url" | "workspace" | "cwd" | "token"> & {
   url(session: string): string;
+  credential?(session: string): string | undefined | Promise<string | undefined>;
   listed?(session: string): Promise<boolean>;
   module(): Promise<WebAssembly.Module>;
   workspace(session: string): Promise<{ workspace: WorkspaceHost; cwd: string }>;
@@ -349,7 +350,7 @@ export function handKeeper(options: HandKeeperOptions) {
   const open = (session: string) => {
     const entry = { session, open: false, hand: undefined as unknown as Promise<Hand | undefined> };
     entry.hand = (async () => {
-      let [ready, place] = await Promise.all([take(), options.workspace(session)]);
+      let [ready, place, token] = await Promise.all([take(), options.workspace(session), options.credential?.(session)]);
       if (place.cwd !== ready.prepared.cwd) {
         ready.prepared.dispose();
         ready = await prepareHand(await options.module(), { ...options, name, workspace: place.workspace, cwd: place.cwd }).then(prepared => ({ prepared, slot: {} }));
@@ -362,7 +363,7 @@ export function handKeeper(options: HandKeeperOptions) {
       const hand = await ready.prepared.connect(options.url(session), next => {
         entry.open = next.state === "attached";
         if (current === entry) emit({ ...next, session });
-      });
+      }, token);
       const deadline = Date.now() + (options.attachMs ?? 5000);
       while (options.listed && Date.now() < deadline && entry.open && !(await options.listed(session).catch(() => false))) await new Promise(resolve => setTimeout(resolve, 150));
       return hand;
