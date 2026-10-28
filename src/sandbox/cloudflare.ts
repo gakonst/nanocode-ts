@@ -1,4 +1,4 @@
-import type { WorkspaceHost } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import {
   collector,
   drain,
@@ -54,7 +54,10 @@ export type ContainerWorkspaceOptions = {
   setup?: string
 }
 
-export type ContainerWorkspace = WorkspaceHost & { ready(): Promise<void>; stop(): Promise<void> }
+export type ContainerWorkspace = Contracts.WorkspaceHost & {
+  ready(): Promise<void>
+  stop(): Promise<void>
+}
 
 export const CONTAINER_IMAGE = 'cloudflare/debian-trixie'
 export const CONTAINER_INACTIVITY_TIMEOUT_MS = 10 * 60_000

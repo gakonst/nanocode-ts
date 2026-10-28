@@ -1,4 +1,4 @@
-import type { HostTool, WorkspaceHost } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import {
   FsError,
   MemoryFileSystem,
@@ -335,7 +335,7 @@ export class Bash {
     await this.fs.write(target, typeof content === 'string' ? encode(content) : content)
   }
 
-  workspace(): WorkspaceHost {
+  workspace(): Contracts.WorkspaceHost {
     return {
       read: async (path) => {
         const target = resolvePath(this.cwd, path)

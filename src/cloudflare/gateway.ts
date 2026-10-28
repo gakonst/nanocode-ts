@@ -1,7 +1,7 @@
-import type { ModelProvider } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import type { ModelDispatch, PrivateBinding } from './contracts.ts'
 
-const HEADERS: Record<ModelProvider, RegExp> = {
+const HEADERS: Record<Contracts.ModelProvider, RegExp> = {
   claude: /^(accept|content-type|anthropic-version|anthropic-beta)$/,
   codex: /^(accept|content-type|x-session-affinity)$/,
 }
@@ -47,7 +47,7 @@ function shape(query: unknown): {
 }
 
 function modelError(
-  provider: ModelProvider,
+  provider: Contracts.ModelProvider,
   status: number,
   type: string,
   message: string,

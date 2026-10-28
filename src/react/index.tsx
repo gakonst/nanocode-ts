@@ -412,7 +412,7 @@ export function useHighlighter(wanted = true): Highlighter | undefined {
     if (provided || !wanted) return
     if (request) return request()
     let active = true
-    fallback ??= import('../highlight.ts').then((module) => module.highlight)
+    fallback ??= import('../Highlight.ts').then((module) => module.highlight)
     fallback.then(
       (highlighter) => {
         if (active) setLoaded(() => highlighter)

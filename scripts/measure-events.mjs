@@ -1,5 +1,5 @@
 import { writeFileSync, mkdirSync } from 'node:fs'
-import { EventHub } from '../src/events.ts'
+import * as EventHub from '../src/EventHub.ts'
 
 if (typeof globalThis.gc !== 'function')
   throw new Error('run with node --expose-gc scripts/measure-events.mjs')
@@ -39,7 +39,7 @@ function batch(first, size, total) {
 }
 
 function fill(size) {
-  const hub = new EventHub(
+  const hub = EventHub.create(
     () => count,
     () => budget,
   )

@@ -1,4 +1,4 @@
-export function fingerprint(bytes: ArrayBuffer | ArrayBufferView): string {
+export function from(bytes: ArrayBuffer | ArrayBufferView): string {
   const data =
     bytes instanceof Uint8Array
       ? bytes

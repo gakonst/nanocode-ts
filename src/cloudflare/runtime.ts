@@ -1,26 +1,10 @@
 import { DurableObjectBlobs } from './sql.ts'
 import { DurableObject } from 'cloudflare:workers'
-import {
-  Timings,
-  difference as timingDifference,
-  type Snapshot as TimingSnapshot,
-} from '../Timing.ts'
-import {
-  type AgentConfiguration,
-  HostFailure,
-  RECENT_MODEL_LIMIT,
-  RemoteRefusal,
-  sessionUuid,
-  type HostTool,
-  type LoggedEvent,
-  type LogPage,
-  type McpServer,
-  type ModelProvider,
-  type TurnView,
-} from '../contracts.ts'
-import { EventHub, type LiveCursor } from '../events.ts'
-import { AgentRuntime } from '../host.ts'
-import { RemoteExecutor } from '../remote.ts'
+import * as Timing from '../Timing.ts'
+import * as Contracts from '../Contracts.ts'
+import * as EventHub from '../EventHub.ts'
+import * as AgentRuntime from '../AgentRuntime.ts'
+import * as Remote from '../Remote.ts'
 import {
   Bash,
   SqlFileSystem,
@@ -31,13 +15,12 @@ import {
   type Limits,
   type PythonRemote,
 } from '../bash/index.ts'
-import { guard } from '../egress.ts'
-import { fileResponse, MAX_UPLOAD_BYTES, promptImages, uploadFile } from '../files.ts'
+import * as Egress from '../Egress.ts'
+import * as Files from '../Files.ts'
 import wasm from 'nanocode-ts/nanocode_wasm.wasm'
 import interpreter from 'nanocode-ts/interpreter.wasm'
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from './store.ts'
 import { ExecutorRejection, connectExecutor } from './remote.ts'
-import { bearerAccepted, bearerToken, HAND_ACCEPTED } from '../remote.ts'
 import { refuseSocket } from './relay.ts'
 import {
   DEFAULT_EXECUTOR,
@@ -57,7 +40,7 @@ import {
   type Thinking,
 } from './contracts.ts'
 
-export type { HostTool, ModelProvider } from '../contracts.ts'
+export type { HostTool, ModelProvider } from '../Contracts.ts'
 export type {
   HostToolCall,
   ModelDispatch,
@@ -107,11 +90,15 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
     env: E,
   ): Promise<string | Principal | null> | string | Principal | null
   egress(env: E): PrivateBinding
-  subscription?(account: string, env: E, provider: ModelProvider): Promise<boolean> | boolean
+  subscription?(
+    account: string,
+    env: E,
+    provider: Contracts.ModelProvider,
+  ): Promise<boolean> | boolean
   recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
   active?(account: string, grant: unknown, env: E): Promise<boolean> | boolean
   tools?: {
-    definitions: HostTool[]
+    definitions: Contracts.HostTool[]
     call(call: HostToolCall, env: E, signal: AbortSignal): Promise<unknown>
   }
   chaos?: boolean
@@ -125,7 +112,9 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
     ): string | null | undefined | Promise<string | null | undefined>
   }
   mcp?: {
-    servers: McpServer[] | ((authority: SessionAuthority, env: E) => McpServer[])
+    servers:
+      | Contracts.McpServer[]
+      | ((authority: SessionAuthority, env: E) => Contracts.McpServer[])
     fetch?(authority: SessionAuthority, env: E): typeof fetch
   }
   instructions?: string
@@ -140,7 +129,7 @@ export type NanocodeOptions<E extends NanocodeEnv> = {
         mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem>
         python?(authority: SessionAuthority, env: E): PythonRemote | undefined
       }
-  workspaceTools?: AgentConfiguration['workspace_tools']
+  workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   liveDeltas?: boolean
   valueLimit?: number
 }
@@ -155,8 +144,8 @@ type TurnTiming = {
   run_started?: number
   run_ms?: number
   recovered?: boolean
-  checkpoints: TimingSnapshot
-  runtime?: TimingSnapshot
+  checkpoints: Timing.Snapshot
+  runtime?: Timing.Snapshot
 }
 type LegacyJob = {
   request_id: string
@@ -227,22 +216,23 @@ const WATCH_TAG = 'watch'
 
 type Watch = { watch: string; cursor: number; live?: boolean }
 type Watcher = { state: Watch; scope: string; descriptor: SessionDescriptor }
-type Executor = RemoteExecutor<WebSocket>
+type Executor = Remote.Executor<WebSocket>
 const OWNER = 'owner'
 const UNFINISHED = new Set(['queued', 'running'])
 const INTERRUPTED = 'Agent execution interrupted; recovery scheduled'
 
-function executorFailure(error: unknown): HostFailure {
+function executorFailure(error: unknown): Contracts.HostFailureError {
   const message = error instanceof Error ? error.message : String(error)
-  if (!(error instanceof ExecutorRejection)) return new HostFailure(message, 'unreachable', false)
+  if (!(error instanceof ExecutorRejection))
+    return new Contracts.HostFailureError(message, 'unreachable', false)
   if (error.status === 401 || error.status === 403)
-    return new HostFailure(message, 'unauthorized', true)
+    return new Contracts.HostFailureError(message, 'unauthorized', true)
   if (
     error.status === 501 ||
     (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429)
   )
-    return new HostFailure(message, 'rejected', true)
-  return new HostFailure(message, 'unavailable', false)
+    return new Contracts.HostFailureError(message, 'rejected', true)
+  return new Contracts.HostFailureError(message, 'unavailable', false)
 }
 
 export type Nanocode<E extends NanocodeEnv> = {
@@ -261,11 +251,11 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private readonly store: CheckpointStore
     private readonly blobs: DurableObjectBlobs
     private readonly metadata: Metadata
-    private readonly instances = new Map<string, Promise<AgentRuntime>>()
-    private readonly runtimes = new Map<string, Promise<AgentRuntime>>()
-    private readonly residents = new Map<string, AgentRuntime>()
-    private readonly efforts = new WeakMap<AgentRuntime, Thinking>()
-    private readonly openedWith = new WeakMap<Promise<AgentRuntime>, string>()
+    private readonly instances = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
+    private readonly runtimes = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
+    private readonly residents = new Map<string, AgentRuntime.AgentRuntime>()
+    private readonly efforts = new WeakMap<AgentRuntime.AgentRuntime, Thinking>()
+    private readonly openedWith = new WeakMap<Promise<AgentRuntime.AgentRuntime>, string>()
     private readonly prewarmed = new Map<
       string,
       { session: string; provider: string; model: string; executor: string }
@@ -291,13 +281,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private pumping = false
     private recorded = false
     private deleted = false
-    private readonly liveSockets = new WeakMap<WebSocket, LiveCursor>()
-    private readonly eventHub = new EventHub(
+    private readonly liveSockets = new WeakMap<WebSocket, EventHub.Cursor>()
+    private readonly eventHub = EventHub.create(
       () => policy(this.env.EVENT_PAGE_SIZE, 'EVENT_PAGE_SIZE'),
       () => policy(this.env.EVENT_TAIL_BYTES, 'EVENT_TAIL_BYTES'),
     )
     private readonly modelDiagnostics: { scope: string; value: unknown }[] = []
-    private readonly timings = new Map<string, Timings>()
+    private readonly timings = new Map<string, Timing.Timings>()
     private readonly turnTimings = new Map<string, TurnTiming>()
     private crash?: number
     private readonly counts = {
@@ -660,7 +650,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           this.binding = new Promise<void>((resolve) => {
             bound = resolve
           })
-        let submitted: Awaited<ReturnType<AgentRuntime['submit']>>
+        let submitted: Awaited<ReturnType<AgentRuntime.AgentRuntime['submit']>>
         try {
           const storedExecutor = this.metadata.get(executorKey)
           const initialized = this.metadata.get(sessionKey) !== undefined
@@ -704,7 +694,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             options.workspace === false ||
             (descriptor.provider === 'codex' && WORKERS_AI_MODELS.has(descriptor.model ?? ''))
               ? []
-              : await promptImages(new SqlFileSystem(this.store, scope), input.images, {
+              : await Files.promptImages(new SqlFileSystem(this.store, scope), input.images, {
                   root: options.workspace?.cwd ?? '/workspace',
                 })
           submitted = await (
@@ -800,7 +790,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.linger !== undefined) clearTimeout(this.linger)
       this.linger = undefined
       let scope: string | undefined
-      let runtime: AgentRuntime | undefined
+      let runtime: AgentRuntime.AgentRuntime | undefined
       let immediate = false
       let waiting = false
       let active: string | undefined
@@ -857,7 +847,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           retryAt = await this.unavailable(
             scope,
             next,
-            new HostFailure(`hand \`${hand}\` is not attached`, 'detached', false),
+            new Contracts.HostFailureError(`hand \`${hand}\` is not attached`, 'detached', false),
             delay,
           )
           immediate = retryAt === undefined || !!this.hands.get(scope)?.get(hand)?.ready
@@ -872,9 +862,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           retryAt = await this.unavailable(
             scope,
             next,
-            error instanceof HostFailure
+            error instanceof Contracts.HostFailureError
               ? error
-              : new HostFailure(
+              : new Contracts.HostFailureError(
                   error instanceof Error ? error.message : String(error),
                   'runtime',
                   false,
@@ -894,7 +884,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             retryAt = await this.unavailable(
               scope,
               next,
-              new HostFailure(
+              new Contracts.HostFailureError(
                 error instanceof Error ? error.message : String(error),
                 'configuration',
                 true,
@@ -986,8 +976,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private async unavailable(
       scope: string,
-      next: TurnView | undefined,
-      failure: HostFailure,
+      next: Contracts.TurnView | undefined,
+      failure: Contracts.HostFailureError,
       delay: number,
     ): Promise<number | undefined> {
       if (!next) {
@@ -997,7 +987,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       }
       const id = next.report.request_id
       const reader = await this.instance(scope)
-      let turn: TurnView | null = next
+      let turn: Contracts.TurnView | null = next
       if (!next.cancel_requested && !failure.permanent) {
         const retryAt = Date.now() + delay
         turn = await reader.retry(scope, id, failure.message, failure.kind, retryAt)
@@ -1041,7 +1031,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       const key = this.sessionKey(scope)
       let session = this.metadata.get(key)
       if (!session) {
-        session = suggested || sessionUuid()
+        session = suggested || Contracts.sessionUuid()
         this.metadata.insert(key, session)
         created?.()
       }
@@ -1052,7 +1042,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       scope: string,
       sessionId: string,
       descriptor: SessionDescriptor,
-    ): Promise<AgentRuntime> {
+    ): Promise<AgentRuntime.AgentRuntime> {
       let resident = this.runtimes.get(scope)
       const opening = JSON.stringify([
         sessionId,
@@ -1113,7 +1103,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const githubToken = options.github?.token
           const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
           const hostFetch = (options.codeMode || undefined)?.fetch?.(authority, this.env)
-          const cellFetch = guard(
+          const cellFetch = Egress.guard(
             hostFetch ? withGitHub(hostFetch, github) : githubArchives(undefined, github),
           )
           const pythonRemote = options.workspace
@@ -1237,7 +1227,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                         ? this.connections.get(request.connection)
                         : await connecting
                     if (!executor)
-                      throw new RemoteRefusal(
+                      throw new Contracts.RemoteRefusalError(
                         request.connection != null
                           ? 'hand is not connected'
                           : 'remote executor is not configured',
@@ -1246,7 +1236,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                       executor.claim(owner)
                     else if (request.connection != null && !executor.owns(owner)) {
                       if (request.op === 'remote_send')
-                        throw new RemoteRefusal('hand connection moved to a newer runtime')
+                        throw new Contracts.RemoteRefusalError(
+                          'hand connection moved to a newer runtime',
+                        )
                       return request.op === 'remote_poll'
                         ? { closed: 'connection moved to a newer runtime' }
                         : null
@@ -1255,7 +1247,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                       try {
                         await this.durable(scope)
                       } catch (error) {
-                        throw new RemoteRefusal(
+                        throw new Contracts.RemoteRefusalError(
                           error instanceof Error ? error.message : String(error),
                         )
                       }
@@ -1266,7 +1258,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                       this.dispatchBlocked(scope)
                     ) {
                       setTimeout(() => void executor.dispose(), 0)
-                      throw new RemoteRefusal('request authority stopped')
+                      throw new Contracts.RemoteRefusalError('request authority stopped')
                     }
                     if (
                       request.op === 'remote_send' &&
@@ -1274,7 +1266,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                       !(await this.handAllowed(request.connection))
                     ) {
                       setTimeout(() => void executor.dispose(), 0)
-                      throw new RemoteRefusal("the hand's access token expired or was revoked")
+                      throw new Contracts.RemoteRefusalError(
+                        "the hand's access token expired or was revoked",
+                      )
                     }
                     return executor.execute(request, id)
                   },
@@ -1407,11 +1401,11 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         return json({ error: 'invalid hand' }, 400)
       if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
         return json({ error: 'hands attach over WebSocket' }, 426)
-      const accepted = bearerAccepted(request)
+      const accepted = Remote.bearerAccepted(request)
       const [client, server] = Object.values(new WebSocketPair())
       this.ctx.acceptWebSocket(server, [HAND_TAG])
-      server.send(HAND_ACCEPTED)
-      const executor = RemoteExecutor.accept(server, this.handLimits())
+      server.send(Remote.handAccepted)
+      const executor = Remote.accept(server, this.handLimits())
       this.handSockets.set(server, executor)
       this.ctx.waitUntil(this.registerHand(scope, requested, executor, descriptor))
       return new Response(null, { status: 101, webSocket: client, headers: accepted })
@@ -1563,7 +1557,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         }
         live.push(connection)
         if (row.descriptor) this.handAuthority.set(connection, JSON.parse(String(row.descriptor)))
-        const executor = RemoteExecutor.restore(socket, this.handLimits(), String(row.catalog))
+        const executor = Remote.restore(socket, {
+          catalog: String(row.catalog),
+          policy: this.handLimits(),
+        })
         this.handSockets.set(socket, executor)
         this.indexHand(String(row.scope), String(row.hand), connection, executor, true)
       }
@@ -1685,7 +1682,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       return list
     }
 
-    private deliver(socket: WebSocket, state: Watch, event: LoggedEvent): void {
+    private deliver(socket: WebSocket, state: Watch, event: Contracts.LoggedEvent): void {
       if (event.seq <= state.cursor) return
       try {
         socket.send(
@@ -1702,7 +1699,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       } catch {}
     }
 
-    private liveCursor(socket: WebSocket, state: Watch): LiveCursor {
+    private liveCursor(socket: WebSocket, state: Watch): EventHub.Cursor {
       let found = this.liveSockets.get(socket)
       if (!found) this.liveSockets.set(socket, (found = { sent: new Map(), cursor: state.cursor }))
       found.cursor = Math.max(found.cursor, state.cursor)
@@ -1725,7 +1722,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       }
     }
 
-    private lived(scope: string, events: LoggedEvent[]): void {
+    private lived(scope: string, events: Contracts.LoggedEvent[]): void {
       if (!events.length || this.deleted) return
       this.eventHub.live(events)
       for (const { socket, watcher } of this.watching()) {
@@ -1734,7 +1731,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       }
     }
 
-    private published(scope: string, events: LoggedEvent[], bytes: number[]): void {
+    private published(scope: string, events: Contracts.LoggedEvent[], bytes: number[]): void {
       if (!events.length || this.deleted) return
       this.counts.events_written += events.length
       this.eventHub.publish(events, bytes)
@@ -1942,7 +1939,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
       const sessionId = this.metadata.get(this.sessionKey(scope))
       if (!sessionId) return false
-      const provider = (this.metadata.get(`model_provider:${scope}`) ?? 'claude') as ModelProvider
+      const provider = (this.metadata.get(`model_provider:${scope}`) ??
+        'claude') as Contracts.ModelProvider
       const executor = this.metadata.get(`executor:${scope}`) ?? this.legacyExecutor()
       const model = this.metadata.get('model:' + scope)
       const descriptor: SessionDescriptor = {
@@ -1972,7 +1970,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private async prewarm(
       scope: string,
       base: SessionDescriptor,
-      provider: ModelProvider,
+      provider: Contracts.ModelProvider,
       model: string,
     ): Promise<boolean> {
       if (this.metadata.get(this.sessionKey(scope)) !== undefined)
@@ -1986,7 +1984,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         entry.model !== model ||
         entry.executor !== executor
       ) {
-        entry = { session: sessionUuid(), provider, model, executor }
+        entry = { session: Contracts.sessionUuid(), provider, model, executor }
         this.prewarmed.set(scope, entry)
       }
       const descriptor: SessionDescriptor = {
@@ -2049,7 +2047,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       }
     }
 
-    private retire(scope: string, runtime: AgentRuntime): void {
+    private retire(scope: string, runtime: AgentRuntime.AgentRuntime): void {
       this.counts.runtime_retirements++
       this.runtimes.delete(scope)
       this.residents.delete(scope)
@@ -2118,7 +2116,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       return json({ deleted: true })
     }
 
-    private finishing(id: string, current: AgentRuntime): Record<string, unknown> {
+    private finishing(id: string, current: AgentRuntime.AgentRuntime): Record<string, unknown> {
       const timing = this.turnTimings.get(id)
       const runtime = current.metrics.timing
       const {
@@ -2135,8 +2133,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           ...phases,
           observed_ms: performance.now() - started,
           runtime_id: runtime.runtime_id,
-          checkpoint_spans: timingDifference(runtime.checkpoints, checkpoints),
-          runtime_spans: timingDifference(runtime.spans, before ?? {}),
+          checkpoint_spans: Timing.difference(runtime.checkpoints, checkpoints),
+          runtime_spans: Timing.difference(runtime.spans, before ?? {}),
         },
       }
     }
@@ -2185,7 +2183,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           scope,
           value: { ...value, runtime_id: timing.runtime_id, dispatch_id: timing.dispatch_id },
         })
-        if (this.modelDiagnostics.length > RECENT_MODEL_LIMIT) this.modelDiagnostics.shift()
+        if (this.modelDiagnostics.length > Contracts.recentModelLimit) this.modelDiagnostics.shift()
       } catch {}
     }
 
@@ -2194,7 +2192,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       return id !== undefined && this.blocked.has(id)
     }
 
-    private instance(scope: string, unopened = false): Promise<AgentRuntime> {
+    private instance(scope: string, unopened = false): Promise<AgentRuntime.AgentRuntime> {
       if (this.deleted) return Promise.reject(new Error('session deleted'))
       let current = this.instances.get(scope)
       if (!current) {
@@ -2245,7 +2243,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       requestId?: string,
       descriptor?: SessionDescriptor,
     ): Promise<Response> {
-      const read = async (cursor: number): Promise<LogPage> => {
+      const read = async (cursor: number): Promise<Contracts.LogPage> => {
         if (descriptor && !(await this.allowed(descriptor)))
           throw new Error('access token expired or revoked')
         return (
@@ -2275,23 +2273,23 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       const root = options.workspace?.cwd ?? '/workspace'
       const fs = new SqlFileSystem(this.store, scope)
       const rest = url.pathname.slice('/internal/files'.length)
-      if (request.method === 'GET') return await fileResponse(fs, rest, { root })
+      if (request.method === 'GET') return await Files.response(fs, rest, { root })
       if (request.method !== 'POST' || rest) return json({ error: 'method not allowed' }, 405)
-      if (Number(request.headers.get('content-length') ?? 0) > MAX_UPLOAD_BYTES) {
+      if (Number(request.headers.get('content-length') ?? 0) > Files.maxUploadBytes) {
         await request.body?.cancel().catch(() => undefined)
-        return json({ error: 'attachments are at most ' + MAX_UPLOAD_BYTES + ' bytes' }, 413)
+        return json({ error: 'attachments are at most ' + Files.maxUploadBytes + ' bytes' }, 413)
       }
       const bytes = new Uint8Array(await request.arrayBuffer())
-      const uploaded = await uploadFile(fs, url.searchParams.get('name') ?? '', bytes, {
+      const uploaded = await Files.upload(fs, url.searchParams.get('name') ?? '', bytes, {
         dir: root + '/uploads',
       })
       return uploaded instanceof Response ? uploaded : json(uploaded)
     }
 
-    private scopeTimings(scope: string): Timings {
+    private scopeTimings(scope: string): Timing.Timings {
       let value = this.timings.get(scope)
       if (!value) {
-        value = new Timings()
+        value = Timing.create()
         this.timings.set(scope, value)
       }
       return value
@@ -2301,7 +2299,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
   async function fetch(request: Request, env: E): Promise<Response> {
     const started = performance.now()
     const url = new URL(request.url)
-    const minted = HAND_TOKEN.exec(bearerToken(request) ?? '')
+    const minted = HAND_TOKEN.exec(Remote.bearerToken(request) ?? '')
     const handing =
       minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null
     const principal = handing
@@ -2350,7 +2348,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     if (!name || name.includes('\0')) return json({ error: 'invalid session name' }, 400)
     if (Number(request.headers.get('content-length') ?? 0) > valueLimit)
       return json({ error: tooLarge }, 413)
-    const mode = (provider: ModelProvider) =>
+    const mode = (provider: Contracts.ModelProvider) =>
       options.subscription
         ? options.subscription(account, env, provider)
         : env.MODEL_AUTH === 'subscription'

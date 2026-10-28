@@ -1,6 +1,6 @@
 import type { DriveContext } from 'durable-harness'
-import type { MessageSocket } from '../contracts.ts'
-import { bearerToken, HAND_ACCEPTED } from '../remote.ts'
+import type * as Contracts from '../Contracts.ts'
+import * as Remote from '../Remote.ts'
 
 type World = DriveContext['world']
 
@@ -159,7 +159,12 @@ export async function* tailLines(
   }
 }
 
-function dialLocal(world: World, runId: string, first: LocalHand, resumes: boolean): MessageSocket {
+function dialLocal(
+  world: World,
+  runId: string,
+  first: LocalHand,
+  resumes: boolean,
+): Contracts.MessageSocket {
   const listeners: Record<'close' | 'error' | 'message', ((event: any) => void)[]> = {
     close: [],
     error: [],
@@ -315,7 +320,7 @@ export async function dialHand(
   runId: string,
   signal: AbortSignal,
   options: DialOptions = {},
-): Promise<MessageSocket> {
+): Promise<Contracts.MessageSocket> {
   const resumes = options.resumes === true
   const nearby = local.get(runId)
   if (nearby && nearby.socket.readyState === OPEN) return dialLocal(world, runId, nearby, resumes)
@@ -430,7 +435,7 @@ export type HandRouteOptions = {
 }
 
 function serveSocket(world: World, sessionId: string, socket: HandSocket): void {
-  socket.send(HAND_ACCEPTED)
+  socket.send(Remote.handAccepted)
   const connection = handId()
   const streams = handStreams(sessionId, connection)
   const attach = appendLines(world, sessionId, streams.attach)
@@ -601,7 +606,7 @@ export function handRoute(options: HandRouteOptions) {
   }
 
   async function SOCKET(request: Request, upgrade: UpgradeWebSocket): Promise<Response> {
-    const bearer = bearerToken(request)
+    const bearer = Remote.bearerToken(request)
     const admitted = await admit(new URL(request.url), bearer)
     if (
       admitted instanceof Response &&

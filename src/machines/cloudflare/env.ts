@@ -1,4 +1,4 @@
-import { mark } from '../../egress.ts'
+import * as Egress from '../../Egress.ts'
 import type { NanocodeEnv } from '../../cloudflare/runtime.ts'
 import { forward, json } from '../account.ts'
 import type { Wallet } from './wallet.ts'
@@ -17,7 +17,7 @@ export function wallet(env: MachinesEnv, account: string) {
 }
 
 export function paying(env: MachinesEnv, account: string): typeof fetch {
-  return mark((input, init) =>
+  return Egress.mark((input, init) =>
     forward((request) => wallet(env, account).fetch(request), input, init),
   )
 }

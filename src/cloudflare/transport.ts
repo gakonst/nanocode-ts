@@ -11,7 +11,7 @@ import {
   type Transport,
   type TransportParameters,
 } from '../client.ts'
-import type { LoggedEvent } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export type CloudflareSession = { id?: string; cursor?: number; open?: string }
 
@@ -76,7 +76,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       signal?.addEventListener('abort', done)
     })
 
-  const receive = (logged: LoggedEvent, requestId: string, sink: Sink): boolean => {
+  const receive = (logged: Contracts.LoggedEvent, requestId: string, sink: Sink): boolean => {
     const body = (logged.event ?? {}) as { source?: string; type?: string }
     if (body.source !== undefined) {
       const event = liveEvent(logged)
@@ -115,7 +115,10 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
           session.cursor = Number(message.id)
           save(session)
         }
-        if (message.data && receive(JSON.parse(message.data) as LoggedEvent, requestId, sink)) {
+        if (
+          message.data &&
+          receive(JSON.parse(message.data) as Contracts.LoggedEvent, requestId, sink)
+        ) {
           settled = true
           break
         }

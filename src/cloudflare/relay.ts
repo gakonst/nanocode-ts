@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { BRAIN_REPLACED, bearerAccepted, bearerToken, HAND_ACCEPTED, HAND_LEFT } from '../remote.ts'
+import * as Remote from '../Remote.ts'
 
 export const RELAY_TOKEN = /^[0-9a-f]{32,128}$/
 
@@ -36,20 +36,24 @@ export class HandRelay extends DurableObject {
     }
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket]
     this.ctx.acceptWebSocket(server, [side])
-    if (side === 'hand') server.send(HAND_ACCEPTED)
+    if (side === 'hand') server.send(Remote.handAccepted)
     if (side === 'brain' && !query.has('wait') && !this.#hand())
-      server.close(HAND_LEFT, 'no hand is attached')
+      server.close(Remote.handLeft, 'no hand is attached')
     else if (side === 'brain') {
       for (const older of this.ctx.getWebSockets('brain'))
         if (older !== server) {
           try {
-            older.close(BRAIN_REPLACED, 'a newer brain took the hand')
+            older.close(Remote.brainReplaced, 'a newer brain took the hand')
           } catch {}
         }
       const catalog = await this.ctx.storage.get<string>('catalog')
       if (catalog !== undefined && this.#hand()) this.#offer(server, catalog)
     }
-    return new Response(null, { status: 101, webSocket: client, headers: bearerAccepted(request) })
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: Remote.bearerAccepted(request),
+    })
   }
 
   override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -78,7 +82,7 @@ export class HandRelay extends DurableObject {
         if (brain.deserializeAttachment() === null) this.#offer(brain, catalog)
         else {
           try {
-            brain.close(HAND_LEFT, 'the hand reconnected')
+            brain.close(Remote.handLeft, 'the hand reconnected')
           } catch {}
         }
       }
@@ -135,19 +139,19 @@ export class HandRelay extends DurableObject {
     await this.ctx.storage.delete('catalog')
     for (const brain of this.ctx.getWebSockets('brain')) {
       try {
-        brain.close(HAND_LEFT, 'the hand disconnected')
+        brain.close(Remote.handLeft, 'the hand disconnected')
       } catch {}
     }
   }
 }
 
 export function relayToken(request: Request): string | undefined {
-  const token = bearerToken(request) ?? new URL(request.url).searchParams.get('token') ?? ''
+  const token = Remote.bearerToken(request) ?? new URL(request.url).searchParams.get('token') ?? ''
   return RELAY_TOKEN.test(token) ? token : undefined
 }
 
 export function refuseSocket(request: Request, reason: string, status: number): Response {
-  const accepted = bearerAccepted(request)
+  const accepted = Remote.bearerAccepted(request)
   if (
     request.headers.get('upgrade')?.toLowerCase() !== 'websocket' ||
     !accepted['sec-websocket-protocol']

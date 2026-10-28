@@ -11,7 +11,7 @@ import {
   type NewFile,
 } from '../fs.ts'
 import { TarReader } from './archive.ts'
-import { guarded, mark } from '../../egress.ts'
+import * as Egress from '../../Egress.ts'
 
 const MAX_BYTES = 200 * 1024 * 1024
 
@@ -2413,7 +2413,7 @@ export function withGitHub(fetcher: typeof fetch, options: GitHubFetchOptions = 
     }
     return limited(response)
   }
-  return guarded(fetcher) ? mark(layer) : layer
+  return Egress.guarded(fetcher) ? Egress.mark(layer) : layer
 }
 
 export function githubArchives(
@@ -2421,7 +2421,7 @@ export function githubArchives(
   options: GitHubFetchOptions = {},
 ): typeof fetch {
   const network = withGitHub(fetcher, options)
-  return mark(async (input, init) => {
+  return Egress.mark(async (input, init) => {
     const request = new Request(input, init)
     if (
       (request.method !== 'GET' && request.method !== 'HEAD') ||

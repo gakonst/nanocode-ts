@@ -1,4 +1,4 @@
-import { fingerprint } from '../../fingerprint.ts'
+import * as Fingerprint from '../../Fingerprint.ts'
 import {
   HELPER,
   type Pyodide,
@@ -111,7 +111,7 @@ function mkdirs(fs: FS, path: string): void {
 
 function stamp(fs: FS, path: string): string | undefined {
   if (kind(fs, path) !== 'file') return undefined
-  return fingerprint(fs.readFile(path))
+  return Fingerprint.from(fs.readFile(path))
 }
 
 function base64(bytes: Uint8Array): string {
@@ -237,7 +237,7 @@ export function pythonServer(
       const data = fs.readFile(path)
       if (span) {
         files.push([path, base64(data.subarray(span[0], span[0] + span[1]))])
-        stamps.set(path, fingerprint(data))
+        stamps.set(path, Fingerprint.from(data))
         continue
       }
       if (data.length > LARGE_BYTES) {
@@ -250,7 +250,7 @@ export function pythonServer(
       }
       budget -= data.length
       files.push([path, base64(data)])
-      stamps.set(path, fingerprint(data))
+      stamps.set(path, Fingerprint.from(data))
     }
     return { files, more, large }
   }
@@ -277,7 +277,7 @@ export function pythonServer(
         return
       }
       const data = fs.readFile(path)
-      const now = fingerprint(data)
+      const now = Fingerprint.from(data)
       if (stamps.get(path) === now) {
         files.push([path, null])
         return

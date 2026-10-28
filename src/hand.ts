@@ -1,20 +1,20 @@
 import { serverEvents } from './client.ts'
-import { AgentRuntime, readBytes, writeBytes } from './host.ts'
-import { bearerProtocols } from './remote.ts'
-import type { HostTool, McpServer, RuntimeOptions, WorkspaceHost } from './contracts.ts'
+import * as AgentRuntime from './AgentRuntime.ts'
+import * as Remote from './Remote.ts'
+import type * as Contracts from './Contracts.ts'
 
-export type HandOptions = {
+export type Options = {
   url: string
   name?: string
-  workspace: WorkspaceHost
+  workspace: Contracts.WorkspaceHost
   cwd?: string
   fetch?(input: string, init: RequestInit): Promise<Response>
   tools?: {
-    definitions: HostTool[]
+    definitions: Contracts.HostTool[]
     call(name: string, input: unknown, signal: AbortSignal): Promise<unknown>
   }
-  mcpServers?: McpServer[]
-  mcp?: RuntimeOptions['mcp']
+  mcpServers?: Contracts.McpServer[]
+  mcp?: Contracts.RuntimeOptions['mcp']
   protocols?: string | string[]
   maxFrameBytes?: number
   WebSocket?: typeof WebSocket
@@ -22,16 +22,16 @@ export type HandOptions = {
   transport?: 'websocket' | 'stream'
   reconnectMs?: number
   batchMs?: number
-  onStatus?(status: HandStatus): void
+  onStatus?(status: Status): void
 }
 
-export type HandStatus = { state: 'connecting' | 'attached' | 'closed'; reason?: string }
+export type Status = { state: 'connecting' | 'attached' | 'closed'; reason?: string }
 
-export type Hand = { closed: Promise<HandStatus>; close(): void }
+export type Hand = { closed: Promise<Status>; close(): void }
 
-export type PreparedHand = {
+export type Prepared = {
   cwd: string
-  connect(url: string, onStatus?: (status: HandStatus) => void, token?: string): Promise<Hand>
+  connect(url: string, onStatus?: (status: Status) => void, token?: string): Promise<Hand>
   dispose(): void
 }
 
@@ -53,7 +53,7 @@ type Compiler = {
   compile(bytes: ArrayBuffer): Promise<WebAssembly.Module>
 }
 
-export async function compileModule(
+export async function compile(
   url: string,
   options: { cache?: string | false; key?: string } = {},
 ): Promise<WebAssembly.Module> {
@@ -114,17 +114,17 @@ function tokened(
         ...(protocols === undefined ? {} : { protocols }),
       },
     }
-  return { protocols: bearerProtocols(token) }
+  return { protocols: Remote.bearerProtocols(token) }
 }
 
-export async function prepareHand(
+export async function prepare(
   module: WebAssembly.Module,
-  options: Omit<HandOptions, 'url' | 'onStatus'>,
-): Promise<PreparedHand> {
+  options: Omit<Options, 'url' | 'onStatus'>,
+): Promise<Prepared> {
   const runtime = await AgentRuntime.instantiate(module, NO_SQL, { published() {} })
   const send =
     options.fetch ?? ((input: string, init: RequestInit) => globalThis.fetch(input, init))
-  const dispatch: RuntimeOptions['dispatch'] = (request, signal) =>
+  const dispatch: Contracts.RuntimeOptions['dispatch'] = (request, signal) =>
     send(request.endpoint, {
       method: request.method,
       headers: request.headers,
@@ -137,7 +137,7 @@ export async function prepareHand(
   let link:
     | { connection: number; send(text: string): void; close(code: number, reason: string): void }
     | undefined
-  let hand: Awaited<ReturnType<AgentRuntime['serveHand']>>
+  let hand: Awaited<ReturnType<AgentRuntime.AgentRuntime['serveHand']>>
   try {
     hand = await runtime.serveHand({
       workspace: options.workspace,
@@ -180,8 +180,8 @@ export async function prepareHand(
       if (used) throw new Error('a prepared hand connects once')
       used = true
       const Socket = options.WebSocket ?? globalThis.WebSocket
-      let done!: (status: HandStatus) => void
-      const closed = new Promise<HandStatus>((resolve) => {
+      let done!: (status: Status) => void
+      const closed = new Promise<Status>((resolve) => {
         done = resolve
       })
       let finished = false
@@ -192,7 +192,7 @@ export async function prepareHand(
         finished = true
         stopped = true
         void runtime.dispose().catch(() => {})
-        const status: HandStatus = { state: 'closed', reason }
+        const status: Status = { state: 'closed', reason }
         onStatus?.(status)
         done(status)
       }
@@ -323,11 +323,11 @@ export async function prepareHand(
   }
 }
 
-export async function connectHand(module: WebAssembly.Module, options: HandOptions): Promise<Hand> {
+export async function connect(module: WebAssembly.Module, options: Options): Promise<Hand> {
   options.onStatus?.({ state: 'connecting' })
-  let prepared: PreparedHand
+  let prepared: Prepared
   try {
-    prepared = await prepareHand(module, options)
+    prepared = await prepare(module, options)
   } catch (error) {
     options.onStatus?.({
       state: 'closed',
@@ -339,11 +339,11 @@ export async function connectHand(module: WebAssembly.Module, options: HandOptio
 }
 
 async function streamLink(
-  options: HandOptions,
+  options: Options,
   catalog: string,
   receive: (text: string) => void,
   gone: (reason: string) => void,
-  closed: Promise<HandStatus>,
+  closed: Promise<Status>,
 ) {
   const connection = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, '0'),
@@ -439,20 +439,20 @@ async function streamLink(
   }
 }
 
-export type HandKeeperOptions = Omit<HandOptions, 'url' | 'workspace' | 'cwd' | 'token'> & {
+export type KeeperOptions = Omit<Options, 'url' | 'workspace' | 'cwd' | 'token'> & {
   url(session: string): string
   credential?(session: string): string | undefined | Promise<string | undefined>
   listed?(session: string): Promise<boolean>
   module(): Promise<WebAssembly.Module>
-  workspace(session: string): Promise<{ workspace: WorkspaceHost; cwd: string }>
+  workspace(session: string): Promise<{ workspace: Contracts.WorkspaceHost; cwd: string }>
   cwd?: string
   name?: string
   attachMs?: number
 }
 
-type Spare = { prepared: PreparedHand; slot: { workspace?: WorkspaceHost } }
+type Spare = { prepared: Prepared; slot: { workspace?: Contracts.WorkspaceHost } }
 
-function deferred(slot: Spare['slot']): WorkspaceHost {
+function deferred(slot: Spare['slot']): Contracts.WorkspaceHost {
   const target = () => {
     if (!slot.workspace) throw new Error('the hand has no workspace yet')
     return slot.workspace
@@ -460,8 +460,8 @@ function deferred(slot: Spare['slot']): WorkspaceHost {
   return {
     read: (path) => target().read(path),
     write: (path, contents) => target().write(path, contents),
-    readBytes: (path) => readBytes(target(), path),
-    writeBytes: (path, data, append) => writeBytes(target(), path, data, append),
+    readBytes: (path) => AgentRuntime.readBytes(target(), path),
+    writeBytes: (path, data, append) => AgentRuntime.writeBytes(target(), path, data, append),
     remove: (path) => target().remove(path),
     run: (request, signal) => target().run(request, signal),
     wasm: (request, signal) => {
@@ -472,21 +472,21 @@ function deferred(slot: Spare['slot']): WorkspaceHost {
   }
 }
 
-export function handKeeper(options: HandKeeperOptions) {
+export function keeper(options: KeeperOptions) {
   const name = options.name ?? 'browser'
   const cwd = options.cwd ?? '/workspace'
   let current: { session: string; hand: Promise<Hand | undefined>; open: boolean } | undefined
   let spare: Promise<Spare | undefined> | undefined
-  const listeners = new Set<(status: HandStatus & { session?: string }) => void>()
-  let status: HandStatus & { session?: string } = { state: 'closed' }
-  const emit = (next: HandStatus & { session?: string }) => {
+  const listeners = new Set<(status: Status & { session?: string }) => void>()
+  let status: Status & { session?: string } = { state: 'closed' }
+  const emit = (next: Status & { session?: string }) => {
     status = next
     options.onStatus?.(next)
     for (const listener of listeners) listener(next)
   }
-  const prepare = async (): Promise<Spare> => {
+  const prepareSpare = async (): Promise<Spare> => {
     const slot: Spare['slot'] = {}
-    const prepared = await prepareHand(await options.module(), {
+    const prepared = await prepare(await options.module(), {
       ...options,
       name,
       workspace: deferred(slot),
@@ -497,7 +497,7 @@ export function handKeeper(options: HandKeeperOptions) {
   const take = async (): Promise<Spare> => {
     const ready = spare
     spare = undefined
-    return (await ready?.catch(() => undefined)) ?? prepare()
+    return (await ready?.catch(() => undefined)) ?? prepareSpare()
   }
   const open = (session: string) => {
     const entry = { session, open: false, hand: undefined as unknown as Promise<Hand | undefined> }
@@ -509,7 +509,7 @@ export function handKeeper(options: HandKeeperOptions) {
       ])
       if (place.cwd !== ready.prepared.cwd) {
         ready.prepared.dispose()
-        ready = await prepareHand(await options.module(), {
+        ready = await prepare(await options.module(), {
           ...options,
           name,
           workspace: place.workspace,
@@ -569,13 +569,13 @@ export function handKeeper(options: HandKeeperOptions) {
   return {
     name,
     status: () => status,
-    subscribe(listener: (status: HandStatus & { session?: string }) => void) {
+    subscribe(listener: (status: Status & { session?: string }) => void) {
       listeners.add(listener)
       return () => void listeners.delete(listener)
     },
     prewarm(session?: string): Promise<unknown> {
       if (session) return attach(session).catch(() => undefined)
-      if (!spare && !current) spare = prepare().catch(() => undefined)
+      if (!spare && !current) spare = prepareSpare().catch(() => undefined)
       return spare ?? Promise.resolve(undefined)
     },
     attach,

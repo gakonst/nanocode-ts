@@ -1,4 +1,4 @@
-import type { McpServer, RuntimeOptions } from './contracts.ts'
+import type * as Contracts from './Contracts.ts'
 
 type Request = {
   provider: unknown
@@ -23,7 +23,7 @@ type Listing = {
   stateful?: boolean
 }
 
-export type McpPolicy = NonNullable<RuntimeOptions['mcp']>
+export type Policy = NonNullable<Contracts.RuntimeOptions['mcp']>
 
 const DEFAULT_CACHE_MS = 600_000
 
@@ -71,10 +71,10 @@ function reply(id: unknown, result: unknown) {
   })
 }
 
-export function deferMcp<R extends Request, A extends unknown[]>(
+export function defer<R extends Request, A extends unknown[]>(
   send: Send<R, A>,
-  servers: readonly McpServer[] | undefined,
-  policy: McpPolicy = {},
+  servers: readonly Contracts.McpServer[] | undefined,
+  policy: Policy = {},
 ): Send<R, A> {
   if (!servers?.length) return send
   const urls = new Set(servers.map((server) => key(server.url)))

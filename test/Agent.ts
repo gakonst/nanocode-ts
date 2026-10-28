@@ -5,8 +5,8 @@
  */
 import * as fs from 'node:fs'
 import * as Sqlite from './Sqlite.ts'
-import type { HostTool, ModelProvider } from '../src/contracts.ts'
-import { AgentRuntime } from '../src/host.ts'
+import type * as Contracts from '../src/Contracts.ts'
+import * as AgentRuntime from '../src/AgentRuntime.ts'
 
 const endpoints = {
   claude: 'https://api.anthropic.com/v1/messages',
@@ -23,7 +23,7 @@ export const lookup = {
     required: ['key'],
     type: 'object',
   },
-} satisfies HostTool
+} satisfies Contracts.HostTool
 
 /** Session scope of every session. */
 export const scope = 'owner'
@@ -89,14 +89,14 @@ export declare namespace open {
   type Options = {
     database: string
     module: WebAssembly.Module
-    provider: ModelProvider
+    provider: Contracts.ModelProvider
     requests: Request[]
     sessionId: string
   }
 }
 
 /** Runs one turn to completion and returns its status. */
-export async function turn(runtime: AgentRuntime, requestId: string) {
+export async function turn(runtime: AgentRuntime.AgentRuntime, requestId: string) {
   const submitted = await runtime.submit(scope, {
     metadata: {},
     prompt: `Look up alpha for ${requestId}`,

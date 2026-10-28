@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { DatabaseSync } from 'node:sqlite'
-import { sessionUuid } from '../src/contracts.ts'
-import { AgentRuntime } from '../src/host.ts'
+import * as Contracts from '../src/Contracts.ts'
+import * as AgentRuntime from '../src/AgentRuntime.ts'
 
 const SCOPE = 'owner'
 const LOOKUP = {
@@ -265,7 +265,7 @@ async function turn(session, requestId) {
 async function scenario(provider) {
   const path = `output/node-${provider}.sqlite`
   rmSync(path, { force: true })
-  const sessionId = sessionUuid()
+  const sessionId = Contracts.sessionUuid()
   const first = await open(provider, path, sessionId)
   const firstRequests = requests.length
   const turns = [await turn(first, 'turn-1'), await turn(first, 'turn-2')]

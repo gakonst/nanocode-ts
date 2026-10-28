@@ -1,5 +1,5 @@
-import type { Engine, EngineFactory, EngineHost } from './contracts.ts'
-import { localEngine } from './host.ts'
+import type * as Contracts from './Contracts.ts'
+import * as AgentRuntime from './AgentRuntime.ts'
 
 type Port = {
   postMessage(message: unknown, transfer?: unknown[]): void
@@ -26,7 +26,7 @@ type Call = [kind: 0 | 1 | 2 | 3, id: number, bytes?: Uint8Array, body?: Uint8Ar
 
 type Reply = { calls: Call[]; error?: string; memory: number }
 
-export type ThreadEngineOptions = { stackSizeMb?: number; timeoutMs?: number }
+export type Options = { stackSizeMb?: number; timeoutMs?: number }
 
 const SOURCE = (engine: string) => String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
@@ -58,7 +58,7 @@ localEngine(module, host).then(engine => {
 }, thrown => parentPort.postMessage({ calls: [], memory: 0, error: thrown instanceof Error ? thrown.message : String(thrown) }));
 `
 
-export function threadEngine(options: ThreadEngineOptions = {}): EngineFactory | undefined {
+export function engine(options: Options = {}): Contracts.EngineFactory | undefined {
   const threads = (
     globalThis as { process?: { getBuiltinModule?(name: string): unknown } }
   ).process?.getBuiltinModule?.('node:worker_threads') as WorkerThreads | undefined
@@ -69,13 +69,13 @@ export function threadEngine(options: ThreadEngineOptions = {}): EngineFactory |
 async function start(
   threads: WorkerThreads,
   module: WebAssembly.Module,
-  host: EngineHost,
-  options: ThreadEngineOptions,
-): Promise<Engine> {
+  host: Contracts.EngineHost,
+  options: Options,
+): Promise<Contracts.Engine> {
   const signal = new SharedArrayBuffer(4)
   const flag = new Int32Array(signal)
   const { port1, port2 } = new threads.MessageChannel()
-  const worker = new threads.Worker(SOURCE(localEngine.toString()), {
+  const worker = new threads.Worker(SOURCE(AgentRuntime.localEngine.toString()), {
     eval: true,
     workerData: { port: port2, module, signal },
     transferList: [port2],

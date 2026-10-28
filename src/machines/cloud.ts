@@ -1,5 +1,5 @@
 import { type HandAccess, serverEvents, socketUrl } from '../client.ts'
-import type { LoggedEvent } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import type * as Payments from './payments.ts'
 import type * as Wallet from './wallet.ts'
 
@@ -20,7 +20,7 @@ export type Model = { model: string; provider: 'claude' | 'codex'; thinking: str
 
 const luna: Model = { model: 'gpt-6-luna', provider: 'codex', thinking: 'low' }
 
-export type Handlers = { event: (logged: LoggedEvent) => void; interrupted: () => void }
+export type Handlers = { event: (logged: Contracts.LoggedEvent) => void; interrupted: () => void }
 
 export function restore(): Cloud | undefined {
   const saved = localStorage.getItem(storageKey)
@@ -121,7 +121,7 @@ async function follow(
         save(cloud)
       }
       if (!message.data) continue
-      const logged = JSON.parse(message.data) as LoggedEvent & {
+      const logged = JSON.parse(message.data) as Contracts.LoggedEvent & {
         event?: { source?: string; type?: string }
       }
       const body = logged.event ?? {}

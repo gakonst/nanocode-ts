@@ -1,18 +1,18 @@
 import type { FileSystem } from './bash/fs.ts'
 
-export const WORKSPACE = '/workspace'
+export const workspace = '/workspace'
 
-export const UPLOADS = '/workspace/uploads'
+export const uploads = '/workspace/uploads'
 
-export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+export const maxUploadBytes = 5 * 1024 * 1024
 
-export const MAX_FILE_RESPONSE_BYTES = 8 * 1024 * 1024
+export const maxResponseBytes = 8 * 1024 * 1024
 
-export const MAX_UPLOADS = 64
+export const maxUploads = 64
 
-export const MAX_PROMPT_IMAGES = 4
+export const maxPromptImages = 4
 
-export const PROMPT_IMAGE_TYPES: ReadonlySet<string> = new Set([
+export const promptImageTypes: ReadonlySet<string> = new Set([
   'image/png',
   'image/jpeg',
   'image/gif',
@@ -21,7 +21,7 @@ export const PROMPT_IMAGE_TYPES: ReadonlySet<string> = new Set([
 
 export type Attachment = { name: string; path: string; type: string; size: number }
 
-export type FileOptions = { root?: string; maxBytes?: number }
+export type Options = { root?: string; maxBytes?: number }
 
 export type UploadOptions = { dir?: string; maxBytes?: number; maxFiles?: number }
 
@@ -73,7 +73,7 @@ export function safeName(name: string): string {
   return (stem || 'file') + extension
 }
 
-export function filePath(raw: string, root = WORKSPACE): string | undefined {
+export function resolve(raw: string, root = workspace): string | undefined {
   let value: string
   try {
     value = decodeURIComponent(raw)
@@ -95,17 +95,17 @@ function problem(error: string, status: number): Response {
   return Response.json({ error }, { status, headers: { 'cache-control': 'no-store' } })
 }
 
-export async function fileResponse(
+export async function response(
   fs: FileSystem,
   raw: string,
-  options: FileOptions = {},
+  options: Options = {},
 ): Promise<Response> {
-  const path = filePath(raw, options.root)
-  if (!path) return problem('files are read under ' + (options.root ?? WORKSPACE), 400)
+  const path = resolve(raw, options.root)
+  if (!path) return problem('files are read under ' + (options.root ?? workspace), 400)
   const stat = await fs.stat(path).catch(() => null)
   if (!stat) return problem('no such file', 404)
   if (stat.kind !== 'file') return problem('not a file', 400)
-  const limit = options.maxBytes ?? MAX_FILE_RESPONSE_BYTES
+  const limit = options.maxBytes ?? maxResponseBytes
   if (stat.size > limit)
     return problem(
       'the file has ' + stat.size + ' bytes; files up to ' + limit + ' bytes are served',
@@ -130,7 +130,7 @@ export async function fileResponse(
   })
 }
 
-export async function writeFile(fs: FileSystem, path: string, bytes: Uint8Array): Promise<void> {
+export async function write(fs: FileSystem, path: string, bytes: Uint8Array): Promise<void> {
   let dir = ''
   for (const part of path.split('/').slice(1, -1)) {
     dir += '/' + part
@@ -141,19 +141,19 @@ export async function writeFile(fs: FileSystem, path: string, bytes: Uint8Array)
   await fs.write(path, bytes)
 }
 
-export async function uploadFile(
+export async function upload(
   fs: FileSystem,
   name: string,
   bytes: Uint8Array,
   options: UploadOptions = {},
 ): Promise<Attachment | Response> {
-  const limit = options.maxBytes ?? MAX_UPLOAD_BYTES
+  const limit = options.maxBytes ?? maxUploadBytes
   if (bytes.length > limit) return problem('attachments are at most ' + limit + ' bytes', 413)
-  const dir = options.dir ?? UPLOADS
+  const dir = options.dir ?? uploads
   const existing = (await fs.stat(dir).catch(() => null))
     ? await fs.list(dir).catch(() => [] as string[])
     : []
-  if (existing.length >= (options.maxFiles ?? MAX_UPLOADS))
+  if (existing.length >= (options.maxFiles ?? maxUploads))
     return problem('this session holds ' + existing.length + ' attachments, the most it takes', 409)
   const safe = safeName(name)
   const dot = safe.lastIndexOf('.')
@@ -163,7 +163,7 @@ export async function uploadFile(
   let chosen = safe
   for (let n = 2; taken.has(chosen); n++) chosen = stem + '-' + n + extension
   const path = dir + '/' + chosen
-  await writeFile(fs, path, bytes)
+  await write(fs, path, bytes)
   return { name: chosen, path, type: sniff(bytes).split(';')[0]!, size: bytes.length }
 }
 
@@ -181,20 +181,19 @@ export function dataUrl(bytes: Uint8Array, type = sniff(bytes)): string {
 export async function promptImages(
   fs: FileSystem,
   paths: unknown,
-  options: FileOptions & { max?: number } = {},
+  options: Options & { max?: number } = {},
 ): Promise<string[]> {
   if (!Array.isArray(paths)) return []
   const images: string[] = []
   for (const raw of paths) {
-    if (images.length >= (options.max ?? MAX_PROMPT_IMAGES)) break
+    if (images.length >= (options.max ?? maxPromptImages)) break
     if (typeof raw !== 'string') continue
-    const path = filePath(raw, options.root)
+    const path = resolve(raw, options.root)
     const stat = path ? await fs.stat(path).catch(() => null) : null
-    if (!path || stat?.kind !== 'file' || stat.size > (options.maxBytes ?? MAX_UPLOAD_BYTES))
-      continue
+    if (!path || stat?.kind !== 'file' || stat.size > (options.maxBytes ?? maxUploadBytes)) continue
     const bytes = await fs.read(path)
     const type = sniff(bytes)
-    if (PROMPT_IMAGE_TYPES.has(type)) images.push(dataUrl(bytes, type))
+    if (promptImageTypes.has(type)) images.push(dataUrl(bytes, type))
   }
   return images
 }

@@ -1,9 +1,9 @@
 import { lookup as dnsLookup, type LookupAddress, type LookupOptions } from 'node:dns'
 import { lookup } from 'node:dns/promises'
 import { Agent, fetch as undiciFetch } from 'undici'
-import { guard, publicAddress, type Resolve } from '../egress.ts'
+import * as Egress from '../Egress.ts'
 
-export const resolve: Resolve = async (host) =>
+export const resolve: Egress.Resolve = async (host) =>
   (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address)
 
 type Callback = (
@@ -15,7 +15,7 @@ type Callback = (
 function pinnedLookup(hostname: string, options: LookupOptions, callback: Callback): void {
   dnsLookup(hostname, { ...options, all: true, verbatim: true }, (error, addresses) => {
     if (error) return callback(error, '')
-    const bad = addresses.find((entry) => !publicAddress(entry.address))
+    const bad = addresses.find((entry) => !Egress.publicAddress(entry.address))
     if (bad)
       return callback(
         Object.assign(
@@ -54,5 +54,5 @@ export const pinned: typeof fetch = (input, init) => {
 }
 
 export function egress(fetcher?: typeof fetch): typeof fetch {
-  return guard(fetcher ?? pinned, { resolve })
+  return Egress.guard(fetcher ?? pinned, { resolve })
 }

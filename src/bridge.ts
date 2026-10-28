@@ -1,8 +1,8 @@
 import { socketUrl } from './client.ts'
-import { BRAIN_REPLACED, bearerProtocols, RemoteExecutor, type RemotePolicy } from './remote.ts'
+import * as Remote from './Remote.ts'
 
-export type RelayedHand = {
-  executor: RemoteExecutor<WebSocket>
+export type Hand = {
+  executor: Remote.Executor<WebSocket>
   name: string | null
   connection: string
 }
@@ -16,17 +16,17 @@ function field(catalog: string, key: 'name' | 'runtime_id'): string | null {
   }
 }
 
-export function relayHands(
+export function relay(
   url: string,
   token: string,
-  policy: RemotePolicy,
-  onHand: (hand: RelayedHand | undefined) => void,
+  policy: Remote.Policy,
+  onHand: (hand: Hand | undefined) => void,
   signal: AbortSignal,
 ): void {
   const address = `${socketUrl(url)}${url.includes('?') ? '&' : '?'}role=brain&wait`
-  let current: RelayedHand | undefined
+  let current: Hand | undefined
   let runtime: string | null = null
-  const lost = (executor: RemoteExecutor<WebSocket>) => {
+  const lost = (executor: Remote.Executor<WebSocket>) => {
     if (current?.executor !== executor) return
     current = undefined
     if (!signal.aborted) onHand(undefined)
@@ -36,7 +36,7 @@ export function relayHands(
   })
   const dial = (delay: number) => {
     if (signal.aborted) return
-    const socket = new WebSocket(address, bearerProtocols(token))
+    const socket = new WebSocket(address, Remote.bearerProtocols(token))
     let cataloged = false
     const stop = () => {
       try {
@@ -53,7 +53,7 @@ export function relayHands(
       if (current && id !== null && id === runtime && current.executor.rebind(socket, event.data))
         return
       current?.executor.disconnected('the hand restarted')
-      const executor = RemoteExecutor.restore(socket, policy, event.data)
+      const executor = Remote.restore(socket, { catalog: event.data, policy })
       runtime = id
       current = { executor, name: field(event.data, 'name'), connection: crypto.randomUUID() }
       void executor.closed.then(() => lost(executor))
@@ -66,7 +66,7 @@ export function relayHands(
       signal.removeEventListener('abort', stop)
       if (current?.executor.socket === socket) current.executor.park('the hand disconnected')
       if (signal.aborted) return
-      if (code === BRAIN_REPLACED)
+      if (code === Remote.brainReplaced)
         return current?.executor.disconnected(reason || 'another brain took the hand')
       const next = cataloged ? 1000 : Math.min(delay * 2, 30_000)
       setTimeout(() => dial(next), cataloged ? 0 : delay)

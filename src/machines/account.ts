@@ -2,7 +2,7 @@ import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
 import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
 import { Account, Actions, createClient, http } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
-import { guard, mark } from '../egress.ts'
+import * as Egress from '../Egress.ts'
 import * as Mcp from './mcp.ts'
 import * as Payment from './payment.ts'
 
@@ -130,7 +130,7 @@ export function account(options: AccountOptions) {
   const { store } = options
   const servers = options.servers ?? Mcp.servers
   const rpc = options.rpc ?? RPC
-  const network = guard(options.fetch ?? ((input, init) => globalThis.fetch(input, init)))
+  const network = Egress.guard(options.fetch ?? ((input, init) => globalThis.fetch(input, init)))
   const sealing = sealer(options.secret)
   let payer: { sealed: string; payer: Payer } | undefined
 
@@ -445,7 +445,7 @@ export function account(options: AccountOptions) {
 
 export type Account = ReturnType<typeof account>
 
-export { publicTarget } from '../egress.ts'
+export { publicTarget } from '../Egress.ts'
 
 export async function envelope(
   request: Request,
@@ -495,7 +495,7 @@ export function paying(
   holder: () => Pick<Account, 'send'>,
   servers: readonly Mcp.Server[] = Mcp.servers,
 ): typeof fetch {
-  return mark(async (input, init) => {
+  return Egress.mark(async (input, init) => {
     const request = new Request(input, init)
     const method = request.method
     const body =

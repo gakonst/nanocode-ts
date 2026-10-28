@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { sessionUuid } from '../src/contracts.ts'
-import { AgentRuntime } from '../src/host.ts'
+import * as Contracts from '../src/Contracts.ts'
+import * as AgentRuntime from '../src/AgentRuntime.ts'
 import { Bash } from '../src/bash/index.ts'
 
 const N = Number(process.argv.find((a) => a.startsWith('--n='))?.slice(4) ?? 20)
@@ -110,7 +110,7 @@ let current = null
 await runtime.open(
   {
     scope: 's',
-    session_id: sessionUuid(),
+    session_id: Contracts.sessionUuid(),
     provider: 'claude',
     model: 'claude-haiku-5-5',
     subscription: false,

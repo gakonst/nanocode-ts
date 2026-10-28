@@ -15,13 +15,13 @@ import {
 } from './harness.ts'
 import { committedBatches, LocalSql } from './journal.ts'
 import { SqlFileSystem } from '../bash/index.ts'
-import { fileResponse } from '../files.ts'
+import * as Files from '../Files.ts'
 import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from './transport.ts'
 import { nanocodeModule } from './module.ts'
-import type { ModelProvider } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export type Selection = {
-  provider: ModelProvider
+  provider: Contracts.ModelProvider
   model: string
   thinking: Thinking
   max_tokens?: number
@@ -38,7 +38,11 @@ export type SelectionModel = {
   serviceTier?: ServiceTier
 }
 
-export type SelectionHarness = { id: ModelProvider; label: string; models: SelectionModel[] }
+export type SelectionHarness = {
+  id: Contracts.ModelProvider
+  label: string
+  models: SelectionModel[]
+}
 
 export type Authorize = ((request: Request) => Promise<void> | void) | 'public'
 
@@ -229,7 +233,7 @@ export function createNanocode(options: NanocodeAppOptions) {
     if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
     const sql = new LocalSql(committedBatches(state))
     try {
-      return await fileResponse(
+      return await Files.response(
         new SqlFileSystem(
           { transaction: (_kind, _operation, statements) => sql.run(statements) },
           SCOPE,

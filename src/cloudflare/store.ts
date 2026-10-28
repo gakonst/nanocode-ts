@@ -1,5 +1,5 @@
-import { Timings } from '../Timing.ts'
-import { type SqlHost, type SqlKind, type Statement } from '../contracts.ts'
+import * as Timing from '../Timing.ts'
+import type * as Contracts from '../Contracts.ts'
 import { DurableObjectSql, SQLITE_VALUE_LIMIT_BYTES } from './sql.ts'
 
 type Row = Record<string, SqlStorageValue>
@@ -87,9 +87,9 @@ export class Metadata {
 
 export { SQLITE_VALUE_LIMIT_BYTES }
 
-export class CheckpointStore implements SqlHost {
+export class CheckpointStore implements Contracts.SqlHost {
   readonly value_limit: number
-  readonly timings = new Timings()
+  readonly timings = Timing.create()
   readonly metrics = metrics()
   readonly log = metrics()
   private readonly sql: DurableObjectSql
@@ -136,7 +136,11 @@ export class CheckpointStore implements SqlHost {
     )
   }
 
-  transaction(kind: SqlKind, operation: string, statements: Statement[]): SqlStorageValue[][][] {
+  transaction(
+    kind: Contracts.SqlKind,
+    operation: string,
+    statements: Contracts.Statement[],
+  ): SqlStorageValue[][][] {
     return this.sql.transaction(kind, operation, statements)
   }
 }

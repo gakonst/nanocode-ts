@@ -1,20 +1,20 @@
-import type { SqlHost, SqlKind, SqlValue, Statement } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export type SqlCursor = {
-  raw(): IterableIterator<SqlValue[]>
+  raw(): IterableIterator<Contracts.SqlValue[]>
   readonly rowsRead: number
   readonly rowsWritten: number
 }
 
 export type DurableObjectSqlStorage = {
-  readonly sql: { exec(query: string, ...bindings: SqlValue[]): SqlCursor }
+  readonly sql: { exec(query: string, ...bindings: Contracts.SqlValue[]): SqlCursor }
   transactionSync<T>(closure: () => T): T
 }
 
 export const SQLITE_VALUE_LIMIT_BYTES = 8_388_608
 
 export type SqlObservation = {
-  kind: SqlKind
+  kind: Contracts.SqlKind
   operation: string
   statements: number
   rows_read: number
@@ -22,7 +22,7 @@ export type SqlObservation = {
   duration_ms: number
 }
 
-export class DurableObjectSql implements SqlHost {
+export class DurableObjectSql implements Contracts.SqlHost {
   readonly value_limit: number
   readonly storage: DurableObjectSqlStorage
   private readonly observe?: (observation: SqlObservation) => void
@@ -39,7 +39,11 @@ export class DurableObjectSql implements SqlHost {
     this.observe = observe
   }
 
-  transaction(kind: SqlKind, operation: string, statements: Statement[]): SqlValue[][][] {
+  transaction(
+    kind: Contracts.SqlKind,
+    operation: string,
+    statements: Contracts.Statement[],
+  ): Contracts.SqlValue[][][] {
     for (const [query, ...values] of statements) {
       for (const value of values) {
         const bytes =

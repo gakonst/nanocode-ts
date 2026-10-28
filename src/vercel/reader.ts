@@ -1,13 +1,13 @@
 import type { SessionState } from 'durable-harness'
-import { type LogPage, type TurnView } from '../contracts.ts'
-import { AgentRuntime } from '../host.ts'
+import type * as Contracts from '../Contracts.ts'
+import * as AgentRuntime from '../AgentRuntime.ts'
 import { SCOPE } from './harness.ts'
 import { committedBatches, LocalSql } from './journal.ts'
 import { nanocodeModule } from './module.ts'
 
 export type NanocodeReader = {
-  turn(request_id: string): Promise<TurnView | null>
-  page(after: number, limit: number, request_id?: string): Promise<LogPage>
+  turn(request_id: string): Promise<Contracts.TurnView | null>
+  page(after: number, limit: number, request_id?: string): Promise<Contracts.LogPage>
   close(): Promise<void>
 }
 

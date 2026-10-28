@@ -8,7 +8,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vite-plus/test'
 import * as Agent from '../test/Agent.ts'
-import { sessionUuid } from './contracts.ts'
+import * as Contracts from './Contracts.ts'
 
 let directory: string
 let module: WebAssembly.Module
@@ -27,7 +27,7 @@ describe('instantiate', () => {
     test(`runs host tool turns and replays them after reopening (${provider})`, async () => {
       const database = path.join(directory, `${provider}.sqlite`)
       const requests: Agent.Request[] = []
-      const sessionId = sessionUuid()
+      const sessionId = Contracts.sessionUuid()
 
       const first = await Agent.open({ database, module, provider, requests, sessionId })
       expect(await Agent.turn(first.runtime, 'turn-1')).toMatchInlineSnapshot(`"completed"`)

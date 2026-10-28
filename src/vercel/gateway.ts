@@ -1,4 +1,4 @@
-import type { ModelProvider } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export type Dispatch = (
   request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array },
@@ -7,7 +7,7 @@ export type Dispatch = (
 
 export const gatewayUrl = () => process.env.AI_GATEWAY_BASE_URL ?? 'https://ai-gateway.vercel.sh'
 
-export function gatewayEndpoint(provider: ModelProvider): string {
+export function gatewayEndpoint(provider: Contracts.ModelProvider): string {
   return provider === 'codex' ? `${gatewayUrl()}/v1` : `${gatewayUrl()}/v1/messages`
 }
 

@@ -12,7 +12,7 @@ function fields(path, start, pattern) {
 }
 const rust = fields('src/wasm.rs', 'struct Configuration {', /^\s+(\w+):/gm)
 const typescript = fields(
-  'src/contracts.ts',
+  'src/Contracts.ts',
   'export type AgentConfiguration = {',
   /^\s+(\w+)\??:/gm,
 )
@@ -22,7 +22,7 @@ const differing = [...rust]
   .concat([...typescript].filter((field) => !rust.has(field)))
 if (differing.length > 0 || rust.size === 0) {
   console.error(
-    `AgentConfiguration in src/contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(', ') || 'no fields found'}`,
+    `AgentConfiguration in src/Contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(', ') || 'no fields found'}`,
   )
   process.exit(1)
 }

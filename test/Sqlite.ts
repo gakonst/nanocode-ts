@@ -4,7 +4,7 @@
  * @module
  */
 import { DatabaseSync } from 'node:sqlite'
-import type { SqlHost, SqlKind, SqlValue, Statement } from '../src/contracts.ts'
+import type * as Contracts from '../src/Contracts.ts'
 
 /**
  * Opens a SQLite database and returns a `SqlHost` over it, with a count of transactions by kind.
@@ -13,8 +13,8 @@ export function open(options: open.Options = {}): open.ReturnType {
   const db = new DatabaseSync(options.path ?? ':memory:')
   const counts = { log: 0, store: 0 }
 
-  const sql: SqlHost = {
-    transaction(kind: SqlKind, _operation: string, statements: Statement[]) {
+  const sql: Contracts.SqlHost = {
+    transaction(kind: Contracts.SqlKind, _operation: string, statements: Contracts.Statement[]) {
       counts[kind]++
       db.exec('BEGIN IMMEDIATE')
 
@@ -27,7 +27,7 @@ export function open(options: open.Options = {}): open.ReturnType {
             ...values.map((value) =>
               value instanceof ArrayBuffer ? new Uint8Array(value) : value,
             ),
-          ) as unknown as SqlValue[][]
+          ) as unknown as Contracts.SqlValue[][]
         })
         db.exec('COMMIT')
         return rows
@@ -51,8 +51,8 @@ export declare namespace open {
     /** Closes the database. */
     close(): void
     /** Number of transactions run for each `SqlKind`. */
-    counts: Record<SqlKind, number>
+    counts: Record<Contracts.SqlKind, number>
     /** The `SqlHost` over the database. */
-    sql: SqlHost
+    sql: Contracts.SqlHost
   }
 }

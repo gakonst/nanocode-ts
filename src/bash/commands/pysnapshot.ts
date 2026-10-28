@@ -1,4 +1,4 @@
-import { fingerprint } from '../../fingerprint.ts'
+import * as Fingerprint from '../../Fingerprint.ts'
 import type { Pyodide } from './python.ts'
 
 export const SNAPSHOT_PACKAGES = ['numpy', 'matplotlib']
@@ -254,7 +254,7 @@ export async function snapshotPyodide(
   const meta: SnapshotMeta = {
     format: FORMAT,
     pyodide: version,
-    libs: libs.map(([name, bytes]) => [name, fingerprint(bytes)]),
+    libs: libs.map(([name, bytes]) => [name, Fingerprint.from(bytes)]),
     handles: Object.entries(module.LDSO.loadedLibsByHandle).map(([handle, dso]) => [
       Number(handle),
       dso.name,

@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import { describe, expect, test } from 'vite-plus/test'
 import * as Agent from '../test/Agent.ts'
 import { liveEvent, Transcript, turns, type Entry } from './client.ts'
-import { sessionUuid } from './contracts.ts'
+import * as Contracts from './Contracts.ts'
 
 describe('Transcript', () => {
   for (const provider of ['claude', 'codex'] as const)
@@ -21,7 +21,7 @@ describe('Transcript', () => {
         module,
         provider,
         requests: [],
-        sessionId: sessionUuid(),
+        sessionId: Contracts.sessionUuid(),
       })
       await Agent.turn(session.runtime, 'turn-1')
       const logged = await session.runtime.page(Agent.scope, 0, 1000)

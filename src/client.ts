@@ -1,7 +1,7 @@
-import type { LoggedEvent, ModelEntry, ModelProvider } from './contracts.ts'
-import type { Attachment } from './files.ts'
+import type * as Contracts from './Contracts.ts'
+import type * as Files from './Files.ts'
 
-export type { Attachment } from './files.ts'
+export type { Attachment } from './Files.ts'
 
 export type EntryKind = 'assistant' | 'error' | 'reasoning' | 'tool' | 'user'
 
@@ -35,11 +35,11 @@ export type Entry = {
   started_at?: number
   ended_at?: number
   steer?: boolean
-  attachments?: Attachment[]
+  attachments?: Files.Attachment[]
 }
 
 export type TransportFiles = {
-  upload(file: Blob, name: string, signal?: AbortSignal): Promise<Attachment>
+  upload(file: Blob, name: string, signal?: AbortSignal): Promise<Files.Attachment>
   read(path: string, signal?: AbortSignal): Promise<Blob>
   maxBytes?: number
   maxFiles?: number
@@ -73,7 +73,10 @@ export function bytes(size: number): string {
   return (size / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-export function attachedPrompt(prompt: string, attachments: readonly Attachment[] = []): string {
+export function attachedPrompt(
+  prompt: string,
+  attachments: readonly Files.Attachment[] = [],
+): string {
   if (!attachments.length) return prompt
   const lines = attachments.map(
     (item) => `Attached: ${item.path} (${item.type || 'file'}, ${bytes(item.size)})`,
@@ -104,7 +107,7 @@ function parentOf(payload: Record<string, unknown>): string | undefined {
   return slash > 0 ? id.slice(0, slash) : undefined
 }
 
-export function liveEvent(logged: LoggedEvent): LiveEvent | undefined {
+export function liveEvent(logged: Contracts.LoggedEvent): LiveEvent | undefined {
   const body = logged.event as LoggedBody
   const base = {
     ...(logged.seq > 0 ? { seq: logged.seq } : {}),
@@ -1277,9 +1280,9 @@ function finish(cell: ToolCell, status: ToolStatus): void {
     )
 }
 
-export type PickerModel = Pick<ModelEntry, 'id' | 'name' | 'efforts' | 'effort'>
+export type PickerModel = Pick<Contracts.ModelEntry, 'id' | 'name' | 'efforts' | 'effort'>
 
-export type PickerHarness = { id: ModelProvider; label: string; models: PickerModel[] }
+export type PickerHarness = { id: Contracts.ModelProvider; label: string; models: PickerModel[] }
 
 export type PickerItem = {
   kind: 'choice' | 'header'
@@ -1337,7 +1340,7 @@ export type ChatState = {
 
 export type TransportParameters = {
   prompt: string
-  attachments?: readonly Attachment[]
+  attachments?: readonly Files.Attachment[]
   push(event: LiveEvent): void
   note(kind: EntryKind, text: string): void
   changed?(): void
@@ -1516,7 +1519,7 @@ export type Config = {
   getState(): ChatState
   getServerState(): ChatState
   subscribe(listener: () => void): () => void
-  send(prompt: string, attachments?: readonly Attachment[]): Promise<void>
+  send(prompt: string, attachments?: readonly Files.Attachment[]): Promise<void>
   readonly files: TransportFiles | undefined
   resume(): Promise<void>
   cancel(): Promise<void>
@@ -1888,7 +1891,7 @@ export function createConfig(options: ConfigOptions): Config {
     prompt: string,
     id: number,
     signal: AbortSignal,
-    attachments?: readonly Attachment[],
+    attachments?: readonly Files.Attachment[],
   ): TransportParameters => ({
     prompt,
     ...(attachments?.length ? { attachments } : {}),
@@ -1914,7 +1917,7 @@ export function createConfig(options: ConfigOptions): Config {
   const settle = (
     start: (parameters: TransportParameters) => Promise<void>,
     prompt = '',
-    attachments?: readonly Attachment[],
+    attachments?: readonly Files.Attachment[],
     free: () => void = () => undefined,
   ) => {
     const id = ++generation

@@ -10,24 +10,15 @@ import {
   type Submission,
 } from 'durable-harness'
 import { liveEvent } from '../client.ts'
-import {
-  type AgentConfiguration,
-  HostFailure,
-  type LoggedEvent,
-  type McpServer,
-  type ModelProvider,
-  type ServiceTier,
-  sessionUuid,
-  type Thinking,
-} from '../contracts.ts'
-import { AgentRuntime } from '../host.ts'
-import { RemoteExecutor } from '../remote.ts'
+import * as Contracts from '../Contracts.ts'
+import * as AgentRuntime from '../AgentRuntime.ts'
+import * as Remote from '../Remote.ts'
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from './gateway.ts'
 import { type Durability, type JournalStats, SqlJournal } from './journal.ts'
-import { threadEngine } from '../thread.ts'
+import * as Thread from '../Thread.ts'
 import { nanocodeModule } from './module.ts'
 import { Bash, type FileSystem, SqlFileSystem, withGitHub } from '../bash/index.ts'
-import { dataUrl, MAX_PROMPT_IMAGES, PROMPT_IMAGE_TYPES, sniff, writeFile } from '../files.ts'
+import * as Files from '../Files.ts'
 import { dialHand, type UpgradeWebSocket } from './hands.ts'
 import { egress } from './egress.ts'
 
@@ -39,15 +30,16 @@ export const WAIT_POLL_MS = 250
 
 export const DEFAULT_EVENT_COALESCE_MS = 50
 
-export type { ServiceTier, Thinking }
+export type ServiceTier = Contracts.ServiceTier
+export type Thinking = Contracts.Thinking
 
 export type NanocodeSession = {
   session_id: string
-  provider: ModelProvider
+  provider: Contracts.ModelProvider
   model?: string
-  thinking?: Thinking
+  thinking?: Contracts.Thinking
   max_tokens?: number
-  service_tier?: ServiceTier
+  service_tier?: Contracts.ServiceTier
 }
 
 export const EFFORT_COMMAND = /^\/effort\s+(\S+)\s*$/
@@ -80,9 +72,9 @@ export type DriveReport = {
 
 export interface NanocodeHarnessOptions {
   name?: string
-  provider?: ModelProvider
+  provider?: Contracts.ModelProvider
   model?: string
-  thinking?: AgentConfiguration['thinking']
+  thinking?: Contracts.AgentConfiguration['thinking']
   instructions?: string
   handInstructions?: string
   tools?: HostTool[]
@@ -102,11 +94,11 @@ export interface NanocodeHarnessOptions {
     token?(sessionId: string): string | null | undefined | Promise<string | null | undefined>
   }
   workspace?: false | { cwd?: string; files?: Record<string, string> }
-  workspaceTools?: AgentConfiguration['workspace_tools']
+  workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   fetch?: typeof fetch
   sessionFetch?(sessionId: string): typeof fetch
   hands?: false | NanocodeHands
-  mcp?: { servers: McpServer[]; fetch?(sessionId: string): typeof fetch }
+  mcp?: { servers: Contracts.McpServer[]; fetch?(sessionId: string): typeof fetch }
   webSearch?: false
   promptImages?: (session: NanocodeSession) => boolean
 }
@@ -201,7 +193,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   const gateway = options.endpoint ? options.gateway : 'vercel'
   const module = options.module ?? nanocodeModule
   const durability = options.durability ?? 'on'
-  const engine = threadEngine()
+  const engine = Thread.engine()
 
   async function run(
     ctx: DriveContext,
@@ -227,7 +219,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const hands = options.hands || undefined
     const executor =
       hands && typeof channel === 'string' && HAND_CHANNEL.test(channel)
-        ? await RemoteExecutor.connect(
+        ? await Remote.connect(
             (signal) =>
               hands.relay
                 ? openSocket(hands.relay(channel), signal)
@@ -240,7 +232,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           ).catch(() => undefined)
         : undefined
     const handName = hands?.name ?? 'browser'
-    const connection = executor ? handName + '#' + sessionUuid() : undefined
+    const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
     const cellFetch = withGitHub(egress(configuredFetch), {
@@ -333,7 +325,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           },
         )
       } catch (error) {
-        if (error instanceof HostFailure && error.permanent)
+        if (error instanceof Contracts.HostFailureError && error.permanent)
           throw new Fatal(`nanocode refused its configuration: ${error.message}`)
         throw error
       }
@@ -342,7 +334,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         await runtime.attach(handName, connection)
       }
       counts.open_ms = performance.now() - opening
-      let applied: Thinking | undefined
+      let applied: Contracts.Thinking | undefined
       for (;;) {
         await ctx.refresh()
         const pending = ctx.pending()
@@ -365,7 +357,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           await changed(runtime, ctx.signal)
           continue
         }
-        const wanted = (next.metadata as { thinking?: Thinking } | null)?.thinking
+        const wanted = (next.metadata as { thinking?: Contracts.Thinking } | null)?.thinking
         if (wanted && wanted !== applied) {
           await runtime.setThinking(wanted)
           applied = wanted
@@ -419,11 +411,11 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
           ctx.config as
             | {
                 nanocode?: {
-                  provider?: ModelProvider
+                  provider?: Contracts.ModelProvider
                   model?: string
-                  thinking?: Thinking
+                  thinking?: Contracts.Thinking
                   max_tokens?: number
-                  service_tier?: ServiceTier
+                  service_tier?: Contracts.ServiceTier
                 }
               }
             | undefined
@@ -447,7 +439,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
             },
           },
           async (): Promise<NanocodeSession> => ({
-            session_id: sessionUuid(),
+            session_id: Contracts.sessionUuid(),
             provider,
             ...(model ? { model } : {}),
             ...(thinking ? { thinking } : {}),
@@ -501,13 +493,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
 export function effort(
   state: SessionState,
   before: string,
-  initial: Thinking | undefined,
-): Thinking | undefined {
+  initial: Contracts.Thinking | undefined,
+): Contracts.Thinking | undefined {
   let current = initial
   for (const submission of state.submissions) {
     if (submission.id === before) break
     const placed = state.effects.get(`nanocode.place:${submission.id}`)?.output as
-      | { thinking?: Thinking }
+      | { thinking?: Contracts.Thinking }
       | undefined
     if (placed?.thinking) current = placed.thinking
   }
@@ -528,14 +520,14 @@ export function exceeds(state: SessionState, id: string, limit: number | undefin
 async function place(
   ctx: DriveContext,
   journal: SqlJournal,
-  runtime: AgentRuntime,
+  runtime: AgentRuntime.AgentRuntime,
   submission: Submission,
-  thinking: Thinking | undefined,
+  thinking: Contracts.Thinking | undefined,
   limit: number | undefined,
   hand?: string,
   workspace?: FileSystem,
   seesImages = true,
-): Promise<Thinking | undefined> {
+): Promise<Contracts.Thinking | undefined> {
   if (cancels(submission)) {
     await cancel(
       ctx,
@@ -566,7 +558,7 @@ async function place(
   }
   const command = submission.kind === 'prompt' ? EFFORT_COMMAND.exec(submission.text ?? '') : null
   if (command) {
-    const level = command[1] as Thinking
+    const level = command[1] as Contracts.Thinking
     const outcome = (await ctx.effect(
       `nanocode.place:${submission.id}`,
       {
@@ -580,7 +572,7 @@ async function place(
           () => ({ thinking: level }),
           (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
         ),
-    )) as { thinking?: Thinking; error?: string }
+    )) as { thinking?: Contracts.Thinking; error?: string }
     ctx.live(
       outcome.thinking
         ? { type: 'effort', thinking: outcome.thinking, request_id: submission.id }
@@ -591,10 +583,10 @@ async function place(
   const attached = attachmentsOf(submission.text ?? '')
   const images: string[] = []
   for (const file of attached.files) {
-    if (workspace) await writeFile(workspace, file.path, file.bytes)
-    const type = sniff(file.bytes)
-    if (seesImages && PROMPT_IMAGE_TYPES.has(type) && images.length < MAX_PROMPT_IMAGES)
-      images.push(dataUrl(file.bytes, type))
+    if (workspace) await Files.write(workspace, file.path, file.bytes)
+    const type = Files.sniff(file.bytes)
+    if (seesImages && Files.promptImageTypes.has(type) && images.length < Files.maxPromptImages)
+      images.push(Files.dataUrl(file.bytes, type))
   }
   const submitted = await runtime.submit(SCOPE, {
     request_id: submission.id,
@@ -630,7 +622,7 @@ async function place(
 async function steer(
   ctx: DriveContext,
   journal: SqlJournal,
-  runtime: AgentRuntime,
+  runtime: AgentRuntime.AgentRuntime,
   driving: Promise<unknown>,
   active: string,
   limit: number | undefined,
@@ -678,7 +670,7 @@ async function steer(
 async function cancel(
   ctx: DriveContext,
   journal: SqlJournal,
-  runtime: AgentRuntime,
+  runtime: AgentRuntime.AgentRuntime,
   submission: Submission,
   active: string | undefined,
 ): Promise<void> {
@@ -744,7 +736,7 @@ async function callTool(
   }
 }
 
-function changed(runtime: AgentRuntime, signal: AbortSignal): Promise<void> {
+function changed(runtime: AgentRuntime.AgentRuntime, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, WAIT_POLL_MS)
     void runtime.changed(signal).then(() => {
@@ -754,7 +746,7 @@ function changed(runtime: AgentRuntime, signal: AbortSignal): Promise<void> {
   })
 }
 
-function modelCall(logged: LoggedEvent): ModelCall | undefined {
+function modelCall(logged: Contracts.LoggedEvent): ModelCall | undefined {
   const body = logged.event as {
     source?: string
     event?: {
@@ -793,7 +785,7 @@ function cancels(submission: Submission): boolean {
   return submission.kind === 'steer' && submission.text === CANCEL
 }
 
-function publisher(ctx: DriveContext): (events: LoggedEvent[]) => void {
+function publisher(ctx: DriveContext): (events: Contracts.LoggedEvent[]) => void {
   const calls = new Map<string, number>()
   const quiet = new Set<string>()
   return (events) => {

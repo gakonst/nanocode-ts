@@ -1,5 +1,5 @@
 import type { HostToolCall } from '../../cloudflare/contracts.ts'
-import type { HostTool } from '../../contracts.ts'
+import type * as Contracts from '../../Contracts.ts'
 import { type MachinesEnv, wallet } from './env.ts'
 
 const FETCH_PREVIEW = 20_000
@@ -12,7 +12,7 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
   required,
 })
 
-const definitions: HostTool[] = [
+const definitions: Contracts.HostTool[] = [
   {
     name: 'http',
     description:

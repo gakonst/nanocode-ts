@@ -1,8 +1,15 @@
-import type { ModelProvider, Thinking, ToolCallContext } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
-export type { Thinking }
+export type Thinking = Contracts.Thinking
 
-export const THINKING: readonly Thinking[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max']
+export const THINKING: readonly Contracts.Thinking[] = [
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]
 
 export const EXECUTOR_ID = /^[a-z0-9][a-z0-9_-]{0,47}$/
 export const DEFAULT_EXECUTOR = 'default'
@@ -14,9 +21,9 @@ export type SessionAuthority = {
 }
 
 export type SessionDescriptor = SessionAuthority & {
-  provider?: ModelProvider
+  provider?: Contracts.ModelProvider
   model?: string
-  thinking?: Thinking
+  thinking?: Contracts.Thinking
   web_search?: boolean
   session_name: string
   subscription: boolean
@@ -53,7 +60,7 @@ export function handSecret(): string {
 }
 
 export type ModelDispatch = {
-  provider?: ModelProvider
+  provider?: Contracts.ModelProvider
   authority: SessionAuthority
   endpoint: string
   headers: [string, string][]
@@ -70,7 +77,7 @@ export type HostToolCall = {
   authority: SessionAuthority
   name: string
   input: unknown
-  context: ToolCallContext
+  context: Contracts.ToolCallContext
   grant?: unknown
 }
 

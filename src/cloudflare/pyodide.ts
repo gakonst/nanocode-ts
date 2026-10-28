@@ -1,7 +1,7 @@
 import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from 'nanocode-ts/pyodide-modules'
 import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from '../bash/commands/python.ts'
 import { restorePyodide } from '../bash/commands/pysnapshot.ts'
-import { fingerprint } from '../fingerprint.ts'
+import * as Fingerprint from '../Fingerprint.ts'
 
 export type SnapshotParts = (name: string) => Promise<Response>
 
@@ -11,7 +11,7 @@ let installed = false
 
 function lookup(bytes: unknown): WebAssembly.Module {
   if (bytes instanceof WebAssembly.Module) return bytes
-  const key = fingerprint(bytes as ArrayBufferView)
+  const key = Fingerprint.from(bytes as ArrayBufferView)
   const found = MODULES[key]
   if (!found)
     throw new Error(

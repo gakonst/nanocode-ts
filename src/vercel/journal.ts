@@ -1,11 +1,15 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { brotliCompressSync, brotliDecompressSync, constants } from 'node:zlib'
 import { type DriveContext, Fatal, Restart, type SessionState } from 'durable-harness'
-import type { SqlHost, SqlKind, SqlValue, Statement } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export const SQL_STEP = 'nanocode.sql'
 
-export type Transaction = { kind: SqlKind; operation: string; statements: Statement[] }
+export type Transaction = {
+  kind: Contracts.SqlKind
+  operation: string
+  statements: Contracts.Statement[]
+}
 
 type Batch = { transactions: Transaction[] } | { packed: Uint8Array }
 
@@ -105,7 +109,7 @@ function unpack(packed: Uint8Array): Transaction[] {
           if (value && typeof value === 'object' && '$n' in value)
             return Number((value as { $n: string }).$n)
           return value
-        }) as Statement,
+        }) as Contracts.Statement,
     ),
   }))
 }
@@ -141,12 +145,14 @@ export class LocalSql {
     })
   }
 
-  run(statements: Statement[]): SqlValue[][][] {
+  run(statements: Contracts.Statement[]): Contracts.SqlValue[][][] {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const rows = statements.map(
         ([query, ...values]) =>
-          this.prepare(query).all(...(values as (string | null)[])) as unknown as SqlValue[][],
+          this.prepare(query).all(
+            ...(values as (string | null)[]),
+          ) as unknown as Contracts.SqlValue[][],
       )
       this.db.exec('COMMIT')
       return rows
@@ -178,7 +184,7 @@ export class LocalSql {
   }
 }
 
-export class SqlJournal implements SqlHost {
+export class SqlJournal implements Contracts.SqlHost {
   private readonly ctx: DriveContext
   private readonly durability: Durability
   private readonly sql: LocalSql
@@ -215,9 +221,13 @@ export class SqlJournal implements SqlHost {
     return this.committed
   }
 
-  transaction(kind: SqlKind, operation: string, statements: Statement[]): Promise<SqlValue[][][]> {
+  transaction(
+    kind: Contracts.SqlKind,
+    operation: string,
+    statements: Contracts.Statement[],
+  ): Promise<Contracts.SqlValue[][][]> {
     if (this.failure) return Promise.reject(this.failure.error)
-    let rows: SqlValue[][][]
+    let rows: Contracts.SqlValue[][][]
     let wrote: boolean
     try {
       const before = this.sql.version()

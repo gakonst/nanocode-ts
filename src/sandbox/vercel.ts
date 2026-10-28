@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream'
 import { Sandbox, type NetworkPolicy, type SandboxRegion } from '@vercel/sandbox'
-import type { WorkspaceHost } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import {
   collector,
   resolvePath,
@@ -27,7 +27,7 @@ export type VercelSandboxOptions = {
   vcpus?: number
 }
 
-export type VercelSandboxWorkspace = WorkspaceHost & {
+export type VercelSandboxWorkspace = Contracts.WorkspaceHost & {
   sandbox(): Promise<Sandbox>
   stop(): Promise<void>
 }

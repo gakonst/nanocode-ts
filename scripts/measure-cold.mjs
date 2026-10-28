@@ -3,8 +3,8 @@ import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { performance } from 'node:perf_hooks'
 import { DatabaseSync } from 'node:sqlite'
 import { parseArgs } from 'node:util'
-import { sessionUuid } from '../src/contracts.ts'
-import { AgentRuntime } from '../src/host.ts'
+import * as Contracts from '../src/Contracts.ts'
+import * as AgentRuntime from '../src/AgentRuntime.ts'
 
 const SCOPE = 'owner'
 const ENDPOINTS = {
@@ -266,7 +266,7 @@ async function child(provider, path, sessionId) {
 async function prepare(provider, history) {
   const path = `output/cold-${provider}.sqlite`
   rmSync(path, { force: true })
-  const sessionId = sessionUuid()
+  const sessionId = Contracts.sessionUuid()
   const module = await WebAssembly.compile(readFileSync(wasmPath))
   const session = await instance(module, provider, path, sessionId)
   for (let index = 0; index < history; index++) await turn(session, `history-${index}`)

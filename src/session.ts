@@ -1,42 +1,42 @@
-import { relayHands, type RelayedHand } from './bridge.ts'
+import * as Bridge from './Bridge.ts'
 import { createRelayToken, type HandAccess, socketUrl } from './client.ts'
-import type { TurnReport } from './contracts.ts'
-import type { AgentRuntime } from './host.ts'
-import type { RemotePolicy } from './remote.ts'
+import type * as Contracts from './Contracts.ts'
+import type * as AgentRuntime from './AgentRuntime.ts'
+import type * as Remote from './Remote.ts'
 
-export type SessionRelay = {
+export type Relay = {
   url: string
   token?: string
-  policy: RemotePolicy
+  policy: Remote.Policy
   keep?(token: string): void
 }
 
-export type SessionOptions = {
+export type Options = {
   scope: string
-  open(hand: RelayedHand | undefined): Promise<AgentRuntime>
-  relay?: SessionRelay
+  open(hand: Bridge.Hand | undefined): Promise<AgentRuntime.AgentRuntime>
+  relay?: Relay
   waitMs?: number
 }
 
 export type Session = {
   readonly interrupted: boolean
-  ask(prompt: string): Promise<TurnReport | undefined>
+  ask(prompt: string): Promise<Contracts.TurnReport | undefined>
   steer(prompt: string): Promise<'queued' | 'steered'>
-  resume(): Promise<TurnReport | undefined>
+  resume(): Promise<Contracts.TurnReport | undefined>
   hand(): HandAccess | undefined
   hands(): readonly (string | null)[]
-  runtime(): AgentRuntime
+  runtime(): AgentRuntime.AgentRuntime
   dispose(): Promise<void>
 }
 
-export function handName(hand: RelayedHand): string {
+export function handName(hand: Bridge.Hand): string {
   return hand.name ?? 'machine'
 }
 
-export async function openSession(options: SessionOptions): Promise<Session> {
+export async function open(options: Options): Promise<Session> {
   const { scope } = options
-  let hand: RelayedHand | undefined
-  let placed: RelayedHand | undefined
+  let hand: Bridge.Hand | undefined
+  let placed: Bridge.Hand | undefined
   let disposed = false
   const arrivals = new Set<() => void>()
   const launch = async () => {
@@ -89,7 +89,7 @@ export async function openSession(options: SessionOptions): Promise<Session> {
   const connect = () => {
     if (!options.relay || !token || relaying) return
     relaying = true
-    relayHands(
+    Bridge.relay(
       options.relay.url,
       token,
       options.relay.policy,

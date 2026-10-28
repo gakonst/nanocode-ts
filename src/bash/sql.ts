@@ -1,4 +1,4 @@
-import type { SqlHost, SqlValue, Statement } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 import {
   baseOf,
   decode,
@@ -44,7 +44,7 @@ let operations = 0
 
 let moved = 0
 
-function weight(value: SqlValue | undefined): number {
+function weight(value: Contracts.SqlValue | undefined): number {
   return value instanceof ArrayBuffer
     ? value.byteLength
     : typeof value === 'string'
@@ -52,7 +52,10 @@ function weight(value: SqlValue | undefined): number {
       : 0
 }
 
-async function breathe(statements: Statement[], results: SqlValue[][][]): Promise<void> {
+async function breathe(
+  statements: Contracts.Statement[],
+  results: Contracts.SqlValue[][][],
+): Promise<void> {
   operations++
   for (const statement of statements)
     for (let index = 1; index < statement.length; index++) moved += weight(statement[index])
@@ -77,11 +80,11 @@ type Meta = {
 
 type Row = Meta & { data: Uint8Array }
 
-function kindOf(value: SqlValue): Kind {
+function kindOf(value: Contracts.SqlValue): Kind {
   return value === 'directory' ? 'directory' : value === 'link' ? 'link' : 'file'
 }
 
-function bytes(value: SqlValue): Uint8Array {
+function bytes(value: Contracts.SqlValue): Uint8Array {
   if (value instanceof ArrayBuffer) return new Uint8Array(value)
   if (ArrayBuffer.isView(value))
     return new Uint8Array(
@@ -109,7 +112,7 @@ function joined(parts: Uint8Array[], size: number): Uint8Array {
 }
 
 export class SqlFileSystem implements FileSystem {
-  readonly sql: SqlHost
+  readonly sql: Contracts.SqlHost
   readonly scope: string
   readonly maxFileBytes: number
   readonly chunkBytes: number
@@ -119,7 +122,7 @@ export class SqlFileSystem implements FileSystem {
   #listedAt = 0
   #generation = 0
 
-  constructor(sql: SqlHost, scope = '', maxFileBytes = MAX_FILE_BYTES) {
+  constructor(sql: Contracts.SqlHost, scope = '', maxFileBytes = MAX_FILE_BYTES) {
     this.sql = sql
     this.scope = scope
     this.maxFileBytes = maxFileBytes
@@ -129,7 +132,10 @@ export class SqlFileSystem implements FileSystem {
     )
   }
 
-  async #run(operation: string, statements: Statement[]): Promise<SqlValue[][][]> {
+  async #run(
+    operation: string,
+    statements: Contracts.Statement[],
+  ): Promise<Contracts.SqlValue[][][]> {
     this.#ready ??= Promise.resolve(
       this.sql.transaction('store', 'files.schema', [[SCHEMA], [INDEX], [CHUNK_SCHEMA]]),
     ).then(() => undefined)
@@ -262,7 +268,7 @@ export class SqlFileSystem implements FileSystem {
     data: Uint8Array | null,
     mode: number,
     mtime = Date.now(),
-  ): Statement {
+  ): Contracts.Statement {
     return [
       `INSERT OR REPLACE INTO ${TABLE} (scope, path, parent, kind, data, mtime, mode) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       this.scope,
@@ -275,12 +281,12 @@ export class SqlFileSystem implements FileSystem {
     ]
   }
 
-  #drop(path: string): Statement {
+  #drop(path: string): Contracts.Statement {
     return [`DELETE FROM ${CHUNKS} WHERE scope = ? AND path = ?`, this.scope, path]
   }
 
-  #chunks(path: string, data: Uint8Array, first: number): Statement[] {
-    const statements: Statement[] = []
+  #chunks(path: string, data: Uint8Array, first: number): Contracts.Statement[] {
+    const statements: Contracts.Statement[] = []
     for (let offset = 0, seq = first; offset < data.length; offset += this.chunkBytes, seq++)
       statements.push([
         `INSERT OR REPLACE INTO ${CHUNKS} (scope, path, seq, data) VALUES (?, ?, ?, ?)`,
@@ -398,7 +404,7 @@ export class SqlFileSystem implements FileSystem {
     ]).then(([rows]) => Boolean(rows?.length))
     if (await this.#links) return writeEach(this, dirs, files)
     const refused: string[] = []
-    let batch: Statement[] = dirs
+    let batch: Contracts.Statement[] = dirs
       .filter((dir) => dir !== '/')
       .map((dir) => [
         `INSERT OR IGNORE INTO ${TABLE} (scope, path, parent, kind, data, mtime, mode) VALUES (?, ?, ?, 'directory', NULL, ?, ?)`,

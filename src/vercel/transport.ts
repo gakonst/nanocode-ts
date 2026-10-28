@@ -9,7 +9,7 @@ import {
   type Transport,
   type TransportParameters,
 } from '../client.ts'
-import { safeName, sniff } from '../files.ts'
+import * as Files from '../Files.ts'
 
 export const VERCEL_ATTACHMENT_BYTES = 3 * 1024 * 1024
 
@@ -191,14 +191,14 @@ export function vercel(options: VercelTransportOptions): VercelTransport {
         if (file.size > VERCEL_ATTACHMENT_BYTES)
           throw new Error(`attachments are at most ${VERCEL_ATTACHMENT_BYTES} bytes here`)
         const bytes = new Uint8Array(await file.arrayBuffer())
-        const safe = safeName(name)
+        const safe = Files.safeName(name)
         const dot = safe.lastIndexOf('.')
         const suffix = Array.from(crypto.getRandomValues(new Uint8Array(2)), (byte) =>
           byte.toString(16).padStart(2, '0'),
         ).join('')
         const chosen =
           dot > 0 ? `${safe.slice(0, dot)}-${suffix}${safe.slice(dot)}` : `${safe}-${suffix}`
-        const type = sniff(bytes).split(';')[0]!
+        const type = Files.sniff(bytes).split(';')[0]!
         const path = `/workspace/uploads/${chosen}`
         pending.set(path, { bytes, type })
         return { name: chosen, path, type, size: bytes.length }

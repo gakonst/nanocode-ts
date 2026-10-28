@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { fingerprint } from '../src/fingerprint.ts'
+import * as Fingerprint from '../src/Fingerprint.ts'
 import { snapshotPyodide } from '../src/bash/commands/pysnapshot.ts'
 
 const require = createRequire(import.meta.url)
@@ -10,11 +10,11 @@ const out = root + 'dist/pyodide/'
 const stamp =
   version +
   ':' +
-  fingerprint(readFileSync(new URL(import.meta.url))) +
+  Fingerprint.from(readFileSync(new URL(import.meta.url))) +
   ':' +
-  fingerprint(readFileSync(root + 'src/fingerprint.ts')) +
+  Fingerprint.from(readFileSync(root + 'src/Fingerprint.ts')) +
   ':' +
-  fingerprint(readFileSync(root + 'src/bash/commands/pysnapshot.ts'))
+  Fingerprint.from(readFileSync(root + 'src/bash/commands/pysnapshot.ts'))
 const PART_BYTES = 8 * 1024 * 1024
 if (existsSync(out + 'stamp') && readFileSync(out + 'stamp', 'utf8') === stamp) process.exit(0)
 
@@ -61,7 +61,7 @@ const record = (bytes) => {
       : ArrayBuffer.isView(bytes)
         ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
         : new Uint8Array(bytes)
-  const key = fingerprint(data)
+  const key = Fingerprint.from(data)
   if (!seen.has(key)) seen.set(key, Buffer.from(data))
 }
 const Compiled = WebAssembly.Module
@@ -133,7 +133,7 @@ for (const [key, bytes] of seen) {
   entries.push(JSON.stringify(key) + ': ' + name + ',')
   if (key === main[0])
     entries.push(
-      JSON.stringify(fingerprint(new TextEncoder().encode('nanocode-pyodide:' + version))) +
+      JSON.stringify(Fingerprint.from(new TextEncoder().encode('nanocode-pyodide:' + version))) +
         ': ' +
         name +
         ',',

@@ -1,4 +1,4 @@
-import type { ShellOutput } from '../contracts.ts'
+import type * as Contracts from '../Contracts.ts'
 
 export const SANDBOX_CWD = '/workspace'
 export const SANDBOX_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
@@ -79,7 +79,7 @@ export function shellOutput(
   exitCode: number,
   timeoutMs: number | null,
   elapsedMs: number,
-): ShellOutput {
+): Contracts.ShellOutput {
   const timedOut =
     timeoutMs !== null && (exitCode === 124 || exitCode === 137) && elapsedMs >= timeoutMs
   const note = timedOut

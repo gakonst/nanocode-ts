@@ -127,7 +127,7 @@ export type SubagentSummary = {
 
 export type TurnReport = Record<string, unknown> & { request_id: string; status: string }
 
-export class HostFailure extends Error {
+export class HostFailureError extends Error {
   readonly kind: string
   readonly permanent: boolean
 
@@ -138,7 +138,7 @@ export class HostFailure extends Error {
   }
 }
 
-export class RemoteRefusal extends Error {}
+export class RemoteRefusalError extends Error {}
 
 export type TurnView = {
   report: TurnReport
@@ -207,7 +207,7 @@ export type BranchPage = {
 
 export type BranchSummary = { record: SessionRecord; preview: string | null }
 
-export const RECENT_MODEL_LIMIT = 64
+export const recentModelLimit = 64
 
 export type ModelTiming = {
   dispatch_id: number

@@ -1,4 +1,4 @@
-import { RemoteExecutor, type RemotePolicy } from '../remote.ts'
+import * as Remote from '../Remote.ts'
 import { headerJson, type PrivateBinding, type SessionAuthority } from './contracts.ts'
 
 export class ExecutorRejection extends Error {
@@ -12,9 +12,9 @@ export class ExecutorRejection extends Error {
 export function connectExecutor(
   binding: PrivateBinding,
   authority: SessionAuthority,
-  policy: RemotePolicy,
-): Promise<RemoteExecutor<WebSocket>> {
-  return RemoteExecutor.connect(async (signal) => {
+  policy: Remote.Policy,
+): Promise<Remote.Executor<WebSocket>> {
+  return Remote.connect(async (signal) => {
     const response = await binding.fetch(
       new Request('https://egress.internal/remote', {
         headers: { upgrade: 'websocket', 'x-nanocode-authority': headerJson(authority) },

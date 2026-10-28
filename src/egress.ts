@@ -1,6 +1,6 @@
 export type Resolve = (host: string, signal?: AbortSignal) => Promise<readonly string[]>
 
-export type GuardOptions = { resolve?: Resolve; redirects?: number }
+export type Options = { resolve?: Resolve; redirects?: number }
 
 const LOCAL_NAME =
   /(^|\.)(localhost|local|localdomain|internal|intranet|lan|home\.arpa|in-addr\.arpa|ip6\.arpa)$/
@@ -205,7 +205,7 @@ export function mark<F extends typeof fetch>(fetcher: F): F {
   return fetcher
 }
 
-export function guard(fetcher: typeof fetch, options: GuardOptions = {}): typeof fetch {
+export function guard(fetcher: typeof fetch, options: Options = {}): typeof fetch {
   if (guarded(fetcher)) return fetcher
   const resolve = options.resolve ?? doh()
   const limit = options.redirects ?? 20
