@@ -157,9 +157,6 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
                 current.send(opened.catalog);
                 ready = true;
                 for (const text of buffered.splice(0)) current.send(text);
-                delay = reconnectMs;
-                onStatus?.({ state: "attached" });
-                resolve();
               }, (error: unknown) => {
                 try { current.close(1011, "the hand could not open a connection"); } catch {}
                 reject(error);
@@ -167,7 +164,14 @@ export async function prepareHand(module: WebAssembly.Module, options: Omit<Hand
             }, { once: true });
           });
           let queue: Promise<void> = connecting;
+          let heard = false;
           current.addEventListener("message", event => {
+            if (!heard) {
+              heard = true;
+              delay = reconnectMs;
+              onStatus?.({ state: "attached" });
+              resolve();
+            }
             const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
             queue = queue.then(() => hand.receive(text)).catch(() => {});
           });

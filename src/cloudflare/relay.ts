@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { BRAIN_REPLACED, bearerAccepted, bearerToken, HAND_LEFT } from "../remote.ts";
+import { BRAIN_REPLACED, bearerAccepted, bearerToken, HAND_ACCEPTED, HAND_LEFT } from "../remote.ts";
 
 export const RELAY_TOKEN = /^[0-9a-f]{32,128}$/;
 
@@ -31,6 +31,7 @@ export class HandRelay extends DurableObject {
     }
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server, [side]);
+    if (side === "hand") server.send(HAND_ACCEPTED);
     if (side === "brain" && !query.has("wait") && !this.#hand()) server.close(HAND_LEFT, "no hand is attached");
     else if (side === "brain") {
       for (const older of this.ctx.getWebSockets("brain")) if (older !== server) { try { older.close(BRAIN_REPLACED, "a newer brain took the hand"); } catch {} }

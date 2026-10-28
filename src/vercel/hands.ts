@@ -1,6 +1,6 @@
 import type { DriveContext } from "durable-harness";
 import type { MessageSocket } from "../index.ts";
-import { bearerToken } from "../remote.ts";
+import { bearerToken, HAND_ACCEPTED } from "../remote.ts";
 
 type World = DriveContext["world"];
 
@@ -345,6 +345,7 @@ export type HandRouteOptions = {
 };
 
 function serveSocket(world: World, sessionId: string, socket: HandSocket): void {
+  socket.send(HAND_ACCEPTED);
   const connection = handId();
   const streams = handStreams(sessionId, connection);
   const attach = appendLines(world, sessionId, streams.attach);

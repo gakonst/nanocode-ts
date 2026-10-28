@@ -8,7 +8,7 @@ import wasm from "nanocode-ts/nanocode_wasm.wasm";
 import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
-import { bearerAccepted, bearerToken } from "../remote.ts";
+import { bearerAccepted, bearerToken, HAND_ACCEPTED } from "../remote.ts";
 import { refuseSocket } from "./relay.ts";
 import { DEFAULT_EXECUTOR, EXECUTOR_ID, HAND_TOKEN, handSecret, handToken, handTokenAccount, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
 
@@ -722,6 +722,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       const accepted = bearerAccepted(request);
       const [client, server] = Object.values(new WebSocketPair());
       this.ctx.acceptWebSocket(server, [HAND_TAG]);
+      server.send(HAND_ACCEPTED);
       const executor = RemoteExecutor.accept(server, this.handLimits());
       this.handSockets.set(server, executor);
       this.ctx.waitUntil(this.registerHand(scope, requested, executor, descriptor));

@@ -6,6 +6,8 @@ export const HAND_LEFT = 4001;
 
 export const BRAIN_REPLACED = 4002;
 
+export const HAND_ACCEPTED = JSON.stringify({ type: "ack", ids: [] });
+
 export function bearerProtocols(token: string): string[] {
   return ["bearer", token];
 }
