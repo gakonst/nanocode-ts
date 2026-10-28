@@ -73,3 +73,27 @@ describe('create', () => {
     )
   })
 })
+
+describe('serves', () => {
+  test('serves the provider’s own models', () => {
+    expect(
+      [
+        ['claude', 'claude-haiku-5-5'],
+        ['claude', 'zai/glm-5.3'],
+        ['codex', 'gpt-6-luna'],
+        ['codex', 'glm-5.3'],
+        ['codex', 'kimi-k3'],
+        ['codex', undefined],
+      ].map(([provider, model]) => Plans.serves(provider as Plans.Provider, model)),
+    ).toMatchInlineSnapshot(`
+      [
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+      ]
+    `)
+  })
+})
