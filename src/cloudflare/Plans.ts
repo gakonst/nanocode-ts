@@ -39,13 +39,16 @@ export type Options<E> = {
 /** Account that `App.create`'s `authenticate` returns. */
 type Authenticated = string | { account: string; read_only?: boolean } | null
 
+/** Model provider of a plan: `codex` for ChatGPT, `claude` for Claude. */
+export type Provider = 'claude' | 'codex'
+
 /** Returns the egress, the `subscription` switch and the sign-in routes of `options`. */
 export function create<E extends Env>(
   options: Options<E> & {
     egress(env: E): PrivateBinding
     authenticate(request: Request, env: E): Promise<Authenticated> | Authenticated
   },
-) {
+): create.ReturnType<E> {
   const plans = Egress.durable<E>((env) => options.vault(env) as never)
   const account =
     options.account ??
@@ -65,5 +68,16 @@ export function create<E extends Env>(
     }),
     subscription: Egress.subscription<E>({ plans }),
     routes: Egress.routes<E>({ plans, account }),
+  }
+}
+
+export declare namespace create {
+  type ReturnType<E> = {
+    /** Egress of the deployment: plan requests on the account's plan, the rest to the host's `egress`. */
+    egress(env: E): PrivateBinding
+    /** Returns whether the account's plan of `provider` is signed in. */
+    subscription(account: string, env: E, provider: Provider): Promise<boolean>
+    /** Returns the response of a sign-in route, or `undefined` for other requests. */
+    routes(request: Request, env: E): Promise<Response | undefined>
   }
 }
