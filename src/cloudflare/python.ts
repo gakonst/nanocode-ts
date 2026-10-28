@@ -5,8 +5,8 @@
  * @module
  */
 import { DurableObject } from 'cloudflare:workers'
-import { pythonServer } from '../bash/commands/pyserver.ts'
-import type { PythonReply, PythonRequest } from '../bash/commands/python.ts'
+import type { Reply as PythonReply, Request as PythonRequest } from '../bash/Python.ts'
+import { pythonServer } from '../bash/internal/commands/pyserver.ts'
 import * as Pyodide from './internal/Pyodide.ts'
 
 let parts: Pyodide.SnapshotParts | undefined

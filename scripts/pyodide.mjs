@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as Fingerprint from '../src/internal/Fingerprint.ts'
-import { snapshotPyodide } from '../src/bash/commands/pysnapshot.ts'
+import { snapshotPyodide } from '../src/bash/internal/commands/pysnapshot.ts'
 
 const require = createRequire(import.meta.url)
 const root = new URL('..', import.meta.url).pathname
@@ -14,7 +14,7 @@ const stamp =
   ':' +
   Fingerprint.from(readFileSync(root + 'src/internal/Fingerprint.ts')) +
   ':' +
-  Fingerprint.from(readFileSync(root + 'src/bash/commands/pysnapshot.ts'))
+  Fingerprint.from(readFileSync(root + 'src/bash/internal/commands/pysnapshot.ts'))
 const PART_BYTES = 8 * 1024 * 1024
 if (existsSync(out + 'stamp') && readFileSync(out + 'stamp', 'utf8') === stamp) process.exit(0)
 

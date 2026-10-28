@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { FileSystem } from '../bash/fs.ts'
+import type { FileSystem } from '../bash/FileSystem.ts'
 
 /** Root of session workspaces. */
 export const workspace = '/workspace'

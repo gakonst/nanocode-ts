@@ -22,7 +22,10 @@ import * as Gateway from './Gateway.ts'
 import * as Journal from './Journal.ts'
 import * as Thread from '../internal/Thread.ts'
 import * as Wasm from './Wasm.ts'
-import { Bash, type FileSystem, SqlFileSystem, withGitHub } from '../bash/index.ts'
+import * as Bash from '../bash/Bash.ts'
+import type * as FileSystem from '../bash/FileSystem.ts'
+import * as GitHub from '../bash/GitHub.ts'
+import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 // Aliased, since `Hands` names the hand options of this module.
 import * as HandStreams from './Hands.ts'
@@ -202,11 +205,11 @@ export function create(options: create.Options = {}): Harness {
     const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
-    const cellFetch = withGitHub(Egress.guard(configuredFetch), {
+    const cellFetch = GitHub.wrap(Egress.guard(configuredFetch), {
       token: githubToken ? () => githubToken(ctx.runId) : undefined,
     })
     const files =
-      options.workspace === false || executor ? undefined : new SqlFileSystem(journal, scope)
+      options.workspace === false || executor ? undefined : SqlFileSystem.create(journal, { scope })
     const shell =
       !files || options.workspace === false
         ? undefined
@@ -593,7 +596,7 @@ async function place(
   thinking: Contracts.Thinking | undefined,
   limit: number | undefined,
   hand?: string,
-  workspace?: FileSystem,
+  workspace?: FileSystem.FileSystem,
   seesImages = true,
 ): Promise<Contracts.Thinking | undefined> {
   if (cancels(submission)) {

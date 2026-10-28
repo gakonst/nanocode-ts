@@ -5,7 +5,16 @@
  */
 import { describe, expect, test } from 'vite-plus/test'
 import * as Sqlite from '../../test/Sqlite.ts'
-import { Bash, MemoryFileSystem, mounted, SqlFileSystem } from './index.ts'
+import {
+  Bash,
+  Command,
+  FileSystem,
+  GitHub,
+  MemoryFileSystem,
+  Mount,
+  Python,
+  SqlFileSystem,
+} from './index.ts'
 
 describe('create', () => {
   test('runs pipelines, loops, and expansions', async () => {
@@ -150,8 +159,10 @@ describe('create', () => {
   })
 
   test('serves mounted file systems', async () => {
-    const archive = new MemoryFileSystem({ '/report.txt': 'archived\n' })
-    const bash = await Bash.create({ fs: mounted(new MemoryFileSystem(), { '/archive': archive }) })
+    const archive = MemoryFileSystem.create({ files: { '/report.txt': 'archived\n' } })
+    const bash = await Bash.create({
+      fs: Mount.create(MemoryFileSystem.create(), { mounts: { '/archive': archive } }),
+    })
 
     expect(await bash.exec('cat /archive/report.txt; ls /archive')).toMatchInlineSnapshot(`
       {
@@ -170,11 +181,11 @@ describe('SqlFileSystem', () => {
   test('keeps files across shells on one SQL host', async () => {
     const store = Sqlite.open()
 
-    const first = await Bash.create({ fs: new SqlFileSystem(store.sql, 'session') })
+    const first = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'session' }) })
     await first.exec('mkdir -p /work && echo persisted > /work/state.txt')
 
-    const second = await Bash.create({ fs: new SqlFileSystem(store.sql, 'session') })
-    const other = await Bash.create({ fs: new SqlFileSystem(store.sql, 'other') })
+    const second = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'session' }) })
+    const other = await Bash.create({ fs: SqlFileSystem.create(store.sql, { scope: 'other' }) })
 
     expect(await second.exec('cat /work/state.txt')).toMatchInlineSnapshot(`
       {
@@ -196,5 +207,82 @@ describe('SqlFileSystem', () => {
     `)
 
     store.close()
+  })
+})
+
+describe('Command', () => {
+  test('runs a host command and reports its error status', async () => {
+    const bash = await Bash.create({
+      commands: {
+        greet: (context) => {
+          if (!context.args.length) throw new Command.CommandError('missing name', 2)
+          context.stdout.write('hello ' + context.args.join(' ') + '\n')
+        },
+      },
+    })
+
+    expect(await bash.exec('greet ada | tr a-z A-Z')).toMatchInlineSnapshot(`
+      {
+        "exitCode": 0,
+        "stderr": "",
+        "stdout": "HELLO ADA
+      ",
+        "truncated": false,
+      }
+    `)
+    expect(await bash.exec('greet; echo "status $?"')).toMatchInlineSnapshot(`
+      {
+        "exitCode": 0,
+        "stderr": "greet: missing name
+      ",
+        "stdout": "status 2
+      ",
+        "truncated": false,
+      }
+    `)
+  })
+})
+
+describe('FileSystem', () => {
+  test('resolves paths and reports file errors', async () => {
+    const fs = MemoryFileSystem.create()
+
+    expect(FileSystem.resolvePath('/home/user', '../tmp/./notes//a.txt')).toMatchInlineSnapshot(
+      `"/home/tmp/notes/a.txt"`,
+    )
+    await expect(fs.read('/missing.txt')).rejects.toThrowErrorMatchingInlineSnapshot(
+      `[FileSystem.FsError: /missing.txt: No such file or directory]`,
+    )
+    expect(
+      await fs.read('/missing.txt').catch((error: FileSystem.FsError) => error.name),
+    ).toMatchInlineSnapshot(`"FileSystem.FsError"`)
+  })
+})
+
+describe('GitHub', () => {
+  test('builds archive URLs', () => {
+    expect(
+      GitHub.codeload({ owner: 'wevm', ref: 'release/v2', repo: 'viem' }),
+    ).toMatchInlineSnapshot(`"https://codeload.github.com/wevm/viem/tar.gz/release/v2"`)
+  })
+
+  test('refuses hosts other than GitHub', async () => {
+    const fetcher = GitHub.archives()
+
+    await expect(fetcher('https://example.com/')).rejects.toThrowErrorMatchingInlineSnapshot(
+      `[TypeError: GET https://example.com/ refused: this host reaches only public GitHub repositories (raw.githubusercontent.com files, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, and GET https://api.github.com/repos/OWNER/REPO with its /contents, /commits, /releases, /tarball and /zipball), so no other URL works from cells, curl or wget]`,
+    )
+  })
+})
+
+describe('Python', () => {
+  test('returns the packages that a prompt mentions', () => {
+    expect(Python.hint('Plot a chart of the pandas dataframe')).toMatchInlineSnapshot(`
+      [
+        "matplotlib",
+        "pandas",
+      ]
+    `)
+    expect(Python.hint('Count the lines in notes.txt')).toMatchInlineSnapshot(`undefined`)
   })
 })

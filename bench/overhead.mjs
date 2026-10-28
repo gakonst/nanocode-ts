@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import * as Contracts from '../src/Contracts.ts'
 import * as AgentRuntime from '../src/AgentRuntime.ts'
-import { Bash } from '../src/bash/index.ts'
+import * as Bash from '../src/bash/Bash.ts'
 
 const N = Number(process.argv.find((a) => a.startsWith('--n='))?.slice(4) ?? 20)
 const WAT =

@@ -16,7 +16,8 @@
   "include": [
     "src/*.ts",
     "src/bash/*.ts",
-    "src/bash/commands/*.ts",
+    "src/bash/internal/*.ts",
+    "src/bash/internal/commands/*.ts",
     "src/cloudflare/Sql.ts",
     "src/cloudflare/Transport.ts",
     "src/internal/*.ts",

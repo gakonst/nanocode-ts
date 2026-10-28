@@ -5,7 +5,7 @@
  * @module
  */
 import { DurableObject } from 'cloudflare:workers'
-import { githubArchives } from '../../bash/index.ts'
+import * as GitHub from '../../bash/GitHub.ts'
 import type * as App from '../../cloudflare/App.ts'
 import { account, type Account, envelope, json, type KeyRecord, type Store } from '../account.ts'
 import * as Mcp from '../mcp.ts'
@@ -135,7 +135,7 @@ export function create<E extends Env.Env>(options: create.Options<E>) {
               Env.paying(env, { account: authority.account_id }),
           },
         }
-      : { codeMode: { fetch: () => githubArchives() } }),
+      : { codeMode: { fetch: () => GitHub.archives() } }),
     ...(servers.length
       ? {
           mcp: {

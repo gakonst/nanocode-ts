@@ -7,7 +7,7 @@ import { durableAgent, getWorld, type HostTool } from 'durable-harness'
 import * as Hands from './Hands.ts'
 import * as Harness from './Harness.ts'
 import * as Journal from './Journal.ts'
-import { SqlFileSystem } from '../bash/index.ts'
+import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import * as Attachments from './internal/Attachments.ts'
 import * as LocalSql from './internal/LocalSql.ts'
@@ -234,9 +234,9 @@ export function create(options: create.Options) {
     const sql = LocalSql.create(Journal.committed(state))
     try {
       return await Files.response(
-        new SqlFileSystem(
+        SqlFileSystem.create(
           { transaction: (_kind, _operation, statements) => sql.run(statements) },
-          Harness.scope,
+          { scope: Harness.scope },
         ),
         params.get('file') ?? '',
         { root: harness.workspace?.cwd ?? '/workspace' },
