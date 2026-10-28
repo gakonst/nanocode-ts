@@ -79,8 +79,8 @@
     },
     "./react/zyzz.css": "./dist/react/zyzz.css",
     "./highlight": {
-      "types": "./dist/highlight.d.ts",
-      "default": "./dist/highlight.js"
+      "types": "./dist/Highlight.d.ts",
+      "default": "./dist/Highlight.js"
     },
     "./models": {
       "types": "./dist/models.d.ts",
