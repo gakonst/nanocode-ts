@@ -1,0 +1,142 @@
+export const probes = [
+  {
+    id: 'cell',
+    tools: 'exec',
+    prompt:
+      'Compute the 30th Fibonacci number (F1=F2=1) in one Code Mode cell and tell me the number.',
+    ok: (t) => /832,?040/.test(t),
+  },
+  {
+    id: 'bash',
+    tools: 'bash',
+    prompt:
+      "In bash, create notes.txt with the three lines 'alpha beta', 'gamma', 'delta epsilon zeta', then run wc -w on it and tell me the word count.",
+    ok: (t) => /\b6\b/.test(t),
+  },
+  {
+    id: 'edit',
+    tools: 'files',
+    prompt:
+      'Write math.js exporting a function sum(a, b). Then edit the file so it also exports product(a, b). Finally print the file and show it to me.',
+    ok: (t) => /product/.test(t) && /sum/.test(t),
+  },
+  {
+    id: 'clone',
+    tools: 'git',
+    prompt:
+      'Clone https://github.com/wevm/zyzz and tell me how many .ts files (not .tsx) are under its src directory. Use find.',
+    ok: (t) => /\b\d+\b/.test(t) && !/could not|failed|unable/i.test(t),
+  },
+  {
+    id: 'fetch',
+    tools: 'fetch',
+    prompt:
+      'Fetch https://api.github.com/repos/gakonst/nanocode-ts from a cell and tell me its default branch name.',
+    ok: (t) => /\bmain\b/.test(t),
+  },
+  {
+    id: 'parallel',
+    tools: 'exec+bash+fetch',
+    prompt:
+      "In one cell, run these in parallel with Promise.all: the bash command 'echo -n hello | wc -c', and a fetch of https://api.github.com/repos/wevm/viem that reads its default_branch. Report both results.",
+    ok: (t) => /\b5\b/.test(t) && /\bmain\b/.test(t),
+  },
+  {
+    id: 'python',
+    tools: 'python',
+    prompt:
+      'Use python3 with numpy to compute the mean and population standard deviation of the integers 1 through 100. Give both numbers.',
+    ok: (t) => /50\.5/.test(t) && /28\.86/.test(t),
+  },
+  {
+    id: 'wasm',
+    tools: 'wasm',
+    prompt:
+      'Build a tiny WebAssembly module that exports add(a, b) for i32, instantiate it and call add(2, 3). Tell me the result.',
+    ok: (t) => /\b5\b/.test(t),
+  },
+  {
+    id: 'notify',
+    tools: 'notify',
+    prompt:
+      "Run one cell that calls notify('step 1'), then notify('step 2'), then prints 'done'. Tell me what the cell printed.",
+    ok: (t) => /done/i.test(t),
+  },
+  {
+    id: 'yield',
+    tools: 'exec+wait',
+    prompt:
+      "Run a cell that prints 'tick N' every second for 4 seconds and then prints 'finished'. If it yields before finishing, wait for it. Tell me the last line it printed.",
+    ok: (t) => /finished/i.test(t),
+  },
+  {
+    id: 'store',
+    tools: 'store/load',
+    prompt:
+      "In one exec cell, store the value 4242 under the key 'magic' with store(). Then, in a second, separate exec cell, read it back with load('magic') and tell me what it returned.",
+    ok: (t) => /4242/.test(t),
+  },
+  {
+    id: 'catalog',
+    tools: 'ALL_TOOLS',
+    prompt:
+      'Without calling any of them, inspect ALL_TOOLS in a cell and tell me how many nested tools it lists.',
+    ok: (t) => /\b\d+\b/.test(t),
+  },
+  {
+    id: 'search',
+    tools: 'web search',
+    prompt: 'Search the web for the latest stable Rust release and tell me its version number.',
+    ok: (t) => /1\.\d{2,3}/.test(t),
+  },
+  {
+    id: 'sub-two',
+    tools: 'subagents',
+    prompt:
+      "Use two subagents in parallel: one computes 17*23, the other counts the letters in the word 'nanocode'. Wait for both and report both results.",
+    ok: (t, r) => /391/.test(t) && /\b8\b/.test(t) && r.subagents > 0,
+  },
+  {
+    id: 'sub-object',
+    tools: 'subagents',
+    prompt:
+      'Use one subagent with an object output contract that has integer fields a and b. It computes a = 6*7 and b = 2**10. Wait for it and report a and b.',
+    ok: (t, r) => /\b42\b/.test(t) && /1,?024/.test(t) && r.subagents > 0,
+  },
+  {
+    id: 'chart',
+    tools: 'python+files',
+    prompt:
+      'Plot y = x^2 for x from 0 to 10 with matplotlib in python3, save it to chart.png, and tell me where you saved it.',
+    ok: (t) => /chart\.png/.test(t),
+  },
+  {
+    id: 'bigout',
+    tools: 'exec (200k lines)',
+    prompt:
+      "In one cell, console.log the line 'row N' for every N from 0 to 199999, one line each, then tell me the last line the cell printed.",
+    ok: (t) => /row 199,?999/.test(t),
+  },
+  {
+    id: 'recursion',
+    tools: 'exec (stack)',
+    prompt:
+      'In a cell, define a function that calls itself forever with no base case, call it inside try/catch, and tell me the constructor name of the error that was caught.',
+    ok: (t) => /RangeError|InternalError/.test(t),
+  },
+  {
+    id: 'curl',
+    tools: 'bash curl+jq',
+    prompt:
+      'Use curl in bash to download https://raw.githubusercontent.com/gakonst/nanocode-ts/main/package.json and use jq to print its license field. Tell me the license.',
+    ok: (t) => /MIT/.test(t),
+  },
+  {
+    id: 'image',
+    tools: 'image_gen',
+    providers: ['codex'],
+    prompt:
+      "Generate a small image of a red circle on a white background with your image generation tool and save it in the workspace. Tell me the saved file's path.",
+    ok: (t, r) => /\.(png|webp|jpe?g)/i.test(t) && !/unable|could not|can't|cannot/i.test(t),
+  },
+]

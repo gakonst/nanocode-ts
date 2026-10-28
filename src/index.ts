@@ -1,9 +1,15 @@
-export { AgentRuntime, type RuntimeMetrics } from "./host.ts";
-export { EventHub, type LiveCursor } from "./events.ts";
-export { compileModule, connectHand, handKeeper, prepareHand, type Hand, type HandKeeperOptions, type HandOptions, type HandStatus, type PreparedHand } from "./hand.ts";
-export { deferMcp, type McpPolicy } from "./mcp.ts";
-export { bearerAccepted, bearerProtocols, bearerToken, RemoteExecutor, type RemotePolicy } from "./remote.ts";
-export { relayHands, type RelayedHand } from "./bridge.ts";
-export { handName, openSession, type Session, type SessionOptions, type SessionRelay } from "./session.ts";
-export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from "./timing.ts";
-export { HostFailure, RECENT_MODEL_LIMIT, RemoteRefusal, sessionUuid, type AgentConfiguration, type BlobHost, type BranchBoundary, type BranchCursor, type BranchExport, type BranchPage, type BranchPoint, type BranchSummary, type Compacted, type Driven, type HostOptions, type HostTool, type HandToolSelection, type LoggedEvent, type LogPage, type LogPageOptions, type McpServer, type MessageSocket, type ModelCatalog, type ModelEntry, type ModelGateway, type Thinking, type ModelProvider, type ModelTiming, type ReasoningMode, type ProviderEndpoint, type MovedQueued, type RemoteRequest, type Replaced, type RuntimeOptions, type RuntimeSettings, type ServiceTier, type RuntimeTiming, type SessionRecord, type ShellOutput, type ShellRun, type SocketHandshake, type SqlHost, type SqlKind, type SqlValue, type Statement, type Submitted, type SubagentStatus, type SubagentSummary, type ToolCallContext, type TurnReport, type TurnView, type WorkspaceHost, type WorkspaceTools } from "./contracts.ts";
+/**
+ * Host-agnostic entrypoint: the WebAssembly agent runtime, hands, sessions, and the contracts that
+ * hosts implement.
+ *
+ * @module
+ */
+export * as AgentRuntime from './AgentRuntime.ts'
+export * as Bridge from './Bridge.ts'
+export * as Contracts from './Contracts.ts'
+export * as EventHub from './EventHub.ts'
+export * as Hand from './Hand.ts'
+export * as Mcp from './Mcp.ts'
+export * as Remote from './Remote.ts'
+export * as Session from './Session.ts'
+export * as Timing from './Timing.ts'
