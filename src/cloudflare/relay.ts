@@ -96,8 +96,17 @@ export function relayToken(request: Request): string | undefined {
   return RELAY_TOKEN.test(token) ? token : undefined;
 }
 
+export function refuseSocket(request: Request, reason: string, status: number): Response {
+  const accepted = bearerAccepted(request);
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket" || !accepted["sec-websocket-protocol"]) return Response.json({ error: reason }, { status });
+  const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
+  server.accept();
+  server.close(1008, reason.slice(0, 120));
+  return new Response(null, { status: 101, webSocket: client, headers: accepted });
+}
+
 export function relay(request: Request, namespace: DurableObjectNamespace<HandRelay>): Response | Promise<Response> {
   const token = relayToken(request);
-  if (!token) return Response.json({ error: "hands and brains connect with the relay's token, as Authorization: Bearer, the bearer WebSocket subprotocol or ?token=" }, { status: 403 });
+  if (!token) return refuseSocket(request, "hands and brains connect with the relay's token, as Authorization: Bearer, the bearer WebSocket subprotocol or ?token=", 403);
   return namespace.get(namespace.idFromName(token)).fetch(request);
 }

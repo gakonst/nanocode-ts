@@ -454,6 +454,7 @@ export function handRoute(options: HandRouteOptions) {
   async function SOCKET(request: Request, upgrade: UpgradeWebSocket): Promise<Response> {
     const bearer = bearerToken(request);
     const admitted = await admit(new URL(request.url), bearer);
+    if (admitted instanceof Response && /^\s*bearer\s*,/.test(request.headers.get("sec-websocket-protocol") ?? "")) return upgrade(socket => socket.close(1008, "this hand token is not valid for the session"));
     if (admitted instanceof Response) return new Response(admitted.body, { status: 403 });
     const world = await options.world();
     return upgrade(socket => serveSocket(world, admitted.sessionId, socket), { maxPayload: options.maxFrameBytes ?? 1_048_576 });

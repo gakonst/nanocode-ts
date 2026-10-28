@@ -9,6 +9,7 @@ import interpreter from "nanocode-ts/interpreter.wasm";
 import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from "./store.ts";
 import { ExecutorRejection, connectExecutor } from "./remote.ts";
 import { bearerAccepted, bearerToken } from "../remote.ts";
+import { refuseSocket } from "./relay.ts";
 import { DEFAULT_EXECUTOR, EXECUTOR_ID, HAND_TOKEN, handSecret, handToken, handTokenAccount, headerJson, json, THINKING, type HostToolCall, type ModelDispatch, type PrivateBinding, type SessionAuthority, type SessionDescriptor, type Thinking } from "./contracts.ts";
 
 export type { HostTool, ModelProvider } from "../index.ts";
@@ -229,7 +230,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         if (binding && binding !== identity) return json({ error: "session authority mismatch" }, 403);
         const scope = OWNER;
         const parts = url.pathname.split("/");
-        if (descriptor.hand_token !== undefined && (parts[2] !== "hands" || request.method !== "GET" || !this.handTokenMatches(descriptor.hand_token))) return json({ error: "this hand token is not valid for the session" }, 403);
+        if (descriptor.hand_token !== undefined && (parts[2] !== "hands" || request.method !== "GET" || !this.handTokenMatches(descriptor.hand_token))) return refuseSocket(request, "this hand token is not valid for the session", 403);
         if (parts[2] === "delete" && request.method === "POST") return await this.destroy();
         if (descriptor.read_only && (request.method !== "GET" || (parts[2] === "hands" && request.headers.get("upgrade")?.toLowerCase() === "websocket"))) return json({ error: "read-only access" }, 403);
         if (!this.recorded && options.recordSession) {
@@ -1265,7 +1266,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     const minted = HAND_TOKEN.exec(bearerToken(request) ?? "");
     const handing = minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null;
     const principal = handing ? handTokenAccount(handing[1]!) : await options.authenticate(request, env);
-    if (!principal) return json({ error: "unauthorized" }, 401);
+    if (!principal) return refuseSocket(request, "unauthorized", 401);
     const account = typeof principal === "string" ? principal : principal.account;
     const claude = env.CLAUDE_MODEL ?? "claude-opus-5-5";
     if (url.pathname === "/health") return json({ ok: true, model: claude, models: { claude, codex: "gpt-6.1-sol" }, auth: env.MODEL_AUTH ?? "api_key" });
