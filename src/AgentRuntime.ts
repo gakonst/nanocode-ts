@@ -207,6 +207,7 @@ async function create(
       Contracts.HostOptions & {
         handSend?(text: string, connection: number): void
         handFailed?(reason: string, connection: number): void
+        handCapabilities?: Contracts.HandCapability[]
       }
     sql: Contracts.SqlHost
     hands: boolean
@@ -272,6 +273,7 @@ async function create(
       Contracts.HostOptions & {
         handSend?(text: string, connection: number): void
         handFailed?(reason: string, connection: number): void
+        handCapabilities?: Contracts.HandCapability[]
       },
     sql: undefined as unknown as Contracts.SqlHost,
     hands: false,
@@ -372,6 +374,25 @@ async function create(
         case 'hand_failed': {
           state.options.handFailed?.(request.reason, request.connection)
           return null
+        }
+        case 'hand_capabilities':
+          return Promise.all(
+            (state.options.handCapabilities ?? []).map(async (capability) => ({
+              name: capability.name,
+              description: capability.description,
+              tools: capability.tools ?? [],
+              permission: await capability.permission(),
+            })),
+          )
+        case 'hand_request_capability': {
+          const capability = state.options.handCapabilities?.find(
+            (candidate) => candidate.name === request.name,
+          )
+          if (!capability)
+            throw new Error(`this hand offers no capability named \`${request.name}\``)
+          return capability.request
+            ? await capability.request(request.reason)
+            : await capability.permission()
         }
         case 'wake':
           internal.notify()
@@ -1038,6 +1059,9 @@ async function create(
       }
       mcp_servers?: Contracts.McpServer[]
       mcp?: Mcp.Policy
+      environment?: Contracts.HandEnvironment
+      capabilities?: Contracts.HandCapability[]
+      tools_only?: boolean
       name?: string
       max_frame_bytes?: number
       runtime_id?: string
@@ -1061,6 +1085,7 @@ async function create(
         ...(options.tools ? { tools: options.tools } : {}),
         handSend: options.send,
         ...(options.failed ? { handFailed: options.failed } : {}),
+        ...(options.capabilities?.length ? { handCapabilities: options.capabilities } : {}),
       }
       const catalog = (await internal.command('hand_open', {
         name: options.name ?? null,
@@ -1069,6 +1094,13 @@ async function create(
         runtime_id: options.runtime_id ?? null,
         tools: options.tools?.definitions ?? [],
         mcp_servers: options.mcp_servers ?? [],
+        environment: options.environment ?? null,
+        capabilities: (options.capabilities ?? []).map((capability) => ({
+          name: capability.name,
+          description: capability.description,
+          tools: capability.tools ?? [],
+        })),
+        tools_only: options.tools_only ?? false,
       })) as string
       return {
         catalog,
@@ -1122,7 +1154,7 @@ async function create(
             provider: config.provider ?? 'claude',
             remote: state.remote,
             hands: state.hands,
-            code_mode: !(state.remote || state.hands),
+            code_mode: !state.remote,
             event_coalesce_ms: config.event_coalesce_ms ?? 0,
             tools: config.tools ?? [],
           },

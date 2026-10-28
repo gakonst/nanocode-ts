@@ -15,6 +15,9 @@ export type Options = {
   }
   mcpServers?: Contracts.McpServer[]
   mcp?: Contracts.RuntimeOptions['mcp']
+  environment?: Contracts.HandEnvironment
+  capabilities?: Contracts.HandCapability[]
+  toolsOnly?: boolean
   protocols?: string | string[]
   maxFrameBytes?: number
   WebSocket?: typeof WebSocket
@@ -154,6 +157,9 @@ export async function prepare(
         : {}),
       ...(options.mcpServers?.length ? { mcp_servers: options.mcpServers } : {}),
       ...(options.mcp ? { mcp: options.mcp } : {}),
+      environment: options.environment ?? { shell: 'bash' },
+      ...(options.capabilities?.length ? { capabilities: options.capabilities } : {}),
+      ...(options.toolsOnly ? { tools_only: true } : {}),
       ...(options.name ? { name: options.name } : {}),
       ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
       runtime_id: crypto.randomUUID(),

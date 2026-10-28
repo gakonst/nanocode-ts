@@ -20,6 +20,22 @@ export type HostTool = {
   content?: boolean
 }
 
+export type HandEnvironment = {
+  platform?: string
+  os_version?: string
+  shell?: string
+}
+
+export type HandPermission = 'granted' | 'prompt' | 'denied'
+
+export type HandCapability = {
+  name: string
+  description: string
+  tools?: string[]
+  permission(): HandPermission | Promise<HandPermission>
+  request?(reason: string): HandPermission | Promise<HandPermission>
+}
+
 export type Thinking = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ServiceTier = 'standard' | 'priority' | 'fast' | 'ultrafast'

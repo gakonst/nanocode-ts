@@ -10,6 +10,7 @@ const module = await WebAssembly.compile(
 )
 const shell = await Bash.create({ fs: MemoryFileSystem.create(), cwd: '/workspace' })
 const hand = await Hand.connect(module, {
+  ...(process.env.BROWSER ? { WebSocket: class extends WebSocket {} } : {}),
   url: process.env.URL!,
   token: process.env.TOKEN!,
   name: 'bench',

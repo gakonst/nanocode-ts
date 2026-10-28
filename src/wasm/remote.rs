@@ -225,5 +225,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     spawn(async move {
         driver.await;
     });
-    Ok(client.into_host(catalog.definitions))
+    Ok(client
+        .into_host(catalog.definitions.clone())
+        .described(&catalog))
 }

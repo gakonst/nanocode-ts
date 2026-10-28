@@ -1,3 +1,4 @@
+export * as Capabilities from './Capabilities.ts'
 export * as Config from './Config.ts'
 export * as LiveEvent from './LiveEvent.ts'
 export * as Pickers from './Pickers.ts'

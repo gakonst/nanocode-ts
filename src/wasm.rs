@@ -311,6 +311,12 @@ enum Command {
         tools: Vec<tools::HostTool>,
         #[serde(default)]
         mcp_servers: Vec<mcp::Server>,
+        #[serde(default)]
+        environment: Option<nanocode_code_mode::remote::HandEnvironment>,
+        #[serde(default)]
+        capabilities: Vec<hand::CapabilitySpec>,
+        #[serde(default)]
+        tools_only: bool,
     },
     HandConnect {},
     HandFrame {
@@ -974,7 +980,11 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             })
         };
         executors.insert(Arc::clone(&name), host);
-        executors.set_default(Some(name));
+        if local && config.hands {
+            executors.set_fallback(Some(name));
+        } else {
+            executors.set_default(Some(name));
+        }
     }
     let session_instructions = instructions(config.instructions.as_deref());
     if !session_instructions.is_empty() {
@@ -1421,8 +1431,22 @@ fn execute(command: Command) -> Executed {
             runtime_id,
             tools,
             mcp_servers,
+            environment,
+            capabilities,
+            tools_only,
         } => executed(async move {
-            hand::open_hand(name, workspace, max_frame_bytes, runtime_id, tools, mcp_servers).await
+            hand::open_hand(hand::Opening {
+                tools_only,
+                name,
+                workspace,
+                max_frame_bytes,
+                runtime_id,
+                host_tools: tools,
+                mcp_servers,
+                environment,
+                capabilities,
+            })
+            .await
         }),
         Command::HandConnect {} => executed(hand::connect()),
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),

@@ -6,10 +6,11 @@ use nanocode_code_mode::{
     code_mode::{CodeModeExecution, CodeModeObserver, LocalCells},
     embedded::{CodeModeHost, CodeModeHostError, HostFuture, OwnedToolContext},
     remote::{
-        DetachedObservers, ExecutorOptions, HandActivity, HandBrain, HandCore, HandHost,
-        HandSession, RemoteFrame as Frame,
+        DetachedObservers, ExecutorOptions, HandActivity, HandBrain, HandCapability, HandCore,
+        HandEnvironment, HandHost, HandPermission, HandSession, RemoteFrame as Frame,
     },
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -30,10 +31,33 @@ thread_local! {
     static HAND: RefCell<Option<Open>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone, Deserialize)]
+pub struct CapabilitySpec {
+    name: String,
+    description: String,
+    #[serde(default)]
+    tools: Vec<String>,
+}
+
+pub struct Opening {
+    pub name: Option<String>,
+    pub workspace: Option<String>,
+    pub max_frame_bytes: Option<usize>,
+    pub runtime_id: Option<String>,
+    pub host_tools: Vec<tools::HostTool>,
+    pub mcp_servers: Vec<mcp::Server>,
+    pub environment: Option<HandEnvironment>,
+    pub capabilities: Vec<CapabilitySpec>,
+    pub tools_only: bool,
+}
+
 struct Host {
     cells: Arc<LocalCells>,
     own: Vec<Arc<dyn Tool>>,
     workspace: Option<String>,
+    environment: Option<HandEnvironment>,
+    capabilities: Vec<CapabilitySpec>,
+    tools_only: bool,
 }
 
 impl HandHost for Host {
@@ -87,6 +111,49 @@ impl HandHost for Host {
 
     fn spawn(&self, task: HostFuture<'static, ()>) {
         spawn(task);
+    }
+
+    fn environment(&self) -> Option<HandEnvironment> {
+        self.environment.clone()
+    }
+
+    fn runs_cells(&self) -> bool {
+        !self.tools_only
+    }
+
+    fn capabilities(&self) -> HostFuture<'_, Vec<HandCapability>> {
+        Box::pin(async move {
+            if self.capabilities.is_empty() {
+                return Vec::new();
+            }
+            match call(json!({"op": "hand_capabilities"})).await {
+                Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+                Err(_) => self
+                    .capabilities
+                    .iter()
+                    .map(|spec| HandCapability {
+                        name: spec.name.clone(),
+                        description: spec.description.clone(),
+                        tools: spec.tools.clone(),
+                        permission: HandPermission::Prompt,
+                    })
+                    .collect(),
+            }
+        })
+    }
+
+    fn request_capability<'a>(
+        &'a self,
+        name: &'a str,
+        reason: &'a str,
+    ) -> HostFuture<'a, Result<HandPermission, String>> {
+        Box::pin(async move {
+            let value =
+                call(json!({"op": "hand_request_capability", "name": name, "reason": reason}))
+                    .await
+                    .map_err(|issue| issue.to_string())?;
+            serde_json::from_value(value).map_err(|issue| issue.to_string())
+        })
     }
 }
 
@@ -200,14 +267,18 @@ fn open() -> Result<(HandCore, usize), String> {
     })
 }
 
-pub async fn open_hand(
-    name: Option<String>,
-    workspace: Option<String>,
-    max_frame_bytes: Option<usize>,
-    runtime_id: Option<String>,
-    host_tools: Vec<tools::HostTool>,
-    mcp_servers: Vec<mcp::Server>,
-) -> Result<Value, String> {
+pub async fn open_hand(opening: Opening) -> Result<Value, String> {
+    let Opening {
+        name,
+        workspace,
+        max_frame_bytes,
+        runtime_id,
+        host_tools,
+        mcp_servers,
+        environment,
+        capabilities,
+        tools_only,
+    } = opening;
     let limit = max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES);
     let mut own: Vec<Arc<dyn Tool>> = Vec::new();
     if let Some(root) = workspace.as_deref() {
@@ -245,12 +316,14 @@ pub async fn open_hand(
         cells: Arc::new(cells::host(workspace.as_deref())),
         own,
         workspace,
+        environment,
+        capabilities,
+        tools_only,
     };
     let options = ExecutorOptions {
         name,
         runtime_id,
-        callback_timeout: None,
-        callback_hold: None,
+        ..ExecutorOptions::default()
     };
     let (core, driver) = HandCore::new(Arc::new(host), options, HandActivity::default());
     spawn(driver);
