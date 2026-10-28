@@ -5,8 +5,8 @@
  * @module
  */
 import * as App from '../../cloudflare/App.ts'
-import { json } from '../account.ts'
-import * as Payment from '../payment.ts'
+import { json } from '../Account.ts'
+import * as Payment from '../Payment.ts'
 import * as Egress from './Egress.ts'
 import * as Env from './Env.ts'
 import * as Keys from './internal/Keys.ts'

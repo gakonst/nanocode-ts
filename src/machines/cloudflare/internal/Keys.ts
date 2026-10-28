@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { device, type Holder, keys } from '../../account.ts'
+import { device, type Holder, keys } from '../../Account.ts'
 import * as Env from '../Env.ts'
 
 /** Returns the account of a request from the host's own authentication. */

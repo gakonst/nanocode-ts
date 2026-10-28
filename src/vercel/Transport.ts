@@ -3,17 +3,10 @@
  *
  * @module
  */
-import {
-  type Attachment,
-  attachedPrompt,
-  type HandAccess,
-  type HandSource,
-  type LiveEvent,
-  serverEvents,
-  socketUrl,
-  type Transport as ClientTransport,
-  type TransportParameters,
-} from '../client.ts'
+import type * as LiveEvent from '../client/LiveEvent.ts'
+import * as Relay from '../client/Relay.ts'
+import * as ServerEvents from '../client/ServerEvents.ts'
+import * as ClientTransport from '../client/Transport.ts'
 import * as Files from '../internal/Files.ts'
 
 /** Largest total size in bytes of the attachments of one message. */
@@ -45,8 +38,8 @@ export type Session = {
 }
 
 /** Transport of a deployment on Vercel, with its session and hand operations. */
-export type Transport = ClientTransport &
-  HandSource & {
+export type Transport = ClientTransport.Transport &
+  Relay.Source & {
     /** Arms a crash of the session's drive, for tests of a deployment with `chaos`. */
     crash(options?: { at?: 'tool' | 'any'; afterMs?: number }): Promise<Response>
     /** Clears the session. */
@@ -98,7 +91,7 @@ export function create(options: create.Options): Transport {
 
   const follow = async (
     response: Response,
-    parameters: Omit<TransportParameters, 'prompt'>,
+    parameters: Omit<ClientTransport.Parameters, 'prompt'>,
     session: Session,
   ): Promise<boolean> => {
     const { signal } = parameters
@@ -108,14 +101,14 @@ export function create(options: create.Options): Transport {
       return true
     }
     try {
-      for await (const message of serverEvents(response.body)) {
+      for await (const message of ServerEvents.parse(response.body)) {
         if (signal?.aborted) break
         if (message.id) {
           session.cursor = message.id
           save(session)
         }
         if (message.event === 'end') return true
-        if (message.data) parameters.push(JSON.parse(message.data) as LiveEvent)
+        if (message.data) parameters.push(JSON.parse(message.data) as LiveEvent.LiveEvent)
       }
     } catch {
       if (signal?.aborted) return true
@@ -165,7 +158,7 @@ export function create(options: create.Options): Transport {
 
   const reconnect = async (
     id: string,
-    parameters: Omit<TransportParameters, 'prompt'>,
+    parameters: Omit<ClientTransport.Parameters, 'prompt'>,
     session: Session,
   ) => {
     const { signal } = parameters
@@ -193,7 +186,7 @@ export function create(options: create.Options): Transport {
     }
   }
 
-  const encoded = (attachments: readonly Attachment[] = []) => {
+  const encoded = (attachments: readonly ClientTransport.Attachment[] = []) => {
     const files = attachments.flatMap((item) => {
       const found = pending.get(item.path)
       if (!found) return []
@@ -238,8 +231,15 @@ export function create(options: create.Options): Transport {
         return await response.blob()
       },
     },
-    async send({ prompt: typed, attachments, push, note, changed, signal }: TransportParameters) {
-      const prompt = attachedPrompt(typed, attachments)
+    async send({
+      prompt: typed,
+      attachments,
+      push,
+      note,
+      changed,
+      signal,
+    }: ClientTransport.Parameters) {
+      const prompt = ClientTransport.prompt(typed, { attachments })
       const total = (attachments ?? []).reduce(
         (sum, item) => sum + (pending.get(item.path)?.bytes.length ?? 0),
         0,
@@ -295,7 +295,7 @@ export function create(options: create.Options): Transport {
         }
       }
     },
-    async steer({ prompt }: TransportParameters) {
+    async steer({ prompt }: ClientTransport.Parameters) {
       if (!state.id) return false
       const kind = /^\/effort\s/.test(prompt) ? 'prompt' : 'steer'
       const response = await fetch(url, {
@@ -352,11 +352,11 @@ export function create(options: create.Options): Transport {
       }
       return session.id
     },
-    async hand(): Promise<HandAccess | undefined> {
+    async hand(): Promise<Relay.Access | undefined> {
       const id = await this.open()
       const hand = state.hand
       if (!id || !hand || state.id !== id) return undefined
-      return { url: `${socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand }
+      return { url: `${Relay.socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand }
     },
     async hands() {
       if (!state.id) return []

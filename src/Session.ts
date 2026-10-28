@@ -4,7 +4,7 @@
  * @module
  */
 import * as Bridge from './Bridge.ts'
-import { createRelayToken, type HandAccess, socketUrl } from './client.ts'
+import * as ClientRelay from './client/Relay.ts'
 import type * as Contracts from './Contracts.ts'
 import type * as AgentRuntime from './AgentRuntime.ts'
 import type * as Remote from './Remote.ts'
@@ -31,7 +31,7 @@ export type Session = {
   ask(prompt: string): Promise<Contracts.TurnReport | undefined>
   steer(prompt: string): Promise<'queued' | 'steered'>
   resume(): Promise<Contracts.TurnReport | undefined>
-  hand(): HandAccess | undefined
+  hand(): ClientRelay.Access | undefined
   hands(): readonly (string | null)[]
   runtime(): AgentRuntime.AgentRuntime
   dispose(): Promise<void>
@@ -187,11 +187,11 @@ export async function open(options: Options): Promise<Session> {
     hand() {
       if (!options.relay) return undefined
       if (!token) {
-        token = createRelayToken()
+        token = ClientRelay.createToken()
         options.relay.keep?.(token)
       }
       connect()
-      return { url: socketUrl(options.relay.url), token }
+      return { url: ClientRelay.socketUrl(options.relay.url), token }
     },
     hands: () => (hand ? [hand.name] : []),
     runtime: () => runtime,

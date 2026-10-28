@@ -42,7 +42,7 @@ export const definitions: Contracts.HostTool[] = [
   {
     name: 'wallet',
     description:
-      "Returns the account's wallet address, access key expiry and spend per service in MACH base units.",
+      "Returns the account's wallet address, access key expiry and spend per service in mach base units.",
     parameters: object({}),
   },
 ]

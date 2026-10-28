@@ -5,7 +5,7 @@
  * @module
  */
 import type * as App from '../../cloudflare/App.ts'
-import { json } from '../account.ts'
+import { json } from '../Account.ts'
 import * as Env from './Env.ts'
 
 /** MPP proxy of each model API host. */

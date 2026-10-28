@@ -7,9 +7,16 @@
 import { DurableObject } from 'cloudflare:workers'
 import * as GitHub from '../../bash/GitHub.ts'
 import type * as App from '../../cloudflare/App.ts'
-import { account, type Account, envelope, json, type KeyRecord, type Store } from '../account.ts'
-import * as Mcp from '../mcp.ts'
-import * as Payment from '../payment.ts'
+import {
+  create as createAccount,
+  type Account,
+  envelope,
+  json,
+  type KeyRecord,
+  type Store,
+} from '../Account.ts'
+import * as Mcp from '../Mcp.ts'
+import * as Payment from '../Payment.ts'
 import * as Env from './Env.ts'
 import * as Keys from './internal/Keys.ts'
 
@@ -27,14 +34,14 @@ function kvStore(kv: SyncKvStorage): Store {
   }
 }
 
-/** Durable Object of one account's wallet. Its methods serve the RPC of the machines Worker. */
+/** Durable Object of one account's wallet. Its methods serve the rpc of the machines Worker. */
 export class Wallet extends DurableObject<Env.Env> {
   protected servers: readonly Mcp.Server[] = Mcp.servers
   protected scripts = true
   private holder?: Account
 
   private core(): Account {
-    this.holder ??= account({
+    this.holder ??= createAccount({
       store: kvStore(this.ctx.storage.kv),
       secret: this.env.KEY_SECRET,
       servers: this.servers,

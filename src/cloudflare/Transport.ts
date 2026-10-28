@@ -4,19 +4,11 @@
  *
  * @module
  */
-import {
-  type Attachment,
-  attachedPrompt,
-  type EntryKind,
-  type HandAccess,
-  type HandSource,
-  type LiveEvent,
-  liveEvent,
-  serverEvents,
-  socketUrl,
-  type Transport,
-  type TransportParameters,
-} from '../client.ts'
+import * as LiveEvent from '../client/LiveEvent.ts'
+import * as Relay from '../client/Relay.ts'
+import * as ServerEvents from '../client/ServerEvents.ts'
+import type * as Transcript from '../client/Transcript.ts'
+import * as ClientTransport from '../client/Transport.ts'
 import type * as Contracts from '../Contracts.ts'
 
 /** Saved state of the transport's session. */
@@ -41,7 +33,10 @@ export type Model = {
   web_search?: boolean
 }
 
-type Sink = { push(event: LiveEvent): void; note(kind: EntryKind, text: string): void }
+type Sink = {
+  push(event: LiveEvent.LiveEvent): void
+  note(kind: Transcript.EntryKind, text: string): void
+}
 
 function identifier(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12))
@@ -81,7 +76,7 @@ export function create(options: create.Options): create.ReturnType {
   const receive = (logged: Contracts.LoggedEvent, requestId: string, sink: Sink): boolean => {
     const body = (logged.event ?? {}) as { source?: string; type?: string }
     if (body.source !== undefined) {
-      const event = liveEvent(logged)
+      const event = LiveEvent.fromLogged(logged)
       if (event) sink.push(event)
       return false
     }
@@ -92,7 +87,7 @@ export function create(options: create.Options): create.ReturnType {
         'The session object reset. Its alarm started it again, and the turn continues from its checkpoint.',
       )
     if (body.type !== 'retrying' && body.type !== 'result') return false
-    const event = liveEvent(logged)
+    const event = LiveEvent.fromLogged(logged)
     if (event) sink.push(event)
     return body.type === 'result'
   }
@@ -111,7 +106,7 @@ export function create(options: create.Options): create.ReturnType {
     }
     let settled = false
     try {
-      for await (const message of serverEvents(response.body)) {
+      for await (const message of ServerEvents.parse(response.body)) {
         if (signal?.aborted) break
         if (message.id) {
           session.cursor = Number(message.id)
@@ -166,7 +161,7 @@ export function create(options: create.Options): create.ReturnType {
     prompt: string,
     sink: Sink,
     signal?: AbortSignal,
-    attachments: readonly Attachment[] = [],
+    attachments: readonly ClientTransport.Attachment[] = [],
   ) => {
     state.id ??= warmed ?? identifier('web')
     const session = state
@@ -182,7 +177,7 @@ export function create(options: create.Options): create.ReturnType {
         headers: headers({ accept: 'text/event-stream', 'content-type': 'application/json' }),
         body: JSON.stringify({
           request_id: requestId,
-          prompt: attachedPrompt(prompt, attachments),
+          prompt: ClientTransport.prompt(prompt, { attachments }),
           ...(images(attachments).length ? { images: images(attachments) } : {}),
           provider: model.provider,
           model: model.model,
@@ -206,7 +201,7 @@ export function create(options: create.Options): create.ReturnType {
     }
   }
 
-  const images = (attachments: readonly Attachment[]) =>
+  const images = (attachments: readonly ClientTransport.Attachment[]) =>
     attachments.filter((item) => item.type.startsWith('image/')).map((item) => item.path)
 
   const failure = async (response: Response) => {
@@ -241,7 +236,7 @@ export function create(options: create.Options): create.ReturnType {
           ...(signal ? { signal } : {}),
         })
         if (!response.ok) throw new Error(await failure(response))
-        return (await response.json()) as Attachment
+        return (await response.json()) as ClientTransport.Attachment
       },
       async read(file, signal) {
         if (!state.id) throw new Error('no session yet')
@@ -253,12 +248,12 @@ export function create(options: create.Options): create.ReturnType {
         return await response.blob()
       },
     },
-    async send({ prompt, attachments, push, note, signal }: TransportParameters) {
+    async send({ prompt, attachments, push, note, signal }: ClientTransport.Parameters) {
       await turn(prompt, { push, note }, signal, attachments)
       for (let next = queued.shift(); next && !signal?.aborted; next = queued.shift())
         await turn(next, { push, note }, signal)
     },
-    async steer({ prompt }: TransportParameters) {
+    async steer({ prompt }: ClientTransport.Parameters) {
       if (!state.id) return false
       const model = options.model()
       const response = await fetch(path('turns'), {
@@ -336,10 +331,10 @@ export function create(options: create.Options): create.ReturnType {
       save()
     },
     handToken,
-    async hand(): Promise<HandAccess | undefined> {
+    async hand(): Promise<Relay.Access | undefined> {
       const { session, token } = await handToken()
       return {
-        url: socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`),
+        url: Relay.socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`),
         token,
       }
     },
@@ -379,8 +374,8 @@ export declare namespace create {
     warmMs?: number
   }
 
-  type ReturnType = Transport &
-    HandSource & {
+  type ReturnType = ClientTransport.Transport &
+    Relay.Source & {
       /** Returns the current session. */
       session(): Session
       /** Warms the session and its model, at most once per `warmMs`. */

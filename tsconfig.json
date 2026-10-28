@@ -18,6 +18,8 @@
     "src/bash/*.ts",
     "src/bash/internal/*.ts",
     "src/bash/internal/commands/*.ts",
+    "src/client/*.ts",
+    "src/client/internal/*.ts",
     "src/cloudflare/Sql.ts",
     "src/cloudflare/Transport.ts",
     "src/internal/*.ts",

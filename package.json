@@ -46,36 +46,36 @@
       "default": "./dist/cloudflare/python.js"
     },
     "./client": {
-      "types": "./dist/client.d.ts",
-      "default": "./dist/client.js"
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
     "./react/skin": {
-      "types": "./dist/react/skin.d.ts",
-      "default": "./dist/react/skin.js"
+      "types": "./dist/react/Skin.d.ts",
+      "default": "./dist/react/Skin.js"
     },
     "./react/site": {
-      "types": "./dist/react/site.d.ts",
-      "default": "./dist/react/site.js"
+      "types": "./dist/react/Site.d.ts",
+      "default": "./dist/react/Site.js"
     },
     "./react/theme": {
-      "types": "./dist/react/theme.d.ts",
-      "default": "./dist/react/theme.js"
+      "types": "./dist/react/Theme.d.ts",
+      "default": "./dist/react/Theme.js"
     },
     "./react/themes": {
-      "types": "./dist/react/themes.d.ts",
-      "default": "./dist/react/themes.js"
+      "types": "./dist/react/Themes.d.ts",
+      "default": "./dist/react/Themes.js"
     },
     "./react/playground": {
-      "types": "./dist/react/playground.d.ts",
-      "default": "./dist/react/playground.js"
+      "types": "./dist/react/Playground.d.ts",
+      "default": "./dist/react/Playground.js"
     },
     "./react/clones": {
-      "types": "./dist/react/clones.d.ts",
-      "default": "./dist/react/clones.js"
+      "types": "./dist/react/Clones.d.ts",
+      "default": "./dist/react/Clones.js"
     },
     "./react/zyzz.css": "./dist/react/zyzz.css",
     "./highlight": {
@@ -95,12 +95,12 @@
       "default": "./dist/machines/index.js"
     },
     "./machines/server": {
-      "types": "./dist/machines/account.d.ts",
-      "default": "./dist/machines/account.js"
+      "types": "./dist/machines/Account.d.ts",
+      "default": "./dist/machines/Account.js"
     },
     "./machines/react": {
-      "types": "./dist/react/machines.d.ts",
-      "default": "./dist/react/machines.js"
+      "types": "./dist/react/Machines.d.ts",
+      "default": "./dist/react/Machines.js"
     },
     "./machines/cloudflare": {
       "types": "./dist/machines/cloudflare/index.d.ts",

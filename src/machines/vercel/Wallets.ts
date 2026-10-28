@@ -5,8 +5,16 @@
  */
 import { defineDoc, type DurableSessions } from 'durable-harness'
 import * as Egress from '../../vercel/internal/Egress.ts'
-import * as Payment from '../payment.ts'
-import { account, type Account, device, json, keys, paying, type Store } from '../account.ts'
+import * as Payment from '../Payment.ts'
+import {
+  create as createAccount,
+  type Account,
+  device,
+  json,
+  keys,
+  paying,
+  type Store,
+} from '../Account.ts'
 
 // The document kind and version are durable.
 const walletDoc = defineDoc<{ entries: Record<string, string | number> }>({
@@ -22,7 +30,7 @@ export function create(options: create.Options) {
   const holder = (sessionId: string) => {
     let found = holders.get(sessionId)
     if (!found) {
-      found = account({
+      found = createAccount({
         store: store({ sessionId, sessions: options.sessions }),
         secret: options.secret,
         servers,
@@ -78,7 +86,7 @@ export declare namespace create {
     authorize?(request: Request, sessionId: string): Promise<void> | void
     /** Payment configuration. Inference defaults to `apiKey`. */
     payment?: Payment.Config
-    /** Tempo RPC URL. */
+    /** Tempo rpc URL. */
     rpc?: string
     /** Whether wallets run scripts. Defaults to `false`. */
     scripts?: boolean

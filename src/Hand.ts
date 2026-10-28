@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { serverEvents } from './client.ts'
+import * as ServerEvents from './client/ServerEvents.ts'
 import * as AgentRuntime from './AgentRuntime.ts'
 import * as Remote from './Remote.ts'
 import type * as Contracts from './Contracts.ts'
@@ -430,7 +430,7 @@ async function streamLink(
           return
         }
         if (response.ok && response.body) {
-          for await (const message of serverEvents(response.body)) {
+          for await (const message of ServerEvents.parse(response.body)) {
             if (message.id) cursor = Number(message.id)
             if (!message.data) continue
             const line = JSON.parse(message.data) as { brain?: string; frames?: string[] }
