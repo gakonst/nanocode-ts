@@ -11,6 +11,7 @@ import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import * as Attachments from './internal/Attachments.ts'
 import * as LocalSql from './internal/LocalSql.ts'
+import * as Plans from './Plans.ts'
 import * as Transport from './Transport.ts'
 import * as Wasm from './Wasm.ts'
 import type * as Contracts from '../Contracts.ts'
@@ -133,10 +134,12 @@ export function create(options: create.Options) {
     deadlineMarginMs,
     defaultSelection: chosenDefault,
     hands: chosenHands,
+    plans: planOptions,
     ...rest
   } = options
   const hands = chosenHands ?? {}
-  const harness = { ...rest, hands }
+  const plans = planOptions ? Plans.create(planOptions, account) : undefined
+  const harness = { ...rest, hands, subscription: rest.subscription ?? plans?.subscription }
   const first = harnesses[0]!.models[0]!
   const defaultSelection = chosenDefault ?? {
     provider: harnesses[0]!.id,
@@ -355,7 +358,15 @@ export function create(options: create.Options) {
     return Response.json({ armed: id, at, afterMs })
   }
 
-  return { agent, GET, POST, chaos: { POST: crash }, defaultSelection, harnesses }
+  return {
+    agent,
+    GET,
+    POST,
+    chaos: { POST: crash },
+    defaultSelection,
+    harnesses,
+    plans: plans?.routes,
+  }
 }
 
 export declare namespace create {
@@ -381,6 +392,12 @@ export declare namespace create {
     harnesses: SelectionHarness[]
     /** Whether the kernel publishes timing marks. */
     marks?: boolean
+    /**
+     * ChatGPT and Claude plans of the deployment's accounts, sealed with `PLAN_SECRET`: a signed-in account's model
+     * requests go out on its plan instead of the AI Gateway, and `plans` in the result are the sign-in route
+     * handlers. Needs `account`.
+     */
+    plans?: Plans.Options
     /** Largest prompt in characters. */
     maxPromptCharacters?: number
     /** Whether the kernel runs ahead of the log with `on` durability. */

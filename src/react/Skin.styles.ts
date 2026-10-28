@@ -672,6 +672,31 @@ export const handStatus = variants({
   defaultVariants: { attached: false },
 })
 
+export const plan = hand
+
+export const planTitle = handTitle
+
+export const planText = handText
+
+export const planCode = handCommand
+
+export const planActions = handActions
+
+export const planButton = handButton
+
+export const planStatus = handStatus
+
+export const planInput = style({
+  background: 'none',
+  border: '1px solid',
+  borderColor: 'rule',
+  color: 'text',
+  flex: '1 1 12ch',
+  font: 'inherit !custom',
+  minWidth: '0',
+  paddingInline: 'sm',
+})
+
 export const expand = style({
   backgroundColor: 'transparent',
   border: 'none',
