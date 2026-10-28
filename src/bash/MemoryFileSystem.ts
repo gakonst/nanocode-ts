@@ -1,8 +1,3 @@
-/**
- * In-memory file system for the simulated shell. The files live as long as the instance.
- *
- * @module
- */
 import {
   FsError,
   normalize,
@@ -15,12 +10,10 @@ import {
 } from './FileSystem.ts'
 import { baseOf, encode, parentOf } from './internal/Fs.ts'
 
-/** In-memory file system that `create` returns. */
 export type MemoryFileSystem = FileSystem &
   Required<
     Pick<FileSystem, 'chmod' | 'lstat' | 'readlink' | 'symlink' | 'utimes' | 'writeMany'>
   > & {
-    /** Largest file in bytes that a write accepts. */
     readonly maxFileBytes: number
   }
 
@@ -29,7 +22,6 @@ type Node =
   | { kind: 'directory'; children: Map<string, Node>; mtime: number; mode: number }
   | { kind: 'link'; target: string; mtime: number; mode: number }
 
-/** Creates an in-memory file system seeded with `files`. */
 export function create(options: create.Options = {}): MemoryFileSystem {
   const maxFileBytes = options.maxFileBytes ?? 64 * 1024 * 1024
   const root: Node = { kind: 'directory', children: new Map(), mtime: Date.now(), mode: 0o755 }
@@ -273,9 +265,7 @@ export function create(options: create.Options = {}): MemoryFileSystem {
 
 export declare namespace create {
   type Options = {
-    /** Files to seed, keyed by path. Text is stored as UTF-8. */
     files?: Record<string, FileInput> | undefined
-    /** Largest file in bytes that a write accepts. Defaults to 64 MiB. */
     maxFileBytes?: number | undefined
   }
 }

@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Images of a transcript, including images that a workspace file holds.
- *
- * @module
- */
 import { useContext, useEffect, useState } from 'react'
 import * as Workspace from '../client/internal/Workspace.ts'
 import type * as Transport from '../client/Transport.ts'
@@ -12,7 +7,6 @@ import { ConfigContext, usePart, useSkin } from './Provider.tsx'
 
 const imageUrl = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])/i
 
-/** Returns the source of an image that renders, or `undefined`. */
 export function imageSource(src: unknown): string | undefined {
   if (typeof src !== 'string') return undefined
   const value = src.trim()
@@ -26,7 +20,6 @@ const fileCache = new WeakMap<
   Map<string, { at: number; url: Promise<{ url: string; type: string }> }>
 >()
 
-/** Returns an object URL of a workspace file. */
 export function useWorkspaceFile(path: string | undefined): {
   url?: string
   type?: string
@@ -139,7 +132,6 @@ function openData(src: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
-/** Image from a URL or a workspace file. */
 export function Image(props: Image.Props) {
   const part = usePart()
   const skin = useSkin()

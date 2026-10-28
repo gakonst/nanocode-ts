@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Chat component: the transcript, the composer, the pickers, and the conversation sidebar.
- *
- * @module
- */
 import {
   Fragment,
   type KeyboardEvent,
@@ -32,13 +27,10 @@ import {
 } from './Provider.tsx'
 import { spinner, ToolCell, useNow } from './ToolCell.tsx'
 
-/** Slash command of the composer. */
 export type Command = { label: string; detail?: string }
 
-/** Suggested prompt, or an action button. */
 export type Suggestion = string | { label: string; onClick(): void; disabled?: boolean }
 
-/** Picker of the composer, such as the model picker. */
 export type Picker = {
   title?: string
   items(query: string): Pickers.Item[]
@@ -47,10 +39,8 @@ export type Picker = {
   onChoose(item: Pickers.Item): void
 }
 
-/** Display state of reasoning text. */
 export type Disclosure = 'expanded' | 'collapsed' | 'hidden'
 
-/** Reasoning text with its duration. */
 export function Thinking(props: Thinking.Props) {
   const part = usePart()
   const { entry, live = false, collapsed = true } = props
@@ -99,7 +89,6 @@ export declare namespace Thinking {
   }
 }
 
-/** One transcript entry. */
 export function EntryView(props: EntryView.Props) {
   const part = usePart()
   const { entry, previous, live = false, tools = 'expanded', reasoning = 'collapsed' } = props
@@ -145,7 +134,6 @@ export declare namespace EntryView {
   }
 }
 
-/** List of stored conversations. */
 export function Sidebar(props: Sidebar.Props) {
   const part = usePart()
   const threads = useConversations()
@@ -196,7 +184,6 @@ export declare namespace Sidebar {
 
 const typingDelayMs = 500
 
-/** Chat with the transcript, the composer, and the pickers. */
 export function Chat(props: Chat.Props) {
   const part = usePart()
   const { entries, live } = useTranscript()

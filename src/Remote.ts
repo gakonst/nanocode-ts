@@ -1,87 +1,50 @@
-/**
- * Remote Code Mode executors: a hand's socket carries the SDK's remote frames, and bearer tokens
- * authorize the socket.
- *
- * @module
- */
 import * as Contracts from './Contracts.ts'
 
-/** Frame and time limits that a host places on a remote executor. */
 export type Policy = {
-  /** Largest frame in bytes that either side may send. */
   max_frame_bytes: number
-  /** Whether a parked executor accepts a new socket within `timeout_ms`. */
   resumes?: boolean | undefined
-  /** Deadline in milliseconds for the hand's catalog, and for a parked executor. */
   timeout_ms: number
 }
 
-/** Remote executor over one hand's socket. */
 export type Executor<S extends Contracts.MessageSocket = Contracts.MessageSocket> = {
-  /** Catalog frame of the hand, once it arrived. */
   readonly catalog: string | undefined
-  /** Settles with the failure reason when the executor closes. */
   readonly closed: Promise<string>
-  /** Failure reason, once the executor closed. */
   readonly failure: string | undefined
-  /** Whether the executor waits for its hand to reconnect. */
   readonly parked: boolean
-  /** Socket of the hand. */
   readonly socket: S
-  /** Cancels a pending `remote_poll`. */
   cancel(id: number): void
-  /** Makes `owner` the only runtime that the executor serves. */
   claim(owner: object): void
-  /** Closes the executor and its socket. */
   disconnected(reason?: string): void
-  /** Closes the executor. */
   dispose(): Promise<void>
-  /** Runs one remote operation of the SDK. */
   execute(request: Contracts.RemoteRequest, id: number): Promise<unknown>
-  /** Claims the executor for a runtime and returns that runtime's `remote` host option. */
   host(): NonNullable<Contracts.RuntimeOptions['remote']>
-  /** Whether `owner` holds the executor. */
   owns(owner: object): boolean
-  /** Waits for a reconnect when the policy resumes and the catalog arrived, and closes otherwise. */
   park(reason?: string): void
-  /** Resolves once the hand's catalog arrives, and closes the executor after `timeout_ms`. */
   ready(): Promise<void>
-  /** Takes a reconnected hand's socket and sends the frames queued while parked. */
   rebind(socket: S, catalog: string): boolean
-  /** Accepts one frame from the hand. */
   receive(data: unknown): void
-  /** Closes the executor and tells the hand the reason. */
   refuse(reason: string): void
-  /** Closes the executor with a protocol error. */
   reject(reason: string): void
-  /** Releases the executor from its runtime. */
   release(): void
 }
 
-/** Close code of a socket whose hand left. */
 export const handLeft = 4001
 
-/** Close code of a socket whose brain was replaced. */
 export const brainReplaced = 4002
 
-/** Frame that acknowledges a hand. */
-// Key order is part of the wire format.
 export const handAccepted = JSON.stringify({ type: 'ack', ids: [] })
 
 const encoder = new TextEncoder()
 
-/** Accepts a hand's socket whose host delivers frames through `receive`. */
 export function accept<S extends Contracts.MessageSocket>(socket: S, policy: Policy): Executor<S> {
   validate(policy)
   return create(socket, { listen: false, policy })
 }
 
-/** Returns the `WebSocket` protocols that carry `token` as a bearer token. */
 export function bearerProtocols(token: string): string[] {
   return ['bearer', token]
 }
 
-/** Returns the bearer token of a request, from its `authorization` header or WebSocket protocols. */
 export function bearerToken(request: Request): string | undefined {
   const header = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1]
   if (header) return header
@@ -92,14 +55,12 @@ export function bearerToken(request: Request): string | undefined {
   return scheme === 'bearer' && token ? token : undefined
 }
 
-/** Returns the response headers that accept a bearer WebSocket protocol, if the request asked for one. */
 export function bearerAccepted(request: Request): Record<string, string> {
   return /^\s*bearer\s*,/.test(request.headers.get('sec-websocket-protocol') ?? '')
     ? { 'sec-websocket-protocol': 'bearer' }
     : {}
 }
 
-/** Opens a socket, listens on it, and resolves once the hand's catalog arrives. */
 export async function connect<S extends Contracts.MessageSocket>(
   open: (signal: AbortSignal) => Promise<S>,
   policy: Policy,
@@ -130,7 +91,6 @@ export async function connect<S extends Contracts.MessageSocket>(
   }
 }
 
-/** Accepts a hand's socket whose catalog arrived before. */
 export function restore<S extends Contracts.MessageSocket>(
   socket: S,
   options: restore.Options,
@@ -141,9 +101,7 @@ export function restore<S extends Contracts.MessageSocket>(
 
 export declare namespace restore {
   type Options = {
-    /** Catalog frame that the hand sent before. */
     catalog: string
-    /** Limits of the executor. */
     policy: Policy
   }
 }

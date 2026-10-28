@@ -1,32 +1,17 @@
-/**
- * Workspace host over a Cloudflare Container: it boots the container, prepares the workspace, and
- * runs file operations and shell commands in it.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 import * as Shell from './internal/Shell.ts'
 
-/** Process that a container runs. */
 export type Process = {
-  /** Standard output, when piped. */
   readonly stdout: ReadableStream | null
-  /** Standard error, when piped. */
   readonly stderr: ReadableStream | null
-  /** Settles with the exit code of the process. */
   readonly exitCode: Promise<number>
-  /** Sends a signal to the process. */
   kill(signal?: number): void
 }
 
-/** Instance type of a container: a named type, or explicit resources. */
 export type Instance = string | { vcpu: number; memoryMib: number; diskMb: number }
 
-/** Capabilities of the container binding that a workspace uses. */
 export type Handle = {
-  /** Whether the container runs. */
   readonly running: boolean
-  /** Starts the container. */
   start(options?: {
     image?: string
     enableInternet: boolean
@@ -34,7 +19,6 @@ export type Handle = {
     env?: Record<string, string>
     instance?: Instance
   }): void
-  /** Runs a process in the container. */
   exec(
     cmd: string[],
     options?: {
@@ -45,37 +29,24 @@ export type Handle = {
       stderr?: 'pipe' | 'ignore' | 'combined'
     },
   ): Promise<Process>
-  /** Sets the idle time in milliseconds after which the platform stops the container. */
   setInactivityTimeout(durationMs: number): Promise<void>
-  /** Stops the container. */
   destroy(error?: unknown): Promise<void>
 }
 
-/** Workspace host over a container. */
 export type Workspace = Contracts.WorkspaceHost & {
-  /** Boots the container and prepares the workspace, once. */
   ready(): Promise<void>
-  /** Stops the container. */
   stop(): Promise<void>
 }
 
-/** Image that a container starts from by default. */
 export const defaultImage = 'cloudflare/debian-trixie'
 
-/** Idle time in milliseconds after which the platform stops a container by default. */
 export const defaultInactivityTimeoutMs = 10 * 60_000
 
-/** Environment variables of every command, before the host's own. */
 export const defaultEnv = { DEBIAN_FRONTEND: 'noninteractive', HOME: '/root', LANG: 'C.UTF-8' }
 
-/** Setup script that installs the base tools when the container has internet access. */
 export const defaultSetup =
   'command -v git >/dev/null && command -v python3 >/dev/null && command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl git procps python3 python3-pip python3-venv xz-utils >/dev/null; }'
 
-/**
- * Returns a workspace host over `container`. The first operation boots the container, runs the
- * setup script, and writes the initial files.
- */
 export function create(container: Handle, options: create.Options = {}): Workspace {
   const cwd = options.cwd ?? Shell.cwd
   const limit = options.outputLimit ?? Shell.outputLimitBytes
@@ -224,25 +195,15 @@ export function create(container: Handle, options: create.Options = {}): Workspa
 
 export declare namespace create {
   type Options = {
-    /** Working directory of the workspace. Defaults to `/workspace`. */
     cwd?: string
-    /** Whether the container has internet access. Defaults to `true`. */
     enableInternet?: boolean
-    /** Environment variables of every command, merged over `defaultEnv`. */
     env?: Record<string, string>
-    /** Files to write into the workspace after setup, by path. */
     files?: Record<string, string>
-    /** Image to start. Defaults to `defaultImage`. */
     image?: string
-    /** Idle time in milliseconds before the platform stops the container. */
     inactivityTimeoutMs?: number
-    /** Instance type of the container. */
     instance?: Instance
-    /** Workspace instructions for the model. */
     instructions?: string
-    /** Largest output in bytes that a command keeps from each stream. Defaults to 4 MiB. */
     outputLimit?: number
-    /** Setup script. Defaults to `defaultSetup` with internet access, and to none without it. */
     setup?: string
   }
 }

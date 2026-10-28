@@ -1,14 +1,8 @@
 'use client'
 
-/**
- * Code blocks with syntax highlight, and the code fences of a text.
- *
- * @module
- */
 import { useMemo } from 'react'
 import { useHighlighter, usePart } from './Provider.tsx'
 
-/** Splits text into prose and fenced code blocks. */
 export function fences(
   text: string,
 ): ({ kind: 'text'; text: string } | { kind: 'code'; text: string; language: string })[] {
@@ -35,7 +29,6 @@ export function fences(
   return parts
 }
 
-/** Highlighted lines of code. */
 export function Tokens(props: Tokens.Props) {
   const highlighter = useHighlighter(!!props.language && props.language !== 'text')
   const tokens = useMemo(() => {
@@ -74,7 +67,6 @@ export declare namespace Tokens {
   }
 }
 
-/** Code block with syntax highlight. */
 export function Code(props: Code.Props) {
   const part = usePart()
   return (

@@ -1,9 +1,3 @@
-/**
- * Simulated bash shell over a pluggable file system, with Unix text tools, git, curl, jq, Python,
- * and WebAssembly commands.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 import type * as Command from './Command.ts'
 import * as FileSystem from './FileSystem.ts'
@@ -29,29 +23,18 @@ import { unzip, zip } from './internal/commands/zip.ts'
 
 export type { Limits } from './internal/Shell.ts'
 
-/** Shell that `create` returns. */
 export type Bash = {
-  /** Command handlers by name, after the host's additions and removals. */
   readonly commands: Map<string, Command.Handler>
-  /** Working directory that each `exec` starts in. */
   readonly cwd: string
-  /** Environment variables that each `exec` starts with. */
   readonly env: Record<string, string>
-  /** Runs a script and returns its output and exit code. It does not throw for a failed script. */
   exec(script: string, options?: ExecOptions): Promise<Result>
-  /** File system of the shell. */
   readonly fs: FileSystem.FileSystem
-  /** Limits of the shell. */
   readonly limits: Shell.Limits
-  /** Returns the text of the file at `path`, resolved against `cwd`. */
   readFile(path: string): Promise<string>
-  /** Returns the workspace host that the WebAssembly runtime uses for file tools, shell runs, and WebAssembly cells. */
   workspace(): Contracts.WorkspaceHost
-  /** Writes the file at `path`, resolved against `cwd`, and makes its parent directories. */
   writeFile(path: string, content: FileSystem.FileInput): Promise<void>
 }
 
-/** Failure class of one `exec`, in the `finished` event. */
 export type Category =
   | 'none'
   | 'search_admission'
@@ -64,62 +47,40 @@ export type Category =
   | 'input_validation'
   | 'exception'
 
-/** Event that `create.Options.observe` receives before and after each `exec`. */
 export type Event =
   | {
-      /** Command name of the script, or `other`. */
       command: string
-      /** Sequence number of the `exec` call on this shell, from 1. */
       call: number
       phase: 'started'
     }
   | {
-      /** Sequence number of the `exec` call on this shell, from 1. */
       call: number
-      /** Failure class, or `none` for exit code 0. */
       category: Category
-      /** Command name of the script, or `other`. */
       command: string
-      /** Duration of the call in milliseconds. */
       durationMs: number
-      /** Exit code of the script. */
       exitCode: number | null
-      /** Whether `exec` cut stdout or stderr at `maxOutputLength`. */
       outputTruncated: boolean
       phase: 'finished'
-      /** `success` for exit code 0, and `error` otherwise. */
       status: 'success' | 'error'
     }
 
-/** Options of one `exec` call. */
 export type ExecOptions = {
-  /** Working directory, resolved against the shell's `cwd`. */
   cwd?: string
-  /** Environment variables added to the shell's `env`. */
   env?: Record<string, string>
-  /** Aborts the execution. */
   signal?: AbortSignal
-  /** Standard input. */
   stdin?: string
-  /** Deadline in milliseconds. Defaults to `limits.timeoutMs`. */
   timeoutMs?: number
 }
 
-/** Output of one `exec` call. */
 export type Result = {
-  /** Exit code of the script. */
   exitCode: number
-  /** Standard error. */
   stderr: string
-  /** Standard output. */
   stdout: string
-  /** Whether stdout or stderr reached `maxOutputLength` and lost its tail. */
   truncated: boolean
 }
 
 const workspaceTimeoutMs = 600_000
 
-/** Limits that `create` applies when the host does not override them. */
 export const defaultLimits: Shell.Limits = {
   maxCommands: 1_000_000,
   maxLoopIterations: 1_000_000,
@@ -131,7 +92,6 @@ export const defaultLimits: Shell.Limits = {
   timeoutMs: 30_000,
 }
 
-// Later entries shadow earlier ones, so the order of the spreads is significant.
 const builtinCommands: Record<string, Command.Handler> = {
   ...fileCommands,
   ...textCommands,
@@ -152,13 +112,8 @@ const builtinCommands: Record<string, Command.Handler> = {
   wat2wasm: async (context) => (await import('./internal/commands/wat.ts')).wat(context),
 }
 
-/** Sorted names of the commands that every shell has, before host options add or remove any. */
 export const commandNames = Object.keys(builtinCommands).sort()
 
-/**
- * Creates a shell. Without `fs`, it seeds an in-memory file system with `files`. It makes `cwd` and
- * `/tmp`.
- */
 export async function create(options: create.Options = {}): Promise<Bash> {
   const fs = options.fs ?? MemoryFileSystem.create({ files: options.files })
   const cwd = FileSystem.resolvePath('/', options.cwd ?? '/home/user')
@@ -368,27 +323,16 @@ export async function create(options: create.Options = {}): Promise<Bash> {
 
 export declare namespace create {
   type Options = {
-    /** Command handlers that add to or replace the built-in commands, by name. */
     commands?: Record<string, Command.Handler>
-    /** Working directory. Defaults to `/home/user`. */
     cwd?: string
-    /** Environment variables added to the defaults, such as `HOME` and `PATH`. */
     env?: Record<string, string>
-    /** Network fetch for `curl`, `wget`, and `git clone`. Without it, the shell has no network access. */
     fetch?: typeof fetch
-    /** Files to write before the first `exec`, keyed by path. */
     files?: Record<string, FileSystem.FileInput>
-    /** File system of the shell. Defaults to a new in-memory file system. */
     fs?: FileSystem.FileSystem
-    /** Options of the `git` and `gh` commands. */
     github?: GitHub.Options
-    /** Limits that override `defaultLimits`. */
     limits?: Partial<Shell.Limits>
-    /** Receives an event before and after each `exec`. Its errors are ignored. */
     observe?: (event: Event) => void
-    /** Options of the Python commands. */
     python?: Python.Options
-    /** Options of the WebAssembly commands. */
     wasm?: Wasm.Options
   }
 }
@@ -402,7 +346,6 @@ const githubFileInstructions =
 const programInstructions =
   "WebAssembly programs built for WASI (wasm32-wasi) run directly: `./prog.wasm ARGS`, `wasm prog.wasm ARGS` or `wasmtime prog.wasm ARGS`, with stdin, stdout, exit codes, the environment and the files under the working directory (up to 64 MiB, written back when the program exits). There is no C or Rust compiler: write WebAssembly text and assemble it with `wat2wasm prog.wat` (writes prog.wasm; flat or folded instructions, memory, data, globals and imports such as WASI's `fd_write`), rather than writing module bytes by hand, or download the .wasm file. `wasm --invoke NAME FILE ARGS` calls one exported function and prints its result. Python 3 runs on Pyodide (CPython compiled to WebAssembly, loaded on first use): `python3 script.py ARGS`, `python3 -c CODE`, `python3 -m MODULE` and stdin work on the files under the working directory and /tmp, numpy, pandas and the other packages Pyodide ships load when imported, and `pip install PKG` installs pure-Python wheels for the rest of the session. Python has no network access (urllib, requests and sockets fail), so download files with curl first and read them from Python."
 
-/** Model-facing notes on the shell's git, GitHub, WebAssembly, and Python support. */
 export const instructions =
   gitInstructions + ' ' + githubFileInstructions + ' ' + programInstructions
 

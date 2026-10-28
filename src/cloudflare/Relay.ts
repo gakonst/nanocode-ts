@@ -1,13 +1,6 @@
-/**
- * Hand relay: a Durable Object per relay token that pairs one hand with the brains that drive it,
- * and the routing of a request to it.
- *
- * @module
- */
 import { DurableObject } from 'cloudflare:workers'
 import * as Remote from '../Remote.ts'
 
-/** Pattern of a relay token. */
 export const tokenPattern = /^[0-9a-f]{32,128}$/
 
 const handReplaced = 'another hand attached under this name'
@@ -28,12 +21,7 @@ function catalogField(catalog: string | undefined, field: 'name' | 'runtime_id')
   }
 }
 
-/**
- * Durable Object that relays frames between one hand and its brains. A newer hand replaces the
- * older one, and a newer brain replaces the older one.
- */
 export class HandRelay extends DurableObject {
-  /** Accepts a hand or brain socket, or returns the attached hand's name for a plain request. */
   override async fetch(request: Request): Promise<Response> {
     const query = new URL(request.url).searchParams
     const side: Side = query.get('role') === 'brain' ? 'brain' : 'hand'
@@ -157,19 +145,11 @@ export class HandRelay extends DurableObject {
   }
 }
 
-/**
- * Returns the relay token of a request, from its bearer token or its `token` query parameter, or
- * `undefined` when the token does not match `tokenPattern`.
- */
 export function token(request: Request): string | undefined {
   const value = Remote.bearerToken(request) ?? new URL(request.url).searchParams.get('token') ?? ''
   return tokenPattern.test(value) ? value : undefined
 }
 
-/**
- * Refuses a request. A WebSocket upgrade with a bearer subprotocol receives a socket that closes
- * with code 1008, and other requests receive a JSON error.
- */
 export function refuse(request: Request, options: refuse.Options): Response {
   const accepted = Remote.bearerAccepted(request)
   if (
@@ -186,14 +166,11 @@ export function refuse(request: Request, options: refuse.Options): Response {
 
 export declare namespace refuse {
   type Options = {
-    /** Error message, also the close reason of a socket, cut to 120 characters. */
     reason: string
-    /** HTTP status of a JSON refusal. */
     status: number
   }
 }
 
-/** Routes a request to the relay of its token, and refuses it with status 403 when it has none. */
 export function route(request: Request, options: route.Options): Response | Promise<Response> {
   const value = token(request)
   if (!value)
@@ -207,7 +184,6 @@ export function route(request: Request, options: route.Options): Response | Prom
 
 export declare namespace route {
   type Options = {
-    /** Namespace of the `HandRelay` Durable Object. */
     namespace: DurableObjectNamespace<HandRelay>
   }
 }

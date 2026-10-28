@@ -1,14 +1,8 @@
-/**
- * Hands: a JavaScript host that runs a session's tools for a remote brain, over a WebSocket to its session.
- *
- * @module
- */
 import * as ServerEvents from './client/ServerEvents.ts'
 import * as AgentRuntime from './AgentRuntime.ts'
 import * as Remote from './Remote.ts'
 import type * as Contracts from './Contracts.ts'
 
-/** Options of a hand. */
 export type Options = {
   url: string
   name?: string
@@ -31,13 +25,10 @@ export type Options = {
   onStatus?(status: Status): void
 }
 
-/** Connection state of a hand, with the reason it closed. */
 export type Status = { state: 'connecting' | 'attached' | 'closed'; reason?: string }
 
-/** Connected hand. */
 export type Hand = { closed: Promise<Status>; close(): void }
 
-/** Hand whose module and workspace are open and which has not connected yet. */
 export type Prepared = {
   cwd: string
   connect(url: string, onStatus?: (status: Status) => void, token?: string): Promise<Hand>
@@ -62,7 +53,6 @@ type Compiler = {
   compile(bytes: ArrayBuffer): Promise<WebAssembly.Module>
 }
 
-/** Compiles the module from a response, through the cache when one is given. */
 export async function compile(
   url: string,
   options: { cache?: string | false; key?: string } = {},
@@ -127,7 +117,6 @@ function tokened(
   return { protocols: Remote.bearerProtocols(token) }
 }
 
-/** Instantiates the module and opens the hand's workspace, catalog, and MCP servers without a connection. */
 export async function prepare(
   module: WebAssembly.Module,
   options: Omit<Options, 'url' | 'onStatus'>,
@@ -334,7 +323,6 @@ export async function prepare(
   }
 }
 
-/** Prepares a hand and connects it to `options.url`. */
 export async function connect(module: WebAssembly.Module, options: Options): Promise<Hand> {
   options.onStatus?.({ state: 'connecting' })
   let prepared: Prepared
@@ -451,7 +439,6 @@ async function streamLink(
   }
 }
 
-/** Options of a keeper. */
 export type KeeperOptions = Omit<Options, 'url' | 'workspace' | 'cwd' | 'token'> & {
   url(session: string): string
   credential?(session: string): string | undefined | Promise<string | undefined>
@@ -485,7 +472,6 @@ function deferred(slot: Spare['slot']): Contracts.WorkspaceHost {
   }
 }
 
-/** Keeps one prepared spare hand and attaches a hand to each session that asks for one. */
 export function keeper(options: KeeperOptions) {
   const name = options.name ?? 'browser'
   const cwd = options.cwd ?? '/workspace'

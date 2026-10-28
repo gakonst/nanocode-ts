@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Tool call cells: the title, input, output, and images of one tool call.
- *
- * @module
- */
 import { useContext, useEffect, useState } from 'react'
 import * as Format from '../client/internal/Format.ts'
 import type * as Tool from '../client/Tool.ts'
@@ -12,7 +7,6 @@ import { Tokens } from './Code.tsx'
 import { Image } from './Image.tsx'
 import { useExpanded, usePart, useSkin } from './Provider.tsx'
 
-/** Frames of the running indicator. */
 export const spinner = ['◐', '◓', '◑', '◒']
 
 const statusIcons: Record<Tool.Cell['status'], string> = {
@@ -27,7 +21,6 @@ const inputLines = 12
 
 const outputLines = 10
 
-/** Returns the current time, which updates each second while `active`. */
 export function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -81,7 +74,6 @@ function lineCount(text: string): string {
   return lines === 1 ? '1 line' : lines.toLocaleString('en-US') + ' lines'
 }
 
-/** One tool call cell. */
 export function ToolCell(props: ToolCell.Props) {
   const part = usePart()
   const { cell, live = false, nested = false, collapsed = false } = props

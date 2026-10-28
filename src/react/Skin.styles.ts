@@ -1,8 +1,3 @@
-/**
- * Skin part styles of the default skin, keyed by part name.
- *
- * @module
- */
 import type { Vars } from 'zyzz'
 import { ellipsis, flicker, style, variants, vars } from './Theme.ts'
 

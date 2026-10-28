@@ -1,8 +1,3 @@
-/**
- * Tar and gzip encoding and decoding for `tar`, `gzip`, and `git clone`.
- *
- * @module
- */
 import { decode, encode } from '../Fs.ts'
 
 export type TarEntry = {

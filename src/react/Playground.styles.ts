@@ -1,8 +1,3 @@
-/**
- * Styles of the playground page.
- *
- * @module
- */
 import { style, variants } from './Theme.ts'
 
 const rounded = 'var(--nc-radius, 0) !custom'

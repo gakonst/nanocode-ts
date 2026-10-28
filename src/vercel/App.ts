@@ -1,8 +1,3 @@
-/**
- * Next.js route handlers for nanocode sessions on Vercel: chat, files, hands, cancel, and chaos, around a durable-harness agent.
- *
- * @module
- */
 import { durableAgent, getWorld, type HostTool } from 'durable-harness'
 import * as Hands from './Hands.ts'
 import * as Harness from './Harness.ts'
@@ -16,10 +11,8 @@ import * as Transport from './Transport.ts'
 import * as Wasm from './Wasm.ts'
 import type * as Contracts from '../Contracts.ts'
 
-/** Authorizes a request that starts or reads a session, or `public` for none. A thrown `Response` refuses it. */
 export type Authorize = ((request: Request) => Promise<void> | void) | 'public'
 
-/** Model choice of a session. */
 export type Selection = {
   provider: Contracts.ModelProvider
   model: string
@@ -28,33 +21,22 @@ export type Selection = {
   service_tier?: Harness.ServiceTier
 }
 
-/** Harness that a session can select, with its models. */
 export type SelectionHarness = {
-  /** Provider of the harness. */
   id: Contracts.ModelProvider
-  /** Display label. */
   label: string
   models: SelectionModel[]
 }
 
-/** Model that a session can select. */
 export type SelectionModel = {
-  /** Model ID. */
   id: string
-  /** Display label. */
   label: string
-  /** Display name. */
   name: string
-  /** Reasoning efforts that the model accepts. */
   efforts: Harness.Thinking[]
-  /** Default reasoning effort. */
   effort: Harness.Thinking
-  /** Largest output in tokens. */
   maxTokens?: number
   serviceTier?: Harness.ServiceTier
 }
 
-/** Returns the selection that a request names, or `undefined` when the harness, model, or effort is not offered. */
 export function select(
   harnesses: readonly SelectionHarness[],
   options: select.Options,
@@ -80,11 +62,8 @@ export function select(
 
 export declare namespace select {
   type Options = {
-    /** Requested effort. Defaults to the model's effort. */
     effort?: unknown
-    /** Requested harness ID. */
     harness: unknown
-    /** Requested model ID. */
     model: unknown
   }
 }
@@ -119,7 +98,6 @@ function carried(value: unknown): Attachments.File[] | string {
   return value as Attachments.File[]
 }
 
-/** Returns the route handlers and the agent of a nanocode deployment on Vercel. */
 export function create(options: create.Options) {
   const {
     harnesses,
@@ -374,37 +352,19 @@ export declare namespace create {
     Harness.create.Options,
     'provider' | 'model' | 'thinking' | 'tools' | 'durability'
   > & {
-    /** Returns the account that a new session runs as, such as a signed-in user's ID, which `subscription` receives. */
     account?(request: Request): string | null | undefined | Promise<string | null | undefined>
-    /** Authorizes requests that start or read sessions. Production deployments need one. */
     authorize?: Authorize
-    /** Whether `chaos.POST` arms crashes for tests. */
     chaos?: boolean
-    /** Time in milliseconds that the drive keeps for itself before its deadline. */
     deadlineMarginMs?: number
-    /** Selection of a session that names no harness or model. Defaults to the first model of the first harness. */
     defaultSelection?: Selection
-    /** Time in milliseconds that a request drives the session before it hands off to the queue. */
     directDriveMs?: number
-    /** Defaults to `on`. */
     durability?: 'on' | 'strict'
-    /** Harnesses and models that sessions can select. */
     harnesses: SelectionHarness[]
-    /** Whether the kernel publishes timing marks. */
     marks?: boolean
-    /**
-     * ChatGPT and Claude plans of the deployment's accounts, sealed with `PLAN_SECRET`: a signed-in account's model
-     * requests go out on its plan instead of the AI Gateway, and `plans` in the result are the sign-in route
-     * handlers. Needs `account`.
-     */
     plans?: Plans.Options
-    /** Largest prompt in characters. */
     maxPromptCharacters?: number
-    /** Whether the kernel runs ahead of the log with `on` durability. */
     runAhead?: boolean
-    /** Host tools. */
     tools?: HostTool[]
-    /** Audience of the session's traces. Defaults to `public` for public deployments. */
     traceAudience?: string
   }
 }

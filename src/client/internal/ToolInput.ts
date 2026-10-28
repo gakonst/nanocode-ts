@@ -1,21 +1,8 @@
-/**
- * Streaming reader of a tool call's JSON arguments, which reads top-level string fields before the
- * object closes.
- *
- * @module
- */
-
-/** Reader of one tool call's streamed arguments. */
 export type ToolInput = {
-  /** Top-level string fields read so far. */
   readonly fields: Map<string, string>
-  /** Arguments text received so far. */
   readonly raw: string
-  /** Returns the fields as an object, or the raw text when the arguments are not an object. */
   arguments(): unknown
-  /** Reads the next delta of the arguments text. */
   push(delta: string): void
-  /** Returns the fields as display text, or the raw text when no field was read. */
   text(): string
 }
 
@@ -23,7 +10,6 @@ const escapes: Record<string, string> = { b: '\b', f: '\f', n: '\n', r: '\r', t:
 
 const special = /["\\]/g
 
-/** Creates a reader with no arguments text. */
 export function create(): ToolInput {
   const fields = new Map<string, string>()
   let depth = 0

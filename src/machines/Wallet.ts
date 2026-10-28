@@ -1,9 +1,3 @@
-/**
- * Tempo Wallet access keys of nanocode machines: approval, publication on Tempo, balances, and
- * revocation. Wallet libraries load on first use.
- *
- * @module
- */
 import type { KeyAuthorization } from 'ox/tempo'
 import type { Address, Client, Hash, Hex, Transport } from 'viem'
 import type * as Chains from 'viem/tempo/chains'
@@ -27,7 +21,6 @@ function load() {
   return (loaded ??= modules())
 }
 
-/** Loads the wallet libraries when the browser is idle. */
 export function preload() {
   const start = () =>
     void load().catch(() => {
@@ -37,7 +30,6 @@ export function preload() {
   else setTimeout(start, 1000)
 }
 
-/** MACH token on Tempo. */
 export const mach = {
   address: '0x20c000000000000000000000f37de3740adec032',
   chainId: 4217,
@@ -45,22 +37,17 @@ export const mach = {
   symbol: 'MACH',
 } as const
 
-/** USDC.e token on Tempo, which pays transaction fees. */
 export const usdc = {
   address: '0x20c000000000000000000000b9537d11c60e8b50',
   symbol: 'USDC.e',
 } as const
 
-/** MACH limit of a key in base units. */
 export const allowance = 2_000_000n
 
-/** USDC.e fee limit of a key in base units. */
 export const feeAllowance = 100_000n
 
-/** Lifetime of a key in seconds. */
 export const lifetime = 86_400
 
-/** RPC URL of Tempo. */
 export const rpc = 'https://rpc.tempo.xyz'
 
 const escrow: Address = '0x4d50500000000000000000000000000000000000'
@@ -79,37 +66,23 @@ const selectors = {
 
 const storageKey = 'nanocode.machines.wallet'
 
-/** Access key that Tempo Wallet approved, which `localStorage` keeps. */
 export type AccessKey = {
-  /** Address of the wallet. */
   address: Address
-  /** Key authorization that the wallet signed. */
   authorization: KeyAuthorization.Rpc
-  /** Expiry in seconds since the epoch. */
   expiry: number
-  /** Private key. */
   key: Hex
-  /** Address of the key. */
   keyAddress: Address
 }
 
-/** Device code that Tempo Wallet requests the user to approve. */
 export type Prompt = {
-  /** Code to enter. */
   userCode: string
-  /** URL that accepts the code. */
   verificationUri: string
-  /** URL that holds the code. */
   verificationUriFull: string | undefined
 }
 
-/** Wallet options of a page. */
 export type Options = {
-  /** Display name of the site in Tempo Wallet. */
   name: string
-  /** Path of the device code relay. */
   relay: string
-  /** URL of the site in Tempo Wallet. */
   websiteUrl: string
 }
 
@@ -119,7 +92,6 @@ let options: Options = {
   websiteUrl: 'https://nanocode.xyz/machines/',
 }
 
-/** Sets the wallet options of the page, and drops the current wallet provider. */
 export function configure(next: Partial<Options>) {
   options = { ...options, ...next }
   provider = undefined
@@ -129,14 +101,12 @@ let provider: Promise<{ request(request: never): Promise<unknown> }> | undefined
 
 let prompt: (prompt: Prompt) => void = () => {}
 
-/** Whether the page runs in a frame that cannot open Tempo Wallet, such as X's player. */
 export function framed() {
   return document.documentElement.hasAttribute('data-xframe')
 }
 
 let formsBlocked: boolean | undefined
 
-/** Whether the frame's sandbox blocks form submission. */
 export function sandboxed() {
   if (formsBlocked !== undefined) return formsBlocked
   const form = document.createElement('form')
@@ -152,7 +122,6 @@ export function sandboxed() {
   return formsBlocked
 }
 
-/** Sets the receiver of device codes, and returns its removal. */
 export function onPrompt(listener: (prompt: Prompt) => void) {
   prompt = listener
   return () => {
@@ -187,13 +156,11 @@ function wallet() {
   ))
 }
 
-/** Returns a client that reads Tempo. */
 export async function reader(): Promise<Client<Transport, typeof Chains.tempo>> {
   const [, , , , , , { createClient, http }, { tempo }] = await load()
   return createClient({ chain: tempo, transport: http(rpc) })
 }
 
-/** Returns the saved key, or `undefined` when it is absent, expired, or has no fee limit. */
 export function restore(): AccessKey | undefined {
   const saved = localStorage.getItem(storageKey)
   if (!saved) return undefined
@@ -206,7 +173,6 @@ export function restore(): AccessKey | undefined {
   return undefined
 }
 
-/** Requests a new key from Tempo Wallet, and saves and returns it. */
 export async function connect(): Promise<AccessKey> {
   const [, , , { toHex }, { generatePrivateKey }, , { Account }, { tempo }] = await load()
   const key = generatePrivateKey()
@@ -256,7 +222,6 @@ export async function connect(): Promise<AccessKey> {
   return connected
 }
 
-/** Whether Tempo holds the key and has not revoked it. */
 export async function published(connected: AccessKey) {
   const [, , , { isAddressEqual }, , , { Actions }] = await load()
   const metadata = await Actions.accessKey.getMetadata(await reader(), {
@@ -266,7 +231,6 @@ export async function published(connected: AccessKey) {
   return isAddressEqual(metadata.address, connected.keyAddress) && !metadata.isRevoked
 }
 
-/** Publishes the key on Tempo, and returns the transaction hash, or `undefined` when Tempo already holds it. */
 export async function publish(connected: AccessKey): Promise<Hash | undefined> {
   if (await published(connected)) return undefined
   const [
@@ -300,7 +264,6 @@ export async function publish(connected: AccessKey): Promise<Hash | undefined> {
   return receipt.transactionHash
 }
 
-/** Requests Tempo Wallet to revoke the key. */
 export async function revoke(connected: AccessKey) {
   const [, , , { toHex }, , , , { tempo }] = await load()
   await (
@@ -317,18 +280,15 @@ export async function revoke(connected: AccessKey) {
   } as never)
 }
 
-/** Removes the saved key. */
 export function forget() {
   localStorage.removeItem(storageKey)
 }
 
-/** Opens the MACH checkout of Tempo Wallet. */
 export async function fund(connected: AccessKey) {
   const [[{ Mach }], client] = await Promise.all([load(), wallet()])
   return Mach.fund(client as never, { address: connected.address, displayName: options.name })
 }
 
-/** Returns the URL of the MACH checkout in Tempo Wallet. */
 export function fundingUrl(connected: AccessKey) {
   const url = new URL('https://wallet.tempo.xyz/agent')
   url.searchParams.set('action', 'fund')
@@ -338,7 +298,6 @@ export function fundingUrl(connected: AccessKey) {
   return url.toString()
 }
 
-/** Returns an account that signs with the key for the wallet. */
 export async function signer(
   connected: AccessKey,
 ): Promise<ReturnType<typeof Tempo.Account.fromSecp256k1>> {
@@ -346,7 +305,6 @@ export async function signer(
   return Account.fromSecp256k1(connected.key, { access: connected.address })
 }
 
-/** Returns the MACH and fee balances of the wallet, and the MACH that the key may still spend. */
 export async function balances(connected: AccessKey) {
   const [, , , , , , { Actions }] = await load()
   const client = await reader()
@@ -367,12 +325,10 @@ export async function balances(connected: AccessKey) {
   return { balance: balance.amount, fees: fees.amount, remaining }
 }
 
-/** Returns an address or hash cut to its start and end. */
 export function short(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`
 }
 
-/** Returns an amount in base units of a 6-decimal token as decimal text. */
 export function format(atomics: bigint) {
   return `${atomics / 1_000_000n}.${(atomics % 1_000_000n).toString().padStart(6, '0')}`
 }

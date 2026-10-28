@@ -1,12 +1,6 @@
-/**
- * Relays remote hands to a brain that cannot accept sockets, over a relay WebSocket.
- *
- * @module
- */
 import * as Relay from './client/Relay.ts'
 import * as Remote from './Remote.ts'
 
-/** Hand that the relay attached, with its executor and the connection the runtime attaches it as. */
 export type Hand = {
   executor: Remote.Executor<WebSocket>
   name: string | null
@@ -22,7 +16,6 @@ function field(catalog: string, key: 'name' | 'runtime_id'): string | null {
   }
 }
 
-/** Dials the relay as a brain and reports each hand that attaches or leaves until `signal` aborts. */
 export function relay(
   url: string,
   token: string,

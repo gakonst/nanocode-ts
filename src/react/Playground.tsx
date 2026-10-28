@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Playground page that previews the chat in each form factor and theme, with its source.
- *
- * @module
- */
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Config from '../client/Config.ts'
 import {
@@ -32,7 +27,6 @@ import {
 
 export { styles }
 
-/** Form factor of the chat. */
 export type FormFactor = 'button' | 'chat' | 'rewrite'
 
 const forms: readonly { id: FormFactor; label: string; detail: string }[] = [
@@ -102,7 +96,6 @@ const customTokens: Tokens = {
   text: '#ececf4',
 }
 
-/** Playground page. */
 export function Playground(props: Playground.Props) {
   const themes = props.themes ?? defaults
   const [chosen, setChosen] = useState<string>(

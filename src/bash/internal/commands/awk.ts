@@ -1,8 +1,3 @@
-/**
- * The `awk` and `gawk` commands.
- *
- * @module
- */
 import {
   CommandError,
   budget,

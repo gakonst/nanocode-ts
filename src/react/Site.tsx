@@ -1,21 +1,13 @@
-/**
- * Components of the nanocode site pages.
- *
- * @module
- */
 import type { ReactNode } from 'react'
 import { Code } from './index.tsx'
 import * as styles from './Site.styles.ts'
 
 export { styles }
 
-/** Origin of the site. */
 export const origin = 'https://nanocode.xyz'
 
-/** Navigation link. */
 export type Link = { href: string; label: string }
 
-/** Sections of the site. */
 export const sections: readonly Link[] = [
   { href: `${origin}/`, label: 'Home' },
   { href: `${origin}/experiments`, label: 'Experiments' },
@@ -25,7 +17,6 @@ export const sections: readonly Link[] = [
   { href: 'https://github.com/gakonst/nanocode', label: 'GitHub' },
 ]
 
-/** Experiments of the site. */
 export const experiments: readonly Link[] = [
   { href: `${origin}/docs/guides/xframes`, label: 'xframes' },
   { href: `${origin}/machines/`, label: 'nanocode-machines' },
@@ -34,10 +25,8 @@ export const experiments: readonly Link[] = [
   { href: `${origin}/cloudflare/`, label: 'nanocode on Cloudflare' },
 ]
 
-/** Identifier of a demo. */
 export type Demo = 'cloudflare' | 'machines' | 'vercel'
 
-/** Demos with their logos. */
 export const demos: readonly (Link & { id: Demo; logo: string; viewBox: string })[] = [
   {
     href: `${origin}/cloudflare/`,
@@ -62,7 +51,6 @@ export const demos: readonly (Link & { id: Demo; logo: string; viewBox: string }
   },
 ]
 
-/** Site header with navigation. */
 export function Header(props: Header.Props) {
   return (
     <header {...styles.header()}>
@@ -118,7 +106,6 @@ export declare namespace Header {
   }
 }
 
-/** Links to the demos. */
 export function Demos(props: Demos.Props) {
   return (
     <p {...styles.demos()}>
@@ -149,7 +136,6 @@ export declare namespace Demos {
   }
 }
 
-/** Main content. */
 export function Main(props: Main.Props) {
   return <main {...styles.main()}>{props.children}</main>
 }
@@ -160,7 +146,6 @@ export declare namespace Main {
   }
 }
 
-/** Page body. */
 export function Page(props: Page.Props) {
   return <div {...styles.page()}>{props.children}</div>
 }
@@ -171,7 +156,6 @@ export declare namespace Page {
   }
 }
 
-/** Page title. */
 export function Title(props: Title.Props) {
   return (
     <h1>
@@ -194,7 +178,6 @@ export declare namespace Title {
   }
 }
 
-/** Lead paragraph. */
 export function Lead(props: Lead.Props) {
   return <p {...styles.lead()}>{props.children}</p>
 }
@@ -205,7 +188,6 @@ export declare namespace Lead {
   }
 }
 
-/** Documentation body. */
 export function Docs(props: Docs.Props) {
   return <article {...styles.docs()}>{props.children}</article>
 }
@@ -216,7 +198,6 @@ export declare namespace Docs {
   }
 }
 
-/** Labeled code block. */
 export function Block(props: Block.Props) {
   return (
     <div {...styles.block()}>
@@ -238,7 +219,6 @@ export declare namespace Block {
   }
 }
 
-/** Mermaid diagram source. */
 export function Diagram(props: Diagram.Props) {
   return (
     <div {...styles.block()}>
@@ -255,7 +235,6 @@ export declare namespace Diagram {
   }
 }
 
-/** Grid of cards. */
 export function Cards(props: Cards.Props) {
   return <div {...styles.cards()}>{props.children}</div>
 }
@@ -266,7 +245,6 @@ export declare namespace Cards {
   }
 }
 
-/** Link card. */
 export function Card(props: Card.Props) {
   return (
     <a href={props.href} {...styles.card()}>

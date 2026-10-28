@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Markdown renderer of streamed assistant text, which `Markdown` loads on first use.
- *
- * @module
- */
 import { isValidElement, type JSX, type ReactNode, useMemo, useRef } from 'react'
 import {
   type Components,

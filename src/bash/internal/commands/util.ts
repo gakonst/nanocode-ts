@@ -1,8 +1,3 @@
-/**
- * Argument parsing, input, and link helpers that the commands share.
- *
- * @module
- */
 import { CommandError, budget, type CommandContext, type Input, type Limits } from '../Shell.ts'
 import { FsError, type FileSystem, type LinkStat } from '../../FileSystem.ts'
 import { byte, decode } from '../Fs.ts'

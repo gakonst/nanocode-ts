@@ -1,106 +1,60 @@
-/**
- * Browser transcript: folds live events into entries, reveals streamed text over animation frames,
- * and groups entries into turns.
- *
- * @module
- */
 import type * as Files from '../internal/Files.ts'
 import * as Format from './internal/Format.ts'
 import * as ToolInput from './internal/ToolInput.ts'
 import * as LiveEvent from './LiveEvent.ts'
 import * as Tool from './Tool.ts'
 
-/** Activity of a turn, for a status line. */
 export type Activity = {
-  /** Whether a turn is in progress. */
   busy: boolean
-  /** Phase of the turn. */
   phase: ActivityPhase
-  /** Display name of the running tool, when the phase is `running`. */
   tool?: string
 }
 
-/** Phase of a turn. */
 export type ActivityPhase = 'idle' | 'waiting' | 'thinking' | 'writing' | 'running'
 
-/** One posted item of a transcript. */
 export type Entry = {
-  /** Kind of the entry. */
   kind: EntryKind
-  /** Text of the entry, or the summary of its tool cell. */
   text: string
-  /** Tool cell, for a `tool` entry that a tool call posted. */
   tool?: Tool.Cell
-  /** Start time in milliseconds since the epoch. */
   started_at?: number
-  /** End time in milliseconds since the epoch. */
   ended_at?: number
-  /** Whether a user entry steered a running turn. */
   steer?: boolean
-  /** Files attached to a user entry. */
   attachments?: Files.Attachment[]
 }
 
-/** Kind of a transcript entry. */
 export type EntryKind = 'assistant' | 'error' | 'reasoning' | 'tool' | 'user'
 
-/** Serializable state of the live part of a transcript, which `restore` reads back. */
 export type State = {
-  /** Tool cells that still run. */
   running: Tool.Cell[]
-  /** Streamed text that is not posted yet. */
   stream: Omit<Stream, 'shown'>
-  /** Yielded code cells and the call that continues each one. */
   links: [string, { cell: string; latest: string }][]
-  /** Running children of yielded calls, by the yielded call. */
   orphans: [string, Tool.Cell[]][]
-  /** Identifiers of calls that ended. */
   ended?: string[]
-  /** Fingerprints of the events read, by sequence number. */
   seen?: [number, string][]
-  /** Length of the text read for each streamed item. */
   received?: [string, number][]
 }
 
-/** Transcript of one conversation. */
 export type Transcript = {
-  /** Posts `entry` after the current assistant paragraph completes. */
   aside(entry: Entry): void
-  /** Ends the turn after the queued events, and cancels the running tool cells. */
   close(): void
-  /** Whether queued events are not folded yet. */
   pending(): boolean
-  /** Queues one live event. Events that repeat a sequence number or text already read are dropped. */
   push(event: LiveEvent.LiveEvent): void
-  /** Drops the queue and the live state. */
   reset(): void
-  /** Reads back the live state that `state` returned. */
   restore(state: State | undefined): void
-  /** Runs `callback` after the queued events. */
   run(callback: () => void): void
-  /** Returns the live state, with each tool text cut to `limit` characters. */
   state(limit?: number): State
 }
 
-/** Turn of a conversation: one prompt and the blocks that answer it. */
 export type Turn = {
-  /** Identifier of the turn, from the index of its first entry. */
   id: string
-  /** User entry that started the turn, or `undefined` for entries before the first prompt. */
   prompt: Entry | undefined
-  /** Blocks of the turn, with adjacent assistant and reasoning text merged. */
   blocks: TurnBlock[]
-  /** Whether the turn is in progress. */
   live: boolean
-  /** Start time in milliseconds since the epoch. */
   started_at?: number
-  /** End time in milliseconds since the epoch, once the turn ended. */
   ended_at?: number
 }
 
-/** Block of a turn. */
 export type TurnBlock = Entry & {
-  /** Whether the block is still live. */
   live: boolean
 }
 
@@ -128,7 +82,6 @@ const seenLimit = 4096
 
 const toolEvents = new Set(['tool_input', 'tool_start', 'tool_output', 'tool_end'])
 
-/** Returns the activity of a turn from its live entries. */
 export function activity(live: readonly Entry[], options: activity.Options): Activity {
   if (!options.pending) return { busy: false, phase: 'idle' }
   const last = live[live.length - 1]
@@ -141,12 +94,10 @@ export function activity(live: readonly Entry[], options: activity.Options): Act
 
 export declare namespace activity {
   type Options = {
-    /** Whether a turn is in progress. */
     pending: boolean
   }
 }
 
-/** Creates a transcript that posts entries and live entries through the callbacks of `options`. */
 export function create(options: create.Options): Transcript {
   const calls = new Map<string, Tool.Cell>()
   const consumed = new Map<string, number>()
@@ -538,28 +489,18 @@ export function create(options: create.Options): Transcript {
 
 export declare namespace create {
   type Options = {
-    /** Posts one complete entry. */
     add(entry: Entry): void
-    /** Receives one event that folds into no entry, such as a host's own event. */
     apply?(event: LiveEvent.LiveEvent): void
-    /** Receives each event after it is folded. */
     checkpoint?(event: LiveEvent.LiveEvent): void
-    /** Receives the status of each turn that ended. */
     end?(status: Tool.Status): void
-    /** Delay in milliseconds between reveal frames. Defaults to 16. */
     frameMs?: number | undefined
-    /** Largest number of result characters in a described event. Defaults to 160. */
     limit?: number | undefined
-    /** Receives the live entries: running tool cells and the streamed text. */
     live(entries: Entry[]): void
-    /** Whether to reveal streamed text at once. */
     reducedMotion?(): boolean
-    /** Time constant in milliseconds of the text reveal. `0` reveals text at once. Defaults to 30. */
     revealMs?: number | undefined
   }
 }
 
-/** Returns the entry that a non-text event posts, or `undefined` when it posts none. */
 export function describe(
   event: LiveEvent.LiveEvent,
   options: describe.Options = {},
@@ -602,12 +543,10 @@ export function describe(
 
 export declare namespace describe {
   type Options = {
-    /** Largest number of result characters in the entry. Defaults to 160. */
     limit?: number | undefined
   }
 }
 
-/** Groups posted and live entries into turns. */
 export function turns(entries: readonly Entry[], options: turns.Options = {}): Turn[] {
   const { live = [], pending = false } = options
   const result: Turn[] = []
@@ -653,9 +592,7 @@ export function turns(entries: readonly Entry[], options: turns.Options = {}): T
 
 export declare namespace turns {
   type Options = {
-    /** Live entries, which follow the posted entries. */
     live?: readonly Entry[] | undefined
-    /** Whether a turn is in progress, which marks the last turn live. */
     pending?: boolean | undefined
   }
 }

@@ -1,9 +1,3 @@
-/**
- * Egress binding over Cloudflare AI Gateway: it serves the runtime's model requests and warm-ups
- * through the Workers AI binding, with a deadline on the first byte of each response.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 import type * as App from './App.ts'
 
@@ -323,10 +317,6 @@ async function warm(
   })
 }
 
-/**
- * Returns an egress binding that sends model requests through the AI Gateway `options.id` of
- * `ai`. A request whose first byte misses the deadline returns a retryable 504.
- */
 export function create(ai: Ai, options: create.Options): App.PrivateBinding {
   const firstByteMs = options.firstByteMs ?? 45_000
   const gateway = options.id
@@ -362,11 +352,8 @@ export function create(ai: Ai, options: create.Options): App.PrivateBinding {
 
 export declare namespace create {
   type Options = {
-    /** Deadline in milliseconds for the first byte of a model response. Defaults to 45 seconds. */
     firstByteMs?: number | undefined
-    /** Name of the AI Gateway. */
     id: string
-    /** OpenAI service tier of Codex requests, such as `priority`. Defaults to none. */
     serviceTier?: string | undefined
   }
 }

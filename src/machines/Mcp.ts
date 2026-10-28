@@ -1,19 +1,10 @@
-/**
- * Paid MCP servers: which URLs they serve, and the payment challenge and receipt of each tool call.
- *
- * @module
- */
 const decoder = new TextDecoder()
 
-/** Paid MCP server. */
 export type Server = {
-  /** Name of the server. */
   name: string
-  /** URL of the server's MCP endpoint. */
   url: string
 }
 
-/** Default paid MCP servers. */
 export const servers: readonly Server[] = [
   { name: 'mercator', url: 'https://mercator.sh/mcp' },
   { name: 'gateway', url: 'https://gateway.tempo-dev.workers.dev/mcp' },
@@ -28,25 +19,17 @@ type Message = {
   result?: { _meta?: Record<string, unknown> }
 }
 
-/** Tool call to a paid MCP server. */
 export type Call = {
-  /** Payment challenge that the call answers. */
   challenge?: Challenge
-  /** URL of the server, followed by the tool name. */
   url: string
 }
 
-/** Payment result of a tool call. */
 export type Outcome = {
-  /** Description of the payment challenge. */
   description?: string
-  /** Payment receipt of the call. */
   receipt?: { channelId?: string; intent?: string; spent?: string }
-  /** Whether the call requires a payment. */
   required: boolean
 }
 
-/** Whether `url` is the endpoint of one server in `list`. */
 export function server(url: string, list: readonly Server[] = servers) {
   if (!URL.canParse(url)) return false
   const { origin, pathname } = new URL(url)
@@ -61,7 +44,6 @@ function parse(text: string | undefined): Message | undefined {
   }
 }
 
-/** Returns the tool call that a request makes, or `undefined` when it calls no tool. */
 export async function call(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -82,7 +64,6 @@ export async function call(
   }
 }
 
-/** Returns the payment result that a tool call's response holds. */
 export async function outcome(response: Response): Promise<Outcome> {
   const type = response.headers.get('content-type') ?? ''
   if (!response.body || !(type.includes('json') || type.includes('event-stream')))
@@ -105,7 +86,6 @@ export async function outcome(response: Response): Promise<Outcome> {
   }
 }
 
-/** Returns the body of a proxied request, as text for an MCP server and as bytes otherwise. */
 export function body(
   request: { body: Uint8Array; endpoint: string; method: string },
   list: readonly Server[] = servers,
@@ -116,7 +96,6 @@ export function body(
     : (request.body as Uint8Array<ArrayBuffer>)
 }
 
-/** Returns `init` without the headers that a cross-origin MCP request must not send. */
 export function crossOrigin(init: RequestInit | undefined): RequestInit {
   const headers = new Headers(init?.headers)
   headers.delete('accept-payment')

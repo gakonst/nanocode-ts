@@ -1,9 +1,3 @@
-/**
- * Machines chat: a chat store whose turns run in the Worker's cloud session and pay with the
- * connected Tempo Wallet key, plus the slash commands and the text that its pages show.
- *
- * @module
- */
 import * as Config from '../client/Config.ts'
 import * as LiveEvent from '../client/LiveEvent.ts'
 import type * as Transcript from '../client/Transcript.ts'
@@ -12,17 +6,12 @@ import type * as Models from './Models.ts'
 import * as Payment from './Payment.ts'
 import * as Wallet from './Wallet.ts'
 
-/** Runtime of one machines chat, which its React hook reads. */
 export type Runtime = {
-  /** Returns the model of the next turn. */
   model: () => Models.Model
-  /** Options that created the chat. */
   options: create.Options
-  /** Resolved payment policy. */
   payment: Payment.Policy
 }
 
-/** Slash commands of a machines chat, in display order. */
 export const commands = [
   { detail: 'connect Tempo Wallet and approve a key that pays for this agent', label: '/login' },
   { detail: 'show your MACH and what the key may still spend', label: '/wallet' },
@@ -33,10 +22,8 @@ export const commands = [
   { detail: 'list the commands', label: '/help' },
 ] as const
 
-/** Limits of an approved key, as interface text. */
 export const limits = `at most ${amount(Wallet.allowance)} MACH, plus ${amount(Wallet.feeAllowance)} ${Wallet.usdc.symbol} for fees, until it expires a day later`
 
-/** Slash commands of a chat that unlocks paid tools with a key, in display order. */
 export const unlockCommands = [
   { detail: 'connect Tempo Wallet to unlock paid tools', label: '/login' },
   { detail: 'show your MACH and what the key may still spend', label: '/wallet' },
@@ -44,12 +31,10 @@ export const unlockCommands = [
   { detail: 'revoke the key in Tempo Wallet and forget it here', label: '/logout' },
 ] as const
 
-/** Returns a MACH amount in base units as decimal text without trailing zeros. */
 export function amount(atomics: bigint) {
   return Wallet.format(atomics).replace(/\.?0+$/, '')
 }
 
-/** Creates the chat store and runtime of a machines chat. */
 export function create(options: create.Options) {
   const payment = Payment.resolve(options.payment)
   const runtime: Runtime = { model: options.model, options, payment }
@@ -95,23 +80,17 @@ export function create(options: create.Options) {
 
 export declare namespace create {
   type Options = {
-    /** Storage key prefix of the conversations. */
     history: string
-    /** Returns the model of the next turn. */
     model: () => Models.Model
-    /** Payment configuration. */
     payment?: Payment.Config
-    /** Example prompt that the greeting suggests. */
     suggestion?: string
   }
 }
 
-/** Returns the message of a thrown value. */
 export function message(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Returns the expiry of a key as local date and time text. */
 export function until(key: Wallet.AccessKey) {
   return new Date(key.expiry * 1000).toLocaleString(undefined, {
     day: 'numeric',

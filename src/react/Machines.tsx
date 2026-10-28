@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * React components and hooks of nanocode machines: login, wallet, spend, and paid tool unlocks.
- *
- * @module
- */
 import {
   Fragment,
   type MouseEvent,
@@ -30,7 +25,6 @@ import {
 import type * as Mcp from '../machines/Mcp.ts'
 import { useConfig, useConversations, useHand, usePart, useSend, useTranscript } from './index.tsx'
 
-/** Returns the state and commands of a machines chat. */
 export function useMachine(runtime: Machine.Runtime, options: useMachine.Options) {
   const { model } = options
   const { servers } = runtime.payment
@@ -242,9 +236,7 @@ export function useMachine(runtime: Machine.Runtime, options: useMachine.Options
 
 export declare namespace useMachine {
   type Options = {
-    /** Whether to post the login greeting. Defaults to `true`. */
     greet?: boolean | undefined
-    /** Model of the chat's turns. */
     model: Models.Model
   }
 
@@ -332,7 +324,6 @@ function guard(event: MouseEvent<HTMLAnchorElement>, note: Note) {
   )
 }
 
-/** Shared state of a chat that pays with a key. */
 export type Keyed = {
   busy: boolean
   command(text: string, echo?: boolean): Promise<void>
@@ -344,7 +335,6 @@ export type Keyed = {
   working: boolean
 }
 
-/** State of a chat that unlocks paid tools with a key. */
 export type Unlocking = Keyed & {
   checkout: { address: string; url: string } | undefined
   connected: Wallet.AccessKey | undefined
@@ -354,7 +344,6 @@ export type Unlocking = Keyed & {
   handles(text: string): boolean
 }
 
-/** Returns the state and commands of a chat that unlocks paid tools with a key. */
 export function useUnlock(
   keyring: Keyring.Keyring,
   options: { servers?: readonly Mcp.Server[]; scripts?: boolean } = {},
@@ -479,10 +468,8 @@ export function useUnlock(
 
 const bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as const
 
-/** Source of a spend ledger. */
 export type Source = Pick<Payments.Client, 'ledger' | 'subscribe'>
 
-/** Returns the spend of a ledger, with its rate and recent services. */
 export function useSpend(source: Source, window: number = Payments.window) {
   const ledger = useSyncExternalStore(source.subscribe, source.ledger, source.ledger)
   const [now, setNow] = useState(() => Date.now())
@@ -521,7 +508,6 @@ function spark(service: Payments.Service, now: number, window: number) {
     .join('')
 }
 
-/** Spend of a ledger by service. */
 export function Spend(props: Spend.Props) {
   const part = usePart()
   const { ledger, rate, services } = useSpend(props.source, props.window)
@@ -554,7 +540,6 @@ export declare namespace Spend {
   }
 }
 
-/** Spend meter with a rate graph. */
 export function Meter(props: Meter.Props) {
   const part = usePart()
   const { ledger, rate, services } = useSpend(props.source, props.window)
@@ -604,7 +589,6 @@ export declare namespace Meter {
   }
 }
 
-/** Device code and checkout prompts of the wallet. */
 export function Prompts(props: Prompts.Props) {
   const part = usePart()
   const { checkout, device, open } = props.machine
@@ -638,7 +622,6 @@ export declare namespace Prompts {
   }
 }
 
-/** Login prompt of a machines chat. */
 export function SignIn(props: SignIn.Props) {
   const part = usePart()
   const { machine } = props
@@ -672,7 +655,6 @@ export declare namespace SignIn {
   }
 }
 
-/** Wallet account of a machines chat. */
 export function Account(props: Account.Props) {
   const part = usePart()
   const { machine } = props
@@ -735,7 +717,6 @@ export declare namespace Account {
   }
 }
 
-/** Connect prompt of the paid tools. */
 export function Unlock(props: Unlock.Props) {
   const part = usePart()
   const { machine } = props
@@ -767,12 +748,10 @@ function blocked(cell: Tool.Cell | undefined): boolean {
   return Boolean(cell && (Payment.needsWallet(cell.output) || cell.children.some(blocked)))
 }
 
-/** Whether an entry is the refusal of a paid call before a wallet connects. */
 export function needsWallet(entry: Transcript.Entry) {
   return blocked(entry.tool)
 }
 
-/** Connect card in place of a refused paid call. */
 export function WalletCard(props: WalletCard.Props) {
   const part = usePart()
   const { entries } = useTranscript()
@@ -836,7 +815,6 @@ export declare namespace WalletCard {
   }
 }
 
-/** Returns the `after` renderer that places wallet cards in the transcript. */
 export function walletCards(machine: Keyed) {
   return (entry: Transcript.Entry) => (
     <Fragment>{needsWallet(entry) && <WalletCard entry={entry} machine={machine} />}</Fragment>

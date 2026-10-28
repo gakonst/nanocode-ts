@@ -1,14 +1,7 @@
-/**
- * Egress binding of nanocode machines: it pays for model requests over MPP with the account's
- * wallet, and serves no model sockets or remote executors.
- *
- * @module
- */
 import type * as App from '../../cloudflare/App.ts'
 import { json } from '../Account.ts'
 import * as Env from './Env.ts'
 
-/** MPP proxy of each model API host. */
 export const proxies: Record<string, string> = {
   'api.openai.com': 'https://openai.mpp.tempo.xyz',
   'api.anthropic.com': 'https://anthropic.mpp.tempo.xyz',
@@ -56,7 +49,6 @@ async function model(env: Env.Env, request: Request): Promise<Response> {
   )
 }
 
-/** Returns the egress binding of `env`. */
 export function create(env: Env.Env): App.PrivateBinding {
   return {
     async fetch(request: Request): Promise<Response> {

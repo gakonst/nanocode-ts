@@ -1,9 +1,3 @@
-/**
- * Ambient declarations of the WebAssembly modules and the Pyodide modules that the Worker imports.
- *
- * @module
- */
-
 declare module '*.wasm' {
   const module: WebAssembly.Module
   export default module

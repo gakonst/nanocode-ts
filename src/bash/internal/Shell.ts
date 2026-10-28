@@ -1,8 +1,3 @@
-/**
- * Bash interpreter: the runner, its state, pipes, builtins, and the command contract.
- *
- * @module
- */
 import { FsError, resolvePath, type FileSystem } from '../FileSystem.ts'
 import { decode, masked, encode, rejoin } from './Fs.ts'
 import {
@@ -25,23 +20,14 @@ import { ArithError, evaluateArith, type ArithValue } from './Arith.ts'
 import { escapeRegExp, globSource, hasGlob, posixRegExp } from './Text.ts'
 import { TestError, evaluateTest, type TestArg } from './Condition.ts'
 
-/** Resource limits of one shell. */
 export type Limits = {
-  /** Largest buffered pipe or command input in characters. */
   maxBufferLength: number
-  /** Deepest nesting of function calls and sources. */
   maxCallDepth: number
-  /** Most commands that one `exec` runs. */
   maxCommands: number
-  /** Most file system operations that one `exec` performs. */
   maxFileOperations: number
-  /** Most iterations of one loop. */
   maxLoopIterations: number
-  /** Memory budget in bytes for commands that hold whole inputs. */
   maxMemoryBytes: number
-  /** Most characters of stdout and of stderr that `exec` returns. Later output is cut. */
   maxOutputLength: number
-  /** Deadline of one `exec` in milliseconds. */
   timeoutMs: number
 }
 
@@ -77,10 +63,8 @@ export function append<T>(target: T[], items: readonly T[]) {
   for (let i = 0; i < items.length; i++) target.push(items[i]!)
 }
 
-/** Failure of a command. The shell writes the message to stderr and exits with `status`. */
 export class CommandError extends Error {
   override readonly name = 'Command.CommandError'
-  /** Exit status of the command. Defaults to 1. */
   readonly status: number
   constructor(message: string, status = 1) {
     super(message)
@@ -120,7 +104,6 @@ class LoopSignal {
   }
 }
 
-/** Write to a pipe whose reader closed. Commands stop quietly when they catch it. */
 export class PipeError extends Error {
   override readonly name = 'Command.PipeError'
   constructor() {
@@ -503,43 +486,25 @@ export type Fd = { input?: Input; output?: Output; close?: () => void }
 
 export type IO = { stdin: Input; stdout: Output; stderr: Output; fds?: Map<number, Fd> }
 
-/** Context of one command invocation. */
 export type CommandContext = {
-  /** Arguments after the command name. */
   args: string[]
-  /** Working directory. */
   cwd: string
-  /** Exported environment variables. */
   env: Record<string, string>
-  /** Runs a script in a subshell and returns its status and stdout. */
   exec(script: string, stdin?: string): Promise<{ status: number; stdout: string }>
-  /** Network fetch of the shell. Absent when the shell has no network access. */
   fetch?: typeof fetch
-  /** File system of the shell, with the umask applied. */
   fs: FileSystem
-  /** Limits of the shell. */
   limits: Limits
-  /** Name that invoked the command. */
   name: string
-  /** Returns `path` resolved against `cwd`. */
   resolve(path: string): string
-  /** Runs another command and returns its exit status. */
   run(argv: string[], stdin?: string): Promise<number>
-  /** Aborts when the execution times out or is cancelled. */
   signal: AbortSignal
-  /** Waits `ms` milliseconds, or until `signal` aborts. */
   sleep(ms: number): Promise<void>
-  /** Standard error. */
   stderr: Output
-  /** Standard input. */
   stdin: Input
-  /** Standard output. */
   stdout: Output
-  /** File mode creation mask, such as `0o022`. */
   umask: number
 }
 
-/** Command implementation. It returns the exit status, or nothing for 0. */
 export type CommandHandler = (context: CommandContext) => Promise<number | void> | number | void
 
 const STREAMS = new WeakSet<CommandHandler>()
@@ -577,7 +542,6 @@ const UNREAD = new Set([
   'yes',
 ])
 
-/** Marks `handler` as one that reads stdin as it arrives. Other handlers start after their stdin is complete. */
 export function streaming<T extends CommandHandler>(handler: T): T {
   STREAMS.add(handler)
   return handler

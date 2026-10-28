@@ -1,8 +1,3 @@
-/**
- * The WebAssembly agent runtime: one instance of the nanocode module per session scope, over a host SQL store and the host capabilities in `Contracts`.
- *
- * @module
- */
 import * as Contracts from './Contracts.ts'
 import * as Mcp from './Mcp.ts'
 import * as Timing from './Timing.ts'
@@ -21,7 +16,6 @@ type Socket = {
   timing: Contracts.ModelTiming
 }
 
-/** Counters and timings of one runtime since it was instantiated. */
 export type Metrics = {
   wasm_memory_bytes: number
   timing: {
@@ -60,7 +54,6 @@ export type Metrics = {
   bridge_reply_bytes: number
 }
 
-/** Instantiates the module on the calling thread and returns the engine that runs its calls. */
 export async function localEngine(
   module: WebAssembly.Module,
   host: Contracts.EngineHost,
@@ -1499,7 +1492,6 @@ async function create(
 
   return self
 }
-/** Instantiates the module for one SQL host and returns its runtime. */
 export async function instantiate(
   module: WebAssembly.Module,
   sql: Contracts.SqlHost,
@@ -1508,7 +1500,6 @@ export async function instantiate(
   return create(module, sql, options)
 }
 
-/** Encodes a host error for the module. A `RemoteRefusalError` marks its frames as unsent. */
 export function encodeError(error: unknown) {
   return {
     detail: error instanceof Error ? error.message : String(error),
@@ -1516,7 +1507,6 @@ export function encodeError(error: unknown) {
   }
 }
 
-/** Runtime that `instantiate` returns. Its methods run the SDK commands for one SQL host. */
 export type AgentRuntime = Awaited<ReturnType<typeof create>>
 
 const FRAMED = Symbol('framed')
@@ -1559,7 +1549,6 @@ async function shellBytes(
   }
 }
 
-/** Reads a file from a workspace, through its `readBytes` when present, else as base64 over its shell. */
 export async function readBytes(
   workspace: Contracts.WorkspaceHost,
   path: string,
@@ -1596,7 +1585,6 @@ export async function readBytes(
   return out
 }
 
-/** Writes a file to a workspace, through its `writeBytes` when present, else as base64 over its shell. */
 export async function writeBytes(
   workspace: Contracts.WorkspaceHost,
   path: string,

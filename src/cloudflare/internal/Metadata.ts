@@ -1,28 +1,13 @@
-/**
- * Key-value metadata of a session in the `metadata` table, cached in memory after the first read.
- *
- * @module
- */
-
-/** Cached view of the `metadata` table. */
 export type Metadata = {
-  /** Deletes `key`. */
   delete(key: string): void
-  /** Returns the entry with the smallest key that starts with `prefix`. */
   first(prefix: string): [string, string] | undefined
-  /** Returns the value of `key`. */
   get(key: string): string | undefined
-  /** Inserts `key` unless it exists. */
   insert(key: string, value: string): void
-  /** Drops the cache, so the next read loads the table again. */
   reset(): void
-  /** Inserts or replaces `key`. */
   set(key: string, value: string): void
-  /** Runs `operation` in one synchronous transaction, and drops the cache when it throws. */
   transaction<T>(operation: () => T): T
 }
 
-/** Returns the metadata of `storage`. The table must exist before the first read. */
 export function create(storage: DurableObjectStorage): Metadata {
   let values: Map<string, string> | undefined
 

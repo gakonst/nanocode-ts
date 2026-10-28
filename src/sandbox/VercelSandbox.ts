@@ -1,29 +1,15 @@
-/**
- * Workspace host over a Vercel Sandbox: it opens or resumes a named sandbox, extends its lease
- * while commands run, and runs file operations and shell commands in it.
- *
- * @module
- */
 import * as Stream from 'node:stream'
 import { Sandbox, type NetworkPolicy, type SandboxRegion } from '@vercel/sandbox'
 import type * as Contracts from '../Contracts.ts'
 import * as Shell from './internal/Shell.ts'
 
-/** Workspace host over a Vercel Sandbox. */
 export type Workspace = Contracts.WorkspaceHost & {
-  /** Opens the sandbox, once, and returns it. */
   sandbox(): Promise<Sandbox>
-  /** Stops the sandbox. */
   stop(): Promise<void>
 }
 
-/** Lease in milliseconds that a sandbox holds after each operation by default. */
 export const defaultLeaseMs = 5 * 60_000
 
-/**
- * Returns a workspace host over the sandbox named `options.name`. The first operation opens or
- * creates the sandbox, and a new sandbox writes the initial files.
- */
 export function create(options: create.Options): Workspace {
   const cwd = options.cwd ?? Shell.cwd
   const lease = options.leaseMs ?? defaultLeaseMs
@@ -144,33 +130,19 @@ export function create(options: create.Options): Workspace {
 
 export declare namespace create {
   type Options = {
-    /** Access token and project of the Vercel account. When absent, the SDK reads them from the environment. */
     credentials?: { token: string; projectId: string; teamId: string }
-    /** Working directory of the workspace. Defaults to `/workspace`. */
     cwd?: string
-    /** Environment variables of the sandbox. */
     env?: Record<string, string>
-    /** Files to write into a new sandbox's workspace, by path. */
     files?: Record<string, string>
-    /** Image of a new sandbox. */
     image?: string
-    /** Workspace instructions for the model. */
     instructions?: string
-    /** Lease in milliseconds after each operation. Defaults to `defaultLeaseMs`. */
     leaseMs?: number
-    /** Name of the sandbox to open or create. */
     name: string
-    /** Network policy of a new sandbox. */
     networkPolicy?: NetworkPolicy
-    /** Largest output in bytes that a command keeps from each stream. Defaults to 4 MiB. */
     outputLimit?: number
-    /** Whether the sandbox keeps its state after it stops. Defaults to `true`. */
     persistent?: boolean
-    /** Region of a new sandbox. */
     region?: SandboxRegion
-    /** Tags of a new sandbox. */
     tags?: Record<string, string>
-    /** Virtual CPUs of a new sandbox. */
     vcpus?: number
   }
 }

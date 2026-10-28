@@ -1,8 +1,3 @@
-/**
- * The `patch` command.
- *
- * @module
- */
 import { CommandError, type CommandHandler } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
 import { decode, encode, parentOf } from '../Fs.ts'

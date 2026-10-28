@@ -1,8 +1,3 @@
-/**
- * The `yq` command and its YAML parser.
- *
- * @module
- */
 import { CommandError, type CommandHandler } from '../Shell.ts'
 import { decode, encode } from '../Fs.ts'
 

@@ -1,12 +1,5 @@
-/**
- * Live events: the flat events that a transcript folds, converted from the events that a session
- * logs.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 
-/** Flat event of a running turn, such as a text delta, a tool call, or the turn result. */
 export type LiveEvent = { type: string; [field: string]: unknown }
 
 type AgentEvent = { type: string; payload: Record<string, unknown> }
@@ -20,12 +13,10 @@ type LoggedBody = {
   error?: unknown
 }
 
-/** Returns the time of `event` in milliseconds since the epoch, or the current time when it has none. */
 export function at(event: LiveEvent): number {
   return typeof event.at === 'number' ? event.at : Date.now()
 }
 
-/** Converts a logged session event to a live event, or returns `undefined` when it has none. */
 export function fromLogged(logged: Contracts.LoggedEvent): LiveEvent | undefined {
   const body = logged.event as LoggedBody
   const base = {

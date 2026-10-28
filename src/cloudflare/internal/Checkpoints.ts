@@ -1,44 +1,24 @@
-/**
- * Checkpoint store of a session: the SQL host of its runtimes, with per-store counters of the
- * statements and rows of each transaction.
- *
- * @module
- */
 import * as Timing from '../../Timing.ts'
 import * as Sql from '../Sql.ts'
 
-/** One result row. */
 export type Row = Record<string, SqlStorageValue>
 
-/** Counters of the transactions of one store. */
 export type Metrics = {
-  /** Transactions per SDK operation. */
   operations: Record<string, number>
-  /** Statements in all transactions. */
   statements: number
-  /** Point queries outside the SDK's transactions. */
   point_queries: number
-  /** Rows that the transactions read. */
   rows_read: number
-  /** Rows that the transactions wrote. */
   rows_written: number
 }
 
-/** SQL host with counters for the checkpoint store and the event log. */
 export type Checkpoints = Sql.Host & {
-  /** Counters of the event log. */
   readonly log: Metrics
-  /** Counters of the checkpoint store. */
   readonly metrics: Metrics
-  /** Returns the counts of persisted states and records, and the unfinished turns of `scope`. */
   persisted(scope: string): Row | undefined
-  /** Runs one query outside a transaction and returns its first row. */
   row(query: string, ...values: SqlStorageValue[]): Row | undefined
-  /** Durations of the transactions per SDK operation. */
   readonly timings: Timing.Timings
 }
 
-/** Returns the checkpoint store over `storage`. */
 export function create(storage: DurableObjectStorage, options: create.Options = {}): Checkpoints {
   const log = metrics()
   const counters = metrics()
@@ -93,7 +73,6 @@ export function create(storage: DurableObjectStorage, options: create.Options = 
 
 export declare namespace create {
   type Options = {
-    /** Largest bound value in bytes. Defaults to `Sql.valueLimitBytes`. */
     valueLimit?: number | undefined
   }
 }

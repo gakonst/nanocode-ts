@@ -1,8 +1,3 @@
-/**
- * The `sed` command.
- *
- * @module
- */
 import { CommandError, budget, flatten, streaming, type CommandHandler } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
 import { decode, encode } from '../Fs.ts'

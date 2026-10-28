@@ -1,18 +1,10 @@
-/**
- * Keyrings: a server's store of the connected key, which paid tools on that server use.
- *
- * @module
- */
 import type { Status } from './Account.ts'
 import type * as Wallet from './Wallet.ts'
 
-/** `localStorage` key of the visitor identifier. */
 export const visitorKey = 'nanocode.visitor'
 
-/** Request header that carries the visitor identifier. */
 export const visitorHeader = 'x-nanocode-visitor'
 
-/** Returns the visitor identifier of this browser, and creates one when it has none. */
 export function visitor(): string {
   const saved = localStorage.getItem(visitorKey)
   if (saved && /^[0-9a-f]{64}$/.test(saved)) return saved
@@ -23,18 +15,13 @@ export function visitor(): string {
   return created
 }
 
-/** Returns the headers that carry the visitor identifier. */
 export function visitorHeaders(): Record<string, string> {
   return { [visitorHeader]: visitor() }
 }
 
-/** Client of a server's keyring. */
 export type Keyring = {
-  /** Removes the key from the keyring. */
   logout(): Promise<void>
-  /** Stores the key in the keyring once for each scope. */
   register(wallet: Wallet.AccessKey): Promise<void>
-  /** Returns the key's status and spend, or `undefined` when the scope is not ready. */
   status(): Promise<Status | undefined>
 }
 
@@ -47,7 +34,6 @@ async function failure(response: Response) {
   }
 }
 
-/** Creates a client of the keyring at `options.url`. Calls run one at a time. */
 export function create(options: create.Options): Keyring {
   const registered = new Set<string>()
   let queue: Promise<unknown> = Promise.resolve()
@@ -103,11 +89,8 @@ export function create(options: create.Options): Keyring {
 
 export declare namespace create {
   type Options = {
-    /** Returns extra request headers. */
     headers?(): Record<string, string>
-    /** Returns the query that scopes the key, or `undefined` while no scope is ready. */
     scope?(): Promise<Record<string, string> | undefined> | Record<string, string> | undefined
-    /** URL of the keyring. */
     url: string
   }
 }

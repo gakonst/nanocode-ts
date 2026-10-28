@@ -1,9 +1,3 @@
-/**
- * Host tools of nanocode machines: HTTPS requests with the account's secrets, the secret names, the
- * wallet status, and the files of a session in the account's wallet.
- *
- * @module
- */
 import type * as App from '../../cloudflare/App.ts'
 import type * as Contracts from '../../Contracts.ts'
 import * as Env from './Env.ts'
@@ -18,7 +12,6 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
   required,
 })
 
-/** Definitions of the host tools. */
 export const definitions: Contracts.HostTool[] = [
   {
     name: 'http',
@@ -111,7 +104,6 @@ async function http(
     : result
 }
 
-/** Runs one host tool call. Returns `{ error }` when the tool fails, and throws for an unknown tool. */
 export async function call(
   call: App.HostToolCall,
   env: Env.Env,

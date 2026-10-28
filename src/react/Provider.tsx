@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Chat context: the provider that holds the chat store, skin, and highlighter, and the hooks that read them.
- *
- * @module
- */
 import {
   createContext,
   type ReactNode,
@@ -20,13 +15,10 @@ import type * as Tool from '../client/Tool.ts'
 import * as Transcript from '../client/Transcript.ts'
 import type * as Transport from '../client/Transport.ts'
 
-/** Highlighted span of code. */
 export type Token = { content: string; color?: string; italic?: boolean }
 
-/** Returns the highlighted lines of `code`. */
 export type Highlighter = (code: string, language: string) => Token[][]
 
-/** Name of a part that a skin styles. */
 export type Part =
   | 'attach'
   | 'attachment'
@@ -145,16 +137,13 @@ export type Part =
   | 'walletCardText'
   | 'walletCardTitle'
 
-/** State of a part, which renders as `data-*` attributes. */
 export type PartState = Record<string, string | number | boolean | undefined>
 
-/** Attributes of a part. */
 export type PartProps = {
   className?: string
   style?: Record<string, string | number | undefined>
 } & Record<string, unknown>
 
-/** Class names and icons of each part. */
 export type Skin = {
   parts?: Partial<Record<Part, (state: PartState) => PartProps>>
   icons?: Partial<Record<Tool.Cell['status'], string | readonly string[]>>
@@ -164,12 +153,10 @@ const emptySkin: Skin = {}
 
 const SkinContext = createContext<Skin>(emptySkin)
 
-/** Returns the skin of the provider. */
 export function useSkin(): Skin {
   return useContext(SkinContext)
 }
 
-/** Returns the function that resolves the attributes of a part. */
 export function usePart(): (name: Part, state?: PartState) => PartProps {
   const skin = useSkin()
   return useCallback(
@@ -186,7 +173,6 @@ export function usePart(): (name: Part, state?: PartState) => PartProps {
   )
 }
 
-/** Context of the chat store. */
 export const ConfigContext = createContext<Config.Config | undefined>(undefined)
 
 const ExpandedContext = createContext<{
@@ -194,7 +180,6 @@ const ExpandedContext = createContext<{
   toggle(id: string, open?: boolean): void
 }>({ open: new Set(), toggle: () => {} })
 
-/** Returns the expanded cells and their toggle. */
 export function useExpanded(): {
   open: ReadonlySet<string>
   toggle(id: string, open?: boolean): void
@@ -204,14 +189,12 @@ export function useExpanded(): {
 
 const LinkContext = createContext<((href: string) => string | undefined) | undefined>(undefined)
 
-/** Returns the link resolver of the provider. */
 export function useLinks() {
   return useContext(LinkContext)
 }
 
 const HighlightContext = createContext<{ highlighter?: Highlighter; request?(): void }>({})
 
-/** Provides the chat store, skin, highlighter, and link resolver to its children. */
 export function NanocodeProvider(props: NanocodeProvider.Props) {
   const [highlighter, setHighlighter] = useState<Highlighter>()
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
@@ -278,12 +261,10 @@ export declare namespace NanocodeProvider {
   }
 }
 
-/** Loads the Markdown renderer. */
 export function preloadMarkdown(): Promise<unknown> {
   return import('./Streamed.tsx')
 }
 
-/** Returns the chat store, and throws outside `NanocodeProvider`. */
 export function useConfig(): Config.Config {
   const config = useContext(ConfigContext)
   if (!config) throw new Error('useConfig must be used within NanocodeProvider')
@@ -299,7 +280,6 @@ function useChatState<T>(select: (state: Config.State) => T): T {
   )
 }
 
-/** Returns the posted and live entries. */
 export function useTranscript(): {
   entries: readonly Transcript.Entry[]
   live: readonly Transcript.Entry[]
@@ -309,7 +289,6 @@ export function useTranscript(): {
   return useMemo(() => ({ entries, live }), [entries, live])
 }
 
-/** Returns the send and cancel operations and the status of the turn. */
 export function useSend(): {
   send(prompt: string, attachments?: readonly Transport.Attachment[]): Promise<void>
   cancel(): Promise<void>
@@ -331,21 +310,18 @@ export function useSend(): {
   }
 }
 
-/** Returns the turns of the transcript. */
 export function useTurns(): Transcript.Turn[] {
   const { entries, live } = useTranscript()
   const pending = useChatState((state) => state.status === 'pending')
   return useMemo(() => Transcript.turns(entries, { live, pending }), [entries, live, pending])
 }
 
-/** Returns the activity of the current turn. */
 export function useActivity(): Transcript.Activity {
   const live = useChatState((state) => state.live)
   const pending = useChatState((state) => state.status === 'pending')
   return useMemo(() => Transcript.activity(live, { pending }), [live, pending])
 }
 
-/** Returns the assistant text of the last turn and its status. */
 export function useAnswer(): {
   text: string
   prompt: string | undefined
@@ -376,7 +352,6 @@ export function useAnswer(): {
   }
 }
 
-/** Returns the stored conversations and their operations. */
 export function useConversations(): {
   conversations: readonly Config.Conversation[]
   current: string | undefined
@@ -405,14 +380,12 @@ export function useConversations(): {
   }
 }
 
-/** Returns the operation that posts a note. */
 export function useNote(): (kind: Transcript.EntryKind, text: string) => void {
   return useConfig().note
 }
 
 let fallback: Promise<Highlighter> | undefined
 
-/** Returns the highlighter, and loads it when `wanted`. */
 export function useHighlighter(wanted = true): Highlighter | undefined {
   const { highlighter: provided, request } = useContext(HighlightContext)
   const [loaded, setLoaded] = useState<Highlighter>()

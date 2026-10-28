@@ -1,60 +1,36 @@
-/**
- * Browser transport for a nanocode deployment on Vercel: prompts over `POST`, and events over a resumable event stream.
- *
- * @module
- */
 import type * as LiveEvent from '../client/LiveEvent.ts'
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
 import * as ClientTransport from '../client/Transport.ts'
 import * as Files from '../internal/Files.ts'
 
-/** Largest total size in bytes of the attachments of one message. */
 export const attachmentBytes = 3 * 1024 * 1024
 
-/** Event stream cursor of a session's first event. */
 export const firstCursor = '0.0'
 
-/** Model choice that a new session sends. */
 export type Selection = {
-  /** Reasoning effort. Defaults to the model's effort. */
   effort?: string
-  /** Harness ID. */
   harness: string
-  /** Model ID. */
   model: string
 }
 
-/** Saved state of the transport's session. */
 export type Session = {
-  /** Event stream cursor of the last event read. */
   cursor?: string
-  /** Hand channel of the session. */
   hand?: string
-  /** Session ID, once the server started the session. */
   id?: string
-  /** Whether a turn is in flight. */
   open?: boolean
 }
 
-/** Transport of a deployment on Vercel, with its session and hand operations. */
 export type Transport = ClientTransport.Transport &
   Relay.Source & {
-    /** Arms a crash of the session's drive, for tests of a deployment with `chaos`. */
     crash(options?: { at?: 'tool' | 'any'; afterMs?: number }): Promise<Response>
-    /** Clears the session. */
     forget(): void
-    /** Returns the names of the hands attached to the session. */
     hands(): Promise<(string | null)[]>
-    /** Starts the session when it has none, and returns its ID. */
     open(): Promise<string | undefined>
-    /** Returns the session state. */
     session(): Session
-    /** Starts a session for the current selection ahead of the first prompt. */
     warm(): void
   }
 
-/** Returns a browser transport that talks to the route handlers of `App.create`. */
 export function create(options: create.Options): Transport {
   const url = options.url ?? '/api/chat'
   const reconnectMs = options.reconnectMs ?? 1000
@@ -387,21 +363,13 @@ export function create(options: create.Options): Transport {
 
 export declare namespace create {
   type Options = {
-    /** Chaos route. Defaults to `url` with `chat` replaced by `chaos`. */
     chaosUrl?: string
-    /** Returns the hand channel for a session, or for a new session without `session`. */
     hand?(session?: string): Promise<string | undefined>
-    /** Whether new sessions get a random hand channel. */
     hands?: boolean
-    /** Returns headers that every request carries. */
     headers?(): Record<string, string>
-    /** Base delay in milliseconds before a reconnect. Defaults to 1000. */
     reconnectMs?: number
-    /** Returns the model choice of a new session. */
     selection(): Selection
-    /** Loads and saves the session state. */
     session?: { load(): Session; save(session: Session): void }
-    /** Chat route. Defaults to `/api/chat`. */
     url?: string
   }
 }

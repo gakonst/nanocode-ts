@@ -1,8 +1,3 @@
-/**
- * The `make` command.
- *
- * @module
- */
 import { CommandError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { decode } from '../Fs.ts'
 import { globRegExp } from '../Text.ts'

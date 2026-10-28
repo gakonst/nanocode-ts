@@ -1,8 +1,3 @@
-/**
- * The `wat2wasm` command: an assembler of WebAssembly text.
- *
- * @module
- */
 import { CommandError, type CommandContext, type CommandHandler } from '../Shell.ts'
 
 type Node = string | { bytes: Uint8Array } | Node[]

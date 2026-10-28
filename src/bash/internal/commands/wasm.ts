@@ -1,8 +1,3 @@
-/**
- * The `wasm` and `wasmtime` commands, `.wasm` programs, and the WebAssembly cell host of Code Mode.
- *
- * @module
- */
 import { CommandError, LimitError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError, normalize, type FileSystem } from '../../FileSystem.ts'
 import { decode, encode, parentOf } from '../Fs.ts'

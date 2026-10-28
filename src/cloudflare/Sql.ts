@@ -1,52 +1,28 @@
-/**
- * SQL host of the runtime over Durable Object SQLite storage: it runs each transaction of the SDK
- * synchronously, enforces the host's value limit, and reports each transaction to an observer.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 
-/** Cursor of one SQL statement. */
 export type Cursor = {
-  /** Iterates the result rows as arrays. */
   raw(): IterableIterator<Contracts.SqlValue[]>
-  /** Rows that the statement read. */
   readonly rowsRead: number
-  /** Rows that the statement wrote. */
   readonly rowsWritten: number
 }
 
-/** Capabilities of Durable Object storage that the SQL host uses. */
 export type Storage = {
-  /** SQL interface of the storage. */
   readonly sql: { exec(query: string, ...bindings: Contracts.SqlValue[]): Cursor }
-  /** Runs `closure` in one synchronous transaction. */
   transactionSync<T>(closure: () => T): T
 }
 
-/** Measurements of one transaction. */
 export type Observation = {
-  /** Store that the transaction wrote. */
   kind: Contracts.SqlKind
-  /** Operation of the SDK that ran the transaction. */
   operation: string
-  /** Number of statements in the transaction. */
   statements: number
-  /** Rows that the transaction read. */
   rows_read: number
-  /** Rows that the transaction wrote. */
   rows_written: number
-  /** Duration of the transaction in milliseconds. */
   duration_ms: number
 }
 
-/** SQL host over Durable Object storage. */
 export type Host = Contracts.SqlHost & {
-  /** Largest bound value in bytes. */
   readonly value_limit: number
-  /** Storage that the host writes. */
   readonly storage: Storage
-  /** Runs `statements` in one transaction and returns the rows of each statement. */
   transaction(
     kind: Contracts.SqlKind,
     operation: string,
@@ -54,13 +30,8 @@ export type Host = Contracts.SqlHost & {
   ): Contracts.SqlValue[][][]
 }
 
-/** Largest value in bytes that Durable Object SQLite storage binds. */
 export const valueLimitBytes = 8_388_608
 
-/**
- * Returns a SQL host over `storage`. Throws when `options.valueLimit` is not a positive integer.
- * A transaction throws before it starts when a bound value exceeds the limit.
- */
 export function create(storage: Storage, options: create.Options = {}): Host {
   const valueLimit = options.valueLimit ?? valueLimitBytes
   if (!Number.isSafeInteger(valueLimit) || valueLimit <= 0)
@@ -116,9 +87,7 @@ export function create(storage: Storage, options: create.Options = {}): Host {
 
 export declare namespace create {
   type Options = {
-    /** Receives the measurements of each transaction, after it commits or fails. */
     observe?: ((observation: Observation) => void) | undefined
-    /** Largest bound value in bytes. Defaults to `valueLimitBytes`. */
     valueLimit?: number | undefined
   }
 }

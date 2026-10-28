@@ -1,18 +1,11 @@
-/**
- * Key and device routes that the machines and wallet Workers share.
- *
- * @module
- */
 import { device, type Holder, keys } from '../../Account.ts'
 import * as Env from '../Env.ts'
 
-/** Returns the account of a request from the host's own authentication. */
 export type Account<E> = (
   request: Request,
   env: E,
 ) => Promise<string | null | undefined> | string | null | undefined
 
-/** Key handlers whose holders are the wallets of `env`. */
 export function handlers<E extends Env.Env>(account?: Account<E>) {
   return keys<E>({
     holder: (owner, env) => Env.wallet(env, { account: owner }) as unknown as Holder,
@@ -24,10 +17,8 @@ export function handlers<E extends Env.Env>(account?: Account<E>) {
   })
 }
 
-/** Handlers of one deployment. */
 export type Handlers<E extends Env.Env> = ReturnType<typeof handlers<E>>
 
-/** Serves the key routes, or returns `undefined` for another path. */
 export async function routes<E extends Env.Env>(
   keys: Handlers<E>,
   request: Request,
@@ -41,7 +32,6 @@ export async function routes<E extends Env.Env>(
   return undefined
 }
 
-/** Relays the device registration routes, or returns `undefined` for another request. */
 export function relay(request: Request, pathname: string): Promise<Response> | undefined {
   if (
     request.method !== 'POST' ||

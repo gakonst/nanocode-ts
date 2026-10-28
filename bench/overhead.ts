@@ -215,6 +215,6 @@ out.push(
   '',
   'turn = submit to finished turn record (2 model calls with a cell, 1 without); cell = first model response to next model request (cell run plus result handling).',
 )
-mkdirSync('bench/out', { recursive: true })
-writeFileSync('bench/out/overhead-node.txt', out.join('\n') + '\n')
+mkdirSync('output/bench', { recursive: true })
+writeFileSync('output/bench/overhead-node.txt', out.join('\n') + '\n')
 console.log(out.join('\n'))

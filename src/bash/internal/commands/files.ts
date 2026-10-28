@@ -1,8 +1,3 @@
-/**
- * File commands, such as `cat`, `ls`, `cp`, `find`, and `mkdir`.
- *
- * @module
- */
 import { CommandError, streaming, type CommandContext, type CommandHandler } from '../Shell.ts'
 import {
   FsError,

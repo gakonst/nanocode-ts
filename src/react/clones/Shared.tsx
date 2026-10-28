@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Hooks, icons, and types that the clone pages share.
- *
- * @module
- */
 import type * as Tool from '../../client/Tool.ts'
 import type * as Transcript from '../../client/Transcript.ts'
 import {
@@ -17,13 +12,10 @@ import {
 } from 'react'
 import { Code, type Skin, useAttachments, useConfig, useConversations, useSend } from '../index.tsx'
 
-/** Block of a clone turn, with adjacent tool cells grouped. */
 export type Block = Transcript.TurnBlock | { kind: 'tools'; cells: Tool.Cell[]; live: boolean }
 
-/** Model choice of a clone. */
 export type CloneModel = { id: string; label: string; detail?: string }
 
-/** Model picker of a clone. */
 export type ClonePicker = {
   models: readonly CloneModel[]
   current: string
@@ -31,7 +23,6 @@ export type ClonePicker = {
   bound?: boolean
 }
 
-/** Props that the clone pages share. */
 export type CloneProps = {
   actions?: ReactNode
   before?(): Promise<unknown>
@@ -49,7 +40,6 @@ export type CloneProps = {
   warm?(): void
 }
 
-/** Groups adjacent tool blocks. */
 export function grouped(blocks: readonly Transcript.TurnBlock[]): Block[] {
   const result: Block[] = []
   for (const block of blocks) {
@@ -63,14 +53,12 @@ export function grouped(blocks: readonly Transcript.TurnBlock[]): Block[] {
   return result
 }
 
-/** Returns the duration of a block in seconds. */
 export function seconds(block: Transcript.TurnBlock): number | undefined {
   return block.live || block.started_at === undefined || block.ended_at === undefined
     ? undefined
     : Math.max(1, Math.round((block.ended_at - block.started_at) / 1000))
 }
 
-/** Returns a ref that keeps a scroll container at its end. */
 export function useStick(dependency: unknown) {
   const ref = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -90,7 +78,6 @@ export function useStick(dependency: unknown) {
   }
 }
 
-/** Returns the state and handlers of a clone composer. */
 export function useComposer(options: {
   onSend?(): void
   warm?(): void
@@ -149,7 +136,6 @@ export function useComposer(options: {
   }
 }
 
-/** Resumes the current conversation on mount. */
 export function useResume() {
   const config = useConfig()
   const { current } = useConversations()
@@ -158,7 +144,6 @@ export function useResume() {
   }, [current])
 }
 
-/** Code block with a copy button. */
 export function CopyCode(props: CopyCode.Props) {
   const [copied, setCopied] = useState(false)
   const code = props.code.replace(/\n$/, '')
@@ -188,7 +173,6 @@ export declare namespace CopyCode {
   }
 }
 
-/** Returns a greeting for the time of day. */
 export function useGreeting(): string {
   const [hour, setHour] = useState<number>()
   useEffect(() => setHour(new Date().getHours()), [])
@@ -202,7 +186,6 @@ export function useGreeting(): string {
         : 'Good evening'
 }
 
-/** Closes a popup on outside click and on Escape. */
 export function useDismiss(open: boolean, close: () => void) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -223,7 +206,6 @@ export function useDismiss(open: boolean, close: () => void) {
   return ref
 }
 
-/** Returns the open state of the sidebar. */
 export function useSidebar() {
   const wide = () => typeof matchMedia === 'undefined' || matchMedia('(min-width: 768px)').matches
   const [open, setOpen] = useState(true)
@@ -243,7 +225,6 @@ export function useSidebar() {
   }
 }
 
-/** Suggested prompts. */
 export function Prompts(props: Prompts.Props) {
   const { send } = useSend()
   if (!props.prompts?.length) return null
@@ -302,51 +283,43 @@ declare namespace Svg {
   }
 }
 
-/** Arrow up icon. */
 export const ArrowUp = () => (
   <Svg>
     <path d="M12 19V5M5 12l7-7 7 7" />
   </Svg>
 )
-/** Chevron icon. */
 export const Chevron = () => (
   <Svg size={16}>
     <path d="M6 9l6 6 6-6" />
   </Svg>
 )
-/** Check icon. */
 export const Check = () => (
   <Svg size={18}>
     <path d="M5 12.5l4.5 4.5L19 7.5" />
   </Svg>
 )
-/** Compose icon. */
 export const Compose = () => (
   <Svg>
     <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
     <path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z" />
   </Svg>
 )
-/** Plus icon. */
 export const Plus = () => (
   <Svg>
     <path d="M12 5v14M5 12h14" />
   </Svg>
 )
-/** Sidebar icon. */
 export const Sidebar = () => (
   <Svg>
     <rect height="16" rx="3" width="18" x="3" y="4" />
     <path d="M9 4v16" />
   </Svg>
 )
-/** Stop icon. */
 export const Stop = () => (
   <svg aria-hidden="true" height="14" viewBox="0 0 14 14" width="14">
     <rect fill="currentColor" height="12" rx="2" width="12" x="1" y="1" />
   </svg>
 )
-/** Trash icon. */
 export const Trash = () => (
   <Svg size={16}>
     <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />

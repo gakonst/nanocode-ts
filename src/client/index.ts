@@ -1,9 +1,3 @@
-/**
- * Browser client entrypoint: the chat store, its transcript and transport contracts, hand relays,
- * picker items, and plan sign-in. It imports no Node, Worker, or WebAssembly code.
- *
- * @module
- */
 export * as Config from './Config.ts'
 export * as LiveEvent from './LiveEvent.ts'
 export * as Pickers from './Pickers.ts'

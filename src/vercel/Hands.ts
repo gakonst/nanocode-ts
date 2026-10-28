@@ -1,35 +1,21 @@
-/**
- * Hands over Workflow streams: a hand's socket on one Function instance reaches a brain that runs on another.
- *
- * @module
- */
 import type { DriveContext } from 'durable-harness'
 import type * as Contracts from '../Contracts.ts'
 import * as Remote from '../Remote.ts'
 
 type World = DriveContext['world']
 
-/** One JSON line of a hand stream. */
 export type Line = {
-  /** Brain that frames go to or come from. */
   brain?: string
-  /** Catalog frame of a hand that attached. */
   catalog?: string
-  /** Whether the hand's connection closed. */
   closed?: boolean
-  /** Connection of the hand. */
   connection?: string
-  /** Remote frames in order. */
   frames?: string[]
 }
 
-/** Pattern of a hand's connection ID. */
 export const connectionPattern = /^[A-Za-z0-9_-]{8,64}$/
 
-/** Default time in milliseconds that a hand's event stream stays open. */
 export const defaultHoldMs = 240_000
 
-/** Server side of a hand's WebSocket, in the `ws` package's shape. */
 export type Socket = {
   readonly readyState: number
   send(data: string): void
@@ -39,7 +25,6 @@ export type Socket = {
   on(event: 'error', listener: (error: Error) => void): unknown
 }
 
-/** Upgrades a request to a WebSocket and serves it with `handler`, as `@vercel/functions` does. */
 export type UpgradeWebSocket = (
   handler: (socket: Socket) => void | Promise<void>,
   options?: { maxPayload?: number },
@@ -56,7 +41,6 @@ type LocalHand = { connection: string; catalog: string; socket: Socket; brain?: 
 
 const OPEN = 1
 
-// The `Symbol.for` keys are durable: every copy of the package in one process shares these maps.
 const local: Map<string, LocalHand> = ((globalThis as { [key: symbol]: unknown })[
   Symbol.for('nanocode-ts.vercel.hands')
 ] ??= new Map()) as Map<string, LocalHand>
@@ -69,7 +53,6 @@ const encoder = new TextEncoder()
 
 const decoder = new TextDecoder()
 
-/** Returns the Workflow stream names of a session's hands, and of one connection when `connection` is set. */
 export function streams(runId: string, options: streams.Options = {}): streams.ReturnType {
   const connection = options.connection ?? ''
   return {
@@ -81,28 +64,22 @@ export function streams(runId: string, options: streams.Options = {}): streams.R
 
 export declare namespace streams {
   type Options = {
-    /** Connection of one hand. Defaults to an empty string. */
     connection?: string | undefined
   }
 
   type ReturnType = {
-    /** Stream of attach and close lines. */
     attach: string
-    /** Stream of frames from brains to the hand. */
     down: string
-    /** Stream of frames from the hand to brains. */
     up: string
   }
 }
 
-/** Returns a random 32-character hex ID for a hand channel, connection, or brain. */
 export function id(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, '0'),
   ).join('')
 }
 
-/** Returns a writer that appends lines to a stream in call order. */
 export function append(world: World, options: append.Options): (line: Line) => Promise<void> {
   const { name, runId } = options
   let last = Promise.resolve()
@@ -117,9 +94,7 @@ export function append(world: World, options: append.Options): (line: Line) => P
 
 export declare namespace append {
   type Options = {
-    /** Stream name. */
     name: string
-    /** Run of the session. */
     runId: string
   }
 }
@@ -156,7 +131,6 @@ function frameWriter(
   }
 }
 
-/** Yields each line of a stream from `start` with its 1-based index, and follows the stream until it ends or `signal` aborts. */
 export async function* tail(world: World, options: tail.Options): AsyncGenerator<[number, Line]> {
   const { name, runId, signal } = options
   let index = options.start
@@ -199,13 +173,9 @@ export async function* tail(world: World, options: tail.Options): AsyncGenerator
 
 export declare namespace tail {
   type Options = {
-    /** Stream name. */
     name: string
-    /** Run of the session. */
     runId: string
-    /** Stops the generator. */
     signal: AbortSignal
-    /** Index of the first line to read. */
     start: number
   }
 }
@@ -356,7 +326,6 @@ function handName(catalog: string): string | null {
   }
 }
 
-/** Returns the name of the hand attached to a session, or an empty list when none is attached. A hand without a name is `null`. */
 export async function attached(
   world: World,
   options: attached.Options,
@@ -375,15 +344,10 @@ export async function attached(
 
 export declare namespace attached {
   type Options = {
-    /** Run of the session. */
     runId: string
   }
 }
 
-/**
- * Returns a socket to the hand attached to a session: the hand's own socket on this instance, or else its Workflow streams.
- * Throws when no hand is attached.
- */
 export async function dial(world: World, options: dial.Options): Promise<Contracts.MessageSocket> {
   const { runId, signal } = options
   const resumes = options.resumes === true
@@ -494,11 +458,8 @@ export async function dial(world: World, options: dial.Options): Promise<Contrac
 
 export declare namespace dial {
   type Options = {
-    /** Whether the socket waits for the hand to reconnect after it disconnects. */
     resumes?: boolean | undefined
-    /** Run of the session. */
     runId: string
-    /** Stops the search for an attached hand. */
     signal: AbortSignal
   }
 }
@@ -553,10 +514,6 @@ function serveSocket(world: World, sessionId: string, socket: Socket): void {
   socket.on('error', closed)
 }
 
-/**
- * Returns the hand routes of a session: `GET` streams frames to a hand, `POST` accepts its lines, and `SOCKET` serves its WebSocket.
- * Each route admits a hand only on the channel that `owns` accepts.
- */
 export function route(options: route.Options): route.ReturnType {
   const known = new Map<string, Promise<boolean>>()
   const admit = async (
@@ -699,22 +656,15 @@ export function route(options: route.Options): route.ReturnType {
 
 export declare namespace route {
   type Options = {
-    /** Time in milliseconds that an event stream stays open. Defaults to `defaultHoldMs`. */
     holdMs?: number | undefined
-    /** Largest WebSocket frame in bytes. Defaults to 1 MiB. */
     maxFrameBytes?: number | undefined
-    /** Whether `channel` is the hand channel of the session. */
     owns(sessionId: string, channel: string): Promise<boolean>
-    /** Returns the Workflow world. */
     world(): Promise<World>
   }
 
   type ReturnType = {
-    /** Streams the frames that brains send to a hand connection, as Server-Sent Events. */
     GET(request: Request): Promise<Response>
-    /** Appends a hand's catalog, close, or frames to its streams. */
     POST(request: Request): Promise<Response>
-    /** Serves a hand's WebSocket through `upgrade`. */
     SOCKET(request: Request, upgrade: UpgradeWebSocket): Promise<Response>
   }
 }

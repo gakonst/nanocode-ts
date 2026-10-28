@@ -10,6 +10,5 @@
     "src/sandbox/VercelSandbox.ts",
     "src/machines/vercel.ts",
     "src/machines/vercel/*.ts"
-  ],
-  "exclude": ["src/**/*.test.ts"]
+  ]
 }

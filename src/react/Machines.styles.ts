@@ -1,8 +1,3 @@
-/**
- * Skin part styles of the machines components, keyed by part name.
- *
- * @module
- */
 import { style, variants } from './Theme.ts'
 
 export const spend = style({

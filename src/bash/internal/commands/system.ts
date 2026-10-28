@@ -1,8 +1,3 @@
-/**
- * System commands, such as `dd`, `df`, `ps`, and `printenv`.
- *
- * @module
- */
 import { CommandError, budget, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { decode, encode } from '../Fs.ts'
 import { device, options, put } from './util.ts'

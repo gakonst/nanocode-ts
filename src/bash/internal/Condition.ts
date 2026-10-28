@@ -1,8 +1,3 @@
-/**
- * Evaluator of `test`, `[`, and `[[` conditional expressions.
- *
- * @module
- */
 import type { FileStat, LinkStat } from '../FileSystem.ts'
 
 export type TestArg = { text: string; op?: boolean; pattern?: string; regex?: string }

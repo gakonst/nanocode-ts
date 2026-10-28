@@ -1,8 +1,3 @@
-/**
- * The `jq` command.
- *
- * @module
- */
 import { CommandError, type CommandHandler } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
 import { decode } from '../Fs.ts'

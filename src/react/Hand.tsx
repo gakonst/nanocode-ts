@@ -1,15 +1,9 @@
 'use client'
 
-/**
- * Hands: the state of a session's hands, and the commands that connect one.
- *
- * @module
- */
 import { useCallback, useEffect, useState } from 'react'
 import * as Relay from '../client/Relay.ts'
 import { usePart } from './Provider.tsx'
 
-/** Hand status with the commands that connect a hand. */
 export function Hand(props: Hand.Props) {
   const part = usePart()
   const [copied, setCopied] = useState<string | null>(null)
@@ -66,7 +60,6 @@ export declare namespace Hand {
   }
 }
 
-/** Hand state of a session. */
 export type HandState = {
   open: boolean
   access?: Relay.Access
@@ -77,7 +70,6 @@ export type HandState = {
   reset(): void
 }
 
-/** Returns the hand state of a source. */
 export function useHand(source: Relay.Source | undefined): HandState {
   const [open, setOpen] = useState(false)
   const [access, setAccess] = useState<Relay.Access>()
@@ -123,7 +115,6 @@ export function useHand(source: Relay.Source | undefined): HandState {
   return { open, access, hands, error, show, hide: () => setOpen(false), reset }
 }
 
-/** Commands that connect a hand. */
 export function HandConnect(props: HandConnect.Props) {
   const { hand } = props
   const part = usePart()
@@ -156,7 +147,6 @@ export declare namespace HandConnect {
   }
 }
 
-/** Returns the time since `time` as short text. */
 export function ago(time: number): string {
   const seconds = Math.max(0, (Date.now() - time) / 1000)
   if (seconds < 60) return 'just now'

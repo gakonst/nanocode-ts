@@ -1,8 +1,3 @@
-/**
- * Pyodide memory snapshots: the build script writes them and Workers restore them.
- *
- * @module
- */
 import * as Fingerprint from '../../../internal/Fingerprint.ts'
 import type { Pyodide } from '../../Python.ts'
 

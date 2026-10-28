@@ -1,8 +1,3 @@
-/**
- * Search pruning helpers: literal extraction from patterns and read-ahead over indexed file systems.
- *
- * @module
- */
 import type { FileStat, FileSystem } from '../FileSystem.ts'
 
 function inside(path: string, point: string): boolean {

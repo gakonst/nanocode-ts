@@ -1,8 +1,3 @@
-/**
- * Byte encoding, path, and adapter helpers that the shell and its commands share.
- *
- * @module
- */
 import { FsError, type FileSystem, type NewFile } from '../FileSystem.ts'
 
 export function writeMany(fs: FileSystem, dirs: string[], files: NewFile[]): Promise<string[]> {

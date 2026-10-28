@@ -1,9 +1,3 @@
-/**
- * Server side of nanocode machines: the account that holds a sealed access key and pays with it,
- * the key routes, and the payment envelope between Workers.
- *
- * @module
- */
 import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
 import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
 import { Account, Actions, createClient, http } from 'viem/tempo'
@@ -12,11 +6,8 @@ import * as Egress from '../internal/Egress.ts'
 import * as Mcp from './Mcp.ts'
 import * as Payment from './Payment.ts'
 
-/** MACH token on Tempo. */
 export const mach: Address = '0x20c000000000000000000000f37de3740adec032'
-/** RPC URL of Tempo. */
 export const rpc = 'https://rpc.tempo.xyz'
-/** Request header that carries a visitor identifier. */
 export const visitorHeader = 'x-nanocode-visitor'
 const opening = '200000'
 const topUp = '0.2'
@@ -25,7 +16,6 @@ const fileLimit = 1_000_000
 const tokenPattern = /^(0x[0-9a-f]{40})\.[0-9a-f]{64}$/
 const visitorPattern = /^[0-9a-f]{64}$/
 
-/** Access key that an account holds. */
 export type KeyRecord = {
   address: Address
   keyAddress: Address
@@ -34,7 +24,6 @@ export type KeyRecord = {
   expiry: number
 }
 
-/** Storage of an account, such as a Durable Object's storage. */
 export type Store = {
   get<T>(key: string): Promise<T | undefined>
   put(key: string, value: unknown): Promise<void>
@@ -43,7 +32,6 @@ export type Store = {
   update<T>(key: string, change: (value: T | undefined) => T): Promise<T>
 }
 
-/** Key status and spend of an account. */
 export type Status = {
   address?: string
   key_address?: string
@@ -53,7 +41,6 @@ export type Status = {
   calls: Record<string, number>
 }
 
-/** Request options of a call that the account pays. */
 export type Init = {
   method: string
   headers: [string, string][]
@@ -61,7 +48,6 @@ export type Init = {
   signal?: AbortSignal
 }
 
-/** Remote holder of an account's key, such as a Durable Object stub. */
 export type Holder = {
   register(record: KeyRecord, issue?: boolean): Promise<string | undefined>
   authenticate(hash: string): Promise<number | null>
@@ -73,22 +59,18 @@ type Payer = {
   fetch: (input: string, init: RequestInit & { context?: unknown }) => Promise<Response>
 }
 
-/** Returns bytes as lowercase hexadecimal text. */
 export function hex(bytes: ArrayBuffer | Uint8Array): string {
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/** Returns the SHA-256 digest of `text` as hexadecimal text. */
 export async function digest(text: string): Promise<string> {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))
 }
 
-/** Returns a JSON response that caches nothing. */
 export function json(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { 'cache-control': 'no-store' } })
 }
 
-/** Returns the AES-GCM sealer whose key derives from `secret`. */
 export function sealer(secret: string | undefined) {
   let sealing: Promise<CryptoKey> | undefined
   const material = () =>
@@ -135,7 +117,6 @@ export function sealer(secret: string | undefined) {
   }
 }
 
-/** Creates the account over `options.store`. */
 export function create(options: create.Options) {
   const { store } = options
   const servers = options.servers ?? Mcp.servers
@@ -450,28 +431,19 @@ export function create(options: create.Options) {
 
 export declare namespace create {
   type Options = {
-    /** Fetch of the payer's requests. Defaults to the global `fetch`, behind the egress guard. */
     fetch?: typeof fetch
-    /** RPC URL of Tempo. Defaults to `rpc`. */
     rpc?: string
-    /** Whether scripts may pay services through the account. */
     scripts?: boolean
-    /** Secret of at least 32 characters that seals the stored key. */
     secret: string | undefined
-    /** MCP servers whose paid calls the account settles. Defaults to `Mcp.servers`. */
     servers?: readonly Mcp.Server[]
-    /** Storage of the account. */
     store: Store
   }
 }
 
-/** Account of one wallet. */
 export type Account = ReturnType<typeof create>
 
-/** Whether a URL targets a public host. */
 export { publicTarget } from '../internal/Egress.ts'
 
-/** Reads a `/model` or `/pay` envelope request, or returns `undefined` for any other request. */
 export async function envelope(
   request: Request,
   servers: readonly Mcp.Server[] = Mcp.servers,
@@ -494,7 +466,6 @@ export async function envelope(
   }
 }
 
-/** Sends one request through the wallet's `/pay` envelope, which names the target in headers. */
 export async function forward(
   send: (request: Request) => Promise<Response>,
   options: forward.Options,
@@ -518,14 +489,11 @@ export async function forward(
 
 export declare namespace forward {
   type Options = {
-    /** Request options of the call. */
     init?: RequestInit | undefined
-    /** Request or URL of the call. */
     input: RequestInfo | URL
   }
 }
 
-/** Returns a fetch that pays through the holder's account. */
 export function paying(
   holder: () => Pick<Account, 'send'>,
   servers: readonly Mcp.Server[] = Mcp.servers,
@@ -548,7 +516,6 @@ export function paying(
   })
 }
 
-/** Verifies a key registration body against Tempo, and returns the key or an error response. */
 export async function verify(
   body: { address?: string; key_type?: string; private_key?: string } | undefined,
   endpoint = rpc,
@@ -591,13 +558,11 @@ export async function verify(
   )
 }
 
-/** Returns the account identifier of a visitor request, or `null` when it has no valid identifier. */
 export async function visitor(request: Request): Promise<string | null> {
   const id = request.headers.get(visitorHeader) ?? ''
   return visitorPattern.test(id) ? `visitor:${(await digest(id)).slice(0, 40)}` : null
 }
 
-/** Options of the key routes. */
 export type KeysOptions<E> = {
   holder(account: string, env: E): Holder
   account?(request: Request, env: E): Promise<string | null | undefined> | string | null | undefined
@@ -605,7 +570,6 @@ export type KeysOptions<E> = {
   extra?(account: string, env: E): Promise<Record<string, unknown>>
 }
 
-/** Returns the handlers of the key routes: register, status, and logout. */
 export function keys<E>(options: KeysOptions<E>) {
   async function principal(
     request: Request,
@@ -666,7 +630,6 @@ export function keys<E>(options: KeysOptions<E>) {
   return { caller, logout, me, principal, register }
 }
 
-/** Proxies one step of Tempo Wallet's device code flow. */
 export async function device(request: Request, step: string): Promise<Response> {
   const response = await fetch(`https://wallet.tempo.xyz/api/auth/device/${step}`, {
     body: await request.text(),

@@ -26,8 +26,8 @@ for (const target of targets)
     for (const probe of chosen)
       if (!probe.providers || probe.providers.includes((MODELS[m] ?? ['codex'])[0]))
         jobs.push({ target, model: m, probe })
-mkdirSync('bench/out', { recursive: true })
-const file = 'bench/out/' + label + '.jsonl'
+mkdirSync('output/bench', { recursive: true })
+const file = 'output/bench/' + label + '.jsonl'
 writeFileSync(file, '')
 const drivers = {}
 const results = []
@@ -163,5 +163,5 @@ if (failed.length) {
     )
 }
 const report = lines.join('\n')
-writeFileSync('bench/out/' + label + '.txt', report + '\n')
+writeFileSync('output/bench/' + label + '.txt', report + '\n')
 console.log(report)

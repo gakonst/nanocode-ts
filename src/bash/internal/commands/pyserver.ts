@@ -1,8 +1,3 @@
-/**
- * Python server that runs shell Python requests on a Pyodide instance, for a remote host such as a Durable Object.
- *
- * @module
- */
 import * as Fingerprint from '../../../internal/Fingerprint.ts'
 import { HELPER } from './python.ts'
 import type {

@@ -1,9 +1,3 @@
-/**
- * Browser transport of a Cloudflare deployment: it starts turns over HTTPS, follows their server
- * events, reconnects from the last event, and mints hand tokens for the session.
- *
- * @module
- */
 import * as LiveEvent from '../client/LiveEvent.ts'
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
@@ -11,25 +5,16 @@ import type * as Transcript from '../client/Transcript.ts'
 import * as ClientTransport from '../client/Transport.ts'
 import type * as Contracts from '../Contracts.ts'
 
-/** Saved state of the transport's session. */
 export type Session = {
-  /** Sequence number of the last event received. */
   cursor?: number
-  /** Name of the session, once the first turn or upload chose one. */
   id?: string
-  /** Request ID of the turn in progress. */
   open?: string
 }
 
-/** Model of the next turn. */
 export type Model = {
-  /** Model name. */
   model: string
-  /** Model provider, such as `claude` or `codex`. */
   provider: string
-  /** Thinking level. */
   thinking?: string
-  /** Whether the model may search the web. */
   web_search?: boolean
 }
 
@@ -43,10 +28,6 @@ function identifier(prefix: string): string {
   return `${prefix}-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
 }
 
-/**
- * Returns a transport that sends requests to the deployment at `options.url`. Each turn reconnects after a
- * dropped stream until its result arrives.
- */
 export function create(options: create.Options): create.ReturnType {
   const base = options.url ?? ''
   const reconnectMs = options.reconnectMs ?? 1000
@@ -358,37 +339,23 @@ export function create(options: create.Options): create.ReturnType {
 
 export declare namespace create {
   type Options = {
-    /** Returns the hand that a turn of `session` uses, if any. */
     hand?(session: string, signal?: AbortSignal): Promise<string | undefined>
-    /** Returns extra headers of each request, such as an authorization header. */
     headers?(): Record<string, string>
-    /** Returns the model of the next turn. */
     model(): Model
-    /** First delay in milliseconds before a reconnect. Defaults to 1 second. */
     reconnectMs?: number
-    /** Loads and saves the session between page loads. */
     session?: { load(): Session; save(session: Session): void }
-    /** Base URL of the deployment, ending in `/`. Defaults to paths relative to the page. */
     url?: string
-    /** Shortest time in milliseconds between two warm-ups. Defaults to 10 seconds. */
     warmMs?: number
   }
 
   type ReturnType = ClientTransport.Transport &
     Relay.Source & {
-      /** Returns the current session. */
       session(): Session
-      /** Warms the session and its model, at most once per `warmMs`. */
       warm(): void
-      /** Asks the session object to fail after `afterMs` milliseconds, to test recovery. */
       crash(afterMs?: number): Promise<Response>
-      /** Drops the current session and its queued prompts. */
       forget(): void
-      /** Returns the deployment's health response, or `undefined` when it is unreachable. */
       health(): Promise<Response | undefined>
-      /** Mints a hand token for the current session. */
       handToken(): Promise<{ session: string; token: string }>
-      /** Returns the names of the hands attached to the current session. */
       hands(): Promise<string[]>
     }
 }

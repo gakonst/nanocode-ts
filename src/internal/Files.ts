@@ -1,29 +1,17 @@
-/**
- * Workspace paths, uploads, content sniffing, and file responses for session workspaces.
- *
- * @module
- */
 import type { FileSystem } from '../bash/FileSystem.ts'
 
-/** Root of session workspaces. */
 export const workspace = '/workspace'
 
-/** Directory that uploads land in. */
 export const uploads = '/workspace/uploads'
 
-/** Largest upload in bytes. */
 export const maxUploadBytes = 5 * 1024 * 1024
 
-/** Largest file in bytes that a file response serves. */
 export const maxResponseBytes = 8 * 1024 * 1024
 
-/** Most uploads in one request. */
 export const maxUploads = 64
 
-/** Most images attached to one prompt. */
 export const maxPromptImages = 4
 
-/** Media types that prompts accept as images. */
 export const promptImageTypes: ReadonlySet<string> = new Set([
   'image/png',
   'image/jpeg',
@@ -31,13 +19,10 @@ export const promptImageTypes: ReadonlySet<string> = new Set([
   'image/webp',
 ])
 
-/** File attached to a prompt. */
 export type Attachment = { name: string; path: string; type: string; size: number }
 
-/** Options of `response` and `promptImages`. */
 export type Options = { root?: string; maxBytes?: number }
 
-/** Options of `upload`. */
 export type UploadOptions = { dir?: string; maxBytes?: number; maxFiles?: number }
 
 const ascii = (bytes: Uint8Array, start: number, end: number) =>
@@ -67,7 +52,6 @@ function textual(bytes: Uint8Array): string | undefined {
   }
 }
 
-/** Returns the media type of a file from its first bytes. */
 export function sniff(bytes: Uint8Array): string {
   for (const [type, test] of SIGNATURES) if (test(bytes)) return type
   const text = textual(bytes)
@@ -76,7 +60,6 @@ export function sniff(bytes: Uint8Array): string {
   return 'text/plain; charset=utf-8'
 }
 
-/** Returns a file name without path separators or control characters. */
 export function safeName(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? ''
   const cleaned = base
@@ -90,7 +73,6 @@ export function safeName(name: string): string {
   return (stem || 'file') + extension
 }
 
-/** Resolves a request path under `root`, or returns `undefined` outside it. */
 export function resolve(raw: string, root = workspace): string | undefined {
   let value: string
   try {
@@ -113,7 +95,6 @@ function problem(error: string, status: number): Response {
   return Response.json({ error }, { status, headers: { 'cache-control': 'no-store' } })
 }
 
-/** Responds with a workspace file, or with a problem response. */
 export async function response(
   fs: FileSystem,
   raw: string,
@@ -149,7 +130,6 @@ export async function response(
   })
 }
 
-/** Writes a file and creates its parent directories. */
 export async function write(fs: FileSystem, path: string, bytes: Uint8Array): Promise<void> {
   let dir = ''
   for (const part of path.split('/').slice(1, -1)) {
@@ -161,7 +141,6 @@ export async function write(fs: FileSystem, path: string, bytes: Uint8Array): Pr
   await fs.write(path, bytes)
 }
 
-/** Writes an uploaded file under the uploads directory with a unique name. */
 export async function upload(
   fs: FileSystem,
   name: string,
@@ -195,12 +174,10 @@ function base64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-/** Returns a `data:` URL of bytes. */
 export function dataUrl(bytes: Uint8Array, type = sniff(bytes)): string {
   return 'data:' + type + ';base64,' + base64(bytes)
 }
 
-/** Reads the image attachments of a prompt as `data:` URLs. */
 export async function promptImages(
   fs: FileSystem,
   paths: unknown,

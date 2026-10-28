@@ -1,9 +1,3 @@
-/**
- * Cloudflare runtime of nanocode: the `AgentSession` Durable Object that hosts the agent runtimes
- * of a session, and the Worker handler that authenticates requests and routes them to it.
- *
- * @module
- */
 import { DurableObject } from 'cloudflare:workers'
 import interpreter from 'nanocode-ts/interpreter.wasm'
 import wasm from 'nanocode-ts/nanocode_wasm.wasm'
@@ -31,44 +25,26 @@ import * as Plans from './Plans.ts'
 import * as Relay from './Relay.ts'
 import * as Sql from './Sql.ts'
 
-/** Bindings and variables of a Worker that runs the Cloudflare runtime. */
 export type Env = {
-  /** Namespace of the `AgentSession` Durable Object. */
   SESSIONS: DurableObjectNamespace
-  /** Model authentication, `api_key` or `subscription`. Defaults to `api_key`. */
   MODEL_AUTH?: string
-  /** Claude model that `/health` reports. */
   CLAUDE_MODEL?: string
-  /** Cloudflare account of the Workers AI models. */
   WORKERS_AI_ACCOUNT_ID?: string
-  /** Delay in milliseconds before an interrupted turn recovers. */
   RECOVERY_DELAY_MS: string
-  /** Interval in milliseconds between keepalives of an event stream. */
   EVENT_STREAM_KEEPALIVE_MS: string
-  /** Largest number of events in one page. */
   EVENT_PAGE_SIZE: string
-  /** Bytes of recent events that the event hub keeps in memory. */
   EVENT_TAIL_BYTES: string
-  /** Time in milliseconds that the event hub waits to coalesce writes. */
   EVENT_COALESCE_MS: string
-  /** Time in milliseconds that an idle model socket stays open. */
   MODEL_SOCKET_LINGER_MS: string
-  /** Memory budget in bytes of the resident runtimes. */
   RUNTIME_MEMORY_BUDGET_BYTES: string
-  /** Whether a session uses the default remote executor, as `true`. */
   RUNNER_ENABLED?: string
-  /** Largest remote frame in bytes. */
   REMOTE_MAX_FRAME_BYTES: string
-  /** Deadline in milliseconds of a remote executor. */
   REMOTE_TIMEOUT_MS: string
-  /** Location hint of new session objects. */
   SESSION_LOCATION_HINT?: DurableObjectLocationHint
 }
 
-/** Thinking level of a turn. */
 export type Thinking = Contracts.Thinking
 
-/** Thinking levels that a turn accepts, in increasing order. */
 export const thinkingLevels: readonly Contracts.Thinking[] = [
   'none',
   'low',
@@ -78,81 +54,46 @@ export const thinkingLevels: readonly Contracts.Thinking[] = [
   'max',
 ]
 
-/** Identity of one session of one account. */
 export type SessionAuthority = {
-  /** Account that owns the session. */
   account_id: string
-  /** Session ID of the runtime. */
   session_id: string
-  /** Remote executor of the session, when it uses one. */
   executor_id?: string
 }
 
-/** Authority and settings of a request to a session object. */
 export type SessionDescriptor = SessionAuthority & {
-  /** Model provider of the turn. */
   provider?: Contracts.ModelProvider
-  /** Model of the turn. */
   model?: string
-  /** Thinking level of the turn. */
   thinking?: Contracts.Thinking
-  /** Whether the model may search the web. */
   web_search?: boolean
-  /** Name of the session in its account. */
   session_name: string
-  /** Whether Claude requests use the account's subscription. */
   subscription: boolean
-  /** Whether Codex requests use the account's subscription. */
   codex_subscription?: boolean
-  /** Hand that the turn runs on. */
   hand?: string
-  /** Whether the caller may only read the session. */
   read_only?: boolean
-  /** Grant of the caller, which `active` checks. */
   grant?: unknown
-  /** Expiry of the caller's grant in milliseconds since the epoch. */
   expires_at?: number
-  /** Secret of the hand token that authenticated the request. */
   hand_token?: string
 }
 
-/** Model request that a session sends to the egress binding in the `x-nanocode-model` header. */
 export type ModelDispatch = {
-  /** Model provider. Defaults to `claude`. */
   provider?: Contracts.ModelProvider
-  /** Session that sends the request. */
   authority: SessionAuthority
-  /** Upstream URL of the model API. */
   endpoint: string
-  /** Request headers of the model API. */
   headers: [string, string][]
-  /** Whether the request uses the account's subscription. */
   subscription: boolean
 }
 
-/** Model socket request that a session sends to the egress binding. */
 export type SocketDispatch = Pick<ModelDispatch, 'provider' | 'authority' | 'headers'>
 
-/**
- * Private binding, such as a service binding, that serves `/model`, `/warm`, `/socket`,
- * `/remote`, and `/metrics` for the sessions.
- */
 export type PrivateBinding = {
-  /** Serves one request. */
   fetch(request: Request): Promise<Response>
 }
 
-/** Call of a host tool. */
 export type HostToolCall = {
-  /** Session that calls the tool. */
   authority: SessionAuthority
-  /** Name of the tool. */
   name: string
-  /** Input of the call. */
   input: unknown
-  /** Context of the call in the runtime. */
   context: Contracts.ToolCallContext
-  /** Grant of the caller. */
   grant?: unknown
 }
 
@@ -163,15 +104,10 @@ const pythonRemoteBytes = 256 * 1024 * 1024
 
 const workersAiModels = new Set(['glm-5.3'])
 
-/** Account of an authenticated request, with the caller's restrictions. */
 export type Principal = {
-  /** Account that owns the sessions. */
   account: string
-  /** Whether the caller may only read sessions. */
   read_only?: boolean
-  /** Grant of the caller, which `active` checks. */
   grant?: unknown
-  /** Expiry of the caller's grant in milliseconds since the epoch, or `null` for none. */
   expires_at?: number | null
 }
 
@@ -276,10 +212,6 @@ function executorFailure(error: unknown): Contracts.HostFailureError {
   return new Contracts.HostFailureError(message, 'unavailable', false)
 }
 
-/**
- * Returns the `AgentSession` Durable Object class and the Worker handler of a deployment. Export
- * `AgentSession` from the Worker under the class name that the `SESSIONS` binding names.
- */
 export function create<E extends Env>(options: create.Options<E>): create.ReturnType<E> {
   const plans = options.plans
     ? Plans.create<E & Plans.Env>({
@@ -2502,33 +2434,23 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
 export declare namespace create {
   type Options<E extends Env> = {
-    /** Returns whether `account` has an active grant. Without it, every grant is active. */
     active?(account: string, grant: unknown, env: E): Promise<boolean> | boolean
-    /** Returns the account of a request, or `null` to refuse it with status 401. */
     authenticate(
       request: Request,
       env: E,
     ): Promise<string | Principal | null> | string | Principal | null
-    /** Whether a session serves `POST /sessions/:name/crash`, to test recovery. */
     chaos?: boolean
-    /** Network of Code Mode cells: `fetch` serves their requests. Without it, cells reach only GitHub archives. */
     codeMode?: { fetch?(authority: SessionAuthority, env: E): typeof fetch }
-    /** Returns the egress binding that serves model requests and remote executors. */
     egress(env: E): PrivateBinding
-    /** Source of the GitHub token of a session's workspace. */
     github?: {
       token?(
         env: E,
         authority: SessionAuthority,
       ): string | null | undefined | Promise<string | null | undefined>
     }
-    /** Instructions that a session adds when its turn runs on a hand. */
     handInstructions?: string
-    /** Instructions of every session. */
     instructions?: string
-    /** Whether the runtime emits live deltas. Defaults to `true`. */
     liveDeltas?: boolean
-    /** MCP servers of a session, the `fetch` that reaches them, and the store that shares their listings. */
     mcp?: {
       servers:
         | Contracts.McpServer[]
@@ -2536,32 +2458,20 @@ export declare namespace create {
       fetch?(authority: SessionAuthority, env: E): typeof fetch
       store?(env: E): Contracts.McpStore | undefined
     }
-    /**
-     * ChatGPT and Claude plans of the deployment's accounts, sealed with `PLAN_SECRET`: a signed-in account's model
-     * requests go out on its plan instead of `egress`, and `/plans` serves the sign-in routes. The Worker exports
-     * `PlanVault` and, for ChatGPT plans, `RelayContainer` from this package.
-     */
     plans?: Plans.Options<E>
-    /** Records a new session, and returns `false` to delete it and refuse the request. */
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
-    /** Whether the runtime streams tool input. Defaults to `true`. */
     streamToolInput?: boolean
-    /** Whether the runtime runs subagents. Defaults to the runtime's default. */
     subagents?: boolean
-    /** Returns whether requests of `provider` use the account's subscription. Defaults to whether `plans` has its plan signed in. */
     subscription?(
       account: string,
       env: E,
       provider: Contracts.ModelProvider,
     ): Promise<boolean> | boolean
-    /** Host tools of every session. */
     tools?: {
       definitions: Contracts.HostTool[]
       call(call: HostToolCall, env: E, signal: AbortSignal): Promise<unknown>
     }
-    /** Largest request body and SQL value in bytes. Defaults to `Sql.valueLimitBytes`. */
     valueLimit?: number
-    /** Workspace of a session, or `false` for none. */
     workspace?:
       | false
       | {
@@ -2572,19 +2482,15 @@ export declare namespace create {
           mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>
           python?(authority: SessionAuthority, env: E): Python.Remote | undefined
         }
-    /** Workspace tools of the runtime. */
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   }
 
   type ReturnType<E extends Env> = {
-    /** Durable Object class of one session. */
     AgentSession: new (
       ctx: DurableObjectState,
       env: E,
     ) => DurableObject<E> & { fetch(request: Request): Promise<Response>; alarm(): Promise<void> }
-    /** Deletes the session `name` of `account`, and returns whether it is gone. */
     deleteSession(env: E, options: { account: string; name: string }): Promise<boolean>
-    /** Serves one Worker request. */
     fetch(request: Request, env: E): Promise<Response>
   }
 }

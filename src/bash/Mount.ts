@@ -1,8 +1,3 @@
-/**
- * Mount table that joins several file systems into one tree.
- *
- * @module
- */
 import { FsError, normalize, type FileStat, type FileSystem, type NewFile } from './FileSystem.ts'
 import { writeMany } from './internal/Fs.ts'
 
@@ -12,10 +7,6 @@ function inside(path: string, point: string): boolean {
   return path === point || path.startsWith(point + '/')
 }
 
-/**
- * Returns a file system that serves each mount point from its own file system and every other
- * path from `base`. Without mounts other than `/`, it returns `base`.
- */
 export function create(base: FileSystem, options: create.Options): FileSystem {
   const table: Mount[] = Object.entries(options.mounts)
     .map(([point, fs]) => ({ point: normalize(point), fs }))
@@ -163,7 +154,6 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
 
 export declare namespace create {
   type Options = {
-    /** File systems keyed by their mount point. Longer mount points take precedence. */
     mounts: Record<string, FileSystem>
   }
 }

@@ -1,31 +1,18 @@
-/**
- * Attachments that a prompt carries to the Function as base64 files at the end of its text.
- *
- * @module
- */
-
-/** File that a prompt carries. */
 export type File = {
-  /** Base64 contents. */
   data: string
-  /** Workspace path under `/workspace/uploads/`. */
   path: string
 }
 
-// The markers are durable: Workflow replays parse prompts that carry them.
 const close = '</nanocode-attachments>'
 
 const open = '\n\n<nanocode-attachments>'
 
-/** Pattern of an attachment's workspace path. */
 export const path = /^\/workspace\/uploads\/[\w.-]{1,100}$/
 
-/** Appends `files` to a prompt's text, and returns the text alone when there are none. */
 export function carry(text: string, files: readonly File[]): string {
   return files.length ? text + open + JSON.stringify(files) + close : text
 }
 
-/** Splits the carried files from a prompt's text, and decodes at most eight valid ones. */
 export function parse(text: string): {
   text: string
   files: { path: string; bytes: Uint8Array }[]

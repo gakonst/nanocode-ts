@@ -1,8 +1,3 @@
-/**
- * durable-harness kernel `Harness` that runs a nanocode session on a Workflow run, with its SQL in the run's log.
- *
- * @module
- */
 import {
   type DriveContext,
   EffectFailure,
@@ -27,87 +22,55 @@ import type * as FileSystem from '../bash/FileSystem.ts'
 import * as GitHub from '../bash/GitHub.ts'
 import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
-// Aliased, since `Hands` names the hand options of this module.
 import * as HandStreams from './Hands.ts'
 import * as Attachments from './internal/Attachments.ts'
 import * as Egress from './internal/Egress.ts'
 
-/** Submission text that cancels the active turn. The value is durable. */
 export const cancelText = '\u0000nanocode:cancel'
 
-/** Default time in milliseconds over which the runtime coalesces streamed events. */
 export const defaultEventCoalesceMs = 50
 
-/** Prompt that sets the reasoning effort of later turns, such as `/effort high`. */
 export const effortCommand = /^\/effort\s+(\S+)\s*$/
 
-/** Pattern of a session's hand channel. */
 export const handChannel = /^[A-Za-z0-9_-]{16,64}$/
 
-/** SQL scope of every session's runtime. The value is durable. */
 export const scope = 'session'
 
-/** Effect key and step name of the session record. The value is durable. */
 export const sessionKey = 'nanocode.session'
 
-/** Time in milliseconds between two polls when the drive has no live hints. */
 export const waitPollMs = 250
 
 const streamedWasmCalls = 20
 
-/** Report of one drive, which `create.Options.report` receives. */
 export type DriveReport = {
-  /** Run of the session. */
   run_id: string
-  /** Delivery attempt of the drive, from 0. */
   attempt: number
   durability: Journal.Durability
-  /** Whether the drive opened the runtime. */
   opened: boolean
-  /** Duration of the drive in milliseconds. */
   duration_ms: number
-  /** Time in milliseconds to replay the journal. */
   replay_ms: number
-  /** Time in milliseconds to open the runtime. */
   open_ms: number
   journal: Journal.Stats
-  /** Model requests that the drive sent. */
   model_requests: number
-  /** Host tool calls that the drive ran. */
   tool_calls: number
-  /** Completed model calls, in order. */
   models: ModelCall[]
-  /** How the drive ended. */
   outcome: 'idle' | 'settled' | 'stopped' | 'failed'
-  /** Name and message of the failure, when the drive failed or stopped. */
   error?: string
 }
 
-/** Hands that a session connects to. */
 export type Hands = {
-  /** Time in milliseconds that a hand's event stream stays open. */
   holdMs?: number
-  /** Largest frame in bytes. Defaults to 1 MiB. */
   maxFrameBytes?: number
-  /** Name of the hand in the session. Defaults to `browser`. */
   name?: string
-  /** Returns the URL of an external hand relay for a channel, instead of Workflow streams. */
   relay?(channel: string): string
-  /** Time in milliseconds to wait for the hand's catalog. Defaults to 30 seconds. */
   timeoutMs?: number
-  /** Upgrades a request to a hand's WebSocket on the Function. */
   upgrade?: HandStreams.UpgradeWebSocket
 }
 
-/** Completed model call of a drive. */
 export type ModelCall = {
-  /** Call index in the session. */
   index: number
-  /** Whether the call replayed from the log. */
   replayed: boolean
-  /** Time in milliseconds to the first output, or `null` without output. */
   first_output_ms: number | null
-  /** Duration of the call in milliseconds. */
   duration_ms: number
   input_tokens: number
   cached_tokens: number
@@ -116,9 +79,7 @@ export type ModelCall = {
 
 export type ServiceTier = Contracts.ServiceTier
 
-/** Model selection of a session, recorded once under `sessionKey`. */
 export type Session = {
-  /** SDK session ID. */
   session_id: string
   provider: Contracts.ModelProvider
   model?: string
@@ -129,7 +90,6 @@ export type Session = {
 
 export type Thinking = Contracts.Thinking
 
-/** ChatGPT or Claude plan of a session: the model dispatch and, for Codex, the WebSocket that carry its credential. */
 export type Subscription = {
   dispatch: Gateway.Dispatch
   socket?: NonNullable<Contracts.RuntimeOptions['socket']> | undefined
@@ -154,10 +114,8 @@ function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   })
 }
 
-// The `nanocode.settled:` key is durable.
 const settledKey = (batches: number) => `nanocode.settled:${batches}`
 
-/** Returns a durable-harness kernel `Harness` that drives nanocode sessions. */
 export function create(options: create.Options = {}): Harness {
   const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
   const definitions = [...tools.values()].map((tool) => ({
@@ -480,79 +438,46 @@ export function create(options: create.Options = {}): Harness {
 
 export declare namespace create {
   type Options = {
-    /** Minimum time in milliseconds between two SQL batches with `on` durability. */
     batchMs?: number
-    /** Sends model requests. Defaults to `Gateway.dispatch()`. */
     dispatch?: Gateway.Dispatch
-    /** Defaults to `on`. */
     durability?: Journal.Durability
-    /** Model endpoint. Defaults to the AI Gateway endpoint of the session's provider. */
     endpoint?: string
-    /** Time in milliseconds over which the runtime coalesces streamed events. Defaults to `defaultEventCoalesceMs`. */
     eventCoalesceMs?: number
-    /** `fetch` of agent code, behind the public-address guard. */
     fetch?: typeof fetch
-    /** Gateway of a custom `endpoint`. With no `endpoint`, the gateway is `vercel`. */
     gateway?: 'vercel'
     github?: {
-      /** Returns the GitHub token that agent requests to GitHub carry. */
       token?(sessionId: string): string | null | undefined | Promise<string | null | undefined>
     }
-    /** Instructions added when a hand is attached. */
     handInstructions?: string
-    /** Hands of the session, or `false` for none. */
     hands?: false | Hands
-    /** Host instructions of the session. */
     instructions?: string
-    /** Largest number of prompts in a session. */
     maxPrompts?: number
     mcp?: {
-      /** Returns the `fetch` for MCP requests of a session. */
       fetch?(sessionId: string): typeof fetch
-      /** MCP servers of every session. */
       servers: Contracts.McpServer[]
     }
-    /** Default model, when the session config names none. */
     model?: string
-    /** Loads the WebAssembly module. Defaults to `Wasm.load`. */
     module?: () => Promise<WebAssembly.Module>
-    /** Harness name. Defaults to `nanocode`. */
     name?: string
-    /** Whether a session's prompts carry images. Defaults to `true`. */
     promptImages?: (session: Session) => boolean
-    /** Default provider, when the session config names none. Defaults to `claude`. */
     provider?: Contracts.ModelProvider
-    /** Receives the report of each drive. */
     report?: (report: DriveReport) => void
-    /** Returns the `fetch` of agent code for one session, instead of `fetch`. */
     sessionFetch?(sessionId: string): typeof fetch
-    /** Whether the runtime streams tool input. */
     streamToolInput?: boolean
-    /**
-     * Returns the ChatGPT or Claude plan that a session's model requests use, or `undefined` for the AI Gateway.
-     * The account is the session config's `account`, which `App.create`'s `account` sets; each drive asks again.
-     */
     subscription?(session: {
       account: string
       provider: Contracts.ModelProvider
       model?: string
     }): Promise<Subscription | undefined> | Subscription | undefined
-    /** Whether the agent starts subagents. */
     subagents?: boolean
-    /** Default reasoning effort, when the session config names none. */
     thinking?: Contracts.AgentConfiguration['thinking']
-    /** Host tools, run as durable effects. */
     tools?: HostTool[]
-    /** `false` for no workspace, or the workspace's directory and seed files. */
     workspace?: false | { cwd?: string; files?: Record<string, string> }
-    /** Workspace tools of the provider. */
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
-    /** `false` turns web search off. */
     webSearch?: false
   }
 }
 
-/** Returns the reasoning effort in force before submission `before`, after the `/effort` commands placed earlier. */
 export function effort(
   state: SessionState,
   options: effort.Options,
@@ -570,14 +495,11 @@ export function effort(
 
 export declare namespace effort {
   type Options = {
-    /** Submission ID. */
     before: string
-    /** Effort of the session. */
     initial: Contracts.Thinking | undefined
   }
 }
 
-/** Returns whether submission `id` is past the prompt limit. Cancels, chaos, and withdrawals do not count. */
 export function exceeds(state: SessionState, options: exceeds.Options): boolean {
   const { id, limit } = options
   if (limit === undefined) return false
@@ -592,14 +514,11 @@ export function exceeds(state: SessionState, options: exceeds.Options): boolean 
 
 export declare namespace exceeds {
   type Options = {
-    /** Submission ID. */
     id: string
-    /** Largest number of prompts, or `undefined` for no limit. */
     limit: number | undefined
   }
 }
 
-/** Returns whether a session is idle: it has no SQL batches, or it settled after its last batch. */
 export function isIdle(state: SessionState, options: isIdle.Options): boolean {
   const { batches } = options
   return batches === 0 || state.effects.get(settledKey(batches))?.status === 'completed'
@@ -607,7 +526,6 @@ export function isIdle(state: SessionState, options: isIdle.Options): boolean {
 
 export declare namespace isIdle {
   type Options = {
-    /** Committed SQL batches of the session. */
     batches: number
   }
 }

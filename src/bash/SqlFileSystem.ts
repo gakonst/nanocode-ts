@@ -1,9 +1,3 @@
-/**
- * File system over a SQL host, scoped by a key. Rows hold small files inline and large files as
- * chunks.
- *
- * @module
- */
 import type * as Contracts from '../Contracts.ts'
 import {
   FsError,
@@ -94,21 +88,14 @@ function joined(parts: Uint8Array[], size: number): Uint8Array {
   return out
 }
 
-/** File system over a SQL host that `create` returns. */
 export type SqlFileSystem = FileSystem &
   Required<
     Pick<FileSystem, 'chmod' | 'lstat' | 'readlink' | 'symlink' | 'utimes' | 'writeMany'>
   > & {
-    /** Largest file in bytes that a write accepts. */
     readonly maxFileBytes: number
-    /** Key that separates this file system's rows from other scopes on the same host. */
     readonly scope: string
   }
 
-/**
- * Creates a file system over `sql`. It makes its tables on first use, and instances with the same
- * scope on one host share their files.
- */
 export function create(sql: Contracts.SqlHost, options: create.Options = {}): SqlFileSystem {
   const scope = options.scope ?? ''
   const maxFileBytes = options.maxFileBytes ?? defaultMaxFileBytes
@@ -626,9 +613,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
 
 export declare namespace create {
   type Options = {
-    /** Key that separates this file system's rows from other scopes on the same host. Defaults to the empty string. */
     scope?: string | undefined
-    /** Largest file in bytes that a write accepts. Defaults to 32 MiB. */
     maxFileBytes?: number | undefined
   }
 }

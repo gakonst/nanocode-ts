@@ -1,8 +1,3 @@
-/**
- * Caches MCP `initialize` and `tools/list` responses for the configured servers.
- *
- * @module
- */
 import type * as Contracts from './Contracts.ts'
 
 type Request = {
@@ -28,7 +23,6 @@ type Listing = {
   stateful?: boolean
 }
 
-/** Cache policy for MCP listings. */
 export type Policy = NonNullable<Contracts.RuntimeOptions['mcp']>
 
 const DEFAULT_CACHE_MS = 600_000
@@ -102,7 +96,6 @@ function reply(id: unknown, result: unknown) {
   })
 }
 
-/** Wraps a dispatch so that MCP `initialize` and `tools/list` requests to `servers` reuse cached responses. */
 export function defer<R extends Request, A extends unknown[]>(
   send: Send<R, A>,
   servers: readonly Contracts.McpServer[] | undefined,

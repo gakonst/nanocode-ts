@@ -1,8 +1,3 @@
-/**
- * Worker thread that runs Pyodide for the Python commands in Node.
- *
- * @module
- */
 import { CommandError, type CommandContext } from '../Shell.ts'
 
 export type PythonJob = {

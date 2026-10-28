@@ -40,6 +40,6 @@ out.push(
     (N - 1) +
     ', so process start and runtime setup are excluded.',
 )
-mkdirSync('bench/out', { recursive: true })
-writeFileSync('bench/out/overhead-native.txt', out.join('\n') + '\n')
+mkdirSync('output/bench', { recursive: true })
+writeFileSync('output/bench/overhead-native.txt', out.join('\n') + '\n')
 console.log(out.join('\n'))

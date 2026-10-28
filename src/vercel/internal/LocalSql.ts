@@ -1,24 +1,14 @@
-/**
- * In-memory `node:sqlite` replica that replays a session's committed SQL batches.
- *
- * @module
- */
 import * as sqlite from 'node:sqlite'
 import { Fatal } from 'durable-harness'
 import type * as Contracts from '../../Contracts.ts'
 import type * as Journal from '../Journal.ts'
 
-/** SQLite replica of a session's log. */
 export type LocalSql = {
-  /** Closes the database. */
   close(): void
-  /** Runs statements in one immediate transaction and returns each statement's rows. */
   run(statements: Contracts.Statement[]): Contracts.SqlValue[][][]
-  /** Returns a value that changes after every write and schema change. */
   version(): string
 }
 
-/** Opens an in-memory database and replays `batches` into it. Throws `Fatal` when a batch does not replay. */
 export function create(batches: Journal.Transaction[][]): LocalSql {
   const db = new sqlite.DatabaseSync(':memory:')
   const statements = new Map<string, sqlite.StatementSync>()

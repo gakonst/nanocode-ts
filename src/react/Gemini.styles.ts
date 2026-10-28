@@ -1,8 +1,3 @@
-/**
- * Skin part styles of the Gemini theme, keyed by part name.
- *
- * @module
- */
 import { flicker, pulse, spin, style, variants } from './Theme.ts'
 
 const sans =
@@ -612,7 +607,6 @@ export const sidebarRemove = style({
   selectors: { '[data-nc="sidebarChat"]:hover > &, &:focus-visible': { opacity: '1 !custom' } },
 })
 
-// The running turn's marker, under the last message as in the durable demos' clones.
 export const pending = style({
   alignSelf: 'flex-start',
   display: 'inline-block',

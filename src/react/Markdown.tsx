@@ -1,16 +1,10 @@
 'use client'
 
-/**
- * Markdown of assistant text, which loads its renderer on first use.
- *
- * @module
- */
 import { lazy, type ReactNode, Suspense } from 'react'
 import { usePart } from './Provider.tsx'
 
 const Streamed = lazy(() => import('./Streamed.tsx'))
 
-/** Markdown text, which renders as plain text until the renderer loads. */
 export function Markdown(props: Markdown.Props) {
   const part = usePart()
   const fallback = (
@@ -33,7 +27,6 @@ export declare namespace Markdown {
   }
 }
 
-/** Markdown text of an assistant reply. */
 export function Reply(props: Markdown.Props) {
   return <Markdown {...props} />
 }

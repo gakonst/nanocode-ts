@@ -1,8 +1,3 @@
-/**
- * The `git` and `gh` commands over GitHub source snapshots.
- *
- * @module
- */
 import { CommandError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError, normalize, type FileSystem, type NewFile } from '../../FileSystem.ts'
 import { breathe, decode, encode, parentOf, writeMany } from '../Fs.ts'

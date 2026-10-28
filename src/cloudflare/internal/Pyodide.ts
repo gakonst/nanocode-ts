@@ -1,17 +1,8 @@
-/**
- * Pyodide loader for Workers: it serves only the WebAssembly modules built into the Worker, and
- * restores the precompiled snapshot when its parts are available.
- *
- * Loading patches `WebAssembly`, `fetch`, `process`, and `location` on the global scope, once.
- *
- * @module
- */
 import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from 'nanocode-ts/pyodide-modules'
 import * as Python from '../../bash/Python.ts'
 import { restorePyodide } from '../../bash/internal/commands/pysnapshot.ts'
 import * as Fingerprint from '../../internal/Fingerprint.ts'
 
-/** Fetches one part of the Pyodide snapshot by name. */
 export type SnapshotParts = (name: string) => Promise<Response>
 
 type Instantiate = (source: unknown, imports?: WebAssembly.Imports) => Promise<unknown>
@@ -124,10 +115,6 @@ function joined(parts: SnapshotParts, names: string[]): ReadableStream<Uint8Arra
 
 let restorable = true
 
-/**
- * Loads Pyodide from the modules built into the Worker. Restores the snapshot from
- * `options.parts` when it can, and boots without it after the first failed restore.
- */
 export async function load(options: load.Options = {}): Promise<Python.Pyodide> {
   const parts = options.parts
   if (BUILT !== Python.pyodideVersion)
@@ -183,7 +170,6 @@ export async function load(options: load.Options = {}): Promise<Python.Pyodide> 
 
 export declare namespace load {
   type Options = {
-    /** Fetches the snapshot parts. When absent, Pyodide boots without its snapshot. */
     parts?: SnapshotParts | undefined
   }
 }

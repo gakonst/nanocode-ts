@@ -1,89 +1,49 @@
-/**
- * Chat store: runs a transport's turns, folds their events into a transcript, and keeps
- * conversations in storage that tabs of one origin share.
- *
- * @module
- */
 import * as LiveEvent from './LiveEvent.ts'
 import * as Tool from './Tool.ts'
 import * as Transcript from './Transcript.ts'
 import type * as Transport from './Transport.ts'
 
-/** Chat store, in the shape that `useSyncExternalStore` reads. */
 export type Config = {
-  /** Whether the transport cancels turns. */
   readonly cancellable: boolean
-  /** Whether a running turn continues when another conversation is selected. */
   readonly detachable: boolean
-  /** File access of the transport. */
   readonly files: Transport.Files | undefined
-  /** Cancels the running turn. */
   cancel(): Promise<void>
-  /** Starts a new conversation, or clears the transcript when the store keeps no history. */
   clear(): void
-  /** Starts a new conversation and returns its identifier, or returns the current one when it is empty. */
   create(): string | undefined
-  /** Returns the state at render time in the browser. */
   getState(): State
-  /** Returns the state of a server render. */
   getServerState(): State
-  /** Posts one note to the transcript. */
   note(kind: Transcript.EntryKind, text: string): void
-  /** Queues one live event into the current conversation. */
   push(event: LiveEvent.LiveEvent): void
-  /** Removes one conversation and its stored state. */
   remove(id: string): void
-  /** Drops the live state of the current conversation. */
   reset(): void
-  /** Follows the running turn of the current conversation. */
   resume(): Promise<void>
-  /** Runs `callback` after the queued events. */
   run(callback: () => void): void
-  /** Selects one stored conversation. */
   select(id: string): void
-  /** Sends a prompt, or steers the running turn with it. */
   send(prompt: string, attachments?: readonly Transport.Attachment[]): Promise<void>
-  /** Registers a listener for state changes and returns its removal. */
   subscribe(listener: () => void): () => void
 }
 
-/** Stored conversation. */
 export type Conversation = {
-  /** Identifier of the conversation. */
   id: string
-  /** Title, from the first prompt. */
   title: string
-  /** Time of the last change in milliseconds since the epoch. */
   updated: number
 }
 
-/** Storage that keeps conversations, in the shape of `localStorage`. */
 export type HistoryStorage = {
-  /** Returns the value of `key`, or `null` when it has none. */
   getItem(key: string): string | null
-  /** Removes `key`. */
   removeItem(key: string): void
-  /** Sets the value of `key`, and throws when the storage is full. */
   setItem(key: string, value: string): void
 }
 
-/** State of a chat store. */
 export type State = {
-  /** Posted entries of the current conversation. */
   entries: readonly Transcript.Entry[]
-  /** Live entries of the current conversation. */
   live: readonly Transcript.Entry[]
-  /** Whether a turn is in progress. */
   status: Status
-  /** Error of the last turn. */
   error: Error | undefined
-  /** Stored conversations, newest first. */
   conversations: readonly Conversation[]
-  /** Identifier of the current conversation. */
   conversation: string | undefined
 }
 
-/** Status of a chat store. */
 export type Status = 'idle' | 'pending'
 
 type TabLocks = {
@@ -115,7 +75,6 @@ function conversationId(): string {
   return random ?? Date.now().toString(36) + Math.random().toString(36).slice(2)
 }
 
-/** Creates a chat store over `options.transport`. */
 export function create(options: create.Options): Config {
   const listeners = new Set<() => void>()
   const history = options.history && {
@@ -908,29 +867,20 @@ export function create(options: create.Options): Config {
 
 export declare namespace create {
   type Options = {
-    /** Receives each event of the current conversation that folds into no entry. */
     apply?(event: LiveEvent.LiveEvent): void
-    /** Storage of conversations. Without it, the store keeps one transcript through `persist`. */
     history?: History | undefined
-    /** Largest number of entries kept in one conversation. Defaults to 500. */
     keep?: number | undefined
-    /** Storage of the transcript when the store keeps no history. */
     persist?: {
       load(): readonly Transcript.Entry[]
       save(entries: readonly Transcript.Entry[]): void
     }
-    /** Time constant in milliseconds of the text reveal. Defaults to 30. */
     revealMs?: number | undefined
-    /** Backend that runs turns. */
     transport: Transport.Transport
   }
 
   type History = {
-    /** Prefix of the storage keys and the tab channel. */
     key: string
-    /** Largest number of conversations kept. Defaults to 50. */
     limit?: number | undefined
-    /** Storage of conversations. Defaults to `localStorage`. */
     storage?: HistoryStorage | undefined
   }
 }

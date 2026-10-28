@@ -1,8 +1,3 @@
-/**
- * The `python`, `python3`, `pip`, and `pip3` commands on Pyodide.
- *
- * @module
- */
 import { CommandError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError, type FileSystem } from '../../FileSystem.ts'
 import { breathe, decode, encode, parentOf } from '../Fs.ts'
@@ -25,10 +20,8 @@ import {
   workerVersion,
 } from './pyworker.ts'
 
-/** Pyodide release that the shell loads. */
 export const pyodideVersion = '314.0.7'
 
-/** jsDelivr CDN base URL of the `pyodideVersion` distribution. */
 export const pyodideUrl = 'https://cdn.jsdelivr.net/pyodide/v' + pyodideVersion + '/full/'
 
 type Mode = {
@@ -417,10 +410,6 @@ function threaded(options: PythonOptions): boolean {
 
 const warmed = new Set<string>()
 
-/**
- * Loads Pyodide and `packages` ahead of the first `python3` run. It resolves after the load, and
- * never rejects.
- */
 export function preload(options: preload.Options = {}): Promise<void> {
   const packages = options.packages ?? []
   if (!canCompile()) return Promise.resolve()
@@ -446,7 +435,6 @@ export function preload(options: preload.Options = {}): Promise<void> {
 
 export declare namespace preload {
   type Options = PythonOptions & {
-    /** Pyodide packages to load, such as `numpy`. */
     packages?: readonly string[] | undefined
   }
 }

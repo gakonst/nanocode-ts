@@ -1,8 +1,3 @@
-/**
- * Content fingerprints for caches and snapshot stamps.
- *
- * @module
- */
 export function from(bytes: ArrayBuffer | ArrayBufferView): string {
   const data =
     bytes instanceof Uint8Array

@@ -1,9 +1,3 @@
-/**
- * nanocode machines on Cloudflare: a Worker that runs sessions whose models, tools, and MCP servers
- * the account's wallet pays for, with key, secret, and file routes.
- *
- * @module
- */
 import * as App from '../../cloudflare/App.ts'
 import { json } from '../Account.ts'
 import * as Payment from '../Payment.ts'
@@ -19,17 +13,14 @@ const archivePath = /^\/api\/github\/([\w.-]+)\/([\w.-]+)\/(.+)$/
 
 const machinesKeys = Keys.handlers<Env.Env>()
 
-/** Returns the principal of a request that carries a wallet key, or `null`. */
 export async function principal(request: Request, env: Env.Env) {
   return machinesKeys.principal(request, env)
 }
 
-/** Serves `POST /v1/keys`, which registers a wallet key. */
 export async function register(request: Request, env: Env.Env): Promise<Response> {
   return machinesKeys.register(request, env)
 }
 
-/** Serves the key, secret, and file routes under `/v1/`. */
 export async function api<E extends Env.Env>(
   request: Request,
   options: api.Options<E>,
@@ -39,17 +30,11 @@ export async function api<E extends Env.Env>(
 
 export declare namespace api {
   type Options<E extends Env.Env> = {
-    /** Bindings of the Worker. */
     env: E
-    /** Path of the request. */
     pathname: string
   }
 }
 
-/**
- * Returns the `AgentSession` and `Wallet` Durable Object classes and the Worker handler of a
- * machines deployment. Throws when `payment.inference` is `apiKey` without the host's egress.
- */
 export function create<E extends Env.Env = Env.Env>(options: create.Options<E> = {}) {
   const { fallback, payment, account, ...rest } = options
   const { inference, servers, tools: paid } = Payment.resolve(payment)
@@ -102,11 +87,8 @@ export function create<E extends Env.Env = Env.Env>(options: create.Options<E> =
 
 export declare namespace create {
   type Options<E extends Env.Env> = Partial<App.create.Options<E>> & {
-    /** Returns the account of a request from the host's own authentication. */
     account?: Keys.Account<E>
-    /** Serves the requests that no route of the deployment serves. Defaults to `ASSETS`. */
     fallback?(request: Request, env: E): Promise<Response> | Response
-    /** Payment configuration of inference, tools, and MCP servers. */
     payment?: Payment.Config
   }
 }

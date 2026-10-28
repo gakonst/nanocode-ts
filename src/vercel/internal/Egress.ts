@@ -1,8 +1,3 @@
-/**
- * Node `fetch` for agent code that connects only to public addresses, with DNS answers pinned per connection.
- *
- * @module
- */
 import * as dns from 'node:dns'
 import * as dnsPromises from 'node:dns/promises'
 import { Agent, fetch as undiciFetch } from 'undici'
@@ -16,12 +11,10 @@ type Callback = (
 
 let agent: Agent | undefined
 
-/** Returns `fetcher`, or the pinned `fetch`, behind the public-address guard. */
 export function guard(fetcher?: typeof fetch): typeof fetch {
   return Egress.guard(fetcher ?? pinned, { resolve })
 }
 
-/** `fetch` whose connections use only the public addresses that DNS returned. */
 export const pinned: typeof fetch = (input, init) => {
   agent ??= new Agent({ connect: { lookup } as never })
   const url = input instanceof Request ? input.url : String(input)
@@ -31,7 +24,6 @@ export const pinned: typeof fetch = (input, init) => {
   } as never) as unknown as Promise<Response>
 }
 
-/** Resolves a host to every address DNS returns, in DNS order. */
 export const resolve: Egress.Resolve = async (host) =>
   (await dnsPromises.lookup(host, { all: true, verbatim: true })).map((entry) => entry.address)
 

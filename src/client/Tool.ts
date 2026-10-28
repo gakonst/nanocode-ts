@@ -1,53 +1,28 @@
-/**
- * Tool cells: the display state of one tool call in a transcript, built from its arguments and its
- * result.
- *
- * @module
- */
 import * as Format from './internal/Format.ts'
 import * as Workspace from './internal/Workspace.ts'
 import * as LiveEvent from './LiveEvent.ts'
 
-/** How a cell renders its input. */
 export type Body = 'text' | 'code' | 'diff'
 
-/** Display state of one tool call. */
 export type Cell = {
-  /** Identifier of the call. */
   call_id: string
-  /** Name of the tool that the model called. */
   tool: string
-  /** Display name, such as `run` for a shell command. */
   name: string
-  /** One-line title, such as the command or the file path. */
   title: string
-  /** Input text that renders below the title. */
   input: string
-  /** How `input` renders. */
   body: Body
-  /** Language of `input` when it renders as code. */
   language: string
-  /** Output text of the call. */
   output: string
-  /** Language of `output`, such as `json` or `diff`, or empty. */
   output_language: string
-  /** Status of the call. */
   status: Status
-  /** Start time in milliseconds since the epoch. */
   started_at: number
-  /** Duration in milliseconds, once the call ended. */
   duration_ms?: number
-  /** Exit code of a command, when the result has one. */
   exit_code?: number
-  /** Image sources that the result holds. */
   images?: string[]
-  /** Short notes, such as `background` or `exit 1`. */
   details: string[]
-  /** Calls that this call started. */
   children: Cell[]
 }
 
-/** Status of a tool call. */
 export type Status = 'running' | 'completed' | 'failed' | 'cancelled' | 'yielded'
 
 const codeTools = new Set(['exec', 'code_mode', 'js'])
@@ -56,7 +31,6 @@ const imageUrl = /^(https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif|bmp)[;,])
 
 const pragmaLine = /^\s*\/\/ @exec:[^\n]*(?:\n|$)/
 
-/** Returns a copy of `cell` and its children whose input and output keep at most `options.limit` characters. */
 export function clip(cell: Cell, options: clip.Options): Cell {
   const { limit, tail = false } = options
   const cut = (text: string) => {
@@ -75,14 +49,11 @@ export function clip(cell: Cell, options: clip.Options): Cell {
 
 export declare namespace clip {
   type Options = {
-    /** Largest number of characters kept in each input and output. */
     limit: number
-    /** Whether to keep the end of a long text instead of its start. */
     tail?: boolean | undefined
   }
 }
 
-/** Creates a running cell for a tool call. */
 export function create(options: create.Options): Cell {
   const { callId, startedAt = Date.now(), tool } = options
   return {
@@ -104,11 +75,8 @@ export function create(options: create.Options): Cell {
 
 export declare namespace create {
   type Options = {
-    /** Identifier of the call. */
     callId: string
-    /** Start time in milliseconds since the epoch. Defaults to the current time. */
     startedAt?: number | undefined
-    /** Name of the tool that the model called. */
     tool: string
   }
 }
@@ -133,7 +101,6 @@ function linesPatch(header: string, path: string, removed: string, added: string
   return lines.join('\n')
 }
 
-/** Sets the display fields of `cell` from the tool's arguments, and returns the cell. */
 export function describe(cell: Cell, options: describe.Options): Cell {
   const value = Format.decode(options.args)
   const object =
@@ -296,7 +263,6 @@ export function describe(cell: Cell, options: describe.Options): Cell {
 
 export declare namespace describe {
   type Options = {
-    /** Arguments of the tool call, as an object or as JSON text. */
     args: unknown
   }
 }
@@ -396,7 +362,6 @@ function stripCodeHeader(text: string): string {
   return lines.slice(index).join('\n')
 }
 
-/** Sets the output, status, and duration of `cell` from the tool's result event, and returns the cell. */
 export function finish(cell: Cell, options: finish.Options): Cell {
   const { event } = options
   const raw = textOf(event.result)
@@ -476,12 +441,10 @@ export function finish(cell: Cell, options: finish.Options): Cell {
 
 export declare namespace finish {
   type Options = {
-    /** `tool_end` event of the call. */
     event: LiveEvent.LiveEvent
   }
 }
 
-/** Returns one line that names the tool call, its title, status, duration, and details. */
 export function summary(cell: Cell): string {
   const head = [cell.name, cell.title].filter(Boolean).join(' ')
   const meta = [

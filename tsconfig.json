@@ -31,5 +31,5 @@
     "src/sandbox/internal/*.ts",
     "src/vercel/Transport.ts"
   ],
-  "exclude": ["src/machines/vercel.ts", "src/**/*.test.ts"]
+  "exclude": ["src/machines/vercel.ts"]
 }

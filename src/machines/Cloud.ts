@@ -1,9 +1,3 @@
-/**
- * Link sessions of nanocode machines: the Worker's bearer token for a connected key, its turns over
- * server-sent events, its hands, and its spend.
- *
- * @module
- */
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
 import type * as Contracts from '../Contracts.ts'
@@ -14,31 +8,21 @@ const storageKey = 'nanocode.machines.cloud'
 
 const reconnectMs = 1000
 
-/** Worker session of a connected key, which `localStorage` keeps. */
 export type Link = {
-  /** Wallet address of the key. */
   address: string
-  /** Sequence number of the last event read. */
   cursor: number
-  /** Expiry of the token in milliseconds since the epoch. */
   expiresAt: number
-  /** Request identifier of the open turn. */
   open?: string
-  /** Identifier of the current session. */
   session: string
-  /** Bearer token that the Worker issued. */
   token: string
 }
 
-/** Model of a turn. */
 export type Model = { model: string; provider: 'claude' | 'codex'; thinking: string }
 
 const luna: Model = { model: 'gpt-6-luna', provider: 'codex', thinking: 'low' }
 
-/** Receivers of a turn's events. */
 export type Handlers = { event: (logged: Contracts.LoggedEvent) => void; interrupted: () => void }
 
-/** Returns the saved link, or `undefined` when it is absent or expired. */
 export function restore(): Link | undefined {
   const saved = localStorage.getItem(storageKey)
   if (!saved) return undefined
@@ -52,12 +36,10 @@ function save(cloud: Link) {
   localStorage.setItem(storageKey, JSON.stringify(cloud))
 }
 
-/** Removes the saved link. */
 export function forget() {
   localStorage.removeItem(storageKey)
 }
 
-/** Makes the Worker forget the key of the link. */
 export async function logout(cloud: Link) {
   const response = await fetch('v1/keys', { headers: headers(cloud), method: 'DELETE' })
   if (!response.ok && response.status !== 401) throw await failure(response)
@@ -76,7 +58,6 @@ async function failure(response: Response) {
   }
 }
 
-/** Registers the key with the Worker, and saves and returns the new link. */
 export async function enable(connected: Wallet.AccessKey): Promise<Link> {
   const response = await fetch('v1/keys', {
     body: JSON.stringify({ address: connected.address, private_key: connected.key }),
@@ -96,15 +77,12 @@ export async function enable(connected: Wallet.AccessKey): Promise<Link> {
   return cloud
 }
 
-/** Part of a link that a conversation keeps. */
 export type Session = Pick<Link, 'cursor' | 'open' | 'session'>
 
-/** Returns the conversation's part of the link. */
 export function snapshot(cloud: Link): Session {
   return { cursor: cloud.cursor, open: cloud.open, session: cloud.session }
 }
 
-/** Moves the link to a conversation's saved session, or to a new session when it has none. */
 export function adopt(cloud: Link, saved: unknown) {
   const session = saved as Partial<Session> | undefined
   Object.assign(
@@ -116,7 +94,6 @@ export function adopt(cloud: Link, saved: unknown) {
   save(cloud)
 }
 
-/** Returns the spend and call counts of the key, by service. */
 export async function status(cloud: Link) {
   const response = await fetch('v1/me', { headers: headers(cloud) })
   if (!response.ok) throw await failure(response)
@@ -195,7 +172,6 @@ async function reconnect(
   }
 }
 
-/** Runs one turn in the session, and follows its events until the result. */
 export async function ask(cloud: Link, options: ask.Options) {
   const { handlers, model = luna, prompt, signal } = options
   const request = `turn-${crypto.randomUUID()}`
@@ -236,18 +212,13 @@ export async function ask(cloud: Link, options: ask.Options) {
 
 export declare namespace ask {
   type Options = {
-    /** Receivers of the turn's events. */
     handlers: Handlers
-    /** Model of the turn. Defaults to Luna. */
     model?: Model | undefined
-    /** Prompt text. */
     prompt: string
-    /** Stops following the turn. The turn keeps running in the Worker. */
     signal?: AbortSignal | undefined
   }
 }
 
-/** Follows the open turn of the session until its result. */
 export async function resume(cloud: Link, options: resume.Options) {
   const { handlers, signal } = options
   const request = cloud.open
@@ -264,14 +235,11 @@ export async function resume(cloud: Link, options: resume.Options) {
 
 export declare namespace resume {
   type Options = {
-    /** Receivers of the turn's events. */
     handlers: Handlers
-    /** Stops following the turn. */
     signal?: AbortSignal | undefined
   }
 }
 
-/** Sends a prompt into the running turn, and returns `queued` when the turn is finishing. */
 export async function steer(cloud: Link, options: steer.Options): Promise<'queued' | 'steered'> {
   const { model = luna, prompt } = options
   const response = await fetch(`sessions/${encodeURIComponent(cloud.session)}/turns`, {
@@ -292,14 +260,11 @@ export async function steer(cloud: Link, options: steer.Options): Promise<'queue
 
 export declare namespace steer {
   type Options = {
-    /** Model of the turn. Defaults to Luna. */
     model?: Model | undefined
-    /** Prompt text. */
     prompt: string
   }
 }
 
-/** Requests access for a new hand of the session. */
 export async function hand(cloud: Link): Promise<Relay.Access> {
   const path = `sessions/${encodeURIComponent(cloud.session)}/hands`
   const response = await fetch(path, { headers: headers(cloud), method: 'POST' })
@@ -308,7 +273,6 @@ export async function hand(cloud: Link): Promise<Relay.Access> {
   return { token, url: Relay.socketUrl(`${path}/machine`) }
 }
 
-/** Returns the names of the session's connected hands. */
 export async function hands(cloud: Link): Promise<string[]> {
   const response = await fetch(`sessions/${encodeURIComponent(cloud.session)}/hands`, {
     cache: 'no-store',
@@ -318,7 +282,6 @@ export async function hands(cloud: Link): Promise<string[]> {
   return ((await response.json()) as { hands?: string[] }).hands ?? []
 }
 
-/** Returns a ledger of the session's spend, which polls the Worker while it has listeners. */
 export function meter(cloud: Link, options: meter.Options = {}) {
   const { interval = 1000 } = options
   let ledger: Payments.Ledger = { calls: 0, services: [], total: 0n }
@@ -367,9 +330,7 @@ export function meter(cloud: Link, options: meter.Options = {}) {
         }
         for (const listener of listeners) listener()
       }
-    } catch {
-      // the next poll tries again
-    }
+    } catch {}
     if (listeners.size) timer = setTimeout(poll, interval)
   }
 
@@ -388,7 +349,6 @@ export function meter(cloud: Link, options: meter.Options = {}) {
 
 export declare namespace meter {
   type Options = {
-    /** Poll interval in milliseconds. Defaults to 1000. */
     interval?: number | undefined
   }
 }

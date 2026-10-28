@@ -1,8 +1,3 @@
-/**
- * Text helpers of the shell: glob and POSIX regular expression translation, line splitting, and `printf` formatting.
- *
- * @module
- */
 import { byte } from './Fs.ts'
 
 const CLASSES: Record<string, string> = {

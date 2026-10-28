@@ -20,7 +20,6 @@
     "src/cloudflare/python.ts",
     "src/cloudflare/Relay.ts",
     "src/cloudflare/wasm.d.ts",
-    "src/machines/cloudflare/**",
-    "src/**/*.test.ts"
+    "src/machines/cloudflare/**"
   ]
 }

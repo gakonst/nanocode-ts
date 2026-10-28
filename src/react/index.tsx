@@ -1,8 +1,3 @@
-/**
- * Headless React components and hooks of a nanocode chat. A skin maps each part to class names.
- *
- * @module
- */
 export {
   AttachmentList,
   type Attachments,

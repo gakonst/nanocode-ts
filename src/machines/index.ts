@@ -1,9 +1,3 @@
-/**
- * Browser entrypoint of nanocode machines: the chat, its cloud session, the Tempo Wallet key, and
- * the payments that the key makes.
- *
- * @module
- */
 export * as Cloud from './Cloud.ts'
 export * as Keyring from './Keyring.ts'
 export * as Machine from './Machine.ts'

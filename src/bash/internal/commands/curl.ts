@@ -1,8 +1,3 @@
-/**
- * The `curl` and `wget` commands.
- *
- * @module
- */
 import { CommandError, PipeError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
 import { decode, encode, parentOf } from '../Fs.ts'

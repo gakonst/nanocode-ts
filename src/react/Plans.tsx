@@ -1,38 +1,21 @@
 'use client'
 
-/**
- * Plans: the visitor's ChatGPT and Claude plans, and the commands that sign in and out of them. A session whose
- * account has a plan signed in runs its model requests on that plan.
- *
- * @module
- */
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
 import * as Plans from '../client/Plans.ts'
 import { usePart } from './Provider.tsx'
 
-/** Plans of the visitor's account, with the commands that sign in and out. */
 export type PlanState = {
-  /** Both plans' states, once loaded. */
   status?: Plans.Status
-  /** Sign-in in progress. */
   pending?: Plans.SignIn
-  /** Last failure. */
   error?: string
-  /** Whether a command runs. */
   busy: boolean
-  /** Starts a sign-in to the plan of `provider`. */
   signIn(provider: Plans.Provider): void
-  /** Finishes the Claude sign-in with the code that Claude's page shows. */
   complete(code: string): void
-  /** Signs out of the plan of `provider`. */
   signOut(provider: Plans.Provider): void
-  /** Forgets the sign-in in progress. */
   cancel(): void
-  /** Reads both plans' states again. */
   refresh(): void
 }
 
-/** Returns the plans of `client`'s account, polling a pending ChatGPT sign-in until it ends. */
 export function usePlans(client: Plans.Client | undefined): PlanState {
   const [status, setStatus] = useState<Plans.Status>()
   const [pending, setPending] = useState<Plans.SignIn>()
@@ -100,7 +83,6 @@ export function usePlans(client: Plans.Client | undefined): PlanState {
   }
 }
 
-/** Rows that connect the visitor's plans, and the panel of a sign-in in progress. */
 export function PlanConnect(props: PlanConnect.Props) {
   const { plans } = props
   const part = usePart()
@@ -220,7 +202,6 @@ export function PlanConnect(props: PlanConnect.Props) {
 export declare namespace PlanConnect {
   type Props = {
     plans: PlanState
-    /** Plans to offer. Defaults to both. */
     providers?: readonly Plans.Provider[]
   }
 }

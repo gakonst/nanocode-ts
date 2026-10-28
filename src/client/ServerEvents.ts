@@ -1,20 +1,9 @@
-/**
- * Server-sent events: reads a `text/event-stream` body into messages.
- *
- * @module
- */
-
-/** One server-sent event. */
 export type Event = {
-  /** Event identifier, from the `id` field. */
   id?: string
-  /** Event name. Defaults to `message`. */
   event: string
-  /** Joined `data` lines. */
   data: string
 }
 
-/** Yields each event of a `text/event-stream` body, and releases the reader when it ends. */
 export async function* parse(body: ReadableStream<Uint8Array>): AsyncGenerator<Event> {
   const reader = body.getReader()
   const decoder = new TextDecoder()

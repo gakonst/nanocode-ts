@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * File attachments of a prompt: uploads, paste and drop, and the list of attached files.
- *
- * @module
- */
 import {
   type ChangeEvent,
   type ClipboardEvent,
@@ -19,7 +14,6 @@ import type * as Transport from '../client/Transport.ts'
 import { Image } from './Image.tsx'
 import { useConfig, usePart } from './Provider.tsx'
 
-/** File that is uploading or failed. */
 export type PendingAttachment = {
   id: string
   name: string
@@ -31,7 +25,6 @@ export type PendingAttachment = {
   attachment?: Transport.Attachment
 }
 
-/** Attachments of the composer. */
 export type Attachments = {
   enabled: boolean
   items: readonly PendingAttachment[]
@@ -58,7 +51,6 @@ export type Attachments = {
   }
 }
 
-/** Default largest number of files in one prompt. */
 export const maxAttachments = 8
 
 function pastedName(file: File): string {
@@ -67,7 +59,6 @@ function pastedName(file: File): string {
   return `pasted-${stamp}.${(file.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`
 }
 
-/** Returns the attachments of the composer and their operations. */
 export function useAttachments(options: { max?: number } = {}): Attachments {
   const config = useConfig()
   const files = config.files
@@ -195,7 +186,6 @@ export function useAttachments(options: { max?: number } = {}): Attachments {
   }
 }
 
-/** List of attached files. */
 export function AttachmentList(props: AttachmentList.Props) {
   const part = usePart()
   if (!props.items.length) return null

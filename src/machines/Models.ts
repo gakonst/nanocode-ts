@@ -1,17 +1,9 @@
-/**
- * Models that nanocode machines offers, and the text of payment errors.
- *
- * @module
- */
 import * as Wallet from './Wallet.ts'
 
-/** Base URL of the paid OpenAI API. */
 export const endpoint = 'https://openai.mpp.tempo.xyz/v1'
 
-/** URL of the paid Anthropic Messages API. */
 export const anthropic = 'https://anthropic.mpp.tempo.xyz/v1/messages'
 
-/** Model of a turn, with its display text. */
 export type Model = {
   about: string
   label: string
@@ -20,7 +12,6 @@ export type Model = {
   thinking: 'low'
 }
 
-/** Models by provider, in display order. */
 export const catalog = {
   claude: [
     {
@@ -56,10 +47,8 @@ export const catalog = {
   ],
 } as const satisfies Record<string, readonly Model[]>
 
-/** Default model. */
 export const luna: Model = catalog.codex[0]
 
-/** Returns an error whose message states the fix for a failed payment or key publication. */
 export function explain(error: unknown) {
   const text = error instanceof Error ? error.message : String(error)
   if (

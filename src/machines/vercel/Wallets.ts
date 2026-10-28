@@ -1,8 +1,3 @@
-/**
- * Machine payment wallets of Vercel sessions, with each session's keys in a durable-harness document.
- *
- * @module
- */
 import { defineDoc, type DurableSessions } from 'durable-harness'
 import * as Egress from '../../vercel/internal/Egress.ts'
 import * as Payment from '../Payment.ts'
@@ -16,14 +11,12 @@ import {
   type Store,
 } from '../Account.ts'
 
-// The document kind and version are durable.
 const walletDoc = defineDoc<{ entries: Record<string, string | number> }>({
   kind: 'nanocode.wallet',
   version: 1,
   initial: () => ({ entries: {} }),
 })
 
-/** Returns the wallet routes, the paying `fetch` of each session, and the MCP payment servers. */
 export function create(options: create.Options) {
   const { servers } = Payment.resolve({ inference: 'apiKey', ...options.payment })
   const holders = new Map<string, Account>()
@@ -82,22 +75,15 @@ export function create(options: create.Options) {
 
 export declare namespace create {
   type Options = {
-    /** Authorizes a wallet request for a session. A thrown `Response` refuses it. */
     authorize?(request: Request, sessionId: string): Promise<void> | void
-    /** Payment configuration. Inference defaults to `apiKey`. */
     payment?: Payment.Config
-    /** Tempo rpc URL. */
     rpc?: string
-    /** Whether wallets run scripts. Defaults to `false`. */
     scripts?: boolean
-    /** Secret that seals the wallet keys. */
     secret: string | undefined
-    /** Returns the durable sessions that hold the wallet documents. */
     sessions(): DurableSessions
   }
 }
 
-/** Returns a `Store` over the wallet document of one session, which caches reads for `maxAgeMs`. */
 export function store(options: store.Options): Store {
   const { sessionId, sessions } = options
   const maxAgeMs = options.maxAgeMs ?? 1000
@@ -143,11 +129,8 @@ export function store(options: store.Options): Store {
 
 export declare namespace store {
   type Options = {
-    /** Time in milliseconds that a read stays cached. Defaults to 1000. */
     maxAgeMs?: number
-    /** Session whose document holds the store. */
     sessionId: string
-    /** Returns the durable sessions. */
     sessions(): DurableSessions
   }
 }

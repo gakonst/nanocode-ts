@@ -1,23 +1,13 @@
-/**
- * Durable SQL host for a session: writes run on a local replica at once and commit to the Workflow log in batches.
- *
- * @module
- */
 import * as zlib from 'node:zlib'
 import { type DriveContext, Restart, type SessionState } from 'durable-harness'
 import type * as Contracts from '../Contracts.ts'
 import * as LocalSql from './internal/LocalSql.ts'
 
-/** Step name of each committed SQL batch. Workflow replays read it. */
 export const sqlStep = 'nanocode.sql'
 
-/** One SQL write transaction of the runtime. */
 export type Transaction = {
-  /** Store that the transaction writes. */
   kind: Contracts.SqlKind
-  /** Runtime operation that issued the transaction. */
   operation: string
-  /** Statements in execution order. */
   statements: Contracts.Statement[]
 }
 
@@ -36,43 +26,28 @@ type Entry = {
   reject(error: unknown): void
 }
 
-/** `on` acknowledges writes before they commit, and `strict` waits for each commit. */
 export type Durability = 'on' | 'strict'
 
-/** Default minimum time in milliseconds between two batches with `on` durability. */
 export const defaultBatchMs = 500
 
 const batchBytes = 24 * 1024 * 1024
 
-/** Counts of one drive's journal. */
 export type Stats = {
-  /** Batches replayed from the log when the journal opened. */
   replayed_batches: number
-  /** Transactions in the replayed batches. */
   replayed_transactions: number
-  /** Batches that this drive committed. */
   batches: number
-  /** Write transactions that this drive ran. */
   transactions: number
-  /** Read-only transactions that this drive ran. */
   reads: number
-  /** Total time in milliseconds spent waiting for batch commits. */
   batch_wait_ms: number
 }
 
-/** Durable `SqlHost` of one drive, created by `create`. */
 export type Journal = Contracts.SqlHost & {
-  /** Number of batches committed to the log, replayed ones included. */
   readonly batches: number
-  /** Closes the replica, and rejects writes that did not commit. */
   close(): void
-  /** Resolves once every write before the call is committed. */
   durable(): Promise<void>
-  /** Counts of this drive. */
   readonly stats: Stats
 }
 
-/** Returns the effect key of batch `n`. The `sql:${n}` format is durable. */
 export function batchKey(n: number): string {
   return `sql:${n}`
 }
@@ -148,7 +123,6 @@ function unpack(packed: Uint8Array): Transaction[] {
   }))
 }
 
-/** Returns the transactions of every committed batch of a session, in commit order. */
 export function committed(state: SessionState): Transaction[][] {
   const batches: Transaction[][] = []
   for (
@@ -162,10 +136,6 @@ export function committed(state: SessionState): Transaction[][] {
   return batches
 }
 
-/**
- * Replays the committed batches of the drive's session, and returns a `SqlHost` that commits new writes as batches.
- * A batch that another drive committed first throws `Restart`.
- */
 export function create(ctx: DriveContext, options: create.Options = {}): Journal {
   const durability = options.durability ?? 'on'
   const batchMs = durability === 'on' ? (options.batchMs ?? defaultBatchMs) : 0
@@ -316,9 +286,7 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
 
 export declare namespace create {
   type Options = {
-    /** Minimum time in milliseconds between two batches with `on` durability. Defaults to `defaultBatchMs`. */
     batchMs?: number | undefined
-    /** Defaults to `on`. */
     durability?: Durability | undefined
   }
 }

@@ -1,8 +1,3 @@
-/**
- * WebAssembly engine: native compilation with an interpreter fallback.
- *
- * @module
- */
 import { LimitError } from '../Shell.ts'
 import type * as Wasm from '../../Wasm.ts'
 

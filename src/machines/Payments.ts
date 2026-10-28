@@ -1,9 +1,3 @@
-/**
- * Browser payments of nanocode machines: a fetch that pays with the connected key through mppx, and
- * the ledger of what it spent.
- *
- * @module
- */
 import type { Address } from 'viem'
 import * as Mcp from './Mcp.ts'
 import * as Payment from './Payment.ts'
@@ -13,34 +7,23 @@ const topUp = '0.05'
 const opening = '50000'
 const maxDeposit = '0.5'
 
-/** Time in milliseconds that a charge counts toward the spend rate. */
 export const window = 30_000
 
 const send = globalThis.fetch.bind(globalThis)
 
-/** Spend of one service. */
 export type Service = {
-  /** Number of paid calls. */
   calls: number
-  /** Recent charges in MACH base units, with their time in milliseconds since the epoch. */
   charges: readonly { amount: bigint; at: number }[]
-  /** Display name, from the host and the operation. */
   name: string
-  /** Total spend in MACH base units. */
   spent: bigint
 }
 
-/** Spend of a key across services. */
 export type Ledger = {
-  /** Number of paid calls. */
   calls: number
-  /** Spend of each service. */
   services: readonly Service[]
-  /** Total spend in MACH base units. */
   total: bigint
 }
 
-/** Creates a paying fetch for the connected key. */
 export function create(connected: Wallet.AccessKey, options: create.Options = {}) {
   const servers = options.servers ?? Mcp.servers
   const prefix = `nanocode.machines.${connected.keyAddress.toLowerCase()}.`
@@ -218,10 +201,8 @@ export function create(connected: Wallet.AccessKey, options: create.Options = {}
 
 export declare namespace create {
   type Options = {
-    /** Paid MCP servers whose calls the ledger counts. Defaults to `Mcp.servers`. */
     servers?: readonly Mcp.Server[] | undefined
   }
 }
 
-/** Paying fetch and its ledger. */
 export type Client = ReturnType<typeof create>

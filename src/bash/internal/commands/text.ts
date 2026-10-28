@@ -1,8 +1,3 @@
-/**
- * Text commands, such as `grep`, `sort`, `cut`, `tr`, and `printf`.
- *
- * @module
- */
 import {
   CommandError,
   PipeError,

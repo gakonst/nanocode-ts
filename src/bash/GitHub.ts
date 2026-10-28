@@ -1,41 +1,22 @@
-/**
- * GitHub access for the shell: `git clone` options, archive URLs, and fetch layers that reach
- * public repositories.
- *
- * @module
- */
 import * as Egress from '../internal/Egress.ts'
 
-/** Options of the `git` and `gh` commands. */
 export type Options = {
-  /** Returns the archive URL of a repository at a ref. Defaults to the codeload.github.com archive and then the API tarball. */
   archive?(owner: string, repo: string, ref: string): string
-  /** Whether `git clone` requests the commit details from api.github.com. `false` skips the request. */
   details?: boolean
-  /** Largest clone in bytes after extraction. */
   maxBytes?: number
-  /** Largest archive in bytes that a clone downloads. */
   maxDownloadBytes?: number
-  /** Largest file in bytes that a clone writes. */
   maxFileBytes?: number
-  /** Most files in one clone. */
   maxFiles?: number
-  /** Milliseconds without archive data before a clone fails. */
   stallMs?: number
-  /** Token for api.github.com requests. */
   token?: Token
 }
 
-/** Token for api.github.com, or a function that returns one. An empty value sends no token. */
 export type Token = string | (() => string | null | undefined | Promise<string | null | undefined>)
 
-/** Options of `wrap` and `archives`. */
 export type FetchOptions = {
-  /** Token for GET and HEAD requests to api.github.com. */
   token?: Token | undefined
 }
 
-/** Returns the codeload.github.com tarball URL of a repository at a ref. */
 export function codeload(options: codeload.Options): string {
   return (
     'https://codeload.github.com/' +
@@ -49,11 +30,8 @@ export function codeload(options: codeload.Options): string {
 
 export declare namespace codeload {
   type Options = {
-    /** Owner of the repository. */
     owner: string
-    /** Branch, tag, or commit. Slashes separate path segments. */
     ref: string
-    /** Name of the repository. */
     repo: string
   }
 }
@@ -332,11 +310,6 @@ async function limited(response: Response): Promise<Response> {
   )
 }
 
-/**
- * Wraps `fetcher` for api.github.com: it adds the token to GET and HEAD requests and answers
- * rate-limited requests from raw.githubusercontent.com, codeload.github.com, or github.com when it
- * can. Other hosts pass through.
- */
 export function wrap(fetcher: typeof fetch, options: FetchOptions = {}): typeof fetch {
   const layer: typeof fetch = async (input, init) => {
     if (new URL(input instanceof Request ? input.url : String(input)).hostname !== apiHost)
@@ -393,10 +366,6 @@ export function wrap(fetcher: typeof fetch, options: FetchOptions = {}): typeof 
   return Egress.guarded(fetcher) ? Egress.mark(layer) : layer
 }
 
-/**
- * Returns a fetch that reaches only public GitHub repositories: files, archives, release assets,
- * and read-only repository API routes. It throws a `TypeError` for other URLs and redirects.
- */
 export function archives(
   fetcher: typeof fetch = globalThis.fetch,
   options: FetchOptions = {},

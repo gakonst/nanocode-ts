@@ -1,9 +1,3 @@
-/**
- * Host-agnostic entrypoint: the WebAssembly agent runtime, hands, sessions, and the contracts that
- * hosts implement.
- *
- * @module
- */
 export * as AgentRuntime from './AgentRuntime.ts'
 export * as Bridge from './Bridge.ts'
 export * as Contracts from './Contracts.ts'

@@ -1,10 +1,5 @@
 'use client'
 
-/**
- * Chat page in the style of Claude.
- *
- * @module
- */
 import type * as Config from '../../client/Config.ts'
 import type * as Transcript from '../../client/Transcript.ts'
 import {
@@ -401,7 +396,6 @@ function App(props: CloneProps) {
   )
 }
 
-/** Chat page in the style of Claude. */
 export function Claude(props: Claude.Props) {
   return (
     <NanocodeProvider

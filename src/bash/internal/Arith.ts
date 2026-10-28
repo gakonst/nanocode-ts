@@ -1,8 +1,3 @@
-/**
- * Evaluator of bash arithmetic expressions, such as `$(( ))` and `let`.
- *
- * @module
- */
 export type ArithValue = number | bigint
 
 export type ArithScope = {

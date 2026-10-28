@@ -1,8 +1,3 @@
-/**
- * Additional commands, such as `rg`, `tar`, `gzip`, `xxd`, and `timeout`.
- *
- * @module
- */
 import {
   CommandError,
   LimitError,

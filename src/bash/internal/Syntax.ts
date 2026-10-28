@@ -1,8 +1,3 @@
-/**
- * Parser of bash source into a syntax tree of scripts, pipelines, commands, and words.
- *
- * @module
- */
 import { byte } from './Fs.ts'
 
 export type Part =

@@ -1,8 +1,3 @@
-/**
- * Printer that turns parsed bash syntax back into source text, such as for `declare -f`.
- *
- * @module
- */
 import type { AndOr, Assign, Command, Pipeline, Redirect, Script, Word } from './Syntax.ts'
 import { forced, heredocs, newlines, sources, texts } from './Syntax.ts'
 

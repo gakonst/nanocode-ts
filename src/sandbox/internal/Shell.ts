@@ -1,31 +1,17 @@
-/**
- * Shell helpers that the sandbox workspaces share: output collection, path resolution, and the
- * `timeout` wrapper of each command.
- *
- * @module
- */
 import type * as Contracts from '../../Contracts.ts'
 
-/** Working directory of a sandbox workspace. */
 export const cwd = '/workspace'
 
-/** Largest output in bytes that a command keeps from each of its streams. */
 export const outputLimitBytes = 4 * 1024 * 1024
 
-/** Seconds that `timeout` waits after its signal before it kills a command. */
 export const killAfterSeconds = 5
 
-/** Byte collector with a size limit. */
 export type Collector = {
-  /** Appends a chunk, and drops the bytes past the limit. */
   push(chunk: Uint8Array | string): void
-  /** Whether the collector dropped bytes. */
   readonly truncated: boolean
-  /** Decodes the kept bytes as UTF-8. */
   text(): string
 }
 
-/** Returns a collector that keeps at most `limit` bytes. */
 export function collector(options: collector.Options): Collector {
   const chunks: Uint8Array[] = []
   let size = 0
@@ -59,12 +45,10 @@ export function collector(options: collector.Options): Collector {
 
 export declare namespace collector {
   type Options = {
-    /** Largest number of bytes to keep. */
     limit: number
   }
 }
 
-/** Reads `stream` to its end into a collector. */
 export async function drain(
   stream: ReadableStream<Uint8Array> | null | undefined,
   options: drain.Options,
@@ -81,12 +65,10 @@ export async function drain(
 
 export declare namespace drain {
   type Options = {
-    /** Collector that receives the chunks. */
     into: Collector
   }
 }
 
-/** Resolves `path` against the working directory, and removes `.` and `..` segments. */
 export function resolve(path: string, options: resolve.Options): string {
   const parts: string[] = []
   for (const part of (path.startsWith('/') ? path : options.cwd + '/' + path).split('/')) {
@@ -99,12 +81,10 @@ export function resolve(path: string, options: resolve.Options): string {
 
 export declare namespace resolve {
   type Options = {
-    /** Directory that a relative path starts from. */
     cwd: string
   }
 }
 
-/** Returns the argument vector that runs `command` in `bash` under `timeout`. */
 export function argv(command: string, options: argv.Options): string[] {
   return [
     'timeout',
@@ -118,12 +98,10 @@ export function argv(command: string, options: argv.Options): string[] {
 
 export declare namespace argv {
   type Options = {
-    /** Deadline in milliseconds, or `null` for no deadline. */
     timeoutMs: number | null
   }
 }
 
-/** Returns the shell output of a finished command, with a note when its deadline expired. */
 export function output(options: output.Options): Contracts.ShellOutput {
   const { elapsedMs, exitCode, stderr, stdout, timeoutMs } = options
 
@@ -143,15 +121,10 @@ export function output(options: output.Options): Contracts.ShellOutput {
 
 export declare namespace output {
   type Options = {
-    /** Milliseconds from the start of the command to its exit. */
     elapsedMs: number
-    /** Exit code of the command. */
     exitCode: number
-    /** Collector of the standard error stream. */
     stderr: Collector
-    /** Collector of the standard output stream. */
     stdout: Collector
-    /** Deadline in milliseconds, or `null` for no deadline. */
     timeoutMs: number | null
   }
 }

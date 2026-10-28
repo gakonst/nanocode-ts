@@ -1,16 +1,6 @@
-/**
- * Blob host of the runtime over Durable Object SQLite storage: it splits each blob into parts that
- * fit the SQL value limit.
- *
- * @module
- */
 import type * as Contracts from '../../Contracts.ts'
 import * as Sql from '../Sql.ts'
 
-/**
- * Returns a blob host over `storage`. It creates the `blob_parts` table, and renames a `blobs`
- * table of the older parted layout to it.
- */
 export function create(storage: Sql.Storage, options: create.Options = {}): Contracts.BlobHost {
   const partBytes = options.partBytes ?? Sql.valueLimitBytes
 
@@ -69,7 +59,6 @@ export function create(storage: Sql.Storage, options: create.Options = {}): Cont
 
 export declare namespace create {
   type Options = {
-    /** Largest part in bytes. Defaults to `Sql.valueLimitBytes`. */
     partBytes?: number | undefined
   }
 }
