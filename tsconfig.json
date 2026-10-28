@@ -9,12 +9,7 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "types": [],
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable",
-      "ESNext.Disposable"
-    ],
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "skipLibCheck": true,
     "jsx": "react-jsx"
   },
@@ -31,8 +26,5 @@
     "src/react/*.ts",
     "src/react/*.tsx"
   ],
-  "exclude": [
-    "src/machines/vercel.ts",
-    "src/**/*.test.ts"
-  ]
+  "exclude": ["src/machines/vercel.ts", "src/**/*.test.ts"]
 }

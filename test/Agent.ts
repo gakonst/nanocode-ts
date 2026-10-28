@@ -128,7 +128,12 @@ function claude(input: any) {
   const answered =
     Array.isArray(last) && last.some((block: { type: string }) => block.type === 'tool_result')
   const blocks = answered
-    ? [[{ text: '', type: 'text' }, { text: 'the value is bravo', type: 'text_delta' }]]
+    ? [
+        [
+          { text: '', type: 'text' },
+          { text: 'the value is bravo', type: 'text_delta' },
+        ],
+      ]
     : [
         [
           { id: `toolu_${call}`, input: {}, name: lookup.name, type: 'tool_use' },
@@ -177,8 +182,7 @@ function codex(input: any) {
     (item: { role?: string; type: string }) => item.type === 'message' && item.role === 'user',
   )
   const answered = items.some(
-    (item: { type: string }, index: number) =>
-      index > user && item.type === 'function_call_output',
+    (item: { type: string }, index: number) => index > user && item.type === 'function_call_output',
   )
   const call = calls++
   const id = `resp_${call}`
@@ -242,7 +246,9 @@ function codex(input: any) {
 
 function sse(events: readonly [string | null, unknown][]) {
   const body = events
-    .map((entry) => (entry[0] ? `event: ${entry[0]}\n` : '') + `data: ${JSON.stringify(entry[1])}\n\n`)
+    .map(
+      (entry) => (entry[0] ? `event: ${entry[0]}\n` : '') + `data: ${JSON.stringify(entry[1])}\n\n`,
+    )
     .join('')
   return new Response(body, { headers: { 'content-type': 'text/event-stream' } })
 }

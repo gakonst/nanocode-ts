@@ -24,7 +24,9 @@ export function open(options: open.Options = {}): open.ReturnType {
           const prepared = db.prepare(query)
           prepared.setReturnArrays(true)
           return prepared.all(
-            ...values.map((value) => (value instanceof ArrayBuffer ? new Uint8Array(value) : value)),
+            ...values.map((value) =>
+              value instanceof ArrayBuffer ? new Uint8Array(value) : value,
+            ),
           ) as unknown as SqlValue[][]
         })
         db.exec('COMMIT')

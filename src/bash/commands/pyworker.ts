@@ -1,19 +1,50 @@
-import { CommandError, type CommandContext } from "../shell.ts";
+import { CommandError, type CommandContext } from '../shell.ts'
 
+export type PythonJob = {
+  kind: string
+  name: string
+  target: string
+  argv: string[]
+  filename: string
+  cwd: string
+  env: Record<string, string>
+  path0: string
+  roots: string[]
+  files: [string, Uint8Array, string][]
+  stdin: Uint8Array
+}
 
-export type PythonJob = { kind: string; name: string; target: string; argv: string[]; filename: string; cwd: string; env: Record<string, string>; path0: string; roots: string[]; files: [string, Uint8Array, string][]; stdin: Uint8Array };
+export type PythonSync = {
+  mirror: string
+  roots: string[]
+  files: [string, string][]
+  dirs: string[]
+}
 
-export type PythonSync = { mirror: string; roots: string[]; files: [string, string][]; dirs: string[] };
+export type PythonChanges = { files: Map<string, Uint8Array>; dirs: string[]; deleted: string[] }
 
-export type PythonChanges = { files: Map<string, Uint8Array>; dirs: string[]; deleted: string[] };
+type Port = {
+  postMessage(message: unknown, transfer?: unknown[]): void
+  on(event: string, listener: (value: unknown) => void): void
+  terminate(): Promise<number>
+  unref?(): void
+  ref?(): void
+}
 
-type Port = { postMessage(message: unknown, transfer?: unknown[]): void; on(event: string, listener: (value: unknown) => void): void; terminate(): Promise<number>; unref?(): void; ref?(): void };
+type WorkerThreads = {
+  Worker: new (
+    source: string,
+    options: { eval: true; workerData: unknown; resourceLimits?: Record<string, number> },
+  ) => Port
+}
 
-type WorkerThreads = { Worker: new (source: string, options: { eval: true; workerData: unknown; resourceLimits?: Record<string, number> }) => Port };
+type Pending = {
+  resolve(value: Record<string, unknown>): void
+  reject(error: Error): void
+  output?(fd: number, text: string): void
+}
 
-type Pending = { resolve(value: Record<string, unknown>): void; reject(error: Error): void; output?(fd: number, text: string): void };
-
-type Remote = { port: Port; pending: Map<number, Pending>; next: number; failed?: Error };
+type Remote = { port: Port; pending: Map<number, Pending>; next: number; failed?: Error }
 
 const SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
@@ -153,130 +184,189 @@ parentPort.on("message", async message => {
     parentPort.postMessage({ id: message.id, type: "error", message: error && error.stack || String(error) });
   }
 });
-`;
+`
 
-let remote: Remote | undefined;
+let remote: Remote | undefined
 
-let queue: Promise<unknown> = Promise.resolve();
+let queue: Promise<unknown> = Promise.resolve()
 
 function threads(): WorkerThreads | undefined {
-  const process = (globalThis as { process?: { versions?: { node?: string }; getBuiltinModule?: (id: string) => unknown } }).process;
-  if (typeof process?.versions?.node !== "string") return undefined;
+  const process = (
+    globalThis as {
+      process?: { versions?: { node?: string }; getBuiltinModule?: (id: string) => unknown }
+    }
+  ).process
+  if (typeof process?.versions?.node !== 'string') return undefined
   try {
-    return process.getBuiltinModule?.("node:worker_threads") as WorkerThreads | undefined;
+    return process.getBuiltinModule?.('node:worker_threads') as WorkerThreads | undefined
   } catch {
-    return undefined;
+    return undefined
   }
 }
 
 export function pythonWorkers(): boolean {
-  return threads() !== undefined && typeof SharedArrayBuffer === "function" && typeof Atomics === "object";
+  return (
+    threads() !== undefined &&
+    typeof SharedArrayBuffer === 'function' &&
+    typeof Atomics === 'object'
+  )
 }
 
 function spawn(helper: string, cacheDir: string): Remote {
-  const { Worker } = threads()!;
-  const port = new Worker(SOURCE, { eval: true, workerData: { helper, cacheDir, from: (import.meta as { url?: string }).url ?? "" } });
-  const current: Remote = { port, pending: new Map(), next: 0 };
+  const { Worker } = threads()!
+  const port = new Worker(SOURCE, {
+    eval: true,
+    workerData: { helper, cacheDir, from: (import.meta as { url?: string }).url ?? '' },
+  })
+  const current: Remote = { port, pending: new Map(), next: 0 }
   const fail = (error: Error) => {
-    current.failed ??= error;
-    if (remote === current) remote = undefined;
-    for (const pending of current.pending.values()) pending.reject(error);
-    current.pending.clear();
-  };
-  port.on("message", (message: unknown) => {
-    const data = message as { id: number; type: string; fd?: number; text?: string; message?: string };
-    const pending = current.pending.get(data.id);
-    if (!pending) return;
-    if (data.type === "out") return pending.output?.(data.fd ?? 1, data.text ?? "");
-    current.pending.delete(data.id);
-    if (!current.pending.size) port.unref?.();
-    if (data.type === "error") pending.reject(new Error(data.message ?? "python worker failed"));
-    else pending.resolve(data as unknown as Record<string, unknown>);
-  });
-  port.on("error", (error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
-  port.on("exit", (code: unknown) => fail(new Error("the python worker exited with code " + String(code))));
-  port.unref?.();
-  return current;
+    current.failed ??= error
+    if (remote === current) remote = undefined
+    for (const pending of current.pending.values()) pending.reject(error)
+    current.pending.clear()
+  }
+  port.on('message', (message: unknown) => {
+    const data = message as {
+      id: number
+      type: string
+      fd?: number
+      text?: string
+      message?: string
+    }
+    const pending = current.pending.get(data.id)
+    if (!pending) return
+    if (data.type === 'out') return pending.output?.(data.fd ?? 1, data.text ?? '')
+    current.pending.delete(data.id)
+    if (!current.pending.size) port.unref?.()
+    if (data.type === 'error') pending.reject(new Error(data.message ?? 'python worker failed'))
+    else pending.resolve(data as unknown as Record<string, unknown>)
+  })
+  port.on('error', (error: unknown) =>
+    fail(error instanceof Error ? error : new Error(String(error))),
+  )
+  port.on('exit', (code: unknown) =>
+    fail(new Error('the python worker exited with code ' + String(code))),
+  )
+  port.unref?.()
+  return current
 }
 
-function call(helper: string, cacheDir: string, message: Record<string, unknown>, output?: Pending["output"], transfer: unknown[] = []): { remote: Remote; result: Promise<Record<string, unknown>> } {
-  const current = remote ??= spawn(helper, cacheDir);
-  const id = ++current.next;
+function call(
+  helper: string,
+  cacheDir: string,
+  message: Record<string, unknown>,
+  output?: Pending['output'],
+  transfer: unknown[] = [],
+): { remote: Remote; result: Promise<Record<string, unknown>> } {
+  const current = (remote ??= spawn(helper, cacheDir))
+  const id = ++current.next
   const result = new Promise<Record<string, unknown>>((resolve, reject) => {
-    current.pending.set(id, { resolve, reject, ...(output ? { output } : {}) });
-  });
-  current.port.ref?.();
-  current.port.postMessage({ ...message, id }, transfer);
-  return { remote: current, result };
+    current.pending.set(id, { resolve, reject, ...(output ? { output } : {}) })
+  })
+  current.port.ref?.()
+  current.port.postMessage({ ...message, id }, transfer)
+  return { remote: current, result }
 }
 
 function serial<T>(work: () => Promise<T>): Promise<T> {
-  const task = queue.then(work);
-  queue = task.catch(() => {});
-  return task;
+  const task = queue.then(work)
+  queue = task.catch(() => {})
+  return task
 }
 
 export function workerVersion(helper: string, cacheDir: string): Promise<string> {
-  return serial(async () => String((await call(helper, cacheDir, { type: "version" }).result)["version"]));
+  return serial(async () =>
+    String((await call(helper, cacheDir, { type: 'version' }).result)['version']),
+  )
 }
 
 export function workerPreload(helper: string, cacheDir: string, packages: string[]): Promise<void> {
-  return serial(async () => void await call(helper, cacheDir, { type: "preload", packages }).result);
+  return serial(
+    async () => void (await call(helper, cacheDir, { type: 'preload', packages }).result),
+  )
 }
 
 export function workerExclusive<T>(work: () => Promise<T>): Promise<T> {
-  return serial(work);
+  return serial(work)
 }
 
-export async function workerSync(helper: string, cacheDir: string, sync: PythonSync): Promise<string[]> {
-  return (await call(helper, cacheDir, { type: "sync", sync }).result)["need"] as string[];
+export async function workerSync(
+  helper: string,
+  cacheDir: string,
+  sync: PythonSync,
+): Promise<string[]> {
+  return (await call(helper, cacheDir, { type: 'sync', sync }).result)['need'] as string[]
 }
 
-export async function workerStamps(helper: string, cacheDir: string, stamps: [string, string][]): Promise<void> {
-  await call(helper, cacheDir, { type: "stamps", stamps }).result;
+export async function workerStamps(
+  helper: string,
+  cacheDir: string,
+  stamps: [string, string][],
+): Promise<void> {
+  await call(helper, cacheDir, { type: 'stamps', stamps }).result
 }
 
-export function workerRun(helper: string, cacheDir: string, ctx: CommandContext, job: PythonJob): Promise<{ status: number; changes: PythonChanges; failure?: unknown }> {
+export function workerRun(
+  helper: string,
+  cacheDir: string,
+  ctx: CommandContext,
+  job: PythonJob,
+): Promise<{ status: number; changes: PythonChanges; failure?: unknown }> {
   return (async () => {
-    const interrupt = new SharedArrayBuffer(4);
-    const flag = new Int32Array(interrupt);
-    const deadline = Date.now() + ctx.limits.timeoutMs;
-    let failure: unknown;
+    const interrupt = new SharedArrayBuffer(4)
+    const flag = new Int32Array(interrupt)
+    const deadline = Date.now() + ctx.limits.timeoutMs
+    let failure: unknown
     const output = (fd: number, text: string) => {
       try {
-        (fd === 2 ? ctx.stderr : ctx.stdout).write(text);
+        ;(fd === 2 ? ctx.stderr : ctx.stdout).write(text)
       } catch (error) {
-        failure ??= error;
+        failure ??= error
       }
-    };
-    const { remote: current, result } = call(helper, cacheDir, { type: "run", job: { ...job, interrupt } }, output);
-    let killed: string | undefined;
-    let stoppedAt = 0;
+    }
+    const { remote: current, result } = call(
+      helper,
+      cacheDir,
+      { type: 'run', job: { ...job, interrupt } },
+      output,
+    )
+    let killed: string | undefined
+    let stoppedAt = 0
     const watch = setInterval(() => {
-      const stopped = failure !== undefined || ctx.signal.aborted || Date.now() > deadline;
-      if (!stopped) return;
-      stoppedAt ||= Date.now();
-      Atomics.store(flag, 0, 2);
-      current.port.postMessage({ type: "cancel" });
+      const stopped = failure !== undefined || ctx.signal.aborted || Date.now() > deadline
+      if (!stopped) return
+      stoppedAt ||= Date.now()
+      Atomics.store(flag, 0, 2)
+      current.port.postMessage({ type: 'cancel' })
       if (Date.now() - stoppedAt > 3000 && !killed) {
-        killed = ctx.signal.aborted ? "interrupted" : failure !== undefined ? "output" : "timeout";
-        void current.port.terminate();
+        killed = ctx.signal.aborted ? 'interrupted' : failure !== undefined ? 'output' : 'timeout'
+        void current.port.terminate()
       }
-    }, 50);
+    }, 50)
     try {
       const done = await result.catch((error: unknown) => {
-        if (killed) return undefined;
-        throw error;
-      });
+        if (killed) return undefined
+        throw error
+      })
       if (!done) {
-        if (killed === "output") throw failure;
-        if (killed === "interrupted") throw new CommandError("interrupted", 130);
-        throw new CommandError("timed out after " + ctx.limits.timeoutMs + " ms (the python process was killed)", 124);
+        if (killed === 'output') throw failure
+        if (killed === 'interrupted') throw new CommandError('interrupted', 130)
+        throw new CommandError(
+          'timed out after ' + ctx.limits.timeoutMs + ' ms (the python process was killed)',
+          124,
+        )
       }
-      return { status: Number(done["status"]), changes: { files: done["files"] as Map<string, Uint8Array>, dirs: done["dirs"] as string[], deleted: done["deleted"] as string[] }, ...(failure !== undefined ? { failure } : {}) };
+      return {
+        status: Number(done['status']),
+        changes: {
+          files: done['files'] as Map<string, Uint8Array>,
+          dirs: done['dirs'] as string[],
+          deleted: done['deleted'] as string[],
+        },
+        ...(failure !== undefined ? { failure } : {}),
+      }
     } finally {
-      clearInterval(watch);
+      clearInterval(watch)
     }
-  })();
+  })()
 }
-

@@ -58,9 +58,9 @@ describe('instantiate', () => {
 
       expect(requests.length).toMatchInlineSnapshot(`6`)
       expect(requests.every((request) => request.credentialFree)).toMatchInlineSnapshot(`true`)
-      expect(requests.every((request) => request.tools.includes(Agent.lookup.name))).toMatchInlineSnapshot(
-        `true`,
-      )
+      expect(
+        requests.every((request) => request.tools.includes(Agent.lookup.name)),
+      ).toMatchInlineSnapshot(`true`)
       expect(requests.at(-1)!.messages > requests[0]!.messages).toMatchInlineSnapshot(`true`)
 
       await second.runtime.dispose()

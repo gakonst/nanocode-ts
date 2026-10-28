@@ -27,7 +27,11 @@ describe('Transcript', () => {
       const logged = await session.runtime.page(Agent.scope, 0, 1000)
 
       const entries: Entry[] = []
-      const transcript = new Transcript({ add: (entry) => entries.push(entry), live: () => {}, revealMs: 0 })
+      const transcript = new Transcript({
+        add: (entry) => entries.push(entry),
+        live: () => {},
+        revealMs: 0,
+      })
       for (const event of logged.events) {
         const live = liveEvent(event)
         if (live) transcript.push(live)
@@ -52,7 +56,8 @@ describe('Transcript', () => {
           },
         ]
       `)
-      expect(turns(entries, [], false).map((turn) => turn.blocks.map((block) => block.kind))).toMatchInlineSnapshot(`
+      expect(turns(entries, [], false).map((turn) => turn.blocks.map((block) => block.kind)))
+        .toMatchInlineSnapshot(`
         [
           [
             "tool",
@@ -73,6 +78,8 @@ function shape(entry: Entry) {
   return {
     kind: entry.kind,
     text: entry.text.replace(/\d+ ms$/, '<duration>'),
-    ...(tool ? { tool: { input: tool.input, name: tool.name, status: tool.status, title: tool.title } } : {}),
+    ...(tool
+      ? { tool: { input: tool.input, name: tool.name, status: tool.status, title: tool.title } }
+      : {}),
   }
 }

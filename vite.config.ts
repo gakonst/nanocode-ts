@@ -7,8 +7,16 @@ import { defineConfig } from 'vite-plus'
 
 export default defineConfig({
   fmt: {
-    // QuickJS sources are embedded with `include_str!` and hashed into the WebAssembly fingerprint.
-    ignorePatterns: ['src/wasm/**', 'dist/**', 'output/**', 'target/**', 'bench/out/**'],
+    // QuickJS sources are embedded with `include_str!`, and Markdown inline code holds escapes.
+    ignorePatterns: [
+      '**/*.md',
+      '**/*.toml',
+      'bench/out/**',
+      'dist/**',
+      'output/**',
+      'src/wasm/**',
+      'target/**',
+    ],
     printWidth: 100,
     semi: false,
     singleQuote: true,

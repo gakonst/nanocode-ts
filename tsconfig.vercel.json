@@ -1,14 +1,8 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src/vercel/*.ts",
-    "src/sandbox/vercel.ts",
-    "src/machines/vercel.ts"
-  ],
+  "include": ["src/vercel/*.ts", "src/sandbox/vercel.ts", "src/machines/vercel.ts"],
   "exclude": []
 }

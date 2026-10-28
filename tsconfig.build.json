@@ -6,14 +6,9 @@
     "rewriteRelativeImportExtensions": true,
     "rootDir": "src",
     "outDir": "dist",
-    "types": [
-      "node"
-    ]
+    "types": ["node"]
   },
-  "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx"
-  ],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": [
     "src/cloudflare/contracts.ts",
     "src/cloudflare/gateway.ts",
