@@ -39,7 +39,7 @@ export function create(batches: Journal.Transaction[][]): LocalSql {
       const rows = list.map((statement) => {
         const [query, ...values] = statement
         return prepare(query).all(
-          ...(values as (string | null)[]),
+          ...values.map((value) => (value instanceof ArrayBuffer ? new Uint8Array(value) : value)),
         ) as unknown as Contracts.SqlValue[][]
       })
       db.exec('COMMIT')
