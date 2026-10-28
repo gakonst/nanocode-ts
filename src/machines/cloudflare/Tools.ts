@@ -1,9 +1,15 @@
-import type { HostToolCall } from '../../cloudflare/contracts.ts'
+/**
+ * Host tools of nanocode machines: HTTPS requests with the account's secrets, the secret names, the
+ * wallet status, and the files of a session in the account's wallet.
+ *
+ * @module
+ */
+import type * as App from '../../cloudflare/App.ts'
 import type * as Contracts from '../../Contracts.ts'
-import { type MachinesEnv, wallet } from './env.ts'
+import * as Env from './Env.ts'
 
-const FETCH_PREVIEW = 20_000
-const SECRET = /\{\{([A-Z_][A-Z0-9_]{0,63})\}\}/g
+const fetchPreview = 20_000
+const secretPattern = /\{\{([A-Z_][A-Z0-9_]{0,63})\}\}/g
 
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object',
@@ -12,7 +18,8 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
   required,
 })
 
-const definitions: Contracts.HostTool[] = [
+/** Definitions of the host tools. */
+export const definitions: Contracts.HostTool[] = [
   {
     name: 'http',
     description:
@@ -59,7 +66,7 @@ async function read(response: Response, limit: number) {
 }
 
 async function http(
-  env: MachinesEnv,
+  env: Env.Env,
   account: string,
   input: { url?: string; method?: string; headers?: Record<string, string>; body?: string },
   signal: AbortSignal,
@@ -68,16 +75,16 @@ async function http(
   if (url.protocol !== 'https:') return { error: 'http only sends https requests' }
   const names = new Set<string>()
   for (const value of Object.values(input.headers ?? {}))
-    for (const match of value.matchAll(SECRET)) names.add(match[1]!)
+    for (const match of value.matchAll(secretPattern)) names.add(match[1]!)
   const secrets: Record<string, string> = names.size
-    ? await wallet(env, account).secrets([...names])
+    ? await Env.wallet(env, { account }).secrets([...names])
     : {}
   const missing = [...names].filter((name) => !(name in secrets))
   if (missing.length) return { error: `no secret named ${missing.join(', ')}` }
   const headers = Object.fromEntries(
     Object.entries(input.headers ?? {}).map(([name, value]) => [
       name,
-      value.replace(SECRET, (_, secret: string) => secrets[secret]!),
+      value.replace(secretPattern, (_, secret: string) => secrets[secret]!),
     ]),
   )
   const started = Date.now()
@@ -91,7 +98,7 @@ async function http(
   const result = {
     status: response.status,
     ms: Date.now() - started,
-    ...(await read(response, FETCH_PREVIEW)),
+    ...(await read(response, fetchPreview)),
   }
   const values = Object.values(secrets).filter((value) => value.length >= 6)
   return values.length
@@ -104,11 +111,16 @@ async function http(
     : result
 }
 
-async function call(call: HostToolCall, env: MachinesEnv, signal: AbortSignal): Promise<unknown> {
+/** Runs one host tool call. Returns `{ error }` when the tool fails, and throws for an unknown tool. */
+export async function call(
+  call: App.HostToolCall,
+  env: Env.Env,
+  signal: AbortSignal,
+): Promise<unknown> {
   const account = call.authority.account_id
   const session = call.authority.session_id
   const input = (call.input ?? {}) as Record<string, unknown>
-  const stub = wallet(env, account)
+  const stub = Env.wallet(env, { account })
   try {
     switch (call.name) {
       case 'http':
@@ -167,5 +179,3 @@ async function call(call: HostToolCall, env: MachinesEnv, signal: AbortSignal): 
   }
   throw new Error(`no host tool is named ${call.name}`)
 }
-
-export const tools = { definitions, call }

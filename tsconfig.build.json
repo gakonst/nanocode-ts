@@ -10,18 +10,15 @@
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": [
-    "src/cloudflare/contracts.ts",
-    "src/cloudflare/gateway.ts",
+    "src/cloudflare/App.ts",
+    "src/cloudflare/Gateway.ts",
     "src/cloudflare/index.ts",
-    "src/cloudflare/limit.ts",
-    "src/cloudflare/pyodide.ts",
+    "src/cloudflare/internal/**",
+    "src/cloudflare/Limit.ts",
     "src/cloudflare/python.ts",
-    "src/cloudflare/relay.ts",
-    "src/cloudflare/remote.ts",
-    "src/cloudflare/runtime.ts",
-    "src/cloudflare/store.ts",
+    "src/cloudflare/Relay.ts",
     "src/cloudflare/wasm.d.ts",
-    "src/machines/cloudflare/*.ts",
+    "src/machines/cloudflare/**",
     "src/**/*.test.ts"
   ]
 }

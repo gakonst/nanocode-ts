@@ -1,8 +1,17 @@
+/**
+ * Pyodide loader for Workers: it serves only the WebAssembly modules built into the Worker, and
+ * restores the precompiled snapshot when its parts are available.
+ *
+ * Loading patches `WebAssembly`, `fetch`, `process`, and `location` on the global scope, once.
+ *
+ * @module
+ */
 import { MODULES, PYODIDE_VERSION as BUILT, SNAPSHOT } from 'nanocode-ts/pyodide-modules'
-import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from '../bash/commands/python.ts'
-import { restorePyodide } from '../bash/commands/pysnapshot.ts'
-import * as Fingerprint from '../internal/Fingerprint.ts'
+import { PYODIDE_URL, PYODIDE_VERSION, type Pyodide } from '../../bash/commands/python.ts'
+import { restorePyodide } from '../../bash/commands/pysnapshot.ts'
+import * as Fingerprint from '../../internal/Fingerprint.ts'
 
+/** Fetches one part of the Pyodide snapshot by name. */
 export type SnapshotParts = (name: string) => Promise<Response>
 
 type Instantiate = (source: unknown, imports?: WebAssembly.Imports) => Promise<unknown>
@@ -78,13 +87,13 @@ function install(): void {
   }
 }
 
-const AHEAD = 2
+const ahead = 2
 
 function joined(parts: SnapshotParts, names: string[]): ReadableStream<Uint8Array> {
   const pending: Promise<ArrayBuffer>[] = []
   let next = 0
   const fill = () => {
-    while (next < names.length && pending.length < AHEAD) {
+    while (next < names.length && pending.length < ahead) {
       const name = names[next++]!
       pending.push(
         parts(name).then((response) => {
@@ -115,7 +124,12 @@ function joined(parts: SnapshotParts, names: string[]): ReadableStream<Uint8Arra
 
 let restorable = true
 
-export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide> {
+/**
+ * Loads Pyodide from the modules built into the Worker. Restores the snapshot from
+ * `options.parts` when it can, and boots without it after the first failed restore.
+ */
+export async function load(options: load.Options = {}): Promise<Pyodide> {
+  const parts = options.parts
   if (BUILT !== PYODIDE_VERSION)
     throw new Error('nanocode-ts precompiled Pyodide ' + BUILT + ' but expects ' + PYODIDE_VERSION)
   install()
@@ -160,4 +174,11 @@ export async function loadWorkersPyodide(parts?: SnapshotParts): Promise<Pyodide
     }
   }
   return (await loader.loadPyodide({ ...config, createPyodideModule: asm.default })) as Pyodide
+}
+
+export declare namespace load {
+  type Options = {
+    /** Fetches the snapshot parts. When absent, Pyodide boots without its snapshot. */
+    parts?: SnapshotParts | undefined
+  }
 }

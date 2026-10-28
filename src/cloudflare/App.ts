@@ -1,10 +1,13 @@
-import { DurableObjectBlobs } from './sql.ts'
+/**
+ * Cloudflare runtime of nanocode: the `AgentSession` Durable Object that hosts the agent runtimes
+ * of a session, and the Worker handler that authenticates requests and routes them to it.
+ *
+ * @module
+ */
 import { DurableObject } from 'cloudflare:workers'
-import * as Timing from '../Timing.ts'
-import * as Contracts from '../Contracts.ts'
-import * as EventHub from '../EventHub.ts'
+import interpreter from 'nanocode-ts/interpreter.wasm'
+import wasm from 'nanocode-ts/nanocode_wasm.wasm'
 import * as AgentRuntime from '../AgentRuntime.ts'
-import * as Remote from '../Remote.ts'
 import {
   Bash,
   SqlFileSystem,
@@ -15,123 +18,163 @@ import {
   type Limits,
   type PythonRemote,
 } from '../bash/index.ts'
+import * as Contracts from '../Contracts.ts'
+import * as EventHub from '../EventHub.ts'
 import * as Egress from '../internal/Egress.ts'
 import * as Files from '../internal/Files.ts'
-import wasm from 'nanocode-ts/nanocode_wasm.wasm'
-import interpreter from 'nanocode-ts/interpreter.wasm'
-import { CheckpointStore, Metadata, SQLITE_VALUE_LIMIT_BYTES } from './store.ts'
-import { ExecutorRejection, connectExecutor } from './remote.ts'
-import { refuseSocket } from './relay.ts'
-import {
-  DEFAULT_EXECUTOR,
-  EXECUTOR_ID,
-  HAND_TOKEN,
-  handSecret,
-  handToken,
-  handTokenAccount,
-  headerJson,
-  json,
-  THINKING,
-  type HostToolCall,
-  type ModelDispatch,
-  type PrivateBinding,
-  type SessionAuthority,
-  type SessionDescriptor,
-  type Thinking,
-} from './contracts.ts'
+import * as Remote from '../Remote.ts'
+import * as Timing from '../Timing.ts'
+import * as Blobs from './internal/Blobs.ts'
+import * as Checkpoints from './internal/Checkpoints.ts'
+import * as Executor from './internal/Executor.ts'
+import * as HandToken from './internal/HandToken.ts'
+import { headerJson, json } from './internal/Http.ts'
+import * as Metadata from './internal/Metadata.ts'
+import * as Relay from './Relay.ts'
+import * as Sql from './Sql.ts'
 
-export type { HostTool, ModelProvider } from '../Contracts.ts'
-export type {
-  HostToolCall,
-  ModelDispatch,
-  PrivateBinding,
-  SessionAuthority,
-  SessionDescriptor,
-  SocketDispatch,
-  Thinking,
-} from './contracts.ts'
-export { THINKING } from './contracts.ts'
-
-const WORKSPACE_MEMORY_BYTES = 48 * 1024 * 1024
-
-const WORKSPACE_FILE_BYTES = 32 * 1024 * 1024
-const PYTHON_REMOTE_BYTES = 256 * 1024 * 1024
-
-const WORKERS_AI_MODELS = new Set(['glm-5.3'])
-
-export interface NanocodeEnv {
+/** Bindings and variables of a Worker that runs the Cloudflare runtime. */
+export type Env = {
+  /** Namespace of the `AgentSession` Durable Object. */
   SESSIONS: DurableObjectNamespace
+  /** Model authentication, `api_key` or `subscription`. Defaults to `api_key`. */
   MODEL_AUTH?: string
+  /** Claude model that `/health` reports. */
   CLAUDE_MODEL?: string
+  /** Cloudflare account of the Workers AI models. */
   WORKERS_AI_ACCOUNT_ID?: string
+  /** Delay in milliseconds before an interrupted turn recovers. */
   RECOVERY_DELAY_MS: string
+  /** Interval in milliseconds between keepalives of an event stream. */
   EVENT_STREAM_KEEPALIVE_MS: string
+  /** Largest number of events in one page. */
   EVENT_PAGE_SIZE: string
+  /** Bytes of recent events that the event hub keeps in memory. */
   EVENT_TAIL_BYTES: string
+  /** Time in milliseconds that the event hub waits to coalesce writes. */
   EVENT_COALESCE_MS: string
+  /** Time in milliseconds that an idle model socket stays open. */
   MODEL_SOCKET_LINGER_MS: string
+  /** Memory budget in bytes of the resident runtimes. */
   RUNTIME_MEMORY_BUDGET_BYTES: string
+  /** Whether a session uses the default remote executor, as `true`. */
   RUNNER_ENABLED?: string
+  /** Largest remote frame in bytes. */
   REMOTE_MAX_FRAME_BYTES: string
+  /** Deadline in milliseconds of a remote executor. */
   REMOTE_TIMEOUT_MS: string
+  /** Location hint of new session objects. */
   SESSION_LOCATION_HINT?: DurableObjectLocationHint
 }
 
-export type Principal = {
-  account: string
-  read_only?: boolean
-  grant?: unknown
-  expires_at?: number | null
+/** Thinking level of a turn. */
+export type Thinking = Contracts.Thinking
+
+/** Thinking levels that a turn accepts, in increasing order. */
+export const thinkingLevels: readonly Contracts.Thinking[] = [
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]
+
+/** Identity of one session of one account. */
+export type SessionAuthority = {
+  /** Account that owns the session. */
+  account_id: string
+  /** Session ID of the runtime. */
+  session_id: string
+  /** Remote executor of the session, when it uses one. */
+  executor_id?: string
 }
 
-export type NanocodeOptions<E extends NanocodeEnv> = {
-  authenticate(
-    request: Request,
-    env: E,
-  ): Promise<string | Principal | null> | string | Principal | null
-  egress(env: E): PrivateBinding
-  subscription?(
-    account: string,
-    env: E,
-    provider: Contracts.ModelProvider,
-  ): Promise<boolean> | boolean
-  recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
-  active?(account: string, grant: unknown, env: E): Promise<boolean> | boolean
-  tools?: {
-    definitions: Contracts.HostTool[]
-    call(call: HostToolCall, env: E, signal: AbortSignal): Promise<unknown>
-  }
-  chaos?: boolean
-  subagents?: boolean
-  streamToolInput?: boolean
-  codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch }
-  github?: {
-    token?(
-      env: E,
-      authority: SessionAuthority,
-    ): string | null | undefined | Promise<string | null | undefined>
-  }
-  mcp?: {
-    servers:
-      | Contracts.McpServer[]
-      | ((authority: SessionAuthority, env: E) => Contracts.McpServer[])
-    fetch?(authority: SessionAuthority, env: E): typeof fetch
-  }
-  instructions?: string
-  handInstructions?: string
-  workspace?:
-    | false
-    | {
-        cwd?: string
-        files?: Record<string, string>
-        limits?: Partial<Limits>
-        maxFileBytes?: number
-        mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem>
-        python?(authority: SessionAuthority, env: E): PythonRemote | undefined
-      }
-  workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
-  liveDeltas?: boolean
-  valueLimit?: number
+/** Authority and settings of a request to a session object. */
+export type SessionDescriptor = SessionAuthority & {
+  /** Model provider of the turn. */
+  provider?: Contracts.ModelProvider
+  /** Model of the turn. */
+  model?: string
+  /** Thinking level of the turn. */
+  thinking?: Contracts.Thinking
+  /** Whether the model may search the web. */
+  web_search?: boolean
+  /** Name of the session in its account. */
+  session_name: string
+  /** Whether Claude requests use the account's subscription. */
+  subscription: boolean
+  /** Whether Codex requests use the account's subscription. */
+  codex_subscription?: boolean
+  /** Hand that the turn runs on. */
+  hand?: string
+  /** Whether the caller may only read the session. */
+  read_only?: boolean
+  /** Grant of the caller, which `active` checks. */
+  grant?: unknown
+  /** Expiry of the caller's grant in milliseconds since the epoch. */
+  expires_at?: number
+  /** Secret of the hand token that authenticated the request. */
+  hand_token?: string
+}
+
+/** Model request that a session sends to the egress binding in the `x-nanocode-model` header. */
+export type ModelDispatch = {
+  /** Model provider. Defaults to `claude`. */
+  provider?: Contracts.ModelProvider
+  /** Session that sends the request. */
+  authority: SessionAuthority
+  /** Upstream URL of the model API. */
+  endpoint: string
+  /** Request headers of the model API. */
+  headers: [string, string][]
+  /** Whether the request uses the account's subscription. */
+  subscription: boolean
+}
+
+/** Model socket request that a session sends to the egress binding. */
+export type SocketDispatch = Pick<ModelDispatch, 'provider' | 'authority' | 'headers'>
+
+/**
+ * Private binding, such as a service binding, that serves `/model`, `/warm`, `/socket`,
+ * `/remote`, and `/metrics` for the sessions.
+ */
+export type PrivateBinding = {
+  /** Serves one request. */
+  fetch(request: Request): Promise<Response>
+}
+
+/** Call of a host tool. */
+export type HostToolCall = {
+  /** Session that calls the tool. */
+  authority: SessionAuthority
+  /** Name of the tool. */
+  name: string
+  /** Input of the call. */
+  input: unknown
+  /** Context of the call in the runtime. */
+  context: Contracts.ToolCallContext
+  /** Grant of the caller. */
+  grant?: unknown
+}
+
+const workspaceMemoryBytes = 48 * 1024 * 1024
+
+const workspaceFileBytes = 32 * 1024 * 1024
+const pythonRemoteBytes = 256 * 1024 * 1024
+
+const workersAiModels = new Set(['glm-5.3'])
+
+/** Account of an authenticated request, with the caller's restrictions. */
+export type Principal = {
+  /** Account that owns the sessions. */
+  account: string
+  /** Whether the caller may only read sessions. */
+  read_only?: boolean
+  /** Grant of the caller, which `active` checks. */
+  grant?: unknown
+  /** Expiry of the caller's grant in milliseconds since the epoch, or `null` for none. */
+  expires_at?: number | null
 }
 
 type TurnTiming = {
@@ -182,7 +225,7 @@ function duration(value: string, name: string): number {
 }
 
 const handName = (value: unknown): value is string =>
-  typeof value === 'string' && EXECUTOR_ID.test(value)
+  typeof value === 'string' && Executor.idPattern.test(value)
 const decoder = new TextDecoder()
 
 async function bodyText(request: Request, limit: number): Promise<string | undefined> {
@@ -208,22 +251,22 @@ async function bodyText(request: Request, limit: number): Promise<string | undef
   }
   return decoder.decode(bytes)
 }
-const HAND_TAG = 'hand'
-const HAND_REPLACED = 'another hand attached under this name'
-const INVALID_HAND =
+const handTag = 'hand'
+const handReplaced = 'another hand attached under this name'
+const invalidHand =
   'hand names are 1 to 48 lowercase letters, digits, _ or -, starting with a letter or digit; pass --name'
-const WATCH_TAG = 'watch'
+const watchTag = 'watch'
 
 type Watch = { watch: string; cursor: number; live?: boolean }
 type Watcher = { state: Watch; scope: string; descriptor: SessionDescriptor }
-type Executor = Remote.Executor<WebSocket>
-const OWNER = 'owner'
-const UNFINISHED = new Set(['queued', 'running'])
-const INTERRUPTED = 'Agent execution interrupted; recovery scheduled'
+type HandExecutor = Remote.Executor<WebSocket>
+const ownerScope = 'owner'
+const unfinishedStatuses = new Set(['queued', 'running'])
+const interruptedNote = 'Agent execution interrupted; recovery scheduled'
 
 function executorFailure(error: unknown): Contracts.HostFailureError {
   const message = error instanceof Error ? error.message : String(error)
-  if (!(error instanceof ExecutorRejection))
+  if (!(error instanceof Executor.RejectedError))
     return new Contracts.HostFailureError(message, 'unreachable', false)
   if (error.status === 401 || error.status === 403)
     return new Contracts.HostFailureError(message, 'unauthorized', true)
@@ -235,22 +278,17 @@ function executorFailure(error: unknown): Contracts.HostFailureError {
   return new Contracts.HostFailureError(message, 'unavailable', false)
 }
 
-export type Nanocode<E extends NanocodeEnv> = {
-  AgentSession: new (
-    ctx: DurableObjectState,
-    env: E,
-  ) => DurableObject<E> & { fetch(request: Request): Promise<Response>; alarm(): Promise<void> }
-  fetch(request: Request, env: E): Promise<Response>
-  deleteSession(account: string, name: string, env: E): Promise<boolean>
-}
-
-export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E>): Nanocode<E> {
-  const valueLimit = options.valueLimit ?? SQLITE_VALUE_LIMIT_BYTES
+/**
+ * Returns the `AgentSession` Durable Object class and the Worker handler of a deployment. Export
+ * `AgentSession` from the Worker under the class name that the `SESSIONS` binding names.
+ */
+export function create<E extends Env>(options: create.Options<E>): create.ReturnType<E> {
+  const valueLimit = options.valueLimit ?? Sql.valueLimitBytes
   const tooLarge = `request bodies are limited to ${valueLimit} bytes`
   class AgentSession extends DurableObject<E> {
-    private readonly store: CheckpointStore
-    private readonly blobs: DurableObjectBlobs
-    private readonly metadata: Metadata
+    private readonly store: Checkpoints.Checkpoints
+    private readonly blobs: Contracts.BlobHost
+    private readonly metadata: Metadata.Metadata
     private readonly instances = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
     private readonly runtimes = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
     private readonly residents = new Map<string, AgentRuntime.AgentRuntime>()
@@ -270,10 +308,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private reflush = false
     private readonly hands = new Map<
       string,
-      Map<string, { connection: string; executor: Executor; ready: boolean }>
+      Map<string, { connection: string; executor: HandExecutor; ready: boolean }>
     >()
-    private readonly connections = new Map<string, Executor>()
-    private readonly handSockets = new Map<WebSocket, Executor>()
+    private readonly connections = new Map<string, HandExecutor>()
+    private readonly handSockets = new Map<WebSocket, HandExecutor>()
     private readonly handAuthority = new Map<string, SessionDescriptor>()
     private readonly rechecks = new Set<WebSocket>()
     private readonly handFrames = new Map<WebSocket, Promise<void>>()
@@ -306,9 +344,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     constructor(ctx: DurableObjectState, env: E) {
       super(ctx, env)
-      this.store = new CheckpointStore(ctx.storage, valueLimit)
-      this.blobs = new DurableObjectBlobs(ctx.storage, valueLimit)
-      this.metadata = new Metadata(ctx.storage)
+      this.store = Checkpoints.create(ctx.storage, { valueLimit })
+      this.blobs = Blobs.create(ctx.storage, { partBytes: valueLimit })
+      this.metadata = Metadata.create(ctx.storage)
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
         DROP INDEX IF EXISTS scoped_events;
@@ -374,7 +412,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       }
       const scopes = new Map<string, unknown[]>()
       for (const job of jobs) {
-        const scope = job.scope ?? OWNER
+        const scope = job.scope ?? ownerScope
         let descriptor: SessionDescriptor | Record<string, never>
         try {
           descriptor = this.descriptorOf(JSON.parse(job.descriptor ?? '{}'))
@@ -382,7 +420,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           descriptor = {}
         }
         const result = job.result ? JSON.parse(job.result) : undefined
-        const unfinished = UNFINISHED.has(job.status)
+        const unfinished = unfinishedStatuses.has(job.status)
         const range = ranges.get(job.request_id)
         let list = scopes.get(scope)
         if (!list) scopes.set(scope, (list = []))
@@ -429,7 +467,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         })
         if (binding && binding !== identity)
           return json({ error: 'session authority mismatch' }, 403)
-        const scope = OWNER
+        const scope = ownerScope
         const parts = url.pathname.split('/')
         if (
           descriptor.hand_token !== undefined &&
@@ -437,7 +475,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             request.method !== 'GET' ||
             !this.handTokenMatches(descriptor.hand_token))
         )
-          return refuseSocket(request, 'this hand token is not valid for the session', 403)
+          return Relay.refuse(request, {
+            reason: 'this hand token is not valid for the session',
+            status: 403,
+          })
         if (parts[2] === 'delete' && request.method === 'POST') return await this.destroy()
         if (
           descriptor.read_only &&
@@ -503,10 +544,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             if (descriptor.read_only) return json({ error: 'read-only access' }, 403)
             let secret = this.metadata.get('hand_token')
             if (!secret) {
-              secret = handSecret()
+              secret = HandToken.secret()
               this.metadata.insert('hand_token', secret)
             }
-            return json({ token: handToken(descriptor.account_id, secret) })
+            return json({ token: HandToken.encode({ account: descriptor.account_id, secret }) })
           }
           if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405)
           if (parts.length === 3 && request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
@@ -542,7 +583,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                 ? 'gpt-6.1-sol'
                 : (this.env.CLAUDE_MODEL ?? 'claude-opus-5-5'))
           const opened = this.prewarm(scope, descriptor, provider, model).catch(() => false)
-          if (provider === 'codex' && WORKERS_AI_MODELS.has(model)) {
+          if (provider === 'codex' && workersAiModels.has(model)) {
             await Promise.all([this.instance(scope), opened])
             return new Response(null, { status: 204 })
           }
@@ -600,11 +641,11 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           return json({ error: 'provider must be claude or codex' }, 400)
         if (input.model !== undefined && (typeof input.model !== 'string' || !input.model))
           return json({ error: 'model must be a nonempty model ID' }, 400)
-        if (input.thinking !== undefined && !THINKING.includes(input.thinking))
-          return json({ error: `thinking must be one of ${THINKING.join(', ')}` }, 400)
+        if (input.thinking !== undefined && !thinkingLevels.includes(input.thinking))
+          return json({ error: `thinking must be one of ${thinkingLevels.join(', ')}` }, 400)
         if (
           input.executor !== undefined &&
-          (typeof input.executor !== 'string' || !EXECUTOR_ID.test(input.executor))
+          (typeof input.executor !== 'string' || !Executor.idPattern.test(input.executor))
         )
           return json({ error: 'invalid executor' }, 400)
         if (input.hand !== undefined && !handName(input.hand))
@@ -692,7 +733,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           if (current && current !== identity) throw new Error('session authority mismatch')
           const images =
             options.workspace === false ||
-            (descriptor.provider === 'codex' && WORKERS_AI_MODELS.has(descriptor.model ?? ''))
+            (descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? ''))
               ? []
               : await Files.promptImages(new SqlFileSystem(this.store, scope), input.images, {
                   root: options.workspace?.cwd ?? '/workspace',
@@ -741,7 +782,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         const turn = submitted.turn
         if (cursor && submitted.submitted === 'accepted' && cursor.after >= turn.first_seq)
           cursor.after = turn.first_seq - 1
-        const unfinished = UNFINISHED.has(turn.report.status)
+        const unfinished = unfinishedStatuses.has(turn.report.status)
         if (unfinished && !this.pumping)
           await this.ctx.storage.setAlarm(
             Date.now() + policy(this.env.RECOVERY_DELAY_MS, 'RECOVERY_DELAY_MS'),
@@ -797,9 +838,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       let retryAt: number | undefined
       try {
         if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
-        const reader = await this.instance(OWNER)
+        const reader = await this.instance(ownerScope)
         const admissions = this.admissions
-        const pending = await reader.pending(OWNER)
+        const pending = await reader.pending(ownerScope)
         const next = pending[0]
         this.unfinished = next ? true : admissions === this.admissions ? false : undefined
         const background = this.metadata.first('background:')
@@ -807,7 +848,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           immediate = admissions !== this.admissions
           return
         }
-        scope = next ? OWNER : background![0].slice('background:'.length)
+        scope = next ? ownerScope : background![0].slice('background:'.length)
         const descriptor: SessionDescriptor = next
           ? this.descriptorOf(next.metadata)
           : JSON.parse(background![1])
@@ -945,15 +986,16 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
           const fields = { cancelled: true, error: 'request cancelled', ...this.observed(active) }
           this.turnTimings.delete(active)
           this.unfinished = true
-          const reader = await this.instance(scope ?? OWNER).catch(() => undefined)
-          const turn = await reader?.turn(scope ?? OWNER, active).catch(() => null)
-          if (turn?.cancel_requested && UNFINISHED.has(turn.report.status)) {
-            immediate = await reader!.finish(scope ?? OWNER, active, 'cancelled', fields).then(
+          const reader = await this.instance(scope ?? ownerScope).catch(() => undefined)
+          const turn = await reader?.turn(scope ?? ownerScope, active).catch(() => null)
+          if (turn?.cancel_requested && unfinishedStatuses.has(turn.report.status)) {
+            immediate = await reader!.finish(scope ?? ownerScope, active, 'cancelled', fields).then(
               () => true,
               () => false,
             )
             if (immediate) this.unfinished = undefined
-          } else await reader?.interrupted(scope ?? OWNER, active, INTERRUPTED).catch(() => {})
+          } else
+            await reader?.interrupted(scope ?? ownerScope, active, interruptedNote).catch(() => {})
         }
       } finally {
         if (this.deleted) {
@@ -991,9 +1033,10 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (!next.cancel_requested && !failure.permanent) {
         const retryAt = Date.now() + delay
         turn = await reader.retry(scope, id, failure.message, failure.kind, retryAt)
-        if (turn && UNFINISHED.has(turn.report.status) && !turn.cancel_requested) return retryAt
+        if (turn && unfinishedStatuses.has(turn.report.status) && !turn.cancel_requested)
+          return retryAt
       }
-      if (turn && UNFINISHED.has(turn.report.status)) {
+      if (turn && unfinishedStatuses.has(turn.report.status)) {
         const fields = turn.cancel_requested
           ? { cancelled: true, error: 'request cancelled' }
           : { error: failure.message, kind: failure.kind }
@@ -1020,11 +1063,11 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     }
 
     private sessionKey(scope: string): string {
-      return scope === OWNER ? 'session_id' : `session_id:${scope}`
+      return scope === ownerScope ? 'session_id' : `session_id:${scope}`
     }
 
     private legacyExecutor(): string {
-      return this.env.RUNNER_ENABLED === 'true' ? DEFAULT_EXECUTOR : ''
+      return this.env.RUNNER_ENABLED === 'true' ? Executor.defaultId : ''
     }
 
     private sessionId(scope: string, suggested?: string, created?: () => void): string {
@@ -1077,13 +1120,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
             executor_id: descriptor.executor_id,
           }
           const enabled = this.executorEnabled(descriptor)
-          let remote: Executor | undefined
+          let remote: HandExecutor | undefined
           let remoteFailed = false
           let remoteError: unknown
           const owner = {}
           const connectStarted = performance.now()
           const connecting = enabled
-            ? connectExecutor(options.egress(this.env), authority, this.handLimits())
+            ? Executor.connect(options.egress(this.env), { authority, policy: this.handLimits() })
                 .then(
                   (value) => (remote = value),
                   (error) => {
@@ -1124,7 +1167,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                     new SqlFileSystem(
                       this.store,
                       scope,
-                      options.workspace?.maxFileBytes ?? WORKSPACE_FILE_BYTES,
+                      options.workspace?.maxFileBytes ?? workspaceFileBytes,
                     ),
                     options.workspace
                       ? (options.workspace.mounts?.(authority, this.env) ?? {})
@@ -1135,9 +1178,9 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                   fetch: cellFetch,
                   wasm: { interpreter },
                   ...(pythonRemote
-                    ? { python: { remote: pythonRemote, maxBytes: PYTHON_REMOTE_BYTES } }
+                    ? { python: { remote: pythonRemote, maxBytes: pythonRemoteBytes } }
                     : {}),
-                  limits: { maxMemoryBytes: WORKSPACE_MEMORY_BYTES, ...options.workspace?.limits },
+                  limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
                 })
           const local = options.codeMode !== false && !enabled && !this.handsMode(scope, descriptor)
           try {
@@ -1157,7 +1200,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
                       ? 'https://chatgpt.com/backend-api/codex'
                       : 'https://api.openai.com/v1'
                     : `https://api.anthropic.com/v1/messages${descriptor.subscription ? '?beta=true' : ''}`,
-                ...(descriptor.provider === 'codex' && WORKERS_AI_MODELS.has(descriptor.model ?? '')
+                ...(descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? '')
                   ? {
                       gateway: 'workers_ai' as const,
                       cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID,
@@ -1403,7 +1446,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         return json({ error: 'hands attach over WebSocket' }, 426)
       const accepted = Remote.bearerAccepted(request)
       const [client, server] = Object.values(new WebSocketPair())
-      this.ctx.acceptWebSocket(server, [HAND_TAG])
+      this.ctx.acceptWebSocket(server, [handTag])
       server.send(Remote.handAccepted)
       const executor = Remote.accept(server, this.handLimits())
       this.handSockets.set(server, executor)
@@ -1422,7 +1465,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     private async registerHand(
       scope: string,
       requested: string | undefined,
-      executor: Executor,
+      executor: HandExecutor,
       descriptor: SessionDescriptor,
     ): Promise<void> {
       try {
@@ -1443,7 +1486,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       const hand = requested ?? advertised.name
       if (!handName(hand)) {
         this.handSockets.delete(executor.socket)
-        return executor.refuse(INVALID_HAND)
+        return executor.refuse(invalidHand)
       }
       const resumed = this.hands.get(scope)?.get(hand)
       if (
@@ -1508,7 +1551,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         incumbent &&
         incumbent !== advertised.runtime_id
       )
-        previous.executor.refuse(HAND_REPLACED)
+        previous.executor.refuse(handReplaced)
       else if (previous) await previous.executor.dispose()
       const resident = this.runtimes.get(scope)
       const runtime = resident && (await resident.catch(() => undefined))
@@ -1527,7 +1570,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       scope: string,
       hand: string,
       connection: string,
-      executor: Executor,
+      executor: HandExecutor,
       ready: boolean,
     ): void {
       let hands = this.hands.get(scope)
@@ -1538,7 +1581,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     }
 
     private restoreHands(): void {
-      const sockets = this.ctx.getWebSockets(HAND_TAG)
+      const sockets = this.ctx.getWebSockets(handTag)
       const live: string[] = []
       for (const socket of sockets) {
         const connection = (socket.deserializeAttachment() as { connection?: string } | null)
@@ -1574,7 +1617,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
       if (this.deleted) return
       const executor = this.handSockets.get(socket)
       if (executor) return this.handFrame(socket, executor, message)
-      if (this.ctx.getTags(socket).includes(WATCH_TAG)) return this.watcherMessage(socket, message)
+      if (this.ctx.getTags(socket).includes(watchTag)) return this.watcherMessage(socket, message)
       try {
         socket.close(1011, 'unknown connection')
       } catch {}
@@ -1616,7 +1659,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
         scope,
         JSON.stringify(descriptor),
       )
-      this.ctx.acceptWebSocket(server, [WATCH_TAG])
+      this.ctx.acceptWebSocket(server, [watchTag])
       const state: Watch = {
         watch: id,
         cursor: after,
@@ -1654,7 +1697,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private restoreWatchers(): void {
       const live = this.ctx
-        .getWebSockets(WATCH_TAG)
+        .getWebSockets(watchTag)
         .map((socket) => (socket.deserializeAttachment() as Watch | null)?.watch)
         .filter(Boolean)
       this.ctx.storage.sql.exec(
@@ -1665,7 +1708,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private watching(): { socket: WebSocket; watcher: Watcher }[] {
       const list = []
-      for (const socket of this.ctx.getWebSockets(WATCH_TAG)) {
+      for (const socket of this.ctx.getWebSockets(watchTag)) {
         const watcher = this.watcher(socket)
         if (!watcher) {
           try {
@@ -1889,7 +1932,7 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
 
     private handFrame(
       socket: WebSocket,
-      executor: Executor,
+      executor: HandExecutor,
       message: string | ArrayBuffer,
     ): Promise<void> {
       const connection = (socket.deserializeAttachment() as { connection?: string } | null)
@@ -2299,13 +2342,13 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
   async function fetch(request: Request, env: E): Promise<Response> {
     const started = performance.now()
     const url = new URL(request.url)
-    const minted = HAND_TOKEN.exec(Remote.bearerToken(request) ?? '')
+    const minted = HandToken.pattern.exec(Remote.bearerToken(request) ?? '')
     const handing =
       minted && /^\/sessions\/[^/]+\/hands(?:\/[^/]+)?$/.test(url.pathname) ? minted : null
     const principal = handing
-      ? handTokenAccount(handing[1]!)
+      ? HandToken.account(handing[1]!)
       : await options.authenticate(request, env)
-    if (!principal) return refuseSocket(request, 'unauthorized', 401)
+    if (!principal) return Relay.refuse(request, { reason: 'unauthorized', status: 401 })
     const account = typeof principal === 'string' ? principal : principal.account
     const claude = env.CLAUDE_MODEL ?? 'claude-opus-5-5'
     if (url.pathname === '/health')
@@ -2400,7 +2443,8 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
     })
   }
 
-  async function deleteSession(account: string, name: string, env: E): Promise<boolean> {
+  async function deleteSession(env: E, input: { account: string; name: string }): Promise<boolean> {
+    const { account, name } = input
     const descriptor: SessionDescriptor = {
       account_id: account,
       session_id: '',
@@ -2421,4 +2465,86 @@ export function createNanocode<E extends NanocodeEnv>(options: NanocodeOptions<E
   }
 
   return { AgentSession, fetch, deleteSession }
+}
+
+export declare namespace create {
+  type Options<E extends Env> = {
+    /** Returns whether `account` has an active grant. Without it, every grant is active. */
+    active?(account: string, grant: unknown, env: E): Promise<boolean> | boolean
+    /** Returns the account of a request, or `null` to refuse it with status 401. */
+    authenticate(
+      request: Request,
+      env: E,
+    ): Promise<string | Principal | null> | string | Principal | null
+    /** Whether a session serves `POST /sessions/:name/crash`, to test recovery. */
+    chaos?: boolean
+    /** Code Mode of the runtime, or `false` to turn it off. `fetch` serves its network requests. */
+    codeMode?: false | { fetch?(authority: SessionAuthority, env: E): typeof fetch }
+    /** Returns the egress binding that serves model requests and remote executors. */
+    egress(env: E): PrivateBinding
+    /** Source of the GitHub token of a session's workspace. */
+    github?: {
+      token?(
+        env: E,
+        authority: SessionAuthority,
+      ): string | null | undefined | Promise<string | null | undefined>
+    }
+    /** Instructions that a session adds when its turn runs on a hand. */
+    handInstructions?: string
+    /** Instructions of every session. */
+    instructions?: string
+    /** Whether the runtime emits live deltas. Defaults to `true`. */
+    liveDeltas?: boolean
+    /** MCP servers of a session, and the `fetch` that reaches them. */
+    mcp?: {
+      servers:
+        | Contracts.McpServer[]
+        | ((authority: SessionAuthority, env: E) => Contracts.McpServer[])
+      fetch?(authority: SessionAuthority, env: E): typeof fetch
+    }
+    /** Records a new session, and returns `false` to delete it and refuse the request. */
+    recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
+    /** Whether the runtime streams tool input. Defaults to `true`. */
+    streamToolInput?: boolean
+    /** Whether the runtime runs subagents. Defaults to the runtime's default. */
+    subagents?: boolean
+    /** Returns whether requests of `provider` use the account's subscription. */
+    subscription?(
+      account: string,
+      env: E,
+      provider: Contracts.ModelProvider,
+    ): Promise<boolean> | boolean
+    /** Host tools of every session. */
+    tools?: {
+      definitions: Contracts.HostTool[]
+      call(call: HostToolCall, env: E, signal: AbortSignal): Promise<unknown>
+    }
+    /** Largest request body and SQL value in bytes. Defaults to `Sql.valueLimitBytes`. */
+    valueLimit?: number
+    /** Workspace of a session, or `false` for none. */
+    workspace?:
+      | false
+      | {
+          cwd?: string
+          files?: Record<string, string>
+          limits?: Partial<Limits>
+          maxFileBytes?: number
+          mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem>
+          python?(authority: SessionAuthority, env: E): PythonRemote | undefined
+        }
+    /** Workspace tools of the runtime. */
+    workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
+  }
+
+  type ReturnType<E extends Env> = {
+    /** Durable Object class of one session. */
+    AgentSession: new (
+      ctx: DurableObjectState,
+      env: E,
+    ) => DurableObject<E> & { fetch(request: Request): Promise<Response>; alarm(): Promise<void> }
+    /** Deletes the session `name` of `account`, and returns whether it is gone. */
+    deleteSession(env: E, options: { account: string; name: string }): Promise<boolean>
+    /** Serves one Worker request. */
+    fetch(request: Request, env: E): Promise<Response>
+  }
 }

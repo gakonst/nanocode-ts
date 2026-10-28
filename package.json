@@ -38,8 +38,8 @@
       "default": "./dist/cloudflare/index.js"
     },
     "./cloudflare/transport": {
-      "types": "./dist/cloudflare/transport.d.ts",
-      "default": "./dist/cloudflare/transport.js"
+      "types": "./dist/cloudflare/Transport.d.ts",
+      "default": "./dist/cloudflare/Transport.js"
     },
     "./cloudflare/python": {
       "types": "./dist/cloudflare/python.d.ts",

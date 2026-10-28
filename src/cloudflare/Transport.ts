@@ -1,3 +1,9 @@
+/**
+ * Browser transport of a Cloudflare deployment: it starts turns over HTTPS, follows their server
+ * events, reconnects from the last event, and mints hand tokens for the session.
+ *
+ * @module
+ */
 import {
   type Attachment,
   attachedPrompt,
@@ -13,35 +19,27 @@ import {
 } from '../client.ts'
 import type * as Contracts from '../Contracts.ts'
 
-export type CloudflareSession = { id?: string; cursor?: number; open?: string }
+/** Saved state of the transport's session. */
+export type Session = {
+  /** Sequence number of the last event received. */
+  cursor?: number
+  /** Name of the session, once the first turn or upload chose one. */
+  id?: string
+  /** Request ID of the turn in progress. */
+  open?: string
+}
 
-export type CloudflareModel = {
-  provider: string
+/** Model of the next turn. */
+export type Model = {
+  /** Model name. */
   model: string
+  /** Model provider, such as `claude` or `codex`. */
+  provider: string
+  /** Thinking level. */
   thinking?: string
+  /** Whether the model may search the web. */
   web_search?: boolean
 }
-
-export type CloudflareTransportOptions = {
-  url?: string
-  model(): CloudflareModel
-  headers?(): Record<string, string>
-  session?: { load(): CloudflareSession; save(session: CloudflareSession): void }
-  reconnectMs?: number
-  warmMs?: number
-  hand?(session: string, signal?: AbortSignal): Promise<string | undefined>
-}
-
-export type CloudflareTransport = Transport &
-  HandSource & {
-    session(): CloudflareSession
-    warm(): void
-    crash(afterMs?: number): Promise<Response>
-    forget(): void
-    health(): Promise<Response | undefined>
-    handToken(): Promise<{ session: string; token: string }>
-    hands(): Promise<string[]>
-  }
 
 type Sink = { push(event: LiveEvent): void; note(kind: EntryKind, text: string): void }
 
@@ -50,11 +48,15 @@ function identifier(prefix: string): string {
   return `${prefix}-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
 }
 
-export function cloudflare(options: CloudflareTransportOptions): CloudflareTransport {
+/**
+ * Returns a transport that sends requests to the deployment at `options.url`. Each turn reconnects after a
+ * dropped stream until its result arrives.
+ */
+export function create(options: create.Options): create.ReturnType {
   const base = options.url ?? ''
   const reconnectMs = options.reconnectMs ?? 1000
   const warmMs = options.warmMs ?? 10_000
-  let state: CloudflareSession = options.session?.load() ?? {}
+  let state: Session = options.session?.load() ?? {}
   let warmed: string | undefined
   let used = 0
   const queued: string[] = []
@@ -99,7 +101,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     response: Response,
     requestId: string,
     sink: Sink,
-    session: CloudflareSession,
+    session: Session,
     signal?: AbortSignal,
   ): Promise<boolean> => {
     if (!response.ok || !response.body) {
@@ -135,7 +137,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
   const reconnect = async (
     requestId: string,
     sink: Sink,
-    session: CloudflareSession,
+    session: Session,
     signal?: AbortSignal,
   ) => {
     let delay = reconnectMs
@@ -214,6 +216,13 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     } catch {
       return body || `${response.status}`
     }
+  }
+
+  const handToken = async () => {
+    const id = state.id ?? (warmed ??= identifier('web'))
+    const response = await fetch(path('hands', { id }), { method: 'POST', headers: headers() })
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
+    return { session: id, token: ((await response.json()) as { token: string }).token }
   }
 
   return {
@@ -295,7 +304,7 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
     session: () => state,
     snapshot: () => ({ ...state }),
     restore(saved) {
-      state = saved && typeof saved === 'object' ? { ...(saved as CloudflareSession) } : {}
+      state = saved && typeof saved === 'object' ? { ...(saved as Session) } : {}
       warmed = undefined
       used = 0
       queued.length = 0
@@ -326,14 +335,9 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
       queued.length = 0
       save()
     },
-    async handToken() {
-      const id = state.id ?? (warmed ??= identifier('web'))
-      const response = await fetch(path('hands', { id }), { method: 'POST', headers: headers() })
-      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
-      return { session: id, token: ((await response.json()) as { token: string }).token }
-    },
+    handToken,
     async hand(): Promise<HandAccess | undefined> {
-      const { session, token } = await this.handToken()
+      const { session, token } = await handToken()
       return {
         url: socketUrl(`${base}sessions/${encodeURIComponent(session)}/hands/machine`),
         token,
@@ -355,4 +359,41 @@ export function cloudflare(options: CloudflareTransportOptions): CloudflareTrans
         : await fetch(`${base}health`, { headers: headers() }).catch(() => undefined)
     },
   }
+}
+
+export declare namespace create {
+  type Options = {
+    /** Returns the hand that a turn of `session` uses, if any. */
+    hand?(session: string, signal?: AbortSignal): Promise<string | undefined>
+    /** Returns extra headers of each request, such as an authorization header. */
+    headers?(): Record<string, string>
+    /** Returns the model of the next turn. */
+    model(): Model
+    /** First delay in milliseconds before a reconnect. Defaults to 1 second. */
+    reconnectMs?: number
+    /** Loads and saves the session between page loads. */
+    session?: { load(): Session; save(session: Session): void }
+    /** Base URL of the deployment, ending in `/`. Defaults to paths relative to the page. */
+    url?: string
+    /** Shortest time in milliseconds between two warm-ups. Defaults to 10 seconds. */
+    warmMs?: number
+  }
+
+  type ReturnType = Transport &
+    HandSource & {
+      /** Returns the current session. */
+      session(): Session
+      /** Warms the session and its model, at most once per `warmMs`. */
+      warm(): void
+      /** Asks the session object to fail after `afterMs` milliseconds, to test recovery. */
+      crash(afterMs?: number): Promise<Response>
+      /** Drops the current session and its queued prompts. */
+      forget(): void
+      /** Returns the deployment's health response, or `undefined` when it is unreachable. */
+      health(): Promise<Response | undefined>
+      /** Mints a hand token for the current session. */
+      handToken(): Promise<{ session: string; token: string }>
+      /** Returns the names of the hands attached to the current session. */
+      hands(): Promise<string[]>
+    }
 }
