@@ -1,13 +1,21 @@
+/**
+ * Components of the nanocode site pages.
+ *
+ * @module
+ */
 import type { ReactNode } from 'react'
 import { Code } from './index.tsx'
-import * as styles from './site.styles.ts'
+import * as styles from './Site.styles.ts'
 
 export { styles }
 
+/** Origin of the site. */
 export const origin = 'https://nanocode.xyz'
 
+/** Navigation link. */
 export type Link = { href: string; label: string }
 
+/** Sections of the site. */
 export const sections: readonly Link[] = [
   { href: `${origin}/`, label: 'Home' },
   { href: `${origin}/experiments`, label: 'Experiments' },
@@ -17,6 +25,7 @@ export const sections: readonly Link[] = [
   { href: 'https://github.com/gakonst/nanocode', label: 'GitHub' },
 ]
 
+/** Experiments of the site. */
 export const experiments: readonly Link[] = [
   { href: `${origin}/docs/guides/xframes`, label: 'xframes' },
   { href: `${origin}/machines/`, label: 'nanocode-machines' },
@@ -25,8 +34,10 @@ export const experiments: readonly Link[] = [
   { href: `${origin}/cloudflare/`, label: 'nanocode on Cloudflare' },
 ]
 
+/** Identifier of a demo. */
 export type Demo = 'cloudflare' | 'machines' | 'vercel'
 
+/** Demos with their logos. */
 export const demos: readonly (Link & { id: Demo; logo: string; viewBox: string })[] = [
   {
     href: `${origin}/cloudflare/`,
@@ -51,7 +62,8 @@ export const demos: readonly (Link & { id: Demo; logo: string; viewBox: string }
   },
 ]
 
-export function Header(props: { current?: string; experiment?: string }) {
+/** Site header with navigation. */
+export function Header(props: Header.Props) {
   return (
     <header {...styles.header()}>
       <nav aria-label="Site" {...styles.navigation()}>
@@ -99,7 +111,15 @@ export function Header(props: { current?: string; experiment?: string }) {
   )
 }
 
-export function Demos(props: { current: Demo }) {
+export declare namespace Header {
+  type Props = {
+    current?: string
+    experiment?: string
+  }
+}
+
+/** Links to the demos. */
+export function Demos(props: Demos.Props) {
   return (
     <p {...styles.demos()}>
       nanocode on
@@ -123,15 +143,36 @@ export function Demos(props: { current: Demo }) {
   )
 }
 
-export function Main(props: { children: ReactNode }) {
+export declare namespace Demos {
+  type Props = {
+    current: Demo
+  }
+}
+
+/** Main content. */
+export function Main(props: Main.Props) {
   return <main {...styles.main()}>{props.children}</main>
 }
 
-export function Page(props: { children: ReactNode }) {
+export declare namespace Main {
+  type Props = {
+    children: ReactNode
+  }
+}
+
+/** Page body. */
+export function Page(props: Page.Props) {
   return <div {...styles.page()}>{props.children}</div>
 }
 
-export function Title(props: { children: ReactNode; subtitle?: ReactNode }) {
+export declare namespace Page {
+  type Props = {
+    children: ReactNode
+  }
+}
+
+/** Page title. */
+export function Title(props: Title.Props) {
   return (
     <h1>
       {props.children}
@@ -146,15 +187,37 @@ export function Title(props: { children: ReactNode; subtitle?: ReactNode }) {
   )
 }
 
-export function Lead(props: { children: ReactNode }) {
+export declare namespace Title {
+  type Props = {
+    children: ReactNode
+    subtitle?: ReactNode
+  }
+}
+
+/** Lead paragraph. */
+export function Lead(props: Lead.Props) {
   return <p {...styles.lead()}>{props.children}</p>
 }
 
-export function Docs(props: { children: ReactNode }) {
+export declare namespace Lead {
+  type Props = {
+    children: ReactNode
+  }
+}
+
+/** Documentation body. */
+export function Docs(props: Docs.Props) {
   return <article {...styles.docs()}>{props.children}</article>
 }
 
-export function Block(props: { code: string; label?: string; language: string }) {
+export declare namespace Docs {
+  type Props = {
+    children: ReactNode
+  }
+}
+
+/** Labeled code block. */
+export function Block(props: Block.Props) {
   return (
     <div {...styles.block()}>
       {props.label && (
@@ -167,7 +230,16 @@ export function Block(props: { code: string; label?: string; language: string })
   )
 }
 
-export function Diagram(props: { children: string }) {
+export declare namespace Block {
+  type Props = {
+    code: string
+    label?: string
+    language: string
+  }
+}
+
+/** Mermaid diagram source. */
+export function Diagram(props: Diagram.Props) {
   return (
     <div {...styles.block()}>
       <div {...styles.diagram()}>
@@ -177,15 +249,37 @@ export function Diagram(props: { children: string }) {
   )
 }
 
-export function Cards(props: { children: ReactNode }) {
+export declare namespace Diagram {
+  type Props = {
+    children: string
+  }
+}
+
+/** Grid of cards. */
+export function Cards(props: Cards.Props) {
   return <div {...styles.cards()}>{props.children}</div>
 }
 
-export function Card(props: { href: string; title: string; children: ReactNode }) {
+export declare namespace Cards {
+  type Props = {
+    children: ReactNode
+  }
+}
+
+/** Link card. */
+export function Card(props: Card.Props) {
   return (
     <a href={props.href} {...styles.card()}>
       <span {...styles.cardTitle()}>{props.title}</span>
       <span>{props.children}</span>
     </a>
   )
+}
+
+export declare namespace Card {
+  type Props = {
+    href: string
+    title: string
+    children: ReactNode
+  }
 }

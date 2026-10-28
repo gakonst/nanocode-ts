@@ -1,5 +1,10 @@
+/**
+ * Styles of the site pages.
+ *
+ * @module
+ */
 import type { Vars } from 'zyzz'
-import { flicker, style, variants } from './theme.ts'
+import { flicker, style, variants } from './Theme.ts'
 
 export const body = style({
   backgroundColor: 'bg',

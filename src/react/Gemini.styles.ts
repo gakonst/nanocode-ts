@@ -1,10 +1,15 @@
-import { flicker, pulse, spin, style, variants } from './theme.ts'
+/**
+ * Skin part styles of the Gemini theme, keyed by part name.
+ *
+ * @module
+ */
+import { flicker, pulse, spin, style, variants } from './Theme.ts'
 
-const SANS =
-  '"Styrene B", "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !custom'
-const SERIF =
-  '"Tiempos Text", "Copernicus", "Source Serif 4", Georgia, "Times New Roman", serif !custom'
-const MONO = '"Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace !custom'
+const sans =
+  '"Google Sans Text", "Google Sans", Roboto, "Helvetica Neue", Arial, sans-serif !custom'
+const mono =
+  '"Google Sans Mono", "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace !custom'
+const spark = 'linear-gradient(135deg, #4285f4 0%, #9b72cb 55%, #d96570 100%) !custom'
 
 export const chat = variants({
   base: {
@@ -15,7 +20,7 @@ export const chat = variants({
     color: 'text',
     display: 'flex',
     flexDirection: 'column',
-    fontFamily: SANS,
+    fontFamily: sans,
     fontSize: '0.9375rem !custom',
     lineHeight: '1.5rem !custom',
     overflow: 'hidden',
@@ -82,6 +87,7 @@ export const turn = style({
   flexDirection: 'column',
   gap: 'sm',
   minWidth: '0',
+  selectors: { '&:has(> [data-kind="user"])': { alignItems: 'flex-end' } },
 })
 
 export const speaker = variants({
@@ -91,7 +97,13 @@ export const speaker = variants({
       agent: {
         fontSize: '0 !custom',
         lineHeight: '1 !custom',
-        '::before': { color: 'accent', content: '"✻"', fontSize: '1.375rem !custom' },
+        '::before': {
+          backgroundClip: 'text !custom',
+          backgroundImage: spark,
+          color: 'transparent',
+          content: '"✦"',
+          fontSize: '1.375rem !custom',
+        },
       },
       you: { display: 'none' },
     },
@@ -102,16 +114,15 @@ export const entry = variants({
   base: { margin: '0', minWidth: '0', overflowWrap: 'break-word', whiteSpace: 'pre-wrap' },
   variants: {
     kind: {
-      assistant: { fontFamily: SERIF, fontSize: '1rem !custom', lineHeight: '1.65rem !custom' },
+      assistant: {},
       cell: { whiteSpace: 'normal' },
       error: { color: 'accent' },
       reasoning: { color: 'middle', fontSize: '0.875rem !custom', fontStyle: 'italic' },
       tool: { color: 'middle', fontSize: '0.875rem !custom' },
       user: {
-        alignSelf: 'flex-start',
         backgroundColor: 'surface',
-        borderRadius: '0.75rem !custom',
-        maxWidth: '85% !custom',
+        borderRadius: '1.5rem 0.25rem 1.5rem 1.5rem !custom',
+        maxWidth: '80% !custom',
         paddingBlock: '0.625rem !custom',
         paddingInline: '1.125rem !custom',
       },
@@ -124,8 +135,10 @@ export const entry = variants({
           animationIterationCount: 'infinite',
           animationName: flicker,
           animationTimingFunction: 'steps(1, end)',
-          color: 'accent',
-          content: '" ✻"',
+          backgroundClip: 'text !custom',
+          backgroundImage: spark,
+          color: 'transparent',
+          content: '" ●"',
         },
         '@media (prefers-reduced-motion: reduce)': { '::after': { animationName: 'none' } },
       },
@@ -161,7 +174,7 @@ export const link = style({
 
 export const code = variants({
   base: {
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     margin: '0',
     overflowWrap: 'anywhere',
@@ -186,7 +199,7 @@ export const code = variants({
 export const inline = style({
   backgroundColor: 'surface',
   borderRadius: '0.375rem !custom',
-  fontFamily: MONO,
+  fontFamily: mono,
   fontSize: '0.875em !custom',
   paddingInline: '0.3em !custom',
 })
@@ -260,7 +273,7 @@ export const body = variants({
   base: {
     backgroundColor: 'bg',
     borderRadius: '0.75rem !custom',
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     lineHeight: '1.25rem !custom',
     marginBlock: '0',
@@ -322,11 +335,8 @@ export const typing = variants({
 
 export const row = style({
   alignItems: 'center',
-  backgroundColor: 'bg',
-  border: '1px solid',
-  borderColor: 'rule',
-  borderRadius: '1.25rem !custom',
-  boxShadow: '0 0.25rem 1.25rem rgba(0, 0, 0, 0.035) !custom',
+  backgroundColor: 'surface',
+  borderRadius: '1.75rem !custom',
   display: 'flex',
   gap: 'sm',
   marginBottom: 'sm',
@@ -373,16 +383,16 @@ export const send = style({
   alignSelf: 'flex-end',
   backgroundColor: 'accent',
   border: 'none',
-  borderRadius: '0.5rem !custom',
+  borderRadius: '999px !custom',
   color: 'onAccent',
   cursor: 'pointer',
   display: 'inline-flex',
   flexShrink: 0,
-  height: '2rem !custom',
+  height: '2.5rem !custom',
   justifyContent: 'center',
   padding: '0',
   textDecorationLine: 'none',
-  width: '2rem !custom',
+  width: '2.5rem !custom',
   '::before': { content: '"↑"', fontSize: '1.125rem !custom', fontWeight: '600 !custom' },
   ':focus-visible': { outline: '2px solid', outlineColor: 'text', outlineOffset: '2px' },
 })
@@ -503,20 +513,21 @@ export const quote = style({
 })
 
 export const greeting = style({
-  fontFamily: '"Copernicus", "Tiempos Headline", "Source Serif 4", Georgia, serif !custom',
+  backgroundClip: 'text',
+  backgroundImage: 'linear-gradient(74deg, #4285f4 0%, #9b72cb 45%, #d96570 90%) !custom',
+  color: 'transparent',
   fontSize: '2.25rem !custom',
-  fontWeight: '400 !custom',
+  fontWeight: '500 !custom',
   lineHeight: '2.75rem !custom',
   margin: '0',
   paddingBottom: 'md',
   textAlign: 'center',
-  '::before': { color: 'accent', content: '"✻ "' },
+  WebkitBackgroundClip: 'text',
+  WebkitTextFillColor: 'transparent !custom',
 })
 
 export const sidebar = style({
-  backgroundColor: 'light-dark(#f5f4ed, #1f1e1d) !custom',
-  borderRight: '1px solid',
-  borderRightColor: 'rule',
+  backgroundColor: 'surface',
   display: 'flex',
   flexDirection: 'column',
   flexShrink: 0,
@@ -532,7 +543,7 @@ export const sidebarNew = style({
   backgroundColor: 'transparent',
   border: 'none',
   borderRadius: '0.625rem !custom',
-  color: 'accent',
+  color: 'text',
   cursor: 'pointer',
   display: 'flex',
   font: 'inherit !custom',
@@ -543,20 +554,9 @@ export const sidebarNew = style({
   paddingInline: '0.625rem !custom',
   textAlign: 'left',
   textDecorationLine: 'none',
-  '::before': {
-    alignItems: 'center',
-    backgroundColor: 'accent',
-    borderRadius: '50% !custom',
-    color: 'onAccent',
-    content: '"+"',
-    display: 'inline-flex',
-    fontSize: '1rem !custom',
-    height: '1.625rem !custom',
-    justifyContent: 'center',
-    width: '1.625rem !custom',
-  },
+  '::before': { content: '"+"', fontSize: '1.125rem !custom', width: '1.25rem !custom' },
   ':disabled': { cursor: 'default', opacity: 'faint' },
-  ':hover:not(:disabled)': { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' },
+  ':hover:not(:disabled)': { backgroundColor: 'rule' },
 })
 
 export const sidebarSection = style({
@@ -577,7 +577,7 @@ export const sidebarChat = variants({
     alignItems: 'center',
     borderRadius: '0.625rem !custom',
     display: 'flex',
-    ':hover': { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' },
+    ':hover': { backgroundColor: 'rule' },
     '& > button:first-child': {
       backgroundColor: 'transparent',
       border: 'none',
@@ -596,9 +596,7 @@ export const sidebarChat = variants({
       whiteSpace: 'nowrap',
     },
   },
-  variants: {
-    current: { false: {}, true: { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' } },
-  },
+  variants: { current: { false: {}, true: { backgroundColor: 'rule' } } },
   defaultVariants: { current: false },
 })
 
@@ -623,10 +621,10 @@ export const pending = style({
   '::before': {
     animationDuration: '1.2s',
     animationIterationCount: 'infinite',
-    animationName: spin,
-    animationTimingFunction: 'linear',
-    color: 'accent',
-    content: '"✻"',
+    animationName: pulse,
+    animationTimingFunction: 'ease-in-out',
+    color: 'agent',
+    content: '"✦"',
     display: 'inline-block',
     fontSize: '1.25rem !custom',
     lineHeight: '1.25rem !custom',

@@ -1,5 +1,10 @@
 'use client'
 
+/**
+ * Chat page in the style of Claude.
+ *
+ * @module
+ */
 import type * as Config from '../../client/Config.ts'
 import type * as Transcript from '../../client/Transcript.ts'
 import {
@@ -14,7 +19,7 @@ import {
   useTurns,
 } from '../index.tsx'
 import { useState } from 'react'
-import { css } from './claude.css.ts'
+import { css } from './Claude.css.ts'
 import {
   ArrowUp,
   type Block,
@@ -35,7 +40,7 @@ import {
   useResume,
   useSidebar,
   useStick,
-} from './shared.tsx'
+} from './Shared.tsx'
 
 const skin: Skin = {
   icons: { cancelled: '–', completed: '✓', failed: '!', running: '', yielded: '↻' },
@@ -57,7 +62,7 @@ const skin: Skin = {
   },
 }
 
-function ModelMenu(props: { picker: NonNullable<CloneProps['picker']> }) {
+function ModelMenu(props: ModelMenu.Props) {
   const [open, setOpen] = useState(false)
   const ref = useDismiss(open, () => setOpen(false))
   const { bound, choose, current, models } = props.picker
@@ -108,7 +113,13 @@ function ModelMenu(props: { picker: NonNullable<CloneProps['picker']> }) {
   )
 }
 
-function Thinking(props: { block: Transcript.TurnBlock }) {
+declare namespace ModelMenu {
+  type Props = {
+    picker: NonNullable<CloneProps['picker']>
+  }
+}
+
+function Thinking(props: Thinking.Props) {
   const [open, setOpen] = useState(false)
   const done = !props.block.live
   const took = seconds(props.block)
@@ -127,7 +138,13 @@ function Thinking(props: { block: Transcript.TurnBlock }) {
   )
 }
 
-function BlockView(props: { block: Block }) {
+declare namespace Thinking {
+  type Props = {
+    block: Transcript.TurnBlock
+  }
+}
+
+function BlockView(props: BlockView.Props) {
   const block = props.block
   if (block.kind === 'tools')
     return (
@@ -154,7 +171,13 @@ function BlockView(props: { block: Block }) {
   )
 }
 
-function Composer(props: CloneProps & { onSend(): void }) {
+declare namespace BlockView {
+  type Props = {
+    block: Block
+  }
+}
+
+function Composer(props: Composer.Props) {
   const composer = useComposer({
     ...(props.before ? { before: props.before } : {}),
     onSend: props.onSend,
@@ -215,6 +238,10 @@ function Composer(props: CloneProps & { onSend(): void }) {
       </div>
     </div>
   )
+}
+
+declare namespace Composer {
+  type Props = CloneProps & { onSend(): void }
 }
 
 function App(props: CloneProps) {
@@ -374,9 +401,8 @@ function App(props: CloneProps) {
   )
 }
 
-export function Claude(
-  props: CloneProps & { config: Config.Config; highlight?: () => Promise<Highlighter> },
-) {
+/** Chat page in the style of Claude. */
+export function Claude(props: Claude.Props) {
   return (
     <NanocodeProvider
       config={props.config}
@@ -389,4 +415,11 @@ export function Claude(
       <App {...props} />
     </NanocodeProvider>
   )
+}
+
+export declare namespace Claude {
+  type Props = CloneProps & {
+    config: Config.Config
+    highlight?: () => Promise<Highlighter>
+  }
 }

@@ -1,5 +1,10 @@
 'use client'
 
+/**
+ * React components and hooks of nanocode machines: login, wallet, spend, and paid tool unlocks.
+ *
+ * @module
+ */
 import {
   Fragment,
   type MouseEvent,
@@ -25,6 +30,7 @@ import {
 import type * as Mcp from '../machines/Mcp.ts'
 import { useConfig, useConversations, useHand, usePart, useSend, useTranscript } from './index.tsx'
 
+/** Returns the state and commands of a machines chat. */
 export function useMachine(runtime: Machine.Runtime, options: useMachine.Options) {
   const { model } = options
   const { servers } = runtime.payment
@@ -326,6 +332,7 @@ function guard(event: MouseEvent<HTMLAnchorElement>, note: Note) {
   )
 }
 
+/** Shared state of a chat that pays with a key. */
 export type Keyed = {
   busy: boolean
   command(text: string, echo?: boolean): Promise<void>
@@ -337,6 +344,7 @@ export type Keyed = {
   working: boolean
 }
 
+/** State of a chat that unlocks paid tools with a key. */
 export type Unlocking = Keyed & {
   checkout: { address: string; url: string } | undefined
   connected: Wallet.AccessKey | undefined
@@ -346,6 +354,7 @@ export type Unlocking = Keyed & {
   handles(text: string): boolean
 }
 
+/** Returns the state and commands of a chat that unlocks paid tools with a key. */
 export function useUnlock(
   keyring: Keyring.Keyring,
   options: { servers?: readonly Mcp.Server[]; scripts?: boolean } = {},
@@ -470,8 +479,10 @@ export function useUnlock(
 
 const bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as const
 
+/** Source of a spend ledger. */
 export type Source = Pick<Payments.Client, 'ledger' | 'subscribe'>
 
+/** Returns the spend of a ledger, with its rate and recent services. */
 export function useSpend(source: Source, window: number = Payments.window) {
   const ledger = useSyncExternalStore(source.subscribe, source.ledger, source.ledger)
   const [now, setNow] = useState(() => Date.now())
@@ -510,7 +521,8 @@ function spark(service: Payments.Service, now: number, window: number) {
     .join('')
 }
 
-export function Spend(props: { source: Source; window?: number }) {
+/** Spend of a ledger by service. */
+export function Spend(props: Spend.Props) {
   const part = usePart()
   const { ledger, rate, services } = useSpend(props.source, props.window)
   const width = Math.max(0, ...services.map((service) => service.name.length))
@@ -535,7 +547,15 @@ export function Spend(props: { source: Source; window?: number }) {
   )
 }
 
-export function Meter(props: { source: Source; window?: number; chevron?: ReactNode }) {
+export declare namespace Spend {
+  type Props = {
+    source: Source
+    window?: number
+  }
+}
+
+/** Spend meter with a rate graph. */
+export function Meter(props: Meter.Props) {
   const part = usePart()
   const { ledger, rate, services } = useSpend(props.source, props.window)
   const [open, setOpen] = useState(false)
@@ -576,9 +596,16 @@ export function Meter(props: { source: Source; window?: number; chevron?: ReactN
   )
 }
 
-export function Prompts(props: {
-  machine: Pick<useMachine.ReturnType, 'checkout' | 'device' | 'open'>
-}) {
+export declare namespace Meter {
+  type Props = {
+    source: Source
+    window?: number
+    chevron?: ReactNode
+  }
+}
+
+/** Device code and checkout prompts of the wallet. */
+export function Prompts(props: Prompts.Props) {
   const part = usePart()
   const { checkout, device, open } = props.machine
   const link = device && (device.verificationUriFull ?? device.verificationUri)
@@ -605,7 +632,14 @@ export function Prompts(props: {
   )
 }
 
-export function SignIn(props: { machine: useMachine.ReturnType; children?: ReactNode }) {
+export declare namespace Prompts {
+  type Props = {
+    machine: Pick<useMachine.ReturnType, 'checkout' | 'device' | 'open'>
+  }
+}
+
+/** Login prompt of a machines chat. */
+export function SignIn(props: SignIn.Props) {
   const part = usePart()
   const { machine } = props
   return (
@@ -631,7 +665,15 @@ export function SignIn(props: { machine: useMachine.ReturnType; children?: React
   )
 }
 
-export function Account(props: { machine: useMachine.ReturnType }) {
+export declare namespace SignIn {
+  type Props = {
+    machine: useMachine.ReturnType
+    children?: ReactNode
+  }
+}
+
+/** Wallet account of a machines chat. */
+export function Account(props: Account.Props) {
   const part = usePart()
   const { machine } = props
   const connected = machine.connected
@@ -687,7 +729,14 @@ export function Account(props: { machine: useMachine.ReturnType }) {
   )
 }
 
-export function Unlock(props: { machine: Keyed }) {
+export declare namespace Account {
+  type Props = {
+    machine: useMachine.ReturnType
+  }
+}
+
+/** Connect prompt of the paid tools. */
+export function Unlock(props: Unlock.Props) {
   const part = usePart()
   const { machine } = props
   if (!machine.locked) return null
@@ -708,15 +757,23 @@ export function Unlock(props: { machine: Keyed }) {
   )
 }
 
+export declare namespace Unlock {
+  type Props = {
+    machine: Keyed
+  }
+}
+
 function blocked(cell: Tool.Cell | undefined): boolean {
   return Boolean(cell && (Payment.needsWallet(cell.output) || cell.children.some(blocked)))
 }
 
+/** Whether an entry is the refusal of a paid call before a wallet connects. */
 export function needsWallet(entry: Transcript.Entry) {
   return blocked(entry.tool)
 }
 
-export function WalletCard(props: { machine: Keyed; entry: Transcript.Entry }) {
+/** Connect card in place of a refused paid call. */
+export function WalletCard(props: WalletCard.Props) {
   const part = usePart()
   const { entries } = useTranscript()
   const { machine } = props
@@ -772,6 +829,14 @@ export function WalletCard(props: { machine: Keyed; entry: Transcript.Entry }) {
   )
 }
 
+export declare namespace WalletCard {
+  type Props = {
+    machine: Keyed
+    entry: Transcript.Entry
+  }
+}
+
+/** Returns the `after` renderer that places wallet cards in the transcript. */
 export function walletCards(machine: Keyed) {
   return (entry: Transcript.Entry) => (
     <Fragment>{needsWallet(entry) && <WalletCard entry={entry} machine={machine} />}</Fragment>

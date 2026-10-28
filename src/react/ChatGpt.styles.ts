@@ -1,10 +1,13 @@
-import { flicker, pulse, spin, style, variants } from './theme.ts'
+/**
+ * Skin part styles of the ChatGPT theme, keyed by part name.
+ *
+ * @module
+ */
+import { flicker, pulse, spin, style, variants } from './Theme.ts'
 
-const SANS =
-  '"Google Sans Text", "Google Sans", Roboto, "Helvetica Neue", Arial, sans-serif !custom'
-const MONO =
-  '"Google Sans Mono", "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace !custom'
-const SPARK = 'linear-gradient(135deg, #4285f4 0%, #9b72cb 55%, #d96570 100%) !custom'
+const sans =
+  'ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif !custom'
+const mono = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace !custom'
 
 export const chat = variants({
   base: {
@@ -15,7 +18,7 @@ export const chat = variants({
     color: 'text',
     display: 'flex',
     flexDirection: 'column',
-    fontFamily: SANS,
+    fontFamily: sans,
     fontSize: '0.9375rem !custom',
     lineHeight: '1.5rem !custom',
     overflow: 'hidden',
@@ -89,17 +92,7 @@ export const speaker = variants({
   base: { margin: '0', userSelect: 'none' },
   variants: {
     who: {
-      agent: {
-        fontSize: '0 !custom',
-        lineHeight: '1 !custom',
-        '::before': {
-          backgroundClip: 'text !custom',
-          backgroundImage: SPARK,
-          color: 'transparent',
-          content: '"✦"',
-          fontSize: '1.375rem !custom',
-        },
-      },
+      agent: { display: 'none' },
       you: { display: 'none' },
     },
   },
@@ -116,8 +109,8 @@ export const entry = variants({
       tool: { color: 'middle', fontSize: '0.875rem !custom' },
       user: {
         backgroundColor: 'surface',
-        borderRadius: '1.5rem 0.25rem 1.5rem 1.5rem !custom',
-        maxWidth: '80% !custom',
+        borderRadius: '1.5rem !custom',
+        maxWidth: '70% !custom',
         paddingBlock: '0.625rem !custom',
         paddingInline: '1.125rem !custom',
       },
@@ -130,9 +123,7 @@ export const entry = variants({
           animationIterationCount: 'infinite',
           animationName: flicker,
           animationTimingFunction: 'steps(1, end)',
-          backgroundClip: 'text !custom',
-          backgroundImage: SPARK,
-          color: 'transparent',
+          color: 'text',
           content: '" ●"',
         },
         '@media (prefers-reduced-motion: reduce)': { '::after': { animationName: 'none' } },
@@ -169,7 +160,7 @@ export const link = style({
 
 export const code = variants({
   base: {
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     margin: '0',
     overflowWrap: 'anywhere',
@@ -194,7 +185,7 @@ export const code = variants({
 export const inline = style({
   backgroundColor: 'surface',
   borderRadius: '0.375rem !custom',
-  fontFamily: MONO,
+  fontFamily: mono,
   fontSize: '0.875em !custom',
   paddingInline: '0.3em !custom',
 })
@@ -268,7 +259,7 @@ export const body = variants({
   base: {
     backgroundColor: 'bg',
     borderRadius: '0.75rem !custom',
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     lineHeight: '1.25rem !custom',
     marginBlock: '0',
@@ -330,8 +321,11 @@ export const typing = variants({
 
 export const row = style({
   alignItems: 'center',
-  backgroundColor: 'surface',
+  backgroundColor: 'bg',
+  border: '1px solid',
+  borderColor: 'rule',
   borderRadius: '1.75rem !custom',
+  boxShadow: '0 4px 16px rgb(0 0 0 / 0.06) !custom',
   display: 'flex',
   gap: 'sm',
   marginBottom: 'sm',
@@ -376,18 +370,18 @@ export const input = style({
 export const send = style({
   alignItems: 'center',
   alignSelf: 'flex-end',
-  backgroundColor: 'accent',
+  backgroundColor: 'text',
   border: 'none',
   borderRadius: '999px !custom',
-  color: 'onAccent',
+  color: 'bg',
   cursor: 'pointer',
   display: 'inline-flex',
   flexShrink: 0,
-  height: '2.5rem !custom',
+  height: '2.25rem !custom',
   justifyContent: 'center',
   padding: '0',
   textDecorationLine: 'none',
-  width: '2.5rem !custom',
+  width: '2.25rem !custom',
   '::before': { content: '"↑"', fontSize: '1.125rem !custom', fontWeight: '600 !custom' },
   ':focus-visible': { outline: '2px solid', outlineColor: 'text', outlineOffset: '2px' },
 })
@@ -508,21 +502,16 @@ export const quote = style({
 })
 
 export const greeting = style({
-  backgroundClip: 'text',
-  backgroundImage: 'linear-gradient(74deg, #4285f4 0%, #9b72cb 45%, #d96570 90%) !custom',
-  color: 'transparent',
-  fontSize: '2.25rem !custom',
-  fontWeight: '500 !custom',
-  lineHeight: '2.75rem !custom',
+  fontSize: '1.75rem !custom',
+  fontWeight: '400 !custom',
+  lineHeight: '2.25rem !custom',
   margin: '0',
   paddingBottom: 'md',
   textAlign: 'center',
-  WebkitBackgroundClip: 'text',
-  WebkitTextFillColor: 'transparent !custom',
 })
 
 export const sidebar = style({
-  backgroundColor: 'surface',
+  backgroundColor: 'light-dark(#f9f9f9, #181818) !custom',
   display: 'flex',
   flexDirection: 'column',
   flexShrink: 0,
@@ -549,9 +538,9 @@ export const sidebarNew = style({
   paddingInline: '0.625rem !custom',
   textAlign: 'left',
   textDecorationLine: 'none',
-  '::before': { content: '"+"', fontSize: '1.125rem !custom', width: '1.25rem !custom' },
+  '::before': { content: '"✎"', fontSize: '1rem !custom', width: '1.25rem !custom' },
   ':disabled': { cursor: 'default', opacity: 'faint' },
-  ':hover:not(:disabled)': { backgroundColor: 'rule' },
+  ':hover:not(:disabled)': { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' },
 })
 
 export const sidebarSection = style({
@@ -572,7 +561,7 @@ export const sidebarChat = variants({
     alignItems: 'center',
     borderRadius: '0.625rem !custom',
     display: 'flex',
-    ':hover': { backgroundColor: 'rule' },
+    ':hover': { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' },
     '& > button:first-child': {
       backgroundColor: 'transparent',
       border: 'none',
@@ -591,7 +580,9 @@ export const sidebarChat = variants({
       whiteSpace: 'nowrap',
     },
   },
-  variants: { current: { false: {}, true: { backgroundColor: 'rule' } } },
+  variants: {
+    current: { false: {}, true: { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' } },
+  },
   defaultVariants: { current: false },
 })
 
@@ -618,11 +609,12 @@ export const pending = style({
     animationIterationCount: 'infinite',
     animationName: pulse,
     animationTimingFunction: 'ease-in-out',
-    color: 'agent',
-    content: '"✦"',
+    backgroundColor: 'text',
+    borderRadius: '50% !custom',
+    content: '""',
     display: 'inline-block',
-    fontSize: '1.25rem !custom',
-    lineHeight: '1.25rem !custom',
+    height: '0.75rem !custom',
+    width: '0.75rem !custom',
   },
   '@media (prefers-reduced-motion: reduce)': { '::before': { animationName: 'none' } },
 })

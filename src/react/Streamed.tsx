@@ -1,5 +1,10 @@
 'use client'
 
+/**
+ * Markdown renderer of streamed assistant text, which `Markdown` loads on first use.
+ *
+ * @module
+ */
 import { isValidElement, type JSX, type ReactNode, useMemo, useRef } from 'react'
 import {
   type Components,
@@ -8,7 +13,10 @@ import {
   type StreamdownProps,
   useIsCodeFenceIncomplete,
 } from 'streamdown'
-import { Code, Image, type MarkdownProps, useLinks, usePart } from './index.tsx'
+import { Code } from './Code.tsx'
+import { Image } from './Image.tsx'
+import type { Markdown } from './Markdown.tsx'
+import { useLinks, usePart } from './Provider.tsx'
 
 type PartOf = ReturnType<typeof usePart>
 
@@ -18,7 +26,7 @@ type Pluggable = PluggableList[number]
 
 type Hast = { type: string; tagName?: string; value?: string; children?: Hast[] }
 
-const BLOCKS = new Set([
+const blockTags = new Set([
   'blockquote',
   'div',
   'li',
@@ -34,7 +42,7 @@ const BLOCKS = new Set([
 function trim() {
   const visit = (node: Hast, root: boolean) => {
     if (!node.children) return
-    if (root || BLOCKS.has(node.tagName ?? ''))
+    if (root || blockTags.has(node.tagName ?? ''))
       node.children = node.children.filter(
         (child) => child.type !== 'text' || !/^\s*\n\s*$/.test(child.value ?? ''),
       )
@@ -48,7 +56,7 @@ const [sanitize, schema] = defaultRehypePlugins.sanitize as [
   { protocols?: Record<string, string[]> },
 ]
 
-const REHYPE: PluggableList = [
+const rehype: PluggableList = [
   defaultRehypePlugins.raw!,
   [
     sanitize,
@@ -64,7 +72,7 @@ const REHYPE: PluggableList = [
   trim,
 ]
 
-const LINK = /^(https?:|mailto:)/i
+const linkPattern = /^(https?:|mailto:)/i
 
 type Props<T extends keyof JSX.IntrinsicElements> = JSX.IntrinsicElements[T] & { node?: unknown }
 
@@ -77,11 +85,7 @@ function text(children: ReactNode): string {
     : String(children)
 }
 
-function Fence(props: {
-  code: string
-  language: string
-  render: { current: MarkdownProps['code'] }
-}) {
+function Fence(props: Fence.Props) {
   const incomplete = useIsCodeFenceIncomplete()
   return (
     <>
@@ -92,11 +96,19 @@ function Fence(props: {
   )
 }
 
+declare namespace Fence {
+  type Props = {
+    code: string
+    language: string
+    render: { current: Markdown.Props['code'] }
+  }
+}
+
 function popup(event: { preventDefault(): void }, href: string) {
   if (globalThis.open?.(href, 'nanocode-link', 'popup,width=960,height=800')) event.preventDefault()
 }
 
-const DESTINATION = /(\]\()(<[^>\n]*>|[^()\s]+)/g
+const destinationPattern = /(\]\()(<[^>\n]*>|[^()\s]+)/g
 
 function mapped(
   text: string,
@@ -104,9 +116,9 @@ function mapped(
   popups: Set<string>,
 ): string {
   if (!links || !text.includes('](')) return text
-  return text.replace(DESTINATION, (whole: string, open: string, destination: string) => {
+  return text.replace(destinationPattern, (whole: string, open: string, destination: string) => {
     const href = destination.startsWith('<') ? destination.slice(1, -1) : destination
-    if (LINK.test(href)) return whole
+    if (linkPattern.test(href)) return whole
     const target = links(href)
     if (!target) return whole
     const absolute = new URL(target, globalThis.location?.href ?? 'https://localhost/').href
@@ -117,7 +129,7 @@ function mapped(
 
 function components(
   part: PartOf,
-  render: { current: MarkdownProps['code'] },
+  render: { current: Markdown.Props['code'] },
   popups: Set<string>,
 ): Components {
   const heading = (level: number) => (props: Props<'h1'>) => {
@@ -131,7 +143,7 @@ function components(
   return {
     a: (props: Props<'a'>) => {
       const href = props.href
-      if (!href || !LINK.test(href))
+      if (!href || !linkPattern.test(href))
         return <span {...part('link', { incomplete: true })}>{props.children}</span>
       return (
         <a
@@ -192,9 +204,9 @@ function components(
   }
 }
 
-const OFF = { enabled: false }
+const off = { enabled: false }
 
-const ROW = /^ {0,3}\|.*\|/
+const tableRow = /^ {0,3}\|.*\|/
 
 function cells(row: string): string[] {
   return row
@@ -212,8 +224,8 @@ function table(text: string): string {
   const typed = lines[last] ?? ''
   if (
     /^ {0,3}\|[ :|-]*$/.test(typed) &&
-    ROW.test(lines[last - 1] ?? '') &&
-    !ROW.test(lines[last - 2] ?? '')
+    tableRow.test(lines[last - 1] ?? '') &&
+    !tableRow.test(lines[last - 2] ?? '')
   ) {
     const written = cells(typed)
     lines[last] =
@@ -222,7 +234,7 @@ function table(text: string): string {
         .map((_, column) => (/^:?-+:?$/.test(written[column] ?? '') ? written[column] : '---'))
         .join('|') +
       '|'
-  } else if (/^ {0,3}\|[^|]+\|/.test(typed) && !ROW.test(lines[last - 1] ?? '')) {
+  } else if (/^ {0,3}\|[^|]+\|/.test(typed) && !tableRow.test(lines[last - 1] ?? '')) {
     const header = typed.trimEnd().endsWith('|') ? typed : typed + '|'
     lines[last] =
       header +
@@ -235,19 +247,19 @@ function table(text: string): string {
   return lines.join('\n')
 }
 
-const SPACED = /(!?\[[^\]\n]*\]\()((?:workspace|sandbox):[^()<>\n]*?)(\s+"[^"\n]*")?\)/g
+const spacedLink = /(!?\[[^\]\n]*\]\()((?:workspace|sandbox):[^()<>\n]*?)(\s+"[^"\n]*")?\)/g
 
 function spaced(text: string): string {
   return text.includes('workspace:') || text.includes('sandbox:')
     ? text.replace(
-        SPACED,
+        spacedLink,
         (whole: string, open: string, destination: string, title: string | undefined) =>
           /\s/.test(destination) ? open + '<' + destination + '>' + (title ?? '') + ')' : whole,
       )
     : text
 }
 
-export default function Streamed(props: MarkdownProps) {
+export default function Streamed(props: Markdown.Props) {
   const part = usePart()
   const render = useRef(props.code)
   render.current = props.code
@@ -262,10 +274,10 @@ export default function Streamed(props: MarkdownProps) {
       components={parts}
       controls={false}
       isAnimating={props.live ?? false}
-      linkSafety={OFF}
+      linkSafety={off}
       mode="streaming"
       parseIncompleteMarkdown
-      rehypePlugins={REHYPE}
+      rehypePlugins={rehype}
     >
       {mapped(spaced(props.live === false ? props.text : table(props.text)), links, popups)}
     </Streamdown>

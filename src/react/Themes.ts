@@ -1,13 +1,20 @@
+/**
+ * Themes: sets of CSS variables that restyle a skin, and the inline styles that apply them.
+ *
+ * @module
+ */
 import type { CSSProperties } from 'react'
 import type { Skin } from './index.tsx'
-import * as chatgpt from './chatgpt.styles.ts'
-import * as claude from './claude.styles.ts'
-import * as gemini from './gemini.styles.ts'
-import * as machines from './machines.styles.ts'
-import * as styles from './styles.ts'
+import * as chatgpt from './ChatGpt.styles.ts'
+import * as claude from './Claude.styles.ts'
+import * as gemini from './Gemini.styles.ts'
+import * as machines from './Machines.styles.ts'
+import * as styles from './Skin.styles.ts'
 
+/** Color scheme of a theme. */
 export type Scheme = 'dark' | 'light' | 'light dark'
 
+/** CSS variable values of a theme. */
 export type Tokens = {
   accent?: string
   agent?: string
@@ -23,6 +30,7 @@ export type Tokens = {
   text?: string
 }
 
+/** Named set of tokens with its skin and icons. */
 export type Theme = {
   id: string
   label: string
@@ -35,7 +43,7 @@ export type Theme = {
   placeholder?: string
 }
 
-const VARIABLES: Record<keyof Tokens, string> = {
+const variables: Record<keyof Tokens, string> = {
   accent: '--z-nanocode-color-accent',
   agent: '--z-nanocode-color-agent',
   bg: '--z-nanocode-color-bg',
@@ -50,21 +58,24 @@ const VARIABLES: Record<keyof Tokens, string> = {
   text: '--z-nanocode-color-text',
 }
 
+/** Returns the inline style that sets the tokens. */
 export function tokens(values: Tokens, scheme?: Scheme): CSSProperties {
   const style: Record<string, string> = {}
   for (const [name, value] of Object.entries(values))
-    if (value !== undefined) style[VARIABLES[name as keyof Tokens]] = value
+    if (value !== undefined) style[variables[name as keyof Tokens]] = value
   if (scheme) style.colorScheme = scheme
   if (values.font) style.fontFamily = 'var(--z-nanocode-fontFamily-mono)'
   return style as CSSProperties
 }
 
+/** Returns the inline style of a theme. */
 export function themeStyle(theme: Theme, scheme?: Scheme): CSSProperties {
   return tokens(theme.tokens, scheme ?? theme.scheme)
 }
 
 const base = { ...styles, ...machines } as unknown as NonNullable<Skin['parts']>
 
+/** Default theme. */
 export const nanocodeTheme: Theme = {
   description: 'The default skin: Commit Mono, hairline rules, terminal turns.',
   id: 'nanocode',
@@ -73,7 +84,7 @@ export const nanocodeTheme: Theme = {
   tokens: {},
 }
 
-const ICONS: Skin['icons'] = {
+const themeIcons: Skin['icons'] = {
   cancelled: '–',
   completed: '✓',
   failed: '!',
@@ -81,6 +92,7 @@ const ICONS: Skin['icons'] = {
   yielded: '↻',
 }
 
+/** Theme in the style of ChatGPT. */
 export const chatgptTheme: Theme = {
   description: 'The system sans, no agent label, gray bubbles for you and a black send button.',
   greeting: 'What can I help with?',
@@ -88,7 +100,10 @@ export const chatgptTheme: Theme = {
   label: 'ChatGPT',
   placeholder: 'Ask anything',
   scheme: 'light dark',
-  skin: { icons: ICONS, parts: { ...base, ...(chatgpt as unknown as NonNullable<Skin['parts']>) } },
+  skin: {
+    icons: themeIcons,
+    parts: { ...base, ...(chatgpt as unknown as NonNullable<Skin['parts']>) },
+  },
   tokens: {
     accent: 'light-dark(#0d0d0d, #ececec)',
     agent: 'light-dark(#0d0d0d, #ececec)',
@@ -105,6 +120,7 @@ export const chatgptTheme: Theme = {
   },
 }
 
+/** Theme in the style of Claude. */
 export const claudeTheme: Theme = {
   description: 'Warm paper, a serif answer under a terracotta asterisk and a bordered composer.',
   greeting: (hour) => (hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'),
@@ -113,7 +129,10 @@ export const claudeTheme: Theme = {
   label: 'Claude',
   placeholder: 'How can I help you today?',
   scheme: 'light dark',
-  skin: { icons: ICONS, parts: { ...base, ...(claude as unknown as NonNullable<Skin['parts']>) } },
+  skin: {
+    icons: themeIcons,
+    parts: { ...base, ...(claude as unknown as NonNullable<Skin['parts']>) },
+  },
   tokens: {
     accent: 'light-dark(#c96442, #d97757)',
     agent: 'light-dark(#c96442, #d97757)',
@@ -130,6 +149,7 @@ export const claudeTheme: Theme = {
   },
 }
 
+/** Theme in the style of Gemini. */
 export const geminiTheme: Theme = {
   description: 'Google Sans, a sparkle for the agent, bubbles for you and a pill composer.',
   greeting: 'Hello, there',
@@ -138,7 +158,10 @@ export const geminiTheme: Theme = {
   label: 'Gemini',
   placeholder: 'Ask Gemini',
   scheme: 'light dark',
-  skin: { icons: ICONS, parts: { ...base, ...(gemini as unknown as NonNullable<Skin['parts']>) } },
+  skin: {
+    icons: themeIcons,
+    parts: { ...base, ...(gemini as unknown as NonNullable<Skin['parts']>) },
+  },
   tokens: {
     accent: 'light-dark(#0b57d0, #a8c7fa)',
     agent: 'light-dark(#1a73e8, #8ab4f8)',
@@ -155,6 +178,7 @@ export const geminiTheme: Theme = {
   },
 }
 
+/** Light paper theme. */
 export const paperTheme: Theme = {
   description: 'Only tokens changed: the default skin in ink on paper with a serif face.',
   id: 'paper',
@@ -176,6 +200,7 @@ export const paperTheme: Theme = {
   },
 }
 
+/** Green phosphor terminal theme. */
 export const phosphorTheme: Theme = {
   description: 'Only tokens changed: a green phosphor terminal.',
   id: 'phosphor',
@@ -194,6 +219,7 @@ export const phosphorTheme: Theme = {
   },
 }
 
+/** Theme without styles. */
 export const headlessTheme: Theme = {
   description: 'No skin at all: the same components render plain, unstyled HTML for you to style.',
   id: 'headless',
@@ -202,6 +228,7 @@ export const headlessTheme: Theme = {
   tokens: {},
 }
 
+/** Every theme, in display order. */
 export const themes: readonly Theme[] = [
   nanocodeTheme,
   chatgptTheme,

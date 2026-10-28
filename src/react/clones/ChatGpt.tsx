@@ -1,5 +1,10 @@
 'use client'
 
+/**
+ * Chat page in the style of ChatGPT.
+ *
+ * @module
+ */
 import type * as Config from '../../client/Config.ts'
 import type * as Transcript from '../../client/Transcript.ts'
 import {
@@ -14,7 +19,7 @@ import {
   useTurns,
 } from '../index.tsx'
 import { useState } from 'react'
-import { css } from './chatgpt.css.ts'
+import { css } from './ChatGpt.css.ts'
 import {
   ArrowUp,
   type Block,
@@ -35,7 +40,7 @@ import {
   useResume,
   useSidebar,
   useStick,
-} from './shared.tsx'
+} from './Shared.tsx'
 
 const skin: Skin = {
   icons: { cancelled: '–', completed: '✓', failed: '✕', running: '', yielded: '↻' },
@@ -56,7 +61,7 @@ const skin: Skin = {
   },
 }
 
-function ModelMenu(props: { picker: NonNullable<CloneProps['picker']> }) {
+function ModelMenu(props: ModelMenu.Props) {
   const [open, setOpen] = useState(false)
   const ref = useDismiss(open, () => setOpen(false))
   const { bound, choose, current, models } = props.picker
@@ -108,7 +113,13 @@ function ModelMenu(props: { picker: NonNullable<CloneProps['picker']> }) {
   )
 }
 
-function Thought(props: { block: Transcript.TurnBlock }) {
+declare namespace ModelMenu {
+  type Props = {
+    picker: NonNullable<CloneProps['picker']>
+  }
+}
+
+function Thought(props: Thought.Props) {
   const [open, setOpen] = useState<boolean>()
   const done = !props.block.live
   const took = seconds(props.block)
@@ -128,7 +139,13 @@ function Thought(props: { block: Transcript.TurnBlock }) {
   )
 }
 
-function Tools(props: { block: Extract<Block, { kind: 'tools' }> }) {
+declare namespace Thought {
+  type Props = {
+    block: Transcript.TurnBlock
+  }
+}
+
+function Tools(props: Tools.Props) {
   const [open, setOpen] = useState<boolean>()
   const running = props.block.cells.some((cell) => cell.status === 'running')
   const shown = open ?? running
@@ -173,7 +190,13 @@ function Tools(props: { block: Extract<Block, { kind: 'tools' }> }) {
   )
 }
 
-function BlockView(props: { block: Block }) {
+declare namespace Tools {
+  type Props = {
+    block: Extract<Block, { kind: 'tools' }>
+  }
+}
+
+function BlockView(props: BlockView.Props) {
   const block = props.block
   if (block.kind === 'tools') return <Tools block={block} />
   if (block.kind === 'assistant')
@@ -193,7 +216,13 @@ function BlockView(props: { block: Block }) {
   )
 }
 
-function Composer(props: CloneProps & { onSend(): void }) {
+declare namespace BlockView {
+  type Props = {
+    block: Block
+  }
+}
+
+function Composer(props: Composer.Props) {
   const composer = useComposer({
     ...(props.before ? { before: props.before } : {}),
     onSend: props.onSend,
@@ -258,6 +287,10 @@ function Composer(props: CloneProps & { onSend(): void }) {
       )}
     </div>
   )
+}
+
+declare namespace Composer {
+  type Props = CloneProps & { onSend(): void }
 }
 
 function App(props: CloneProps) {
@@ -412,9 +445,8 @@ function App(props: CloneProps) {
   )
 }
 
-export function ChatGpt(
-  props: CloneProps & { config: Config.Config; highlight?: () => Promise<Highlighter> },
-) {
+/** Chat page in the style of ChatGPT. */
+export function ChatGpt(props: ChatGpt.Props) {
   return (
     <NanocodeProvider
       config={props.config}
@@ -427,4 +459,11 @@ export function ChatGpt(
       <App {...props} />
     </NanocodeProvider>
   )
+}
+
+export declare namespace ChatGpt {
+  type Props = CloneProps & {
+    config: Config.Config
+    highlight?: () => Promise<Highlighter>
+  }
 }

@@ -1,6 +1,12 @@
+/**
+ * Zyzz theme of the skins: the design tokens, the style helpers, and the keyframes.
+ *
+ * @module
+ */
 import { type Config, defineConfig, defineVars, Vars } from 'zyzz'
 import { keyframes } from 'zyzz/web'
 
+/** Design tokens of the skins. */
 export const tokens = defineVars(
   {
     color: {
@@ -69,19 +75,23 @@ export const { style, variants, vars } = defineConfig({
   vars: { base: tokens },
 })
 
+/** Keyframes of a flicker. */
 export const flicker = keyframes({
   '0%, 49%': { opacity: 0 },
   '50%, 100%': { opacity: 1 },
 })
 
+/** Keyframes of a pulse. */
 export const pulse = keyframes({
   '50%': { opacity: 0.6, transform: 'scale(0.7)' },
 })
 
+/** Keyframes of a spin. */
 export const spin = keyframes({
   to: { transform: 'rotate(360deg)' },
 })
 
+/** Keyframes of an animated ellipsis. */
 export const ellipsis = keyframes({
   from: { width: '0' },
   to: { width: '3ch' },

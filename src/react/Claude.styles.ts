@@ -1,8 +1,15 @@
-import { flicker, pulse, spin, style, variants } from './theme.ts'
+/**
+ * Skin part styles of the Claude theme, keyed by part name.
+ *
+ * @module
+ */
+import { flicker, pulse, spin, style, variants } from './Theme.ts'
 
-const SANS =
-  'ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif !custom'
-const MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace !custom'
+const sans =
+  '"Styrene B", "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !custom'
+const serif =
+  '"Tiempos Text", "Copernicus", "Source Serif 4", Georgia, "Times New Roman", serif !custom'
+const mono = '"Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace !custom'
 
 export const chat = variants({
   base: {
@@ -13,7 +20,7 @@ export const chat = variants({
     color: 'text',
     display: 'flex',
     flexDirection: 'column',
-    fontFamily: SANS,
+    fontFamily: sans,
     fontSize: '0.9375rem !custom',
     lineHeight: '1.5rem !custom',
     overflow: 'hidden',
@@ -80,14 +87,17 @@ export const turn = style({
   flexDirection: 'column',
   gap: 'sm',
   minWidth: '0',
-  selectors: { '&:has(> [data-kind="user"])': { alignItems: 'flex-end' } },
 })
 
 export const speaker = variants({
   base: { margin: '0', userSelect: 'none' },
   variants: {
     who: {
-      agent: { display: 'none' },
+      agent: {
+        fontSize: '0 !custom',
+        lineHeight: '1 !custom',
+        '::before': { color: 'accent', content: '"✻"', fontSize: '1.375rem !custom' },
+      },
       you: { display: 'none' },
     },
   },
@@ -97,15 +107,16 @@ export const entry = variants({
   base: { margin: '0', minWidth: '0', overflowWrap: 'break-word', whiteSpace: 'pre-wrap' },
   variants: {
     kind: {
-      assistant: {},
+      assistant: { fontFamily: serif, fontSize: '1rem !custom', lineHeight: '1.65rem !custom' },
       cell: { whiteSpace: 'normal' },
       error: { color: 'accent' },
       reasoning: { color: 'middle', fontSize: '0.875rem !custom', fontStyle: 'italic' },
       tool: { color: 'middle', fontSize: '0.875rem !custom' },
       user: {
+        alignSelf: 'flex-start',
         backgroundColor: 'surface',
-        borderRadius: '1.5rem !custom',
-        maxWidth: '70% !custom',
+        borderRadius: '0.75rem !custom',
+        maxWidth: '85% !custom',
         paddingBlock: '0.625rem !custom',
         paddingInline: '1.125rem !custom',
       },
@@ -118,8 +129,8 @@ export const entry = variants({
           animationIterationCount: 'infinite',
           animationName: flicker,
           animationTimingFunction: 'steps(1, end)',
-          color: 'text',
-          content: '" ●"',
+          color: 'accent',
+          content: '" ✻"',
         },
         '@media (prefers-reduced-motion: reduce)': { '::after': { animationName: 'none' } },
       },
@@ -155,7 +166,7 @@ export const link = style({
 
 export const code = variants({
   base: {
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     margin: '0',
     overflowWrap: 'anywhere',
@@ -180,7 +191,7 @@ export const code = variants({
 export const inline = style({
   backgroundColor: 'surface',
   borderRadius: '0.375rem !custom',
-  fontFamily: MONO,
+  fontFamily: mono,
   fontSize: '0.875em !custom',
   paddingInline: '0.3em !custom',
 })
@@ -254,7 +265,7 @@ export const body = variants({
   base: {
     backgroundColor: 'bg',
     borderRadius: '0.75rem !custom',
-    fontFamily: MONO,
+    fontFamily: mono,
     fontSize: '0.8125rem !custom',
     lineHeight: '1.25rem !custom',
     marginBlock: '0',
@@ -319,8 +330,8 @@ export const row = style({
   backgroundColor: 'bg',
   border: '1px solid',
   borderColor: 'rule',
-  borderRadius: '1.75rem !custom',
-  boxShadow: '0 4px 16px rgb(0 0 0 / 0.06) !custom',
+  borderRadius: '1.25rem !custom',
+  boxShadow: '0 0.25rem 1.25rem rgba(0, 0, 0, 0.035) !custom',
   display: 'flex',
   gap: 'sm',
   marginBottom: 'sm',
@@ -365,18 +376,18 @@ export const input = style({
 export const send = style({
   alignItems: 'center',
   alignSelf: 'flex-end',
-  backgroundColor: 'text',
+  backgroundColor: 'accent',
   border: 'none',
-  borderRadius: '999px !custom',
-  color: 'bg',
+  borderRadius: '0.5rem !custom',
+  color: 'onAccent',
   cursor: 'pointer',
   display: 'inline-flex',
   flexShrink: 0,
-  height: '2.25rem !custom',
+  height: '2rem !custom',
   justifyContent: 'center',
   padding: '0',
   textDecorationLine: 'none',
-  width: '2.25rem !custom',
+  width: '2rem !custom',
   '::before': { content: '"↑"', fontSize: '1.125rem !custom', fontWeight: '600 !custom' },
   ':focus-visible': { outline: '2px solid', outlineColor: 'text', outlineOffset: '2px' },
 })
@@ -497,16 +508,20 @@ export const quote = style({
 })
 
 export const greeting = style({
-  fontSize: '1.75rem !custom',
+  fontFamily: '"Copernicus", "Tiempos Headline", "Source Serif 4", Georgia, serif !custom',
+  fontSize: '2.25rem !custom',
   fontWeight: '400 !custom',
-  lineHeight: '2.25rem !custom',
+  lineHeight: '2.75rem !custom',
   margin: '0',
   paddingBottom: 'md',
   textAlign: 'center',
+  '::before': { color: 'accent', content: '"✻ "' },
 })
 
 export const sidebar = style({
-  backgroundColor: 'light-dark(#f9f9f9, #181818) !custom',
+  backgroundColor: 'light-dark(#f5f4ed, #1f1e1d) !custom',
+  borderRight: '1px solid',
+  borderRightColor: 'rule',
   display: 'flex',
   flexDirection: 'column',
   flexShrink: 0,
@@ -522,7 +537,7 @@ export const sidebarNew = style({
   backgroundColor: 'transparent',
   border: 'none',
   borderRadius: '0.625rem !custom',
-  color: 'text',
+  color: 'accent',
   cursor: 'pointer',
   display: 'flex',
   font: 'inherit !custom',
@@ -533,9 +548,20 @@ export const sidebarNew = style({
   paddingInline: '0.625rem !custom',
   textAlign: 'left',
   textDecorationLine: 'none',
-  '::before': { content: '"✎"', fontSize: '1rem !custom', width: '1.25rem !custom' },
+  '::before': {
+    alignItems: 'center',
+    backgroundColor: 'accent',
+    borderRadius: '50% !custom',
+    color: 'onAccent',
+    content: '"+"',
+    display: 'inline-flex',
+    fontSize: '1rem !custom',
+    height: '1.625rem !custom',
+    justifyContent: 'center',
+    width: '1.625rem !custom',
+  },
   ':disabled': { cursor: 'default', opacity: 'faint' },
-  ':hover:not(:disabled)': { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' },
+  ':hover:not(:disabled)': { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' },
 })
 
 export const sidebarSection = style({
@@ -556,7 +582,7 @@ export const sidebarChat = variants({
     alignItems: 'center',
     borderRadius: '0.625rem !custom',
     display: 'flex',
-    ':hover': { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' },
+    ':hover': { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' },
     '& > button:first-child': {
       backgroundColor: 'transparent',
       border: 'none',
@@ -576,7 +602,7 @@ export const sidebarChat = variants({
     },
   },
   variants: {
-    current: { false: {}, true: { backgroundColor: 'light-dark(#ececec, #2f2f2f) !custom' } },
+    current: { false: {}, true: { backgroundColor: 'light-dark(#ebe9e0, #2c2b28) !custom' } },
   },
   defaultVariants: { current: false },
 })
@@ -602,14 +628,13 @@ export const pending = style({
   '::before': {
     animationDuration: '1.2s',
     animationIterationCount: 'infinite',
-    animationName: pulse,
-    animationTimingFunction: 'ease-in-out',
-    backgroundColor: 'text',
-    borderRadius: '50% !custom',
-    content: '""',
+    animationName: spin,
+    animationTimingFunction: 'linear',
+    color: 'accent',
+    content: '"✻"',
     display: 'inline-block',
-    height: '0.75rem !custom',
-    width: '0.75rem !custom',
+    fontSize: '1.25rem !custom',
+    lineHeight: '1.25rem !custom',
   },
   '@media (prefers-reduced-motion: reduce)': { '::before': { animationName: 'none' } },
 })

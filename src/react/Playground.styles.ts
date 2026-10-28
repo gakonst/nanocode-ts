@@ -1,6 +1,11 @@
-import { style, variants } from './theme.ts'
+/**
+ * Styles of the playground page.
+ *
+ * @module
+ */
+import { style, variants } from './Theme.ts'
 
-const ROUND = 'var(--nc-radius, 0) !custom'
+const rounded = 'var(--nc-radius, 0) !custom'
 
 export const playground = style({
   alignItems: 'start',
@@ -111,7 +116,7 @@ export const card = style({
   backgroundColor: 'surface',
   border: '1px solid',
   borderColor: 'rule',
-  borderRadius: ROUND,
+  borderRadius: rounded,
   display: 'flex',
   flexDirection: 'column',
   gap: 'sm',
@@ -134,7 +139,7 @@ export const action = variants({
     backgroundColor: 'accent',
     border: '1px solid',
     borderColor: 'accent',
-    borderRadius: ROUND,
+    borderRadius: rounded,
     color: 'onAccent',
     cursor: 'pointer',
     display: 'inline-flex',
@@ -159,7 +164,7 @@ export const result = style({
   backgroundColor: 'bg',
   border: '1px solid',
   borderColor: 'rule',
-  borderRadius: ROUND,
+  borderRadius: rounded,
   display: 'flex',
   flexDirection: 'column',
   gap: 'xs',
@@ -173,7 +178,7 @@ export const editor = style({
   backgroundColor: 'bg',
   border: '1px solid',
   borderColor: 'rule',
-  borderRadius: ROUND,
+  borderRadius: rounded,
   color: 'text',
   font: 'inherit !custom',
   minHeight: '8rem !custom',

@@ -1,5 +1,10 @@
 'use client'
 
+/**
+ * Playground page that previews the chat in each form factor and theme, with its source.
+ *
+ * @module
+ */
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Config from '../client/Config.ts'
 import {
@@ -12,9 +17,9 @@ import {
   useConfig,
   useSend,
 } from './index.tsx'
-import * as styles from './playground.styles.ts'
-import { ChatGpt, Claude } from './clones.tsx'
-import { Block } from './site.tsx'
+import * as styles from './Playground.styles.ts'
+import { ChatGpt, Claude } from './Clones.tsx'
+import { Block } from './Site.tsx'
 import {
   nanocodeTheme,
   type Scheme,
@@ -23,21 +28,14 @@ import {
   themeStyle,
   type Tokens,
   tokens,
-} from './themes.ts'
+} from './Themes.ts'
 
 export { styles }
 
+/** Form factor of the chat. */
 export type FormFactor = 'button' | 'chat' | 'rewrite'
 
-export type PlaygroundProps = {
-  configs: Record<FormFactor, Config.Config>
-  highlight?: () => Promise<Highlighter>
-  themes?: readonly Theme[]
-  suggestions?: readonly string[]
-  status?: ReactNode
-}
-
-const FORMS: readonly { id: FormFactor; label: string; detail: string }[] = [
+const forms: readonly { id: FormFactor; label: string; detail: string }[] = [
   { detail: 'The standard chat: transcript, tool cells, composer.', id: 'chat', label: 'Chat' },
   {
     detail: 'A button in your product that runs an agent job and shows its answer.',
@@ -51,28 +49,28 @@ const FORMS: readonly { id: FormFactor; label: string; detail: string }[] = [
   },
 ]
 
-const SUGGESTIONS: readonly string[] = [
+const defaultSuggestions: readonly string[] = [
   'What can you do?',
   'Plot y = sin(x) and show me',
   'Fetch the top Hacker News story',
 ]
 
-const SCHEMES: readonly { id: Scheme | 'theme'; label: string }[] = [
+const schemes: readonly { id: Scheme | 'theme'; label: string }[] = [
   { id: 'theme', label: 'theme' },
   { id: 'light', label: 'light' },
   { id: 'dark', label: 'dark' },
 ]
 
-const FONTS: Record<string, string> = {
+const fonts: Record<string, string> = {
   mono: '"CommitMono", ui-monospace, monospace',
   sans: 'Inter, "Helvetica Neue", Arial, sans-serif',
   serif: '"Iowan Old Style", Georgia, serif',
 }
 
-const NOTES =
+const releaseNotes =
   'nanocode-ts 0.2 ships the Rust SDK as one WebAssembly module. Durable sessions run in a Cloudflare Durable Object or a Vercel workflow, Code Mode cells run in QuickJS inside the module, and the React components are headless: a skin maps each part to class names, and a theme is a handful of CSS variables.'
 
-const JOBS: readonly { label: string; prompt: string }[] = [
+const jobs: readonly { label: string; prompt: string }[] = [
   {
     label: 'Summarize',
     prompt:
@@ -90,28 +88,29 @@ const JOBS: readonly { label: string; prompt: string }[] = [
   },
 ]
 
-const TONES: readonly string[] = ['Shorter', 'Friendlier', 'More formal', 'Fix grammar']
+const tones: readonly string[] = ['Shorter', 'Friendlier', 'More formal', 'Fix grammar']
 
-const DRAFT =
+const draft =
   'hey team, so the deploy kinda broke yesterday bc the migration ran twice, its fixed now but we should prob add a lock so it dont happen again'
 
-const CUSTOM: Tokens = {
+const customTokens: Tokens = {
   accent: '#7c3aed',
   bg: '#0b0b12',
-  font: FONTS.sans,
+  font: fonts.sans,
   radius: '12px',
   surface: '#15151f',
   text: '#ececf4',
 }
 
-export function Playground(props: PlaygroundProps) {
+/** Playground page. */
+export function Playground(props: Playground.Props) {
   const themes = props.themes ?? defaults
   const [chosen, setChosen] = useState<string>(
     themes.find((theme) => theme.id === 'gemini')?.id ?? themes[0]?.id ?? 'nanocode',
   )
   const [form, setForm] = useState<FormFactor>('chat')
   const [scheme, setScheme] = useState<Scheme | 'theme'>('theme')
-  const [custom, setCustom] = useState<Tokens>(CUSTOM)
+  const [custom, setCustom] = useState<Tokens>(customTokens)
   const [font, setFont] = useState('sans')
   const [hour, setHour] = useState<number>()
 
@@ -125,7 +124,7 @@ export function Playground(props: PlaygroundProps) {
       id: 'custom',
       label: 'Custom',
       scheme: 'dark',
-      tokens: { ...custom, font: FONTS[font] ?? FONTS.sans! },
+      tokens: { ...custom, font: fonts[font] ?? fonts.sans! },
     }
   }, [chosen, custom, font, themes])
 
@@ -148,14 +147,14 @@ export function Playground(props: PlaygroundProps) {
               <ChatGpt
                 config={props.configs.chat}
                 footer={props.status}
-                prompts={props.suggestions ?? SUGGESTIONS}
+                prompts={props.suggestions ?? defaultSuggestions}
                 {...(props.highlight ? { highlight: props.highlight } : {})}
               />
             ) : (
               <Claude
                 config={props.configs.chat}
                 footer={props.status}
-                prompts={props.suggestions ?? SUGGESTIONS}
+                prompts={props.suggestions ?? defaultSuggestions}
                 {...(props.highlight ? { highlight: props.highlight } : {})}
               />
             )}
@@ -175,7 +174,7 @@ export function Playground(props: PlaygroundProps) {
                 label={theme.label + ' chat'}
                 placeholder={theme.placeholder ?? 'Ask the agent'}
                 status={props.status}
-                suggestions={props.suggestions ?? SUGGESTIONS}
+                suggestions={props.suggestions ?? defaultSuggestions}
               />
             </div>
           </NanocodeProvider>
@@ -211,7 +210,7 @@ export function Playground(props: PlaygroundProps) {
           </div>
           <div {...styles.bar()} role="radiogroup" aria-label="Form factor">
             <span {...styles.label()}>form factor</span>
-            {FORMS.map((item) => (
+            {forms.map((item) => (
               <button
                 aria-checked={item.id === form}
                 key={item.id}
@@ -227,7 +226,7 @@ export function Playground(props: PlaygroundProps) {
           </div>
           <div {...styles.bar()} role="radiogroup" aria-label="Color scheme">
             <span {...styles.label()}>scheme</span>
-            {SCHEMES.map((item) => (
+            {schemes.map((item) => (
               <button
                 aria-checked={item.id === scheme}
                 key={item.id}
@@ -262,7 +261,7 @@ export function Playground(props: PlaygroundProps) {
                   value={font}
                   {...styles.select()}
                 >
-                  {Object.keys(FONTS).map((name) => (
+                  {Object.keys(fonts).map((name) => (
                     <option key={name} value={name}>
                       {name}
                     </option>
@@ -282,7 +281,7 @@ export function Playground(props: PlaygroundProps) {
             </div>
           )}
           <p {...styles.description()}>
-            {theme.label}: {theme.description} {FORMS.find((item) => item.id === form)?.detail}
+            {theme.label}: {theme.description} {forms.find((item) => item.id === form)?.detail}
           </p>
         </div>
 
@@ -304,6 +303,16 @@ export function Playground(props: PlaygroundProps) {
   )
 }
 
+export declare namespace Playground {
+  type Props = {
+    configs: Record<FormFactor, Config.Config>
+    highlight?: () => Promise<Highlighter>
+    themes?: readonly Theme[]
+    suggestions?: readonly string[]
+    status?: ReactNode
+  }
+}
+
 function Job() {
   const config = useConfig()
   const { send, isPending } = useSend()
@@ -314,16 +323,16 @@ function Job() {
     <div {...styles.pane()}>
       <div {...styles.card()}>
         <p {...styles.cardTitle()}>Release notes · v0.2</p>
-        <p {...styles.cardText()}>{NOTES}</p>
+        <p {...styles.cardText()}>{releaseNotes}</p>
         <div {...styles.actions()}>
-          {JOBS.map((job) => (
+          {jobs.map((job) => (
             <button
               disabled={isPending}
               key={job.label}
               onClick={() => {
                 setRan(job.label)
                 config.clear()
-                void send(job.prompt + '\n\n' + NOTES)
+                void send(job.prompt + '\n\n' + releaseNotes)
               }}
               type="button"
               {...styles.action({ quiet: ran !== undefined && ran !== job.label })}
@@ -354,7 +363,7 @@ function Rewrite() {
   const config = useConfig()
   const { send, isPending } = useSend()
   const answer = useAnswer()
-  const [text, setText] = useState(DRAFT)
+  const [text, setText] = useState(draft)
   const [previous, setPrevious] = useState<string>()
   const waiting = useRef(false)
 
@@ -391,7 +400,7 @@ function Rewrite() {
         </p>
       )}
       <div {...styles.actions()}>
-        {TONES.map((tone) => (
+        {tones.map((tone) => (
           <button
             disabled={isPending || !text.trim()}
             key={tone}
