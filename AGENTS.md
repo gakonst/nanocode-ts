@@ -217,8 +217,8 @@ Applies to documentation, comments, TSDoc, interface copy, commit messages, and 
 ## Workflow Conventions
 
 - Use the smallest repository script that covers the changed behavior. Run focused tests while iterating.
-- Run `pnpm check:types` after TypeScript changes and `cargo clippy` after Rust changes.
-- `pnpm check` runs formatting and lint with fixes. Inspect and keep only task-related changes.
+- Run `npm run check:types` after TypeScript changes and `cargo clippy` after Rust changes.
+- `npm run check` runs formatting and lint with fixes. Inspect and keep only task-related changes.
 - Run `git diff --check` and inspect the final diff before reporting completion.
 
 ## Git Conventions
@@ -233,7 +233,7 @@ Applies to documentation, comments, TSDoc, interface copy, commit messages, and 
 
 ## UI Conventions
 
-- Style with Zyzz. Group a module's styles in `namespace styles` at the bottom of the file, apply them as `styles.card()`, and separate adjacent `style` definitions with one blank line.
+- Style with Zyzz. Keep a component's styles in a sibling `*.styles.ts` module of named `style` definitions, and separate adjacent definitions with one blank line. `erasableSyntaxOnly` rejects a `namespace styles` that holds values.
 - Keep headless components free of styles. Skins and themes are separate entrypoints.
 - Use accessible native controls with labels, visible focus, and `aria-live` for asynchronous status. Use an accessible primitive library only when a component needs coordinated behavior, such as a popup.
 - Respect reduced-motion preferences. Animate `transform` and `opacity`.
@@ -248,21 +248,21 @@ Applies to documentation, comments, TSDoc, interface copy, commit messages, and 
 
 ## Tooling
 
-- Use pnpm. Declare every dependency at an exact version in the default catalog in `pnpm-workspace.yaml`, and reference it as `catalog:` in `package.json`. Peer dependency ranges stay in `package.json`.
+- Use npm. Declare every dependency at an exact version in `package.json`. Peer dependency ranges stay ranges. Hosts install `github:` commit pins with npm, which cannot resolve pnpm `catalog:` specifiers.
 - Prettier is banned. Vite+ runs oxfmt, oxlint, and Vitest, configured in `vite.config.ts`.
 - `tsc` builds the package. Each platform keeps its own tsconfig, since host-agnostic modules are checked against the web platform types only.
 
 ## Commands
 
-- `pnpm build` builds the WebAssembly module from source, then the TypeScript with `pnpm build:ts`.
-- `pnpm check` runs `vp check --fix` for formatting and lint. `pnpm check:types` runs `tsc` for every platform tsconfig.
-- `pnpm test` runs the integration suites with `vp test`.
+- `npm run build` builds the WebAssembly module from source, then the TypeScript with `npm run build:ts`.
+- `npm run check` runs `vp check --fix` for formatting and lint. `npm run check:types` runs `tsc` for every platform tsconfig and for the tests.
+- `npm test` runs the integration suites with `vp test`. They read the WebAssembly module from `dist/`, which `npm install` downloads or builds.
 - `node scripts/wasm.ts` prints the WebAssembly fingerprint. `node scripts/publish-wasm.ts` writes or uploads its release asset.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` check Rust.
 
 # Project Reference
 
-The record below describes the SDK, the hosts, the adapters, and measured behavior. Where it conflicts with the conventions above, the conventions apply to new and changed code.
+The record below describes the SDK, the hosts, the adapters, and measured behavior. Where it conflicts with the conventions above, the conventions apply to new and changed code. Its file paths and API names predate the namespace restructure of 2026-10-28, which renamed modules to PascalCase and functions to `Module.operation` (for example `connectHand` to `Hand.connect` and `src/host.ts` to `src/AgentRuntime.ts`).
 
 nanocode-ts and the hosts built on it (gakonst/nanocode-cloudflare-durable, nanocode-vercel-durable, nanocode-machines-web, tempoxyz/nanocode-site) send models only upstream nanocode's native prompts and tool text: no system or developer instructions of their own, no workspace or sandbox instructions, no tool description overrides (Georgios, 2026-10-25). What models need goes into gakonst/nanocode (its WASM `exec` defaults defer `mcp__*` tools, brief the rarely used subagent tools and note QuickJS, gakonst/nanocode#1085). `instructions` stays an option for other hosts. Mentions below of `LOCAL_INSTRUCTIONS`, `BASH_CODE_MODE_INSTRUCTIONS`, `BASH_REMOTE_PYTHON_INSTRUCTIONS`, the sandbox instructions, `briefTools`, Codex's file-only workspace default and `deferMcp`'s default deferral describe what was removed then: `deferMcp` now defers only with `deferred: true`, and Codex gets all of its native workspace tools. With every host instruction removed, a local GLM-5.3 sweep through the Cloudflare demo Worker passed 12 of 12; the chart prompt needed 17 model calls, since nothing tells models to embed a saved image. Second pass (Georgios, 2026-10-25): nanocode-ts defines no tool text that duplicates or rewrites an upstream tool. `deferMcp` only caches MCP `initialize` and `tools/list` (its `describe_tools`/`call_tool` rewriting, `deferred` and `core` are gone; the SDK defers `mcp__*` tools natively), `Bash` has no `tool()`/`bashTool`/`BASH_TOOL_DESCRIPTION` (no host used them), and the machines cloud tools drop `list_files`, `read_file`, `write_file`, `edit_file` and `delete_file` (upstream Read/Edit/Write and `exec_command` cover the session workspace), leaving `http`, `list_secrets` and `wallet` with one factual line each. On WASM, `AgentRuntime.open` reads the workspace's own `AGENTS.override.md` or `AGENTS.md` through the workspace host and passes it as `environment.project_instructions`, as native nanocode loads a workspace's AGENTS.md (gakonst/nanocode's WASM context source only takes it from the host); tempoxyz/nanocode-site mounts its docs index there. Codex sessions on WASM get every native Codex tool except native-only host routing (`hands`, `runners`): `view_image` reads workspace images through `HostFiles::read_bytes` (the `cell_read` op), and `image_gen__imagegen` posts to `<codex endpoint>/images/generations|edits` through the session's model transport and saves to `generated_images/` through `write_bytes` (`cell_write`), unless the host defines its own `image_gen__imagegen` (gakonst/nanocode#1091). The Cloudflare gateway runs them as the AI Gateway catalog model `openai/<model>` (`gpt-image-2`) and returns OpenAI's `{data: [{b64_json}]}` from the image URL the catalog answers, with edit images as data-URL strings in `images`: AI Gateway added no stored OpenAI key to `openai` provider `images/generations` (401 Missing bearer, while `responses` passed on the same gateway, 2026-10-26). `bench/targets/rust.mjs` reads `nc`'s OpenTelemetry traces from a temporary `--home`, which carry Codex token counts, `code_mode.cell` spans and per-session `agent.depth` for subagents.
 
