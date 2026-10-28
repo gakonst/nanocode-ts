@@ -15,6 +15,7 @@ const LOOKUP = {
     additionalProperties: false,
   },
 }
+const CELL = "text(JSON.stringify(await tools.lookup({ key: 'alpha' })))"
 const ENDPOINTS = {
   claude: 'https://api.anthropic.com/v1/messages',
   codex: 'https://api.openai.com/v1',
@@ -54,8 +55,8 @@ function claude(input) {
       ]
     : [
         [
-          { type: 'tool_use', id: `toolu_${call}`, name: LOOKUP.name, input: {} },
-          { type: 'input_json_delta', partial_json: JSON.stringify({ key: 'alpha' }) },
+          { type: 'tool_use', id: `toolu_${call}`, name: 'exec', input: {} },
+          { type: 'input_json_delta', partial_json: JSON.stringify({ code: CELL }) },
         ],
       ]
   return sse([
@@ -95,7 +96,9 @@ function claude(input) {
 function codex(input) {
   const items = input.input
   const user = items.findLastIndex((item) => item.type === 'message' && item.role === 'user')
-  const result = items.find((item, index) => index > user && item.type === 'function_call_output')
+  const result = items.find(
+    (item, index) => index > user && item.type === 'custom_tool_call_output',
+  )
   const answered = result !== undefined
   if (answered && !JSON.stringify(result.output).includes('bravo'))
     throw new Error("the Codex tool result lost the host tool's output")
@@ -110,11 +113,11 @@ function codex(input) {
         content: [{ type: 'output_text', text: 'the value is bravo' }],
       }
     : {
-        type: 'function_call',
-        id: `fc_${call}`,
+        type: 'custom_tool_call',
+        id: `ctc_${call}`,
         call_id: `call_${call}`,
-        name: LOOKUP.name,
-        arguments: JSON.stringify({ key: 'alpha' }),
+        name: 'exec',
+        input: CELL,
         status: 'completed',
       }
   return sse([
@@ -124,23 +127,32 @@ function codex(input) {
       {
         type: 'response.output_item.added',
         output_index: 0,
-        item: item.type === 'message' ? { ...item, status: 'in_progress', content: [] } : item,
+        item:
+          item.type === 'message'
+            ? { ...item, status: 'in_progress', content: [] }
+            : { ...item, status: 'in_progress', input: '' },
       },
     ],
-    ...(item.type === 'message'
+    item.type === 'message'
       ? [
-          [
-            null,
-            {
-              type: 'response.output_text.delta',
-              output_index: 0,
-              item_id: item.id,
-              content_index: 0,
-              delta: item.content[0].text,
-            },
-          ],
+          null,
+          {
+            type: 'response.output_text.delta',
+            output_index: 0,
+            item_id: item.id,
+            content_index: 0,
+            delta: item.content[0].text,
+          },
         ]
-      : []),
+      : [
+          null,
+          {
+            type: 'response.custom_tool_call_input.delta',
+            output_index: 0,
+            item_id: item.id,
+            delta: CELL,
+          },
+        ],
     [null, { type: 'response.output_item.done', output_index: 0, item }],
     [
       null,
@@ -279,9 +291,9 @@ async function scenario(provider) {
   if (
     !requests
       .slice(firstRequests)
-      .every((request) => request.credential_free && request.tools.includes(LOOKUP.name))
+      .every((request) => request.credential_free && request.tools.join() === 'exec,wait')
   )
-    throw new Error(`${provider} requests did not offer the host tool`)
+    throw new Error(`${provider} requests offered tools other than exec and wait`)
   if (replayed.events.length < firstEvents)
     throw new Error(`${provider} lost logged events across instances`)
   if (last.messages <= requests[firstRequests].messages)
@@ -290,12 +302,14 @@ async function scenario(provider) {
   for (const { event } of replayed.events) {
     if (event.event?.type !== 'tool.input.delta') continue
     const { call_id, tool, text } = event.event.payload
-    if (tool !== LOOKUP.name) throw new Error(`${provider} streamed input for ${tool}`)
+    if (tool !== 'exec') throw new Error(`${provider} streamed input for ${tool}`)
     inputs.set(call_id, (inputs.get(call_id) ?? '') + text)
   }
   if (
     inputs.size !== 2 ||
-    ![...inputs.values()].every((text) => text === JSON.stringify({ key: 'alpha' }))
+    ![...inputs.values()].every(
+      (text) => text === (provider === 'claude' ? JSON.stringify({ code: CELL }) : CELL),
+    )
   )
     throw new Error(`${provider} streamed tool input ${JSON.stringify([...inputs])}`)
   await restored.runtime.dispose()

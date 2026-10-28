@@ -147,7 +147,6 @@ export function create(options: create.Options) {
   const kernel = durability === 'on' && runAhead === true ? 'on' : 'strict'
   const agent = durableAgent({
     harness: Harness.create({
-      codeMode: true,
       subagents: true,
       streamToolInput: true,
       ...harness,
