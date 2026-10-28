@@ -1,7 +1,7 @@
 import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
-import type { KeyAuthorization } from 'ox/tempo'
-import { type Address, encodeFunctionData, type Hex, isAddressEqual, isHex } from 'viem'
-import { Abis, Account, Actions, createClient, http } from 'viem/tempo'
+import { KeyAuthorization } from 'ox/tempo'
+import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
+import { Account, Actions, createClient, http, KeyAuthorizationManager } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
 import * as Egress from '../internal/Egress.ts'
 import * as AccessKey from './AccessKey.ts'
@@ -9,8 +9,6 @@ import * as Mcp from './Mcp.ts'
 import * as Payment from './Payment.ts'
 
 export const mach: Address = '0x20c000000000000000000000f37de3740adec032'
-const usdc: Address = '0x20c000000000000000000000b9537d11c60e8b50'
-const swapper: Address = '0xF72E5107c32C655ffA7539a3C8e97B7C3cE16A3F'
 export const rpc = 'https://rpc.tempo.xyz'
 export const visitorHeader = 'x-nanocode-visitor'
 const opening = '200000'
@@ -299,27 +297,16 @@ export function create(options: create.Options) {
       throw new Error(
         'no access key is registered for this account, or it expired: connect Tempo Wallet again',
       )
+    const keyAuthorizationManager = KeyAuthorizationManager.memory()
+    if (current.authorization)
+      await keyAuthorizationManager.set(
+        { accessKey: current.keyAddress, address: current.address, chainId: tempo.id },
+        KeyAuthorization.fromRpc(current.authorization),
+      )
     const signer =
       current.keyType === 'p256'
-        ? Account.fromP256(current.key, { access: current.address })
-        : Account.fromSecp256k1(current.key, { access: current.address })
-    if (current.authorization)
-      await AccessKey.publish({
-        account: signer,
-        address: current.address,
-        authorization: current.authorization,
-        call: {
-          data: encodeFunctionData({
-            abi: Abis.tip20,
-            args: [swapper, 0n],
-            functionName: 'approve',
-          }),
-          to: mach,
-        },
-        feeToken: usdc,
-        keyAddress: current.keyAddress,
-        rpc: endpoint,
-      })
+        ? Account.fromP256(current.key, { access: current.address, keyAuthorizationManager })
+        : Account.fromSecp256k1(current.key, { access: current.address, keyAuthorizationManager })
     const client = createClient({ chain: tempo, transport: http(endpoint) })
     const prefix = `channel:${current.keyAddress.toLowerCase()}:`
     const mppx = Mppx.create({

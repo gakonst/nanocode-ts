@@ -1,5 +1,5 @@
 import type { KeyAuthorization } from 'ox/tempo'
-import type { Address, Client, Hash, Hex, Transport } from 'viem'
+import type { Address, Client, Hex, Transport } from 'viem'
 import type * as Chains from 'viem/tempo/chains'
 import type * as Tempo from 'viem/tempo'
 
@@ -222,26 +222,6 @@ export async function connect(): Promise<AccessKey> {
   return connected
 }
 
-export async function publish(connected: AccessKey): Promise<Hash | undefined> {
-  const [[, , , { encodeFunctionData }, , , { Abis }], keys, account] = await Promise.all([
-    load(),
-    import('./AccessKey.ts'),
-    signer(connected),
-  ])
-  return await keys.publish({
-    account,
-    address: connected.address,
-    authorization: connected.authorization,
-    call: {
-      data: encodeFunctionData({ abi: Abis.tip20, args: [swapper, 0n], functionName: 'approve' }),
-      to: mach.address,
-    },
-    feeToken: usdc.address,
-    keyAddress: connected.keyAddress,
-    rpc,
-  })
-}
-
 export async function revoke(connected: AccessKey) {
   const [, , , { toHex }, , , , { tempo }] = await load()
   await (
@@ -279,8 +259,17 @@ export function fundingUrl(connected: AccessKey) {
 export async function signer(
   connected: AccessKey,
 ): Promise<ReturnType<typeof Tempo.Account.fromSecp256k1>> {
-  const [, , , , , , { Account }] = await load()
-  return Account.fromSecp256k1(connected.key, { access: connected.address })
+  const [, , { KeyAuthorization }, , , , { Account, KeyAuthorizationManager }, { tempo }] =
+    await load()
+  const keyAuthorizationManager = KeyAuthorizationManager.memory()
+  await keyAuthorizationManager.set(
+    { accessKey: connected.keyAddress, address: connected.address, chainId: tempo.id },
+    KeyAuthorization.fromRpc(connected.authorization),
+  )
+  return Account.fromSecp256k1(connected.key, {
+    access: connected.address,
+    keyAuthorizationManager,
+  })
 }
 
 export async function balances(connected: AccessKey) {

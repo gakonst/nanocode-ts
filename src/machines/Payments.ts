@@ -101,7 +101,6 @@ export function create(connected: Wallet.AccessKey, options: create.Options = {}
       import('mppx/client'),
       Wallet.signer(connected),
       Wallet.reader(),
-      Wallet.publish(connected),
     ])
     const mppx = Mppx.create({
       fetch: async (input, init) => {

@@ -56,7 +56,7 @@ export function explain(error: unknown) {
     (/InsufficientBalance/.test(text) && text.toLowerCase().includes(Wallet.usdc.address))
   )
     return new Error(
-      `Putting the key on Tempo before its first payment needs a little ${Wallet.usdc.symbol} for its fee, which Tempo Wallet did not sponsor, and your wallet holds too little. Add ${Wallet.usdc.symbol} in Tempo Wallet, then ask again.`,
+      `This payment pays its own fee in ${Wallet.usdc.symbol}, which the service does not sponsor, and your wallet holds too little. Add ${Wallet.usdc.symbol} in Tempo Wallet, then ask again.`,
       { cause: error },
     )
   if (/InsufficientBalance/.test(text))
@@ -71,7 +71,7 @@ export function explain(error: unknown) {
     )
   if (/keyAuthorization is not allowed/.test(text))
     return new Error(
-      'The key is not on Tempo yet, and this service does not publish keys. Ask again.',
+      'This service refuses the payment that puts your key on Tempo: it sponsors fees with mppx older than 0.16, which allowed no key authorization in a sponsored payment.',
       {
         cause: error,
       },

@@ -249,7 +249,7 @@ async function approve(note: Note): Promise<Wallet.AccessKey> {
     pending = await Wallet.connect()
     note(
       'tool',
-      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${Machine.limits}, at ${Machine.until(pending)}. It goes on Tempo just before its first payment, with its fee sponsored by Tempo Wallet when it sponsors this site.`,
+      `Tempo Wallet approved key ${Wallet.short(pending.keyAddress)} for ${Wallet.short(pending.address)}: ${Machine.limits}, at ${Machine.until(pending)}. Its first payment puts it on Tempo.`,
     )
   }
   return pending
