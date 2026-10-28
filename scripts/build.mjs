@@ -11,11 +11,11 @@ function fields(path, start, pattern) {
   return new Set([...body.slice(0, body.indexOf("\n}")).matchAll(pattern)].map(match => match[1]));
 }
 const rust = fields("src/wasm.rs", "struct Configuration {", /^\s+(\w+):/gm);
-const typescript = fields("src/contracts.ts", "export type AgentConfiguration = {", /^\s+(\w+)\??:/gm);
+const typescript = fields("src/Contracts.ts", "export type AgentConfiguration = {", /^\s+(\w+)\??:/gm);
 for (const field of ["runtime_id", "started_ms"]) typescript.add(field);
 const differing = [...rust].filter(field => !typescript.has(field)).concat([...typescript].filter(field => !rust.has(field)));
 if (differing.length > 0 || rust.size === 0) {
-  console.error(`AgentConfiguration in src/contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(", ") || "no fields found"}`);
+  console.error(`AgentConfiguration in src/Contracts.ts and Configuration in src/wasm.rs differ: ${differing.join(", ") || "no fields found"}`);
   process.exit(1);
 }
 
@@ -93,5 +93,5 @@ const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes),
 const catalog = await runtime.modelCatalog();
 await runtime.dispose();
 writeFileSync("dist/models.js", `export const models = ${JSON.stringify(catalog, null, 2)};\n`);
-writeFileSync("dist/models.d.ts", `import type { ModelCatalog } from "./contracts.js";\nexport declare const models: ModelCatalog;\n`);
+writeFileSync("dist/models.d.ts", `import type { ModelCatalog } from "./Contracts.js";\nexport declare const models: ModelCatalog;\n`);
 writeFileSync("dist/" + manifestName, JSON.stringify(manifest("dist", wasmFingerprint()), null, 2) + "\n");
