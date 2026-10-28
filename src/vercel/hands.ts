@@ -1,5 +1,5 @@
 import type { DriveContext } from 'durable-harness'
-import type { MessageSocket } from '../index.ts'
+import type { MessageSocket } from '../contracts.ts'
 import { bearerToken, HAND_ACCEPTED } from '../remote.ts'
 
 type World = DriveContext['world']

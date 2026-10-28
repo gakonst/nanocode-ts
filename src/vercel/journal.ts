@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { brotliCompressSync, brotliDecompressSync, constants } from 'node:zlib'
 import { type DriveContext, Fatal, Restart, type SessionState } from 'durable-harness'
-import type { SqlHost, SqlKind, SqlValue, Statement } from '../index.ts'
+import type { SqlHost, SqlKind, SqlValue, Statement } from '../contracts.ts'
 
 export const SQL_STEP = 'nanocode.sql'
 

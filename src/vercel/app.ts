@@ -18,7 +18,7 @@ import { SqlFileSystem } from '../bash/index.ts'
 import { fileResponse } from '../files.ts'
 import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from './transport.ts'
 import { nanocodeModule } from './module.ts'
-import type { ModelProvider } from '../index.ts'
+import type { ModelProvider } from '../contracts.ts'
 
 export type Selection = {
   provider: ModelProvider

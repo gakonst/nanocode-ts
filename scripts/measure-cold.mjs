@@ -3,7 +3,8 @@ import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { performance } from 'node:perf_hooks'
 import { DatabaseSync } from 'node:sqlite'
 import { parseArgs } from 'node:util'
-import { AgentRuntime, sessionUuid } from '../src/index.ts'
+import { sessionUuid } from '../src/contracts.ts'
+import { AgentRuntime } from '../src/host.ts'
 
 const SCOPE = 'owner'
 const ENDPOINTS = {

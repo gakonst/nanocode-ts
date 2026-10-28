@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { DatabaseSync } from 'node:sqlite'
-import { AgentRuntime, sessionUuid } from '../src/index.ts'
+import { sessionUuid } from '../src/contracts.ts'
+import { AgentRuntime } from '../src/host.ts'
 
 const SCOPE = 'owner'
 const LOOKUP = {

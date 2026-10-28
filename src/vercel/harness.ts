@@ -11,17 +11,17 @@ import {
 } from 'durable-harness'
 import { liveEvent } from '../client.ts'
 import {
-  AgentRuntime,
   type AgentConfiguration,
   HostFailure,
   type LoggedEvent,
   type McpServer,
   type ModelProvider,
-  RemoteExecutor,
   type ServiceTier,
   sessionUuid,
   type Thinking,
-} from '../index.ts'
+} from '../contracts.ts'
+import { AgentRuntime } from '../host.ts'
+import { RemoteExecutor } from '../remote.ts'
 import { type Dispatch, gatewayDispatch, gatewayEndpoint } from './gateway.ts'
 import { type Durability, type JournalStats, SqlJournal } from './journal.ts'
 import { threadEngine } from '../thread.ts'

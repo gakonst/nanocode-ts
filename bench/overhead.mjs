@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { AgentRuntime, sessionUuid } from '../src/index.ts'
+import { sessionUuid } from '../src/contracts.ts'
+import { AgentRuntime } from '../src/host.ts'
 import { Bash } from '../src/bash/index.ts'
 
 const N = Number(process.argv.find((a) => a.startsWith('--n='))?.slice(4) ?? 20)

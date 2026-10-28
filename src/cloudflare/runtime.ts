@@ -1,25 +1,26 @@
 import { DurableObjectBlobs } from './sql.ts'
 import { DurableObject } from 'cloudflare:workers'
 import {
+  Timings,
+  difference as timingDifference,
+  type Snapshot as TimingSnapshot,
+} from '../Timing.ts'
+import {
   type AgentConfiguration,
-  AgentRuntime,
-  EventHub,
   HostFailure,
   RECENT_MODEL_LIMIT,
-  RemoteExecutor,
   RemoteRefusal,
-  Timings,
   sessionUuid,
-  timingDifference,
   type HostTool,
-  type LiveCursor,
   type LoggedEvent,
   type LogPage,
   type McpServer,
   type ModelProvider,
-  type TimingSnapshot,
   type TurnView,
-} from '../index.ts'
+} from '../contracts.ts'
+import { EventHub, type LiveCursor } from '../events.ts'
+import { AgentRuntime } from '../host.ts'
+import { RemoteExecutor } from '../remote.ts'
 import {
   Bash,
   SqlFileSystem,
@@ -56,7 +57,7 @@ import {
   type Thinking,
 } from './contracts.ts'
 
-export type { HostTool, ModelProvider } from '../index.ts'
+export type { HostTool, ModelProvider } from '../contracts.ts'
 export type {
   HostToolCall,
   ModelDispatch,

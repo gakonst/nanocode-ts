@@ -1,5 +1,5 @@
 import { writeFileSync, mkdirSync } from 'node:fs'
-import { EventHub } from '../src/index.ts'
+import { EventHub } from '../src/events.ts'
 
 if (typeof globalThis.gc !== 'function')
   throw new Error('run with node --expose-gc scripts/measure-events.mjs')

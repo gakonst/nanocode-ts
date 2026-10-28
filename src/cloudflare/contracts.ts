@@ -1,4 +1,4 @@
-import type { ModelProvider, Thinking, ToolCallContext } from '../index.ts'
+import type { ModelProvider, Thinking, ToolCallContext } from '../contracts.ts'
 
 export type { Thinking }
 

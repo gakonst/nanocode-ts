@@ -1,4 +1,4 @@
-import { RemoteExecutor, type RemotePolicy } from '../index.ts'
+import { RemoteExecutor, type RemotePolicy } from '../remote.ts'
 import { headerJson, type PrivateBinding, type SessionAuthority } from './contracts.ts'
 
 export class ExecutorRejection extends Error {

@@ -1,5 +1,6 @@
 import type { SessionState } from 'durable-harness'
-import { AgentRuntime, type LogPage, type TurnView } from '../index.ts'
+import { type LogPage, type TurnView } from '../contracts.ts'
+import { AgentRuntime } from '../host.ts'
 import { SCOPE } from './harness.ts'
 import { committedBatches, LocalSql } from './journal.ts'
 import { nanocodeModule } from './module.ts'

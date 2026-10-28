@@ -1,5 +1,5 @@
 import type { HostToolCall } from '../../cloudflare/contracts.ts'
-import type { HostTool } from '../../index.ts'
+import type { HostTool } from '../../contracts.ts'
 import { type MachinesEnv, wallet } from './env.ts'
 
 const FETCH_PREVIEW = 20_000

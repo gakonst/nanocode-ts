@@ -1,4 +1,4 @@
-import type { ModelProvider } from '../index.ts'
+import type { ModelProvider } from '../contracts.ts'
 
 export type Dispatch = (
   request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array },

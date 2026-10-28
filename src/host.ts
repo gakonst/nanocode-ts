@@ -39,7 +39,7 @@ import {
   type TurnView,
 } from './contracts.ts'
 import { deferMcp, type McpPolicy } from './mcp.ts'
-import { Timings, type TimingSnapshot } from './timing.ts'
+import * as Timing from './Timing.ts'
 
 type Pending = { resolve(value: unknown): void; reject(reason: unknown): void }
 
@@ -61,8 +61,8 @@ export type RuntimeMetrics = {
     runtime_id: string
     started_at: number
     elapsed_ms: number
-    spans: TimingSnapshot
-    checkpoints: TimingSnapshot
+    spans: Timing.Snapshot
+    checkpoints: Timing.Snapshot
     models: ModelTiming[]
   }
   initializations: number
@@ -208,8 +208,8 @@ export class AgentRuntime {
   private readonly runtimeId = sessionUuid()
   private readonly startedAt = Date.now()
   private readonly started = performance.now()
-  private readonly timings = new Timings()
-  private readonly checkpointTimings = new Timings()
+  private readonly timings = new Timing.Timings()
+  private readonly checkpointTimings = new Timing.Timings()
   private readonly models: RuntimeTiming[] = []
   private engine!: Engine
   private readonly encoder = new TextEncoder()

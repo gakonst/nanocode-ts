@@ -1,4 +1,4 @@
-import type { SqlHost, SqlKind, SqlValue, Statement } from '../index.ts'
+import type { SqlHost, SqlKind, SqlValue, Statement } from '../contracts.ts'
 
 export type SqlCursor = {
   raw(): IterableIterator<SqlValue[]>

@@ -27,7 +27,12 @@ export {
   type SessionOptions,
   type SessionRelay,
 } from './session.ts'
-export { Timings, timingDifference, type TimingSnapshot, type TimingValue } from './timing.ts'
+export {
+  Timings,
+  difference as timingDifference,
+  type Snapshot as TimingSnapshot,
+  type Value as TimingValue,
+} from './Timing.ts'
 export {
   HostFailure,
   RECENT_MODEL_LIMIT,

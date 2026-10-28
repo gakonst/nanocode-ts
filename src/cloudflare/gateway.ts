@@ -1,4 +1,4 @@
-import type { ModelProvider } from '../index.ts'
+import type { ModelProvider } from '../contracts.ts'
 import type { ModelDispatch, PrivateBinding } from './contracts.ts'
 
 const HEADERS: Record<ModelProvider, RegExp> = {

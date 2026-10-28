@@ -1,4 +1,5 @@
-import { Timings, type SqlHost, type SqlKind, type Statement } from '../index.ts'
+import { Timings } from '../Timing.ts'
+import { type SqlHost, type SqlKind, type Statement } from '../contracts.ts'
 import { DurableObjectSql, SQLITE_VALUE_LIMIT_BYTES } from './sql.ts'
 
 type Row = Record<string, SqlStorageValue>
