@@ -21,7 +21,7 @@ export type Durability = "on" | "strict";
 
 export const DEFAULT_BATCH_MS = 500;
 
-const BATCH_BYTES = 4 * 1024 * 1024;
+const BATCH_BYTES = 24 * 1024 * 1024;
 
 export type JournalStats = { replayed_batches: number; replayed_transactions: number; batches: number; transactions: number; reads: number; batch_wait_ms: number };
 
