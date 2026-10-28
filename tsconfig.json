@@ -25,7 +25,7 @@
     "src/react/*.tsx",
     "src/sandbox/cloudflare.ts",
     "src/sandbox/shell.ts",
-    "src/vercel/transport.ts"
+    "src/vercel/Transport.ts"
   ],
   "exclude": ["src/machines/vercel.ts", "src/**/*.test.ts"]
 }

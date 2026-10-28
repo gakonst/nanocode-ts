@@ -1,83 +1,71 @@
+/**
+ * Next.js route handlers for nanocode sessions on Vercel: chat, files, hands, cancel, and chaos, around a durable-harness agent.
+ *
+ * @module
+ */
 import { durableAgent, getWorld, type HostTool } from 'durable-harness'
-import { attachedHands, handId, handRoute } from './hands.ts'
-import {
-  ATTACHMENT_PATH,
-  CANCEL,
-  type CarriedFile,
-  carryAttachments,
-  HAND_CHANNEL,
-  nanocodeHarness,
-  type NanocodeHarnessOptions,
-  type NanocodeSession,
-  SCOPE,
-  type ServiceTier,
-  type Thinking,
-} from './harness.ts'
-import { committedBatches, LocalSql } from './journal.ts'
+import * as Hands from './Hands.ts'
+import * as Harness from './Harness.ts'
+import * as Journal from './Journal.ts'
 import { SqlFileSystem } from '../bash/index.ts'
 import * as Files from '../internal/Files.ts'
-import { FIRST_CURSOR, VERCEL_ATTACHMENT_BYTES } from './transport.ts'
-import { nanocodeModule } from './module.ts'
+import * as Attachments from './internal/Attachments.ts'
+import * as LocalSql from './internal/LocalSql.ts'
+import * as Transport from './Transport.ts'
+import * as Wasm from './Wasm.ts'
 import type * as Contracts from '../Contracts.ts'
 
+/** Authorizes a request that starts or reads a session, or `public` for none. A thrown `Response` refuses it. */
+export type Authorize = ((request: Request) => Promise<void> | void) | 'public'
+
+/** Model choice of a session. */
 export type Selection = {
   provider: Contracts.ModelProvider
   model: string
-  thinking: Thinking
+  thinking: Harness.Thinking
   max_tokens?: number
-  service_tier?: ServiceTier
+  service_tier?: Harness.ServiceTier
 }
 
-export type SelectionModel = {
-  id: string
-  label: string
-  name: string
-  efforts: Thinking[]
-  effort: Thinking
-  maxTokens?: number
-  serviceTier?: ServiceTier
-}
-
+/** Harness that a session can select, with its models. */
 export type SelectionHarness = {
+  /** Provider of the harness. */
   id: Contracts.ModelProvider
+  /** Display label. */
   label: string
   models: SelectionModel[]
 }
 
-export type Authorize = ((request: Request) => Promise<void> | void) | 'public'
-
-export type NanocodeAppOptions = Omit<
-  NanocodeHarnessOptions,
-  'provider' | 'model' | 'thinking' | 'tools' | 'durability'
-> & {
-  harnesses: SelectionHarness[]
-  defaultSelection?: Selection
-  tools?: HostTool[]
-  authorize?: Authorize
-  durability?: 'on' | 'strict'
-  runAhead?: boolean
-  maxPromptCharacters?: number
-  chaos?: boolean
-  marks?: boolean
-  traceAudience?: string
-  directDriveMs?: number
-  deadlineMarginMs?: number
+/** Model that a session can select. */
+export type SelectionModel = {
+  /** Model ID. */
+  id: string
+  /** Display label. */
+  label: string
+  /** Display name. */
+  name: string
+  /** Reasoning efforts that the model accepts. */
+  efforts: Harness.Thinking[]
+  /** Default reasoning effort. */
+  effort: Harness.Thinking
+  /** Largest output in tokens. */
+  maxTokens?: number
+  serviceTier?: Harness.ServiceTier
 }
 
-export function selectionOf(
-  harnesses: SelectionHarness[],
-  harness: unknown,
-  chosen: unknown,
-  effort: unknown,
+/** Returns the selection that a request names, or `undefined` when the harness, model, or effort is not offered. */
+export function select(
+  harnesses: readonly SelectionHarness[],
+  options: select.Options,
 ): Selection | undefined {
-  const entry = harnesses.find((candidate) => candidate.id === harness)
-  const found = entry?.models.find((candidate) => candidate.id === chosen)
+  const entry = harnesses.find((candidate) => candidate.id === options.harness)
+  const found = entry?.models.find((candidate) => candidate.id === options.model)
   if (!entry || !found) return undefined
   const thinking =
-    effort === undefined
+    options.effort === undefined
       ? found.effort
-      : found.efforts.includes(effort as Thinking)
-        ? (effort as Thinking)
+      : found.efforts.includes(options.effort as Harness.Thinking)
+        ? (options.effort as Harness.Thinking)
         : undefined
   if (!thinking) return undefined
   return {
@@ -86,6 +74,17 @@ export function selectionOf(
     thinking,
     ...(found.maxTokens ? { max_tokens: found.maxTokens } : {}),
     ...(found.serviceTier ? { service_tier: found.serviceTier } : {}),
+  }
+}
+
+export declare namespace select {
+  type Options = {
+    /** Requested effort. Defaults to the model's effort. */
+    effort?: unknown
+    /** Requested harness ID. */
+    harness: unknown
+    /** Requested model ID. */
+    model: unknown
   }
 }
 
@@ -101,25 +100,26 @@ type Body = {
   warm?: unknown
 }
 
-function carried(value: unknown): CarriedFile[] | string {
+function carried(value: unknown): Attachments.File[] | string {
   if (!Array.isArray(value) || value.length > 8) return 'attachments must be at most 8 files'
   let total = 0
-  for (const item of value as Partial<CarriedFile>[]) {
+  for (const item of value as Partial<Attachments.File>[]) {
     if (
       typeof item?.path !== 'string' ||
-      !ATTACHMENT_PATH.test(item.path) ||
+      !Attachments.path.test(item.path) ||
       typeof item.data !== 'string' ||
       !/^[A-Za-z0-9+/]*={0,2}$/.test(item.data)
     )
       return 'each attachment needs a /workspace/uploads/ path and base64 data'
     total += Math.floor((item.data.length * 3) / 4)
   }
-  if (total > VERCEL_ATTACHMENT_BYTES)
-    return `a message carries at most ${VERCEL_ATTACHMENT_BYTES} bytes of attachments`
-  return value as CarriedFile[]
+  if (total > Transport.attachmentBytes)
+    return `a message carries at most ${Transport.attachmentBytes} bytes of attachments`
+  return value as Attachments.File[]
 }
 
-export function createNanocode(options: NanocodeAppOptions) {
+/** Returns the route handlers and the agent of a nanocode deployment on Vercel. */
+export function create(options: create.Options) {
   const {
     harnesses,
     authorize,
@@ -145,7 +145,7 @@ export function createNanocode(options: NanocodeAppOptions) {
   const durability = options.durability ?? 'on'
   const kernel = durability === 'on' && runAhead === true ? 'on' : 'strict'
   const agent = durableAgent({
-    harness: nanocodeHarness({
+    harness: Harness.create({
       codeMode: true,
       subagents: true,
       streamToolInput: true,
@@ -161,7 +161,7 @@ export function createNanocode(options: NanocodeAppOptions) {
     ...(deadlineMarginMs ? { deadlineMarginMs } : {}),
   })
   const chat = agent.chatRoute(authorize ? { authorize } : {})
-  const handRoutes = handRoute({
+  const handRoutes = Hands.route({
     world: getWorld,
     owns: async (sessionId, channel) =>
       ((await agent.sessions.inspect(sessionId)).config as { hand?: unknown } | undefined)?.hand ===
@@ -197,7 +197,7 @@ export function createNanocode(options: NanocodeAppOptions) {
     const selection =
       body.harness === undefined && body.model === undefined
         ? defaultSelection
-        : selectionOf(harnesses, body.harness, body.model, body.effort)
+        : select(harnesses, { effort: body.effort, harness: body.harness, model: body.model })
     if (!selection)
       return new Response(
         `harness, model and effort must name one of ${harnesses.map((entry) => `${entry.id} (${entry.models.map((model) => `${model.id}: ${model.efforts.join('|')}`).join(', ')})`).join(' or ')}`,
@@ -208,14 +208,14 @@ export function createNanocode(options: NanocodeAppOptions) {
     const hand = !harness.hands
       ? {}
       : body.hand === true
-        ? { hand: handId() }
-        : typeof body.hand === 'string' && HAND_CHANNEL.test(body.hand)
+        ? { hand: Hands.id() }
+        : typeof body.hand === 'string' && Harness.handChannel.test(body.hand)
           ? { hand: body.hand }
           : {}
     const config = {
       ...hand,
       durability: kernel === 'on' ? 'run-ahead' : 'strict',
-      nanocode: selection satisfies Omit<NanocodeSession, 'session_id'>,
+      nanocode: selection satisfies Omit<Harness.Session, 'session_id'>,
       traceAudience: traceAudience ?? (authorize === 'public' ? 'public' : 'unknown'),
     }
     const { sessionId } = await agent.sessions.start({ config })
@@ -231,12 +231,12 @@ export function createNanocode(options: NanocodeAppOptions) {
       return Response.json({ error: 'this deployment has no workspace' }, { status: 404 })
     const state = await agent.sessions.inspect(sessionId).catch(() => undefined)
     if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
-    const sql = new LocalSql(committedBatches(state))
+    const sql = LocalSql.create(Journal.committed(state))
     try {
       return await Files.response(
         new SqlFileSystem(
           { transaction: (_kind, _operation, statements) => sql.run(statements) },
-          SCOPE,
+          Harness.scope,
         ),
         params.get('file') ?? '',
         { root: harness.workspace?.cwd ?? '/workspace' },
@@ -255,12 +255,12 @@ export function createNanocode(options: NanocodeAppOptions) {
       const refused = await admit(request)
       if (refused) return refused
       return Response.json(
-        { hands: await attachedHands(await getWorld(), params.get('sessionId')!) },
+        { hands: await Hands.attached(await getWorld(), { runId: params.get('sessionId')! }) },
         { headers: { 'cache-control': 'no-store' } },
       )
     }
     if (streamsHands && params.has('hand')) return handRoutes.GET(request)
-    if (params.get('cursor') === FIRST_CURSOR && params.get('sessionId')) {
+    if (params.get('cursor') === Transport.firstCursor && params.get('sessionId')) {
       const state = await agent.sessions.inspect(params.get('sessionId')!).catch(() => undefined)
       if (state && !state.submissions.length)
         return new Response('event: end\ndata: {}\n\n', {
@@ -268,7 +268,7 @@ export function createNanocode(options: NanocodeAppOptions) {
         })
     }
     if (!params.has('keepwarm')) return chat.GET(request)
-    await nanocodeModule()
+    await Wasm.load()
     return new Response(null, { status: 204 })
   }
 
@@ -288,7 +288,7 @@ export function createNanocode(options: NanocodeAppOptions) {
       const state = await agent.sessions.inspect(sent.sessionId).catch(() => undefined)
       if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
       return Response.json(
-        { submission: await agent.sessions.send(sent.sessionId, CANCEL, 'steer') },
+        { submission: await agent.sessions.send(sent.sessionId, Harness.cancelText, 'steer') },
         { status: 202 },
       )
     }
@@ -306,7 +306,7 @@ export function createNanocode(options: NanocodeAppOptions) {
       const { attachments: _, ...rest } = sent
       body = {
         ...rest,
-        text: carryAttachments(typeof sent.text === 'string' ? sent.text : '', files),
+        text: Attachments.carry(typeof sent.text === 'string' ? sent.text : '', files),
       }
       const headers = new Headers(original.headers)
       headers.delete('content-length')
@@ -321,7 +321,7 @@ export function createNanocode(options: NanocodeAppOptions) {
     if (body.warm === true) {
       const started = await start(request, body)
       if (started instanceof Response) return started
-      void nanocodeModule()
+      void Wasm.load()
       return Response.json(started)
     }
     if (body.sessionId !== undefined || typeof body.text !== 'string' || !body.text)
@@ -354,4 +354,36 @@ export function createNanocode(options: NanocodeAppOptions) {
   }
 
   return { agent, GET, POST, chaos: { POST: crash }, defaultSelection, harnesses }
+}
+
+export declare namespace create {
+  type Options = Omit<
+    Harness.create.Options,
+    'provider' | 'model' | 'thinking' | 'tools' | 'durability'
+  > & {
+    /** Authorizes requests that start or read sessions. Production deployments need one. */
+    authorize?: Authorize
+    /** Whether `chaos.POST` arms crashes for tests. */
+    chaos?: boolean
+    /** Time in milliseconds that the drive keeps for itself before its deadline. */
+    deadlineMarginMs?: number
+    /** Selection of a session that names no harness or model. Defaults to the first model of the first harness. */
+    defaultSelection?: Selection
+    /** Time in milliseconds that a request drives the session before it hands off to the queue. */
+    directDriveMs?: number
+    /** Defaults to `on`. */
+    durability?: 'on' | 'strict'
+    /** Harnesses and models that sessions can select. */
+    harnesses: SelectionHarness[]
+    /** Whether the kernel publishes timing marks. */
+    marks?: boolean
+    /** Largest prompt in characters. */
+    maxPromptCharacters?: number
+    /** Whether the kernel runs ahead of the log with `on` durability. */
+    runAhead?: boolean
+    /** Host tools. */
+    tools?: HostTool[]
+    /** Audience of the session's traces. Defaults to `public` for public deployments. */
+    traceAudience?: string
+  }
 }

@@ -3,6 +3,12 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src/vercel/*.ts", "src/sandbox/vercel.ts", "src/machines/vercel.ts"],
-  "exclude": []
+  "include": [
+    "src/vercel/*.ts",
+    "src/vercel/internal/*.ts",
+    "src/sandbox/vercel.ts",
+    "src/machines/vercel.ts",
+    "src/machines/vercel/*.ts"
+  ],
+  "exclude": ["src/**/*.test.ts"]
 }

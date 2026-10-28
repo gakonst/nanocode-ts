@@ -1,3 +1,8 @@
+/**
+ * durable-harness kernel `Harness` that runs a nanocode session on a Workflow run, with its SQL in the run's log.
+ *
+ * @module
+ */
 import {
   type DriveContext,
   EffectFailure,
@@ -13,27 +18,104 @@ import { liveEvent } from '../client.ts'
 import * as Contracts from '../Contracts.ts'
 import * as AgentRuntime from '../AgentRuntime.ts'
 import * as Remote from '../Remote.ts'
-import { type Dispatch, gatewayDispatch, gatewayEndpoint } from './gateway.ts'
-import { type Durability, type JournalStats, SqlJournal } from './journal.ts'
+import * as Gateway from './Gateway.ts'
+import * as Journal from './Journal.ts'
 import * as Thread from '../internal/Thread.ts'
-import { nanocodeModule } from './module.ts'
+import * as Wasm from './Wasm.ts'
 import { Bash, type FileSystem, SqlFileSystem, withGitHub } from '../bash/index.ts'
 import * as Files from '../internal/Files.ts'
-import { dialHand, type UpgradeWebSocket } from './hands.ts'
-import { egress } from './egress.ts'
+// Aliased, since `Hands` names the hand options of this module.
+import * as HandStreams from './Hands.ts'
+import * as Attachments from './internal/Attachments.ts'
+import * as Egress from './internal/Egress.ts'
 
-export const SCOPE = 'session'
+/** Submission text that cancels the active turn. The value is durable. */
+export const cancelText = '\u0000nanocode:cancel'
 
-export const SESSION_KEY = 'nanocode.session'
+/** Default time in milliseconds over which the runtime coalesces streamed events. */
+export const defaultEventCoalesceMs = 50
 
-export const WAIT_POLL_MS = 250
+/** Prompt that sets the reasoning effort of later turns, such as `/effort high`. */
+export const effortCommand = /^\/effort\s+(\S+)\s*$/
 
-export const DEFAULT_EVENT_COALESCE_MS = 50
+/** Pattern of a session's hand channel. */
+export const handChannel = /^[A-Za-z0-9_-]{16,64}$/
+
+/** SQL scope of every session's runtime. The value is durable. */
+export const scope = 'session'
+
+/** Effect key and step name of the session record. The value is durable. */
+export const sessionKey = 'nanocode.session'
+
+/** Time in milliseconds between two polls when the drive has no live hints. */
+export const waitPollMs = 250
+
+const streamedWasmCalls = 20
+
+/** Report of one drive, which `create.Options.report` receives. */
+export type DriveReport = {
+  /** Run of the session. */
+  run_id: string
+  /** Delivery attempt of the drive, from 0. */
+  attempt: number
+  durability: Journal.Durability
+  /** Whether the drive opened the runtime. */
+  opened: boolean
+  /** Duration of the drive in milliseconds. */
+  duration_ms: number
+  /** Time in milliseconds to replay the journal. */
+  replay_ms: number
+  /** Time in milliseconds to open the runtime. */
+  open_ms: number
+  journal: Journal.Stats
+  /** Model requests that the drive sent. */
+  model_requests: number
+  /** Host tool calls that the drive ran. */
+  tool_calls: number
+  /** Completed model calls, in order. */
+  models: ModelCall[]
+  /** How the drive ended. */
+  outcome: 'idle' | 'settled' | 'stopped' | 'failed'
+  /** Name and message of the failure, when the drive failed or stopped. */
+  error?: string
+}
+
+/** Hands that a session connects to. */
+export type Hands = {
+  /** Time in milliseconds that a hand's event stream stays open. */
+  holdMs?: number
+  /** Largest frame in bytes. Defaults to 1 MiB. */
+  maxFrameBytes?: number
+  /** Name of the hand in the session. Defaults to `browser`. */
+  name?: string
+  /** Returns the URL of an external hand relay for a channel, instead of Workflow streams. */
+  relay?(channel: string): string
+  /** Time in milliseconds to wait for the hand's catalog. Defaults to 30 seconds. */
+  timeoutMs?: number
+  /** Upgrades a request to a hand's WebSocket on the Function. */
+  upgrade?: HandStreams.UpgradeWebSocket
+}
+
+/** Completed model call of a drive. */
+export type ModelCall = {
+  /** Call index in the session. */
+  index: number
+  /** Whether the call replayed from the log. */
+  replayed: boolean
+  /** Time in milliseconds to the first output, or `null` without output. */
+  first_output_ms: number | null
+  /** Duration of the call in milliseconds. */
+  duration_ms: number
+  input_tokens: number
+  cached_tokens: number
+  output_tokens: number
+}
 
 export type ServiceTier = Contracts.ServiceTier
-export type Thinking = Contracts.Thinking
 
-export type NanocodeSession = {
+/** Model selection of a session, recorded once under `sessionKey`. */
+export type Session = {
+  /** SDK session ID. */
   session_id: string
   provider: Contracts.ModelProvider
   model?: string
@@ -42,120 +124,7 @@ export type NanocodeSession = {
   service_tier?: Contracts.ServiceTier
 }
 
-export const EFFORT_COMMAND = /^\/effort\s+(\S+)\s*$/
-
-export type ModelCall = {
-  index: number
-  replayed: boolean
-  first_output_ms: number | null
-  duration_ms: number
-  input_tokens: number
-  cached_tokens: number
-  output_tokens: number
-}
-
-export type DriveReport = {
-  run_id: string
-  attempt: number
-  durability: Durability
-  opened: boolean
-  duration_ms: number
-  replay_ms: number
-  open_ms: number
-  journal: JournalStats
-  model_requests: number
-  tool_calls: number
-  models: ModelCall[]
-  outcome: 'idle' | 'settled' | 'stopped' | 'failed'
-  error?: string
-}
-
-export interface NanocodeHarnessOptions {
-  name?: string
-  provider?: Contracts.ModelProvider
-  model?: string
-  thinking?: Contracts.AgentConfiguration['thinking']
-  instructions?: string
-  handInstructions?: string
-  tools?: HostTool[]
-  durability?: Durability
-  batchMs?: number
-  dispatch?: Dispatch
-  endpoint?: string
-  gateway?: 'vercel'
-  eventCoalesceMs?: number
-  module?: () => Promise<WebAssembly.Module>
-  report?: (report: DriveReport) => void
-  maxPrompts?: number
-  subagents?: boolean
-  streamToolInput?: boolean
-  codeMode?: boolean
-  github?: {
-    token?(sessionId: string): string | null | undefined | Promise<string | null | undefined>
-  }
-  workspace?: false | { cwd?: string; files?: Record<string, string> }
-  workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
-  fetch?: typeof fetch
-  sessionFetch?(sessionId: string): typeof fetch
-  hands?: false | NanocodeHands
-  mcp?: { servers: Contracts.McpServer[]; fetch?(sessionId: string): typeof fetch }
-  webSearch?: false
-  promptImages?: (session: NanocodeSession) => boolean
-}
-
-export type NanocodeHands = {
-  relay?(channel: string): string
-  upgrade?: UpgradeWebSocket
-  name?: string
-  timeoutMs?: number
-  maxFrameBytes?: number
-  holdMs?: number
-}
-
-export const HAND_CHANNEL = /^[A-Za-z0-9_-]{16,64}$/
-
-export const ATTACHMENTS_OPEN = '\n\n<nanocode-attachments>'
-
-export const ATTACHMENTS_CLOSE = '</nanocode-attachments>'
-
-export const ATTACHMENT_PATH = /^\/workspace\/uploads\/[\w.-]{1,100}$/
-
-export type CarriedFile = { path: string; data: string }
-
-export function carryAttachments(text: string, files: readonly CarriedFile[]): string {
-  return files.length ? text + ATTACHMENTS_OPEN + JSON.stringify(files) + ATTACHMENTS_CLOSE : text
-}
-
-export function attachmentsOf(text: string): {
-  text: string
-  files: { path: string; bytes: Uint8Array }[]
-} {
-  const start = text.lastIndexOf(ATTACHMENTS_OPEN)
-  if (start < 0 || !text.endsWith(ATTACHMENTS_CLOSE)) return { text, files: [] }
-  let carried: unknown
-  try {
-    carried = JSON.parse(text.slice(start + ATTACHMENTS_OPEN.length, -ATTACHMENTS_CLOSE.length))
-  } catch {
-    return { text, files: [] }
-  }
-  const files = (Array.isArray(carried) ? carried : []).flatMap((item) => {
-    const file = item as Partial<CarriedFile>
-    if (
-      typeof file?.path !== 'string' ||
-      !ATTACHMENT_PATH.test(file.path) ||
-      typeof file.data !== 'string'
-    )
-      return []
-    try {
-      return [
-        { path: file.path, bytes: Uint8Array.from(atob(file.data), (char) => char.charCodeAt(0)) },
-      ]
-    } catch {
-      return []
-    }
-  })
-  return { text: text.slice(0, start), files: files.slice(0, 8) }
-}
+export type Thinking = Contracts.Thinking
 
 function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -176,29 +145,27 @@ function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   })
 }
 
+// The `nanocode.settled:` key is durable.
 const settledKey = (batches: number) => `nanocode.settled:${batches}`
 
-export function isIdle(state: SessionState, batches: number): boolean {
-  return batches === 0 || state.effects.get(settledKey(batches))?.status === 'completed'
-}
-
-export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
+/** Returns a durable-harness kernel `Harness` that drives nanocode sessions. */
+export function create(options: create.Options = {}): Harness {
   const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
   const definitions = [...tools.values()].map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema as Record<string, unknown>,
   }))
-  const dispatch = options.dispatch ?? gatewayDispatch()
+  const dispatch = options.dispatch ?? Gateway.dispatch()
   const gateway = options.endpoint ? options.gateway : 'vercel'
-  const module = options.module ?? nanocodeModule
+  const module = options.module ?? Wasm.load
   const durability = options.durability ?? 'on'
   const engine = Thread.engine()
 
   async function run(
     ctx: DriveContext,
-    journal: SqlJournal,
-    session: NanocodeSession,
+    journal: Journal.Journal,
+    session: Session,
     counts: { model_requests: number; tool_calls: number; models: ModelCall[]; open_ms: number },
   ): Promise<void> {
     const opening = performance.now()
@@ -218,12 +185,12 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const channel = (ctx.config as { hand?: unknown } | undefined)?.hand
     const hands = options.hands || undefined
     const executor =
-      hands && typeof channel === 'string' && HAND_CHANNEL.test(channel)
+      hands && typeof channel === 'string' && handChannel.test(channel)
         ? await Remote.connect(
             (signal) =>
               hands.relay
                 ? openSocket(hands.relay(channel), signal)
-                : dialHand(ctx.world, ctx.runId, signal, { resumes: true }),
+                : HandStreams.dial(ctx.world, { resumes: true, runId: ctx.runId, signal }),
             {
               max_frame_bytes: hands.maxFrameBytes ?? 1_048_576,
               timeout_ms: hands.timeoutMs ?? 30_000,
@@ -235,11 +202,11 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
-    const cellFetch = withGitHub(egress(configuredFetch), {
+    const cellFetch = withGitHub(Egress.guard(configuredFetch), {
       token: githubToken ? () => githubToken(ctx.runId) : undefined,
     })
     const files =
-      options.workspace === false || executor ? undefined : new SqlFileSystem(journal, SCOPE)
+      options.workspace === false || executor ? undefined : new SqlFileSystem(journal, scope)
     const shell =
       !files || options.workspace === false
         ? undefined
@@ -260,7 +227,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       try {
         await runtime.open(
           {
-            scope: SCOPE,
+            scope,
             session_id: session.session_id,
             provider: session.provider,
             model: session.model,
@@ -273,9 +240,9 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
                 ? [options.instructions, options.handInstructions].filter(Boolean).join('\n\n')
                 : options.instructions,
             subscription: false,
-            endpoint: options.endpoint ?? gatewayEndpoint(session.provider),
+            endpoint: options.endpoint ?? Gateway.endpoint(session.provider),
             gateway,
-            event_coalesce_ms: options.eventCoalesceMs ?? DEFAULT_EVENT_COALESCE_MS,
+            event_coalesce_ms: options.eventCoalesceMs ?? defaultEventCoalesceMs,
             stream_tool_input: options.streamToolInput,
             code_mode: executor ? false : options.codeMode,
             ...(executor ? { hands: true } : {}),
@@ -338,7 +305,8 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
       for (;;) {
         await ctx.refresh()
         const pending = ctx.pending()
-        let thinking = pending[0] && effort(ctx.state(), pending[0].id, session.thinking)
+        let thinking =
+          pending[0] && effort(ctx.state(), { before: pending[0].id, initial: session.thinking })
         for (const submission of pending)
           thinking = await place(
             ctx,
@@ -351,7 +319,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
             files,
             options.promptImages?.(session) ?? true,
           )
-        const next = (await runtime.pending(SCOPE))[0]
+        const next = (await runtime.pending(scope))[0]
         if (!next) {
           if (await runtime.settle()) return
           await changed(runtime, ctx.signal)
@@ -400,13 +368,13 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
     modelCalls: 'self',
     async drive(ctx) {
       const started = performance.now()
-      const journal = new SqlJournal(ctx, durability, options.batchMs)
+      const journal = Journal.create(ctx, { batchMs: options.batchMs, durability })
       const replay_ms = performance.now() - started
       const counts = { model_requests: 0, tool_calls: 0, models: [] as ModelCall[], open_ms: 0 }
       let outcome: DriveReport['outcome'] = 'idle'
       let failure: unknown
       try {
-        if (ctx.pending().length === 0 && isIdle(ctx.state(), journal.batches)) return
+        if (ctx.pending().length === 0 && isIdle(ctx.state(), { batches: journal.batches })) return
         const chosen = (
           ctx.config as
             | {
@@ -426,9 +394,9 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
         const max_tokens = chosen?.provider ? chosen.max_tokens : undefined
         const service_tier = chosen?.provider ? chosen.service_tier : undefined
         const session = await ctx.effect(
-          SESSION_KEY,
+          sessionKey,
           {
-            name: SESSION_KEY,
+            name: sessionKey,
             replay: 'safe',
             input: {
               provider,
@@ -438,7 +406,7 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
               ...(service_tier ? { service_tier } : {}),
             },
           },
-          async (): Promise<NanocodeSession> => ({
+          async (): Promise<Session> => ({
             session_id: Contracts.sessionUuid(),
             provider,
             ...(model ? { model } : {}),
@@ -490,14 +458,81 @@ export function nanocodeHarness(options: NanocodeHarnessOptions = {}): Harness {
   }
 }
 
+export declare namespace create {
+  type Options = {
+    /** Minimum time in milliseconds between two SQL batches with `on` durability. */
+    batchMs?: number
+    /** Whether the runtime runs agent code in Code Mode cells. */
+    codeMode?: boolean
+    /** Sends model requests. Defaults to `Gateway.dispatch()`. */
+    dispatch?: Gateway.Dispatch
+    /** Defaults to `on`. */
+    durability?: Journal.Durability
+    /** Model endpoint. Defaults to the AI Gateway endpoint of the session's provider. */
+    endpoint?: string
+    /** Time in milliseconds over which the runtime coalesces streamed events. Defaults to `defaultEventCoalesceMs`. */
+    eventCoalesceMs?: number
+    /** `fetch` of agent code, behind the public-address guard. */
+    fetch?: typeof fetch
+    /** Gateway of a custom `endpoint`. With no `endpoint`, the gateway is `vercel`. */
+    gateway?: 'vercel'
+    github?: {
+      /** Returns the GitHub token that agent requests to GitHub carry. */
+      token?(sessionId: string): string | null | undefined | Promise<string | null | undefined>
+    }
+    /** Instructions added when a hand is attached. */
+    handInstructions?: string
+    /** Hands of the session, or `false` for none. */
+    hands?: false | Hands
+    /** Host instructions of the session. */
+    instructions?: string
+    /** Largest number of prompts in a session. */
+    maxPrompts?: number
+    mcp?: {
+      /** Returns the `fetch` for MCP requests of a session. */
+      fetch?(sessionId: string): typeof fetch
+      /** MCP servers of every session. */
+      servers: Contracts.McpServer[]
+    }
+    /** Default model, when the session config names none. */
+    model?: string
+    /** Loads the WebAssembly module. Defaults to `Wasm.load`. */
+    module?: () => Promise<WebAssembly.Module>
+    /** Harness name. Defaults to `nanocode`. */
+    name?: string
+    /** Whether a session's prompts carry images. Defaults to `true`. */
+    promptImages?: (session: Session) => boolean
+    /** Default provider, when the session config names none. Defaults to `claude`. */
+    provider?: Contracts.ModelProvider
+    /** Receives the report of each drive. */
+    report?: (report: DriveReport) => void
+    /** Returns the `fetch` of agent code for one session, instead of `fetch`. */
+    sessionFetch?(sessionId: string): typeof fetch
+    /** Whether the runtime streams tool input. */
+    streamToolInput?: boolean
+    /** Whether the agent starts subagents. */
+    subagents?: boolean
+    /** Default reasoning effort, when the session config names none. */
+    thinking?: Contracts.AgentConfiguration['thinking']
+    /** Host tools, run as durable effects. */
+    tools?: HostTool[]
+    /** `false` for no workspace, or the workspace's directory and seed files. */
+    workspace?: false | { cwd?: string; files?: Record<string, string> }
+    /** Workspace tools of the provider. */
+    workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
+    /** `false` turns web search off. */
+    webSearch?: false
+  }
+}
+
+/** Returns the reasoning effort in force before submission `before`, after the `/effort` commands placed earlier. */
 export function effort(
   state: SessionState,
-  before: string,
-  initial: Contracts.Thinking | undefined,
+  options: effort.Options,
 ): Contracts.Thinking | undefined {
-  let current = initial
+  let current = options.initial
   for (const submission of state.submissions) {
-    if (submission.id === before) break
+    if (submission.id === options.before) break
     const placed = state.effects.get(`nanocode.place:${submission.id}`)?.output as
       | { thinking?: Contracts.Thinking }
       | undefined
@@ -506,7 +541,18 @@ export function effort(
   return current
 }
 
-export function exceeds(state: SessionState, id: string, limit: number | undefined): boolean {
+export declare namespace effort {
+  type Options = {
+    /** Submission ID. */
+    before: string
+    /** Effort of the session. */
+    initial: Contracts.Thinking | undefined
+  }
+}
+
+/** Returns whether submission `id` is past the prompt limit. Cancels, chaos, and withdrawals do not count. */
+export function exceeds(state: SessionState, options: exceeds.Options): boolean {
+  const { id, limit } = options
   if (limit === undefined) return false
   let index = 0
   for (const submission of state.submissions) {
@@ -517,9 +563,31 @@ export function exceeds(state: SessionState, id: string, limit: number | undefin
   return false
 }
 
+export declare namespace exceeds {
+  type Options = {
+    /** Submission ID. */
+    id: string
+    /** Largest number of prompts, or `undefined` for no limit. */
+    limit: number | undefined
+  }
+}
+
+/** Returns whether a session is idle: it has no SQL batches, or it settled after its last batch. */
+export function isIdle(state: SessionState, options: isIdle.Options): boolean {
+  const { batches } = options
+  return batches === 0 || state.effects.get(settledKey(batches))?.status === 'completed'
+}
+
+export declare namespace isIdle {
+  type Options = {
+    /** Committed SQL batches of the session. */
+    batches: number
+  }
+}
+
 async function place(
   ctx: DriveContext,
-  journal: SqlJournal,
+  journal: Journal.Journal,
   runtime: AgentRuntime.AgentRuntime,
   submission: Submission,
   thinking: Contracts.Thinking | undefined,
@@ -529,16 +597,16 @@ async function place(
   seesImages = true,
 ): Promise<Contracts.Thinking | undefined> {
   if (cancels(submission)) {
-    await cancel(
+    await cancelTurn(
       ctx,
       journal,
       runtime,
       submission,
-      (await runtime.pending(SCOPE))[0]?.report.request_id,
+      (await runtime.pending(scope))[0]?.report.request_id,
     )
     return thinking
   }
-  if (exceeds(ctx.state(), submission.id, limit)) {
+  if (exceeds(ctx.state(), { id: submission.id, limit })) {
     await ctx.effect(
       `nanocode.place:${submission.id}`,
       {
@@ -556,7 +624,7 @@ async function place(
     })
     return thinking
   }
-  const command = submission.kind === 'prompt' ? EFFORT_COMMAND.exec(submission.text ?? '') : null
+  const command = submission.kind === 'prompt' ? effortCommand.exec(submission.text ?? '') : null
   if (command) {
     const level = command[1] as Contracts.Thinking
     const outcome = (await ctx.effect(
@@ -580,7 +648,7 @@ async function place(
     )
     return outcome.thinking ?? thinking
   }
-  const attached = attachmentsOf(submission.text ?? '')
+  const attached = Attachments.parse(submission.text ?? '')
   const images: string[] = []
   for (const file of attached.files) {
     if (workspace) await Files.write(workspace, file.path, file.bytes)
@@ -588,7 +656,7 @@ async function place(
     if (seesImages && Files.promptImageTypes.has(type) && images.length < Files.maxPromptImages)
       images.push(Files.dataUrl(file.bytes, type))
   }
-  const submitted = await runtime.submit(SCOPE, {
+  const submitted = await runtime.submit(scope, {
     request_id: submission.id,
     prompt: attached.text,
     ...(images.length ? { images } : {}),
@@ -621,7 +689,7 @@ async function place(
 
 async function steer(
   ctx: DriveContext,
-  journal: SqlJournal,
+  journal: Journal.Journal,
   runtime: AgentRuntime.AgentRuntime,
   driving: Promise<unknown>,
   active: string,
@@ -642,13 +710,13 @@ async function steer(
     await ctx.refresh()
     for (const submission of ctx.pending()) {
       if (cancels(submission)) {
-        await cancel(ctx, journal, runtime, submission, active)
+        await cancelTurn(ctx, journal, runtime, submission, active)
         continue
       }
       if (
         submission.kind !== 'steer' ||
-        exceeds(ctx.state(), submission.id, limit) ||
-        !(await runtime.steer(submission.id, attachmentsOf(submission.text ?? '').text))
+        exceeds(ctx.state(), { id: submission.id, limit }) ||
+        !(await runtime.steer(submission.id, Attachments.parse(submission.text ?? '').text))
       )
         continue
       await journal.durable()
@@ -667,15 +735,15 @@ async function steer(
   }
 }
 
-async function cancel(
+async function cancelTurn(
   ctx: DriveContext,
-  journal: SqlJournal,
+  journal: Journal.Journal,
   runtime: AgentRuntime.AgentRuntime,
   submission: Submission,
   active: string | undefined,
 ): Promise<void> {
   const turn = active
-    ? (await runtime.cancel(SCOPE, active, { cancelled: true, error: 'request cancelled' })).turn
+    ? (await runtime.cancel(scope, active, { cancelled: true, error: 'request cancelled' })).turn
     : null
   await journal.durable()
   await ctx.effect(
@@ -693,7 +761,7 @@ async function cancel(
 function submitted(ctx: DriveContext): Promise<void> {
   return new Promise((resolve) => {
     let unsubscribe: (() => void) | undefined
-    const timer = ctx.onHint ? undefined : setTimeout(done, WAIT_POLL_MS)
+    const timer = ctx.onHint ? undefined : setTimeout(done, waitPollMs)
     unsubscribe = ctx.onHint?.((hint) => {
       if (hint.eventType === 'hook_received') done()
     })
@@ -707,7 +775,7 @@ function submitted(ctx: DriveContext): Promise<void> {
 
 async function callTool(
   ctx: DriveContext,
-  journal: SqlJournal,
+  journal: Journal.Journal,
   tools: Map<string, HostTool>,
   name: string,
   input: unknown,
@@ -738,7 +806,7 @@ async function callTool(
 
 function changed(runtime: AgentRuntime.AgentRuntime, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, WAIT_POLL_MS)
+    const timer = setTimeout(resolve, waitPollMs)
     void runtime.changed(signal).then(() => {
       clearTimeout(timer)
       resolve()
@@ -777,12 +845,8 @@ function modelCall(logged: Contracts.LoggedEvent): ModelCall | undefined {
   }
 }
 
-export const STREAMED_WASM_CALLS = 20
-
-export const CANCEL = '\u0000nanocode:cancel'
-
 function cancels(submission: Submission): boolean {
-  return submission.kind === 'steer' && submission.text === CANCEL
+  return submission.kind === 'steer' && submission.text === cancelText
 }
 
 function publisher(ctx: DriveContext): (events: Contracts.LoggedEvent[]) => void {
@@ -808,7 +872,7 @@ function publisher(ctx: DriveContext): (events: Contracts.LoggedEvent[]) => void
       ) {
         const count = (calls.get(parent) ?? 0) + 1
         calls.set(parent, count)
-        if (count > STREAMED_WASM_CALLS) {
+        if (count > streamedWasmCalls) {
           quiet.add(id)
           continue
         }
@@ -822,7 +886,7 @@ function publisher(ctx: DriveContext): (events: Contracts.LoggedEvent[]) => void
         continue
       }
       if (live.type === 'tool_end' && id && calls.has(id)) {
-        const skipped = (calls.get(id) ?? 0) - STREAMED_WASM_CALLS
+        const skipped = (calls.get(id) ?? 0) - streamedWasmCalls
         calls.delete(id)
         if (skipped > 0)
           ctx.live({
