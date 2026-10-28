@@ -275,18 +275,6 @@ function executorFailure(error: unknown): Contracts.HostFailureError {
 }
 
 /**
- * Shares MCP listings through a Workers KV namespace, so that sessions in other isolates open
- * without discovering their MCP servers again. KV keeps an entry at least 60 seconds.
- */
-export function mcpStore(namespace: KVNamespace): Contracts.McpStore {
-  return {
-    get: (key) => namespace.get(key),
-    put: (key, value, ttlMs) =>
-      namespace.put(key, value, { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) }),
-  }
-}
-
-/**
  * Returns the `AgentSession` Durable Object class and the Worker handler of a deployment. Export
  * `AgentSession` from the Worker under the class name that the `SESSIONS` binding names.
  */

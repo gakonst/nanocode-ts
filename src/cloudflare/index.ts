@@ -7,9 +7,11 @@
 export * as App from './App.ts'
 export * as Gateway from './Gateway.ts'
 export * as Limit from './Limit.ts'
+export * as Listings from './Listings.ts'
 export * as Relay from './Relay.ts'
 export * as Sql from './Sql.ts'
 
 // Wrangler binds Durable Object classes by export name, so these classes are also flat exports.
 export { PublicLimit } from './Limit.ts'
+export { McpListings } from './Listings.ts'
 export { HandRelay } from './Relay.ts'

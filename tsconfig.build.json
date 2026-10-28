@@ -15,6 +15,7 @@
     "src/cloudflare/index.ts",
     "src/cloudflare/internal/**",
     "src/cloudflare/Limit.ts",
+    "src/cloudflare/Listings.ts",
     "src/cloudflare/python.ts",
     "src/cloudflare/Relay.ts",
     "src/cloudflare/wasm.d.ts",
