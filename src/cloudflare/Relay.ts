@@ -1,9 +1,16 @@
+/**
+ * Hand relay: a Durable Object per relay token that pairs one hand with the brains that drive it,
+ * and the routing of a request to it.
+ *
+ * @module
+ */
 import { DurableObject } from 'cloudflare:workers'
 import * as Remote from '../Remote.ts'
 
-export const RELAY_TOKEN = /^[0-9a-f]{32,128}$/
+/** Pattern of a relay token. */
+export const tokenPattern = /^[0-9a-f]{32,128}$/
 
-const HAND_REPLACED = 'another hand attached under this name'
+const handReplaced = 'another hand attached under this name'
 
 type Side = 'hand' | 'brain'
 
@@ -21,7 +28,12 @@ function catalogField(catalog: string | undefined, field: 'name' | 'runtime_id')
   }
 }
 
+/**
+ * Durable Object that relays frames between one hand and its brains. A newer hand replaces the
+ * older one, and a newer brain replaces the older one.
+ */
 export class HandRelay extends DurableObject {
+  /** Accepts a hand or brain socket, or returns the attached hand's name for a plain request. */
   override async fetch(request: Request): Promise<Response> {
     const query = new URL(request.url).searchParams
     const side: Side = query.get('role') === 'brain' ? 'brain' : 'hand'
@@ -73,7 +85,7 @@ export class HandRelay extends DurableObject {
       for (const other of this.ctx.getWebSockets('hand'))
         if (other !== socket) {
           try {
-            other.close(same ? 1000 : 1008, same ? 'the hand reconnected' : HAND_REPLACED)
+            other.close(same ? 1000 : 1008, same ? 'the hand reconnected' : handReplaced)
           } catch {}
         }
       socket.serializeAttachment({ cataloged: true })
@@ -145,34 +157,57 @@ export class HandRelay extends DurableObject {
   }
 }
 
-export function relayToken(request: Request): string | undefined {
-  const token = Remote.bearerToken(request) ?? new URL(request.url).searchParams.get('token') ?? ''
-  return RELAY_TOKEN.test(token) ? token : undefined
+/**
+ * Returns the relay token of a request, from its bearer token or its `token` query parameter, or
+ * `undefined` when the token does not match `tokenPattern`.
+ */
+export function token(request: Request): string | undefined {
+  const value = Remote.bearerToken(request) ?? new URL(request.url).searchParams.get('token') ?? ''
+  return tokenPattern.test(value) ? value : undefined
 }
 
-export function refuseSocket(request: Request, reason: string, status: number): Response {
+/**
+ * Refuses a request. A WebSocket upgrade with a bearer subprotocol receives a socket that closes
+ * with code 1008, and other requests receive a JSON error.
+ */
+export function refuse(request: Request, options: refuse.Options): Response {
   const accepted = Remote.bearerAccepted(request)
   if (
     request.headers.get('upgrade')?.toLowerCase() !== 'websocket' ||
     !accepted['sec-websocket-protocol']
   )
-    return Response.json({ error: reason }, { status })
+    return Response.json({ error: options.reason }, { status: options.status })
+
   const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket]
   server.accept()
-  server.close(1008, reason.slice(0, 120))
+  server.close(1008, options.reason.slice(0, 120))
   return new Response(null, { status: 101, webSocket: client, headers: accepted })
 }
 
-export function relay(
-  request: Request,
-  namespace: DurableObjectNamespace<HandRelay>,
-): Response | Promise<Response> {
-  const token = relayToken(request)
-  if (!token)
-    return refuseSocket(
-      request,
-      "hands and brains connect with the relay's token, as Authorization: Bearer, the bearer WebSocket subprotocol or ?token=",
-      403,
-    )
-  return namespace.get(namespace.idFromName(token)).fetch(request)
+export declare namespace refuse {
+  type Options = {
+    /** Error message, also the close reason of a socket, cut to 120 characters. */
+    reason: string
+    /** HTTP status of a JSON refusal. */
+    status: number
+  }
+}
+
+/** Routes a request to the relay of its token, and refuses it with status 403 when it has none. */
+export function route(request: Request, options: route.Options): Response | Promise<Response> {
+  const value = token(request)
+  if (!value)
+    return refuse(request, {
+      reason:
+        "hands and brains connect with the relay's token, as Authorization: Bearer, the bearer WebSocket subprotocol or ?token=",
+      status: 403,
+    })
+  return options.namespace.get(options.namespace.idFromName(value)).fetch(request)
+}
+
+export declare namespace route {
+  type Options = {
+    /** Namespace of the `HandRelay` Durable Object. */
+    namespace: DurableObjectNamespace<HandRelay>
+  }
 }

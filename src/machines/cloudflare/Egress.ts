@@ -1,12 +1,20 @@
-import type { ModelDispatch, PrivateBinding } from '../../cloudflare/contracts.ts'
-import { json, type MachinesEnv, wallet } from './env.ts'
+/**
+ * Egress binding of nanocode machines: it pays for model requests over MPP with the account's
+ * wallet, and serves no model sockets or remote executors.
+ *
+ * @module
+ */
+import type * as App from '../../cloudflare/App.ts'
+import { json } from '../account.ts'
+import * as Env from './Env.ts'
 
-export const PROXIES: Record<string, string> = {
+/** MPP proxy of each model API host. */
+export const proxies: Record<string, string> = {
   'api.openai.com': 'https://openai.mpp.tempo.xyz',
   'api.anthropic.com': 'https://anthropic.mpp.tempo.xyz',
 }
 
-const HEADERS = /^(accept|content-type|anthropic-version|anthropic-beta)$/
+const forwardedHeaders = /^(accept|content-type|anthropic-version|anthropic-beta)$/
 
 function modelError(provider: string | undefined, status: number, message: string): Response {
   if (provider === 'codex')
@@ -14,8 +22,8 @@ function modelError(provider: string | undefined, status: number, message: strin
   return json({ type: 'error', error: { type: 'invalid_request_error', message } }, status)
 }
 
-async function model(env: MachinesEnv, request: Request): Promise<Response> {
-  let dispatch: ModelDispatch
+async function model(env: Env.Env, request: Request): Promise<Response> {
+  let dispatch: App.ModelDispatch
   try {
     dispatch = JSON.parse(request.headers.get('x-nanocode-model') ?? '')
   } catch {
@@ -28,13 +36,13 @@ async function model(env: MachinesEnv, request: Request): Promise<Response> {
       'nanocode machines pays by the token over MPP; subscriptions are not used',
     )
   const upstream = new URL(dispatch.endpoint)
-  const proxy = PROXIES[upstream.hostname]
+  const proxy = proxies[upstream.hostname]
   if (!proxy) return modelError(dispatch.provider, 400, `no MPP proxy for ${upstream.hostname}`)
   const headers: [string, string][] = dispatch.headers.filter(([name]) =>
-    HEADERS.test(name.toLowerCase()),
+    forwardedHeaders.test(name.toLowerCase()),
   )
   const body = await request.arrayBuffer()
-  return wallet(env, dispatch.authority.account_id).fetch(
+  return Env.wallet(env, { account: dispatch.authority.account_id }).fetch(
     new Request('https://wallet.internal/model', {
       method: 'POST',
       body,
@@ -48,7 +56,8 @@ async function model(env: MachinesEnv, request: Request): Promise<Response> {
   )
 }
 
-export function egress(env: MachinesEnv): PrivateBinding {
+/** Returns the egress binding of `env`. */
+export function create(env: Env.Env): App.PrivateBinding {
   return {
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url)

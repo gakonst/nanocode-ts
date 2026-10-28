@@ -1,11 +1,18 @@
+/**
+ * Egress binding over Cloudflare AI Gateway: it serves the runtime's model requests and warm-ups
+ * through the Workers AI binding, with a deadline on the first byte of each response.
+ *
+ * @module
+ */
 import type * as Contracts from '../Contracts.ts'
-import type { ModelDispatch, PrivateBinding } from './contracts.ts'
+import type * as App from './App.ts'
 
-const HEADERS: Record<Contracts.ModelProvider, RegExp> = {
+const requestHeaders: Record<Contracts.ModelProvider, RegExp> = {
   claude: /^(accept|content-type|anthropic-version|anthropic-beta)$/,
   codex: /^(accept|content-type|x-session-affinity)$/,
 }
-const RESPONSE_HEADER =
+
+const responseHeader =
   /^(content-type|request-id|x-request-id|retry-after|x-should-retry|anthropic-ratelimit-[a-z0-9-]+|x-ratelimit-[a-z0-9-]+|openai-model|openai-processing-ms|cf-aig-[a-z0-9-]+)$/
 
 function json(value: unknown, status = 200): Response {
@@ -163,14 +170,14 @@ async function model(
   firstByteMs: number,
   request: Request,
 ): Promise<Response> {
-  let dispatch: ModelDispatch
+  let dispatch: App.ModelDispatch
   try {
     dispatch = JSON.parse(request.headers.get('x-nanocode-model') ?? '')
   } catch {
     return modelError('claude', 400, 'invalid_request_error', 'invalid model dispatch')
   }
   const provider = dispatch.provider ?? 'claude'
-  const allowed = HEADERS[provider]
+  const allowed = requestHeaders[provider]
   if (!allowed)
     return modelError('claude', 400, 'invalid_request_error', 'unsupported model provider')
   if (dispatch.subscription)
@@ -247,7 +254,7 @@ async function model(
   const upstream = first.response
   const forwarded = new Headers({ 'cache-control': 'no-store' })
   for (const [name, value] of upstream.headers)
-    if (RESPONSE_HEADER.test(name)) forwarded.set(name, value)
+    if (responseHeader.test(name)) forwarded.set(name, value)
   forwarded.set(
     'x-nanocode-model-diagnostic',
     JSON.stringify({
@@ -316,12 +323,15 @@ async function warm(
   })
 }
 
-export function aiGateway(
-  ai: Ai,
-  gateway: string,
-  serviceTier = '',
-  firstByteMs = 45_000,
-): PrivateBinding {
+/**
+ * Returns an egress binding that sends model requests through the AI Gateway `options.id` of
+ * `ai`. A request whose first byte misses the deadline returns a retryable 504.
+ */
+export function create(ai: Ai, options: create.Options): App.PrivateBinding {
+  const firstByteMs = options.firstByteMs ?? 45_000
+  const gateway = options.id
+  const serviceTier = options.serviceTier ?? ''
+
   return {
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url)
@@ -347,5 +357,16 @@ export function aiGateway(
       if (pathname === '/metrics') return json({ ok: true, egress: 'ai-gateway' })
       return json({ error: 'not_found' }, 404)
     },
+  }
+}
+
+export declare namespace create {
+  type Options = {
+    /** Deadline in milliseconds for the first byte of a model response. Defaults to 45 seconds. */
+    firstByteMs?: number | undefined
+    /** Name of the AI Gateway. */
+    id: string
+    /** OpenAI service tier of Codex requests, such as `priority`. Defaults to none. */
+    serviceTier?: string | undefined
   }
 }

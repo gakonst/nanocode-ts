@@ -4,5 +4,5 @@
     "types": ["@cloudflare/workers-types"],
     "lib": ["ES2022", "ESNext.Disposable"]
   },
-  "include": ["src/cloudflare/*.ts", "src/machines/cloudflare/*.ts"]
+  "include": ["src/cloudflare/**/*.ts", "src/machines/cloudflare/**/*.ts"]
 }
