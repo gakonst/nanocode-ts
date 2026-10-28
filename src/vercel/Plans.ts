@@ -6,6 +6,7 @@
  */
 import type { Store } from 'nanocode-egress'
 import { Egress, Redis } from 'nanocode-egress/vercel'
+import type * as Harness from './Harness.ts'
 
 /** Plans of a deployment, as `App.create` takes them. */
 export type Options = {
@@ -33,7 +34,7 @@ export type Routes = {
  * Returns the `subscription` of the harness and the sign-in route handlers of `options`. The store and the secret are
  * read when the first request needs them, so a build without them still loads the module.
  */
-export function create(options: Options, account: Options['account']) {
+export function create(options: Options, account: Options['account']): create.ReturnType {
   const owner = options.account ?? account
   if (!owner) throw new Error('plans need an account: pass App.create an account, or plans one')
   let accounts: ReturnType<typeof Egress.plans> | undefined
@@ -46,6 +47,15 @@ export function create(options: Options, account: Options['account']) {
     (await routes(request)) ?? Response.json({ error: 'plan route not found' }, { status: 404 })
   return {
     subscription: Egress.subscription(plans),
-    routes: { GET: handle, POST: handle, DELETE: handle } satisfies Routes,
+    routes: { GET: handle, POST: handle, DELETE: handle },
+  }
+}
+
+export declare namespace create {
+  type ReturnType = {
+    /** `subscription` of the harness: the session's plan while its account is signed in. */
+    subscription: NonNullable<Harness.create.Options['subscription']>
+    /** Route handlers of the sign-in routes. */
+    routes: Routes
   }
 }
