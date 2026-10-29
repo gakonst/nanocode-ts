@@ -63,10 +63,12 @@ export type Request = {
   files: [string, string][]
   keep?: string[]
   kind: 'code' | 'stdin' | 'file' | 'module' | 'pip' | 'version'
+  listing?: [string, string][]
   mirror?: string
   name: string
   range?: [number, number]
   roots: string[]
+  stamps?: [string, string][]
   stdin: string
   sync?: boolean
   target: string
