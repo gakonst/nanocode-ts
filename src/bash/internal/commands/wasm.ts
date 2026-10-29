@@ -199,7 +199,7 @@ class Tree {
         )
       return
     }
-    const stat = await fs.stat(path)
+    const stat = await readable(explicit, () => fs.stat(path))
     if (!stat) return
     const name = path.split('/').filter(Boolean).pop()
     if (stat.kind === 'file') {
@@ -207,7 +207,8 @@ class Tree {
       if (name === undefined || parent.children.get(name)?.kind === 'file') return
       let node: FileNode
       if (this.bytes + stat.size <= this.limit) {
-        const data = await fs.read(path)
+        const data = await readable(explicit, () => fs.read(path))
+        if (!data) return
         this.bytes += data.length
         node = this.file(data, true, BigInt(Math.floor(stat.mtime)) * 1_000_000n)
       } else {
@@ -228,14 +229,25 @@ class Tree {
     }
     const dir = name === undefined ? this.root : this.ensure(path)
     if (!dir.partial || depth < 0) return
+    const children = await readable(explicit, () => fs.list(path))
+    if (!children) return
     dir.partial = false
-    for (const child of await fs.list(path)) {
+    for (const child of children) {
       if (this.entries > SNAPSHOT_ENTRIES) {
         dir.partial = true
         break
       }
       await this.load(fs, (path === '/' ? '' : path) + '/' + child, depth - 1, false)
     }
+  }
+}
+
+async function readable<T>(explicit: boolean, read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read()
+  } catch (error) {
+    if (explicit || !(error instanceof FsError)) throw error
+    return undefined
   }
 }
 
@@ -368,7 +380,7 @@ const handler =
       if (found) await tree.load(ctx.fs, target, 64, true)
     }
     await tree.load(ctx.fs, ctx.cwd, ctx.cwd === '/' ? 0 : 64, false)
-    await tree.load(ctx.fs, '/', 2, false)
+    await tree.load(ctx.fs, '/', options.rootDepth ?? 2, false)
     const result = execute(ctx, module, tree, run)
     release(module)
     await writeBack(ctx.fs, tree)
