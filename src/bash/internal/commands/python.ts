@@ -638,7 +638,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
       return 0
     }
     if (options.remote) {
-      mirror.id ||= crypto.randomUUID()
+      if (!options.shared) mirror.id ||= crypto.randomUUID()
       return executeRemote(
         ctx,
         options.remote,
@@ -647,6 +647,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
         maxFiles,
         mirror,
         options.batchBytes ?? 6 * 1024 * 1024,
+        options.shared ?? false,
       )
     }
     if (!canCompile()) {
@@ -779,6 +780,7 @@ async function executeRemote(
   maxFiles: number,
   mirror: Mirror,
   batchBytes: number,
+  shared: boolean,
 ): Promise<number> {
   const stdin = ctx.stdin.read()
   const kind = mode === 'version' ? 'version' : mode.kind
@@ -793,8 +795,6 @@ async function executeRemote(
       roots.indexOf(root) === index &&
       !roots.some((other) => other !== root && within(root, other)),
   )
-  const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes)
-  if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
   const target =
     mode === 'version'
       ? ''
@@ -803,15 +803,6 @@ async function executeRemote(
         : mode.kind === 'stdin'
           ? stdin
           : mode.target
-  const base = {
-    name: ctx.name,
-    cwd: ctx.cwd,
-    env: { ...ctx.env, PWD: ctx.cwd },
-    roots: unique,
-    dirs: [...tree.dirs],
-    timeoutMs: ctx.limits.timeoutMs,
-    mirror: mirror.id,
-  }
   const call = async (request: PythonRequest): Promise<PythonReply> => {
     try {
       return await remote(request, ctx.signal)
@@ -822,6 +813,38 @@ async function executeRemote(
         127,
       )
     }
+  }
+  if (shared) {
+    const reply = await call({
+      name: ctx.name,
+      cwd: ctx.cwd,
+      env: { ...ctx.env, PWD: ctx.cwd },
+      roots: unique,
+      dirs: [],
+      timeoutMs: ctx.limits.timeoutMs,
+      kind,
+      target,
+      argv: mode === 'version' ? [] : mode.argv,
+      filename: mode === 'version' ? '' : mode.filename,
+      files: [],
+      stdin: mode !== 'version' && mode.kind === 'stdin' ? '' : stdin,
+    })
+    if (reply.stdout) ctx.stdout.write(reply.stdout)
+    if (reply.stderr) ctx.stderr.write(reply.stderr)
+    if (reply.status >= 0) return reply.status
+    if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
+    throw new CommandError('timed out after ' + ctx.limits.timeoutMs + ' ms', 124)
+  }
+  const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes)
+  if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
+  const base = {
+    name: ctx.name,
+    cwd: ctx.cwd,
+    env: { ...ctx.env, PWD: ctx.cwd },
+    roots: unique,
+    dirs: [...tree.dirs],
+    timeoutMs: ctx.limits.timeoutMs,
+    mirror: mirror.id,
   }
   const control = {
     ...base,

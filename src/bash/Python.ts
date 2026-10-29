@@ -8,6 +8,7 @@ export type Options = {
   maxFiles?: number
   mirror?: string
   remote?: Remote
+  shared?: boolean
   worker?: boolean
 }
 
