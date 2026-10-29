@@ -10,22 +10,29 @@ export type Source = {
 
 export const installUrl = 'https://nanocode.xyz/install'
 
+export const tabUrl = 'https://nanocode.xyz/hand'
+
 export function commands(access: Access, options: commands.Options = {}): commands.ReturnType {
-  const { install = installUrl } = options
+  const { install = installUrl, tab = tabUrl } = options
   return {
     command: `curl -fsSL ${install} | sh -s -- hand '${access.url}' --token ${access.token}`,
     short: `nc hand '${access.url}' --token ${access.token}`,
+    ...(tab
+      ? { tab: `${tab}#${new URLSearchParams({ url: access.url, token: access.token })}` }
+      : {}),
   }
 }
 
 export declare namespace commands {
   type Options = {
     install?: string | undefined
+    tab?: string | false | undefined
   }
 
   type ReturnType = {
     command: string
     short: string
+    tab?: string
   }
 }
 

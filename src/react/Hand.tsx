@@ -47,6 +47,14 @@ export function Hand(props: Hand.Props) {
           </button>
         </p>
       )}
+      {props.tab && (
+        <p {...part('handText')}>
+          No terminal?{' '}
+          <a href={props.tab} rel="noreferrer" target="_blank">
+            Make a browser tab this session's machine →
+          </a>
+        </p>
+      )}
     </div>
   )
 }
@@ -55,6 +63,7 @@ export declare namespace Hand {
   type Props = {
     command: string
     short?: string
+    tab?: string
     hands: readonly (string | null)[]
     onClose?(): void
   }
@@ -120,8 +129,19 @@ export function HandConnect(props: HandConnect.Props) {
   const part = usePart()
   const names = hand.hands.map((name) => name ?? 'your machine').join(', ')
   if (hand.open && hand.access) {
-    const { command, short } = Relay.commands(hand.access, { install: props.install })
-    return <Hand command={command} hands={hand.hands} onClose={hand.hide} short={short} />
+    const { command, short, tab } = Relay.commands(hand.access, {
+      install: props.install,
+      tab: props.tab,
+    })
+    return (
+      <Hand
+        command={command}
+        hands={hand.hands}
+        onClose={hand.hide}
+        short={short}
+        {...(tab ? { tab } : {})}
+      />
+    )
   }
   return (
     <p {...part('row')}>
@@ -144,6 +164,7 @@ export declare namespace HandConnect {
   type Props = {
     hand: HandState
     install?: string
+    tab?: string | false
   }
 }
 
