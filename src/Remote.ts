@@ -34,6 +34,10 @@ export const brainReplaced = 4002
 
 export const handAccepted = JSON.stringify({ type: 'ack', ids: [] })
 
+export function toolsOnly(catalog: string): boolean {
+  return (JSON.parse(catalog) as { tools_only?: unknown }).tools_only === true
+}
+
 const encoder = new TextEncoder()
 
 export function accept<S extends Contracts.MessageSocket>(socket: S, policy: Policy): Executor<S> {

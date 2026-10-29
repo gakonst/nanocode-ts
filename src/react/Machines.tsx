@@ -47,6 +47,10 @@ export function useMachine(runtime: Machine.Runtime, options: useMachine.Options
       const current = Cloud.restore()
       return current ? await Cloud.hands(current) : []
     },
+    listing: async () => {
+      const current = Cloud.restore()
+      return current ? await Cloud.listing(current) : { hands: [], toolsOnly: [] }
+    },
   }).current
   const hand = useHand(machine)
   const { send } = useSend()
@@ -201,8 +205,7 @@ export function useMachine(runtime: Machine.Runtime, options: useMachine.Options
     void send(text)
   }
 
-  const machines = hand.hands.map((name) => name ?? 'your machine')
-  const detail = `${model.model}${machines.length ? ` · on ${machines.join(', ')}` : ''}`
+  const detail = `${model.model}${hand.where ? ` · ${hand.where}` : ''}`
 
   return {
     busy,

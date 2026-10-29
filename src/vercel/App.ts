@@ -238,7 +238,7 @@ export function create(options: create.Options) {
       const refused = await admit(request)
       if (refused) return refused
       return Response.json(
-        { hands: await Hands.attached(await getWorld(), { runId: params.get('sessionId')! }) },
+        await Hands.listing(await getWorld(), { runId: params.get('sessionId')! }),
         { headers: { 'cache-control': 'no-store' } },
       )
     }

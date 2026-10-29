@@ -274,12 +274,16 @@ export async function hand(cloud: Link): Promise<Relay.Access> {
 }
 
 export async function hands(cloud: Link): Promise<string[]> {
+  return [...(await listing(cloud)).hands].filter((name): name is string => name !== null)
+}
+
+export async function listing(cloud: Link): Promise<Relay.Listing> {
   const response = await fetch(`sessions/${encodeURIComponent(cloud.session)}/hands`, {
     cache: 'no-store',
     headers: headers(cloud),
   }).catch(() => undefined)
-  if (!response?.ok) return []
-  return ((await response.json()) as { hands?: string[] }).hands ?? []
+  if (!response?.ok) return { hands: [], toolsOnly: [] }
+  return Relay.listing((await response.json()) as { hands?: string[]; tools_only?: string[] })
 }
 
 export function meter(cloud: Link, options: meter.Options = {}) {

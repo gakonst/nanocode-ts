@@ -6,6 +6,31 @@ export type Access = {
 export type Source = {
   hand(): Promise<Access | undefined>
   hands(): Promise<readonly (string | null)[]>
+  listing?(): Promise<Listing>
+}
+
+export type Listing = {
+  hands: readonly (string | null)[]
+  toolsOnly: readonly (string | null)[]
+}
+
+export function listing(body: {
+  hands?: readonly (string | null)[] | undefined
+  tools_only?: readonly (string | null)[] | undefined
+}): Listing {
+  return { hands: body.hands ?? [], toolsOnly: body.tools_only ?? [] }
+}
+
+export function where(listing: Listing): string {
+  const named = (name: string | null) => name ?? 'your machine'
+  const scripts = listing.hands.filter((name) => !listing.toolsOnly.includes(name)).map(named)
+  const tools = listing.toolsOnly.filter((name) => listing.hands.includes(name)).map(named)
+  return [
+    scripts.length ? `on ${scripts.join(', ')}` : '',
+    tools.length ? `tools from ${tools.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 export const installUrl = 'https://nanocode.xyz/install'

@@ -201,6 +201,16 @@ export function create(options: create.Options): create.ReturnType {
     return { session: id, token: ((await response.json()) as { token: string }).token }
   }
 
+  const listing = async (): Promise<Relay.Listing> => {
+    const id = state.id ?? warmed
+    if (!id) return { hands: [], toolsOnly: [] }
+    const response = await fetch(path('hands', { id }), { headers: headers() }).catch(
+      () => undefined,
+    )
+    if (!response?.ok) return { hands: [], toolsOnly: [] }
+    return Relay.listing((await response.json()) as { hands?: string[]; tools_only?: string[] })
+  }
+
   return {
     files: {
       maxBytes: 5 * 1024 * 1024,
@@ -320,14 +330,9 @@ export function create(options: create.Options): create.ReturnType {
       }
     },
     async hands() {
-      const id = state.id ?? warmed
-      if (!id) return []
-      const response = await fetch(path('hands', { id }), { headers: headers() }).catch(
-        () => undefined,
-      )
-      if (!response?.ok) return []
-      return ((await response.json()) as { hands?: string[] }).hands ?? []
+      return [...(await listing()).hands].filter((name): name is string => name !== null)
     },
+    listing,
     async health() {
       const open = await fetch(`${base}health`).catch(() => undefined)
       return open?.ok
@@ -357,5 +362,6 @@ export declare namespace create {
       health(): Promise<Response | undefined>
       handToken(): Promise<{ session: string; token: string }>
       hands(): Promise<string[]>
+      listing(): Promise<Relay.Listing>
     }
 }

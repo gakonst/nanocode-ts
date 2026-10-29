@@ -2,7 +2,7 @@ import * as Bridge from './Bridge.ts'
 import * as ClientRelay from './client/Relay.ts'
 import type * as Contracts from './Contracts.ts'
 import type * as AgentRuntime from './AgentRuntime.ts'
-import type * as Remote from './Remote.ts'
+import * as Remote from './Remote.ts'
 
 export type Relay = {
   url: string
@@ -25,6 +25,7 @@ export type Session = {
   resume(): Promise<Contracts.TurnReport | undefined>
   hand(): ClientRelay.Access | undefined
   hands(): readonly (string | null)[]
+  listing(): ClientRelay.Listing
   runtime(): AgentRuntime.AgentRuntime
   dispose(): Promise<void>
 }
@@ -184,6 +185,11 @@ export async function open(options: Options): Promise<Session> {
       return { url: ClientRelay.socketUrl(options.relay.url), token }
     },
     hands: () => (hand ? [hand.name] : []),
+    listing: () => ({
+      hands: hand ? [hand.name] : [],
+      toolsOnly:
+        hand?.executor.catalog && Remote.toolsOnly(hand.executor.catalog) ? [hand.name] : [],
+    }),
     runtime: () => runtime,
     async dispose() {
       disposed = true

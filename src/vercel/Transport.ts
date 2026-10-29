@@ -25,7 +25,8 @@ export type Transport = ClientTransport.Transport &
   Relay.Source & {
     crash(options?: { at?: 'tool' | 'any'; afterMs?: number }): Promise<Response>
     forget(): void
-    hands(): Promise<(string | null)[]>
+    hands(): Promise<readonly (string | null)[]>
+    listing(): Promise<Relay.Listing>
     open(): Promise<string | undefined>
     session(): Session
     warm(): void
@@ -172,6 +173,17 @@ export function create(options: create.Options): Transport {
       return [{ path: item.path, data: btoa(binary) }]
     })
     return files.length ? { attachments: files } : {}
+  }
+
+  const listing = async (): Promise<Relay.Listing> => {
+    if (!state.id) return { hands: [], toolsOnly: [] }
+    const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&hands`, {
+      headers: headers(),
+    })
+    if (!response.ok) return { hands: [], toolsOnly: [] }
+    return Relay.listing(
+      (await response.json()) as { hands?: (string | null)[]; tools_only?: (string | null)[] },
+    )
   }
 
   return {
@@ -335,13 +347,9 @@ export function create(options: create.Options): Transport {
       return { url: `${Relay.socketUrl(url)}?sessionId=${encodeURIComponent(id)}`, token: hand }
     },
     async hands() {
-      if (!state.id) return []
-      const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&hands`, {
-        headers: headers(),
-      })
-      if (!response.ok) return []
-      return ((await response.json()) as { hands?: (string | null)[] }).hands ?? []
+      return (await listing()).hands
     },
+    listing,
     crash(crash = {}) {
       return fetch(options.chaosUrl ?? url.replace(/chat$/, 'chaos'), {
         method: 'POST',

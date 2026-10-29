@@ -502,12 +502,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             return json({ token: HandToken.encode({ account: descriptor.account_id, secret }) })
           }
           if (request.method !== 'GET') return json({ error: 'method not allowed' }, 405)
-          if (parts.length === 3 && request.headers.get('upgrade')?.toLowerCase() !== 'websocket')
+          if (parts.length === 3 && request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+            const ready = [...(this.hands.get(scope) ?? [])].filter(([, entry]) => entry.ready)
             return json({
-              hands: [...(this.hands.get(scope) ?? [])]
-                .filter(([, entry]) => entry.ready)
+              hands: ready.map(([hand]) => hand),
+              tools_only: ready
+                .filter(([, entry]) => Remote.toolsOnly(entry.executor.catalog!))
                 .map(([hand]) => hand),
             })
+          }
           return this.attachHand(
             scope,
             parts.length === 4 ? decodeURIComponent(parts[3]) : undefined,

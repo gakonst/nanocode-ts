@@ -73,6 +73,8 @@ export type HandState = {
   open: boolean
   access?: Relay.Access
   hands: readonly (string | null)[]
+  toolsOnly: readonly (string | null)[]
+  where: string
   error?: string
   show(): void
   hide(): void
@@ -82,16 +84,21 @@ export type HandState = {
 export function useHand(source: Relay.Source | undefined): HandState {
   const [open, setOpen] = useState(false)
   const [access, setAccess] = useState<Relay.Access>()
-  const [hands, setHands] = useState<readonly (string | null)[]>([])
+  const [listing, setListing] = useState<Relay.Listing>({ hands: [], toolsOnly: [] })
   const [error, setError] = useState<string>()
+  const hands = listing.hands
   const connected = hands.length > 0
 
   useEffect(() => {
     if (!source || !access || (!open && !connected)) return
     let stopped = false
     const poll = async () => {
-      const found = await source.hands().catch(() => [])
-      if (!stopped) setHands(found)
+      const found = await (
+        source.listing
+          ? source.listing()
+          : source.hands().then((names) => ({ hands: names, toolsOnly: [] }))
+      ).catch(() => ({ hands: [], toolsOnly: [] }))
+      if (!stopped) setListing(found)
     }
     void poll()
     const timer = setInterval(() => void poll(), open ? 3000 : 20_000)
@@ -117,17 +124,26 @@ export function useHand(source: Relay.Source | undefined): HandState {
   const reset = useCallback(() => {
     setOpen(false)
     setAccess(undefined)
-    setHands([])
+    setListing({ hands: [], toolsOnly: [] })
     setError(undefined)
   }, [])
 
-  return { open, access, hands, error, show, hide: () => setOpen(false), reset }
+  return {
+    open,
+    access,
+    hands,
+    toolsOnly: listing.toolsOnly,
+    where: Relay.where(listing),
+    error,
+    show,
+    hide: () => setOpen(false),
+    reset,
+  }
 }
 
 export function HandConnect(props: HandConnect.Props) {
   const { hand } = props
   const part = usePart()
-  const names = hand.hands.map((name) => name ?? 'your machine').join(', ')
   if (hand.open && hand.access) {
     const { command, short, tab } = Relay.commands(hand.access, {
       install: props.install,
@@ -151,7 +167,7 @@ export function HandConnect(props: HandConnect.Props) {
       <button onClick={hand.show} type="button" {...part('suggestion')}>
         {hand.error ??
           (hand.hands.length
-            ? `running on ${names} · show the command`
+            ? `${hand.where} · show the command`
             : hand.open
               ? 'preparing the command…'
               : 'Run this session on your own machine with nc →')}

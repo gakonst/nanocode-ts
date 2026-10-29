@@ -330,22 +330,34 @@ export async function attached(
   world: World,
   options: attached.Options,
 ): Promise<(string | null)[]> {
-  const { runId } = options
-  const nearby = local.get(runId)
-  if (nearby?.socket.readyState === OPEN) return [handName(nearby.catalog)]
-  const stop = new AbortController()
-  try {
-    const found = await find(world, runId, stop.signal)
-    return found?.current?.catalog !== undefined ? [handName(found.current.catalog)] : []
-  } finally {
-    stop.abort()
-  }
+  return (await listing(world, options)).hands
 }
 
 export declare namespace attached {
   type Options = {
     runId: string
   }
+}
+
+export async function listing(
+  world: World,
+  options: attached.Options,
+): Promise<{ hands: (string | null)[]; tools_only: (string | null)[] }> {
+  const { runId } = options
+  const nearby = local.get(runId)
+  const catalog = async () => {
+    if (nearby?.socket.readyState === OPEN) return nearby.catalog
+    const stop = new AbortController()
+    try {
+      return (await find(world, runId, stop.signal))?.current?.catalog
+    } finally {
+      stop.abort()
+    }
+  }
+  const found = await catalog()
+  if (found === undefined) return { hands: [], tools_only: [] }
+  const name = handName(found)
+  return { hands: [name], tools_only: Remote.toolsOnly(found) ? [name] : [] }
 }
 
 export async function dial(world: World, options: dial.Options): Promise<Contracts.MessageSocket> {

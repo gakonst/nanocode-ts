@@ -27,9 +27,12 @@ export class HandRelay extends DurableObject {
     const side: Side = query.get('role') === 'brain' ? 'brain' : 'hand'
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
       const hand = this.#hand()
+      const catalog = hand ? await this.ctx.storage.get<string>('catalog') : undefined
+      const name = catalogField(catalog, 'name')
       return Response.json(
         {
-          hands: hand ? [catalogField(await this.ctx.storage.get<string>('catalog'), 'name')] : [],
+          hands: hand ? [name] : [],
+          tools_only: catalog !== undefined && Remote.toolsOnly(catalog) ? [name] : [],
         },
         { headers: { 'cache-control': 'no-store' } },
       )
