@@ -21,12 +21,7 @@ const LAZY: [(&str, &str); 4] = [
 fn prelude() -> String {
     let sources = LAZY
         .iter()
-        .map(|(name, source)| {
-            format!(
-                "{name}: function () {{/*{}*/}}",
-                source.replace("*/", "*\u{1}/")
-            )
-        })
+        .map(|(name, source)| format!("{name}: {}", Value::String((*source).to_owned())))
         .collect::<Vec<_>>()
         .join(",\n");
     format!("const lazySources = {{\n{sources}\n}};\n{PRELUDE}")
