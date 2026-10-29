@@ -11,6 +11,14 @@ type Stat = { mode: number; size: number; mtime: Date | number }
 
 type Tracking = { dirty: Set<string>; gone: Set<string> }
 
+type Parked = {
+  files: Map<string, Uint8Array>
+  dirs: string[]
+  bytes: number
+  stamps: Map<string, string | undefined>
+  owned: Map<string, string>
+}
+
 type FS = PyodideFS & {
   lstat(path: string): Stat
   isLink(mode: number): boolean
@@ -54,6 +62,7 @@ function track(runner: Runner): void {
 
 const ALLOWED = ['/workspace', '/tmp', '/home/user']
 const LIMIT = 4 * 1024 * 1024
+const PARKED_BYTES = 32 * 1024 * 1024
 const REPLY_BYTES = 6 * 1024 * 1024
 const LARGE_BYTES = 6 * 1024 * 1024
 const decoder = new TextDecoder('utf-8')
@@ -158,7 +167,9 @@ export function pythonServer(
   let runner: Promise<Runner> | undefined
   let queue: Promise<unknown> = Promise.resolve()
   let mirror: string | undefined
-  const stamps = new Map<string, string | undefined>()
+  let stamps = new Map<string, string | undefined>()
+  let owned = new Map<string, string>()
+  const parked = new Map<string, Parked>()
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -191,6 +202,55 @@ export function pythonServer(
       for (const name of names(fs, root)) remove(fs, join(root, name))
     }
     stamps.clear()
+    owned.clear()
+  }
+
+  const size = (fs: FS, path: string): number => {
+    const found = kind(fs, path)
+    if (found === 'dir')
+      return names(fs, path).reduce((total, name) => total + size(fs, join(path, name)), 0)
+    return found === 'file' ? fs.lstat(path).size : 0
+  }
+
+  const park = (fs: FS) => {
+    const bytes = ALLOWED.reduce((total, root) => total + size(fs, root), 0)
+    if (mirror !== undefined && bytes <= PARKED_BYTES) {
+      const files = new Map<string, Uint8Array>()
+      const dirs: string[] = []
+      const visit = (path: string) => {
+        const found = kind(fs, path)
+        if (found === 'dir') {
+          dirs.push(path)
+          for (const name of names(fs, path)) visit(join(path, name))
+        } else if (found === 'file') files.set(path, fs.readFile(path))
+      }
+      for (const root of ALLOWED) visit(root)
+      parked.delete(mirror)
+      parked.set(mirror, { files, dirs, bytes, stamps, owned })
+      let total = [...parked.values()].reduce((sum, entry) => sum + entry.bytes, 0)
+      for (const [id, entry] of parked) {
+        if (total <= PARKED_BYTES) break
+        parked.delete(id)
+        total -= entry.bytes
+      }
+    }
+    stamps = new Map()
+    owned = new Map()
+    wipe(fs)
+  }
+
+  const enter = (fs: FS, id: string | undefined) => {
+    if (mirror === id) return
+    fs.chdir('/')
+    park(fs)
+    mirror = id
+    const found = id === undefined ? undefined : parked.get(id)
+    if (!found || id === undefined) return
+    parked.delete(id)
+    for (const path of found.dirs) mkdirs(fs, path)
+    for (const [path, data] of found.files) fs.writeFile(path, data)
+    stamps = found.stamps
+    owned = found.owned
   }
 
   const place = (fs: FS, files: [string, string][], dirs: string[], append: boolean) => {
@@ -222,6 +282,7 @@ export function pythonServer(
       if (found && !wanted.has(path)) {
         fs.unlink(path)
         stamps.delete(path)
+        owned.delete(path)
       }
     }
     for (const root of roots) visit(root)
@@ -282,6 +343,7 @@ export function pythonServer(
         files.push([path, null])
         return
       }
+      owned.delete(path)
       if (data.length > LARGE_BYTES) {
         files.push([path, null])
         large.push([path, data.length])
@@ -417,9 +479,12 @@ export function pythonServer(
     pyodide.setStderr(sink(err))
     const deadline = Date.now() + Math.max(1000, request.timeoutMs || 30000)
     let quiet = false
+    let signalled = 0
     pyodide.setInterruptBuffer({
       get 0() {
-        return !quiet && Date.now() > deadline ? 2 : 0
+        if (quiet || Date.now() <= deadline || Date.now() - signalled < 50) return 0
+        signalled = Date.now()
+        return 2
       },
       set 0(_value: number) {},
     })
@@ -496,12 +561,23 @@ export function pythonServer(
       files: [],
       mirror: id,
     }
-    if (mirror !== id) {
-      wipe(fs)
-      mirror = id
-    }
+    enter(fs, id)
     if (request.fetch) return { ...empty, ...fetchFiles(fs, request.fetch, request.range) }
     place(fs, request.files, request.dirs, Boolean(request.append))
+    for (const [path, stamp] of request.stamps ?? [])
+      if (allowed(path) && kind(fs, path) === 'file') owned.set(path, stamp)
+    if (request.listing)
+      return {
+        ...empty,
+        missing: request.listing
+          .filter(
+            ([path, stamp]) =>
+              owned.get(path) !== stamp ||
+              stamps.get(path) === undefined ||
+              kind(fs, path) !== 'file',
+          )
+          .map(([path]) => path),
+      }
     if (request.sync) return empty
     const keep = request.keep ?? []
     const missing = keep.filter(
@@ -515,7 +591,10 @@ export function pythonServer(
       new Set(request.dirs),
     )
     const { touched, ...result } = await execute(python, request, state)
-    for (const path of touched) if (!roots.some((root) => within(path, root))) stamps.delete(path)
+    for (const path of touched) {
+      if (!roots.some((root) => within(path, root))) stamps.delete(path)
+      if (kind(fs, path) !== 'file') owned.delete(path)
+    }
     return { ...empty, ...result, ...changed(fs, roots, touched) }
   }
 
@@ -537,7 +616,7 @@ export function pythonServer(
     if (state && request.kind !== 'version') await replay(python, (await state.load()) ?? [])
     if (request.mirror) return mirrored(python, request, roots, state)
     const { fs } = python
-    mirror = undefined
+    enter(fs, undefined)
     const before = new Map(request.files.map(([path, data]) => [path, unbase64(data)] as const))
     for (const root of roots) {
       if (kind(fs, root) === 'dir') for (const name of names(fs, root)) remove(fs, join(root, name))

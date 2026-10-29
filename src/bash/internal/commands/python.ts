@@ -50,7 +50,7 @@ type Listing = {
   leftBytes: number
 }
 
-type Mirror = { id: string; known: Map<string, string> }
+type Mirror = { id: string; known: Map<string, string>; adopted: Map<string, string> }
 
 const THREADED_BYTES = 256 * 1024 * 1024
 
@@ -624,7 +624,7 @@ function parse(ctx: CommandContext, args: string[]): Mode | 'help' | 'version' {
 export function pythonCommands(options: PythonOptions = {}): Record<string, CommandHandler> {
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024
   const maxFiles = options.maxFiles ?? 20_000
-  const mirror: Mirror = { id: '', known: new Map() }
+  const mirror: Mirror = { id: '', known: new Map(), adopted: new Map() }
   let local = options.mirror ?? ''
   const handler: CommandHandler = async (ctx) => {
     const mode = parse(ctx, ctx.args.slice())
@@ -638,7 +638,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
       return 0
     }
     if (options.remote) {
-      if (!options.shared) mirror.id ||= crypto.randomUUID()
+      if (!options.shared) mirror.id ||= options.mirror ?? crypto.randomUUID()
       return executeRemote(
         ctx,
         options.remote,
@@ -835,6 +835,15 @@ async function executeRemote(
     if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
     throw new CommandError('timed out after ' + ctx.limits.timeoutMs + ' ms', 124)
   }
+  const send = async (request: PythonRequest): Promise<PythonReply> => {
+    const adopted = [...mirror.adopted]
+    const reply = await call(
+      adopted.length ? { ...request, stamps: [...(request.stamps ?? []), ...adopted] } : request,
+    )
+    for (const [path, stamp] of adopted)
+      if (mirror.adopted.get(path) === stamp) mirror.adopted.delete(path)
+    return reply
+  }
   const tree = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes)
   if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
   const base = {
@@ -855,6 +864,12 @@ async function executeRemote(
     stdin: '',
     keep: [],
   }
+  const stamped = (files: [string, string][]): [string, string][] =>
+    files.map(([path]) => [path, tree.files.get(path)!])
+  const adopt = (path: string, stamp: string) => {
+    mirror.known.set(path, stamp)
+    mirror.adopted.set(path, stamp)
+  }
   const upload = async (paths: string[]): Promise<[string, string][]> => {
     let batch: [string, string][] = []
     let bytes = 0
@@ -863,11 +878,14 @@ async function executeRemote(
       if (!data) continue
       if (data.length > batchBytes) {
         for (let offset = 0; offset < data.length; offset += batchBytes) {
-          const reply = await call({
+          const reply = await send({
             ...control,
             files: [[path, base64(data.subarray(offset, offset + batchBytes))]],
             sync: true,
             append: offset > 0,
+            ...(offset + batchBytes >= data.length
+              ? { stamps: [[path, tree.files.get(path)!] as [string, string]] }
+              : {}),
           })
           if (reply.mirror !== mirror.id)
             throw new CommandError(
@@ -882,7 +900,7 @@ async function executeRemote(
         continue
       }
       if (batch.length && bytes + data.length > batchBytes) {
-        const reply = await call({ ...control, files: batch, sync: true })
+        const reply = await send({ ...control, files: batch, sync: true, stamps: stamped(batch) })
         if (reply.mirror !== mirror.id)
           throw new CommandError(
             ctx.name +
@@ -898,6 +916,14 @@ async function executeRemote(
     }
     return batch
   }
+  if (!mirror.known.size && tree.files.size) {
+    const listing = [...tree.files]
+    const reply = await send({ ...control, files: [], sync: true, listing })
+    if (reply.mirror === mirror.id) {
+      const missing = new Set(reply.missing ?? [])
+      for (const [path, stamp] of listing) if (!missing.has(path)) mirror.known.set(path, stamp)
+    }
+  }
   let pending = [...tree.files.keys()].filter(
     (path) => mirror.known.get(path) !== tree.files.get(path),
   )
@@ -908,7 +934,7 @@ async function executeRemote(
     const keep = [...tree.files.keys()].filter(
       (path) => !sent.has(path) && mirror.known.get(path) === tree.files.get(path),
     )
-    reply = await call({
+    reply = await send({
       ...base,
       kind,
       target,
@@ -916,6 +942,7 @@ async function executeRemote(
       filename: mode === 'version' ? '' : mode.filename,
       files,
       keep,
+      stamps: stamped(files),
       stdin: mode !== 'version' && mode.kind === 'stdin' ? '' : stdin,
     })
     if (!reply.missing?.length || attempt >= 2) break
@@ -943,7 +970,7 @@ async function executeRemote(
     const large = new Map(reply.large ?? [])
     for (const [path, data] of reply.files) if (data !== null) changed.set(path, data)
     for (let more = reply.more ?? []; more.length; ) {
-      const fetched = await call({ ...control, files: [], fetch: more })
+      const fetched = await send({ ...control, files: [], fetch: more })
       for (const [path, data] of fetched.files) if (data !== null) changed.set(path, data)
       for (const [path, size] of fetched.large ?? []) large.set(path, size)
       more = fetched.more ?? []
@@ -972,13 +999,13 @@ async function executeRemote(
       await mkdirs(ctx.fs, parentOf(path))
       await ctx.fs.write(path, unbase64(data))
       const stat = await ctx.fs.stat(path)
-      if (stat && reply.mirror === mirror.id) mirror.known.set(path, stat.size + ':' + stat.mtime)
+      if (stat && reply.mirror === mirror.id) adopt(path, stat.size + ':' + stat.mtime)
     }
     for (const [path, size] of large) {
       await mkdirs(ctx.fs, parentOf(path))
       try {
         for (let offset = 0; offset < size || offset === 0; offset += batchBytes) {
-          const piece = await call({
+          const piece = await send({
             ...control,
             files: [],
             fetch: [path],
@@ -1010,7 +1037,7 @@ async function executeRemote(
         continue
       }
       const stat = await ctx.fs.stat(path)
-      if (stat && reply.mirror === mirror.id) mirror.known.set(path, stat.size + ':' + stat.mtime)
+      if (stat && reply.mirror === mirror.id) adopt(path, stat.size + ':' + stat.mtime)
     }
   }
   if (reply.status >= 0) return reply.status

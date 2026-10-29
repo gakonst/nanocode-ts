@@ -1144,7 +1144,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   fetch: cellFetch,
                   wasm: { interpreter },
                   ...(pythonRemote
-                    ? { python: { remote: pythonRemote, maxBytes: pythonRemoteBytes } }
+                    ? {
+                        python: {
+                          remote: pythonRemote,
+                          maxBytes: pythonRemoteBytes,
+                          mirror: sessionId + ':' + scope,
+                        },
+                      }
                     : {}),
                   limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
                 })
