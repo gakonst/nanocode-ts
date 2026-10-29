@@ -57,7 +57,23 @@ export function masked(fs: FileSystem, umask: number): FileSystem {
 const encoder = new TextEncoder()
 const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 const lossy = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true })
-const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+export type Codec = {
+  encode(text: string): Uint8Array
+  decode(bytes: Uint8Array): string
+  toBase64(bytes: Uint8Array): string
+  fromBase64(text: string): Uint8Array
+}
+
+let codec: Codec | undefined
+
+export function useCodec(value: Codec | undefined): void {
+  codec = value
+}
+
+function wellFormed(text: string): boolean {
+  return (text as string & { isWellFormed(): boolean }).isWellFormed()
+}
 
 export function byte(value: number): string {
   const b = value & 0xff
@@ -65,7 +81,8 @@ export function byte(value: number): string {
 }
 
 export function encode(text: string): Uint8Array {
-  if (!LONE.test(text)) return encoder.encode(text)
+  if (codec) return codec.encode(text)
+  if (wellFormed(text)) return encoder.encode(text)
   const out = new Uint8Array(text.length * 3)
   let n = 0
   for (let i = 0; i < text.length; i++) {
@@ -103,7 +120,39 @@ export function encode(text: string): Uint8Array {
   return out.slice(0, n)
 }
 
+export function toBase64(bytes: Uint8Array): string {
+  if (codec) return codec.toBase64(bytes)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(binary)
+}
+
+export function fromBase64(text: string): Uint8Array {
+  if (codec) return codec.fromBase64(text)
+  const binary = atob(text)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+export function byteLength(text: string): number {
+  if (codec) return codec.encode(text).length
+  let n = text.length
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code < 0x80) continue
+    if (code < 0x800) n += 1
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      n += 2
+      i++
+    } else if (code < 0xdc80 || code > 0xdcff) n += 2
+  }
+  return n
+}
+
 export function decode(bytes: Uint8Array): string {
+  if (codec) return codec.decode(bytes)
   try {
     return strict.decode(bytes)
   } catch {
@@ -170,11 +219,11 @@ function escaped(bytes: Uint8Array): string {
 }
 
 export function rejoin(text: string): string {
-  return LONE.test(text) ? decode(encode(text)) : text
+  return wellFormed(text) ? text : decode(encode(text))
 }
 
 export function display(text: string): string {
-  return LONE.test(text) ? lossy.decode(encode(text)) : text
+  return wellFormed(text) ? text : lossy.decode(encode(text))
 }
 
 export function parentOf(path: string): string {

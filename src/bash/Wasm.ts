@@ -3,4 +3,5 @@ export type Options = {
   fuel?: number
   interpreter?: WebAssembly.Module | Promise<WebAssembly.Module>
   memoryBytes?: number
+  rootDepth?: number
 }

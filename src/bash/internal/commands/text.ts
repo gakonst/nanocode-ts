@@ -7,7 +7,7 @@ import {
   type CommandHandler,
 } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
-import { baseOf, decode, encode } from '../Fs.ts'
+import { baseOf, byteLength, decode, encode, fromBase64, toBase64 } from '../Fs.ts'
 import {
   ahead,
   exactLiterals,
@@ -243,20 +243,6 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
     } else await render(await ctx.stdin.text())
   }
   return status
-}
-
-function byteLength(text: string): number {
-  let n = text.length
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i)
-    if (code < 0x80) continue
-    if (code < 0x800) n += 1
-    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
-      n += 2
-      i++
-    } else if (code < 0xdc80 || code > 0xdcff) n += 2
-  }
-  return n
 }
 
 const wc: CommandHandler = streaming(async (ctx) => {
@@ -2222,13 +2208,6 @@ const sleep: CommandHandler = async (ctx) => {
   return 0
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 0x8000)
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  return btoa(binary)
-}
-
 const base64: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
     flags: 'di',
@@ -2240,25 +2219,24 @@ const base64: CommandHandler = async (ctx) => {
   if (parsed.flags.has('d')) {
     const raw = decode(bytes)
     const text = (
-      parsed.flags.has('i') ? raw.replace(/[^A-Za-z0-9+/=_-]/g, '') : raw.replace(/[\r\n]/g, '')
+      parsed.flags.has('i')
+        ? raw.replace(/[^A-Za-z0-9+/=_-]/g, '')
+        : raw.replaceAll('\r', '').replaceAll('\n', '')
     )
-      .replace(/-/g, '+')
-      .replace(/_/g, '/')
+      .replaceAll('-', '+')
+      .replaceAll('_', '/')
     const bad = text.search(/[^A-Za-z0-9+/=]/)
     const valid = bad < 0 ? text : text.slice(0, bad)
     const padding = valid.indexOf('=')
     const body = padding < 0 ? valid : valid.slice(0, padding)
     const whole = body.length - (body.length % 4)
     const partial = body.length % 4 >= 2 ? body.slice(whole) : ''
-    let binary = ''
+    let decoded: Uint8Array
     try {
-      binary = atob(body.slice(0, whole)) + (partial ? atob(partial.padEnd(4, '=')) : '')
+      decoded = fromBase64(body.slice(0, whole) + (partial ? partial.padEnd(4, '=') : ''))
     } catch {
-      binary = ''
+      decoded = new Uint8Array(0)
     }
-    const decoded = new Uint8Array(binary.length)
-    for (let index = 0; index < binary.length; index++) decoded[index] = binary.charCodeAt(index)
-    binary = ''
     ctx.stdout.write(decode(decoded))
     const trailing = padding < 0 ? '' : valid.slice(padding)
     const complete =
@@ -2272,7 +2250,7 @@ const base64: CommandHandler = async (ctx) => {
     return 0
   }
   budget(ctx.limits, 4 * bytes.length, 'base64: its input')
-  const encoded = bytesToBase64(bytes)
+  const encoded = toBase64(bytes)
   const wrap = Number(last(parsed, 'w') ?? 76)
   if (!(wrap > 0)) {
     await put(ctx, encoded + '\n')
