@@ -107,11 +107,8 @@ const joinBytes = (chunks) => {
   for (const chunk of chunks) { out.set(chunk, at); at += chunk.length; }
   return out;
 };
-const randomBytes = (length) => {
-  const bytes = new Uint8Array(length);
-  for (let index = 0; index < length; index++) bytes[index] = Math.floor(Math.random() * 256);
-  return bytes;
-};
+const randomBytes = (length) => new Uint8Array(nativeBytes.random(length));
+const digestBytes = (name, bytes) => new Uint8Array(nativeBytes.digest(name, bytes.buffer, bytes.byteOffset, bytes.byteLength));
 class TextEncoder {
   get encoding() { return "utf-8"; }
   encode(text = "") { return utf8(String(text)); }
@@ -472,7 +469,7 @@ for (const name of ["exec_command", "write_stdin", "apply_patch"]) {
     : name === "apply_patch" ? (input) => tools.apply_patch(typeof input === "string" ? input : input?.input ?? input?.patch ?? input)
     : (input) => tools[name](input);
 }
-const core = { TextDecoder, TextEncoder, byteView, callWasm, hostFunction, setTimeoutWithArgs, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, putBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
+const core = { TextDecoder, TextEncoder, byteView, callWasm, digestBytes, hostFunction, setTimeoutWithArgs, compareText, decodeBytes, encodeText, fromBase64, fromHex, fromLatin1, fromUtf8, joinBytes, putBytes, randomBytes, toBase64, toHex, toLatin1, utf8 };
 const modules = {};
 const lazyBody = (name) => {
   const source = lazySources[name].toString();
