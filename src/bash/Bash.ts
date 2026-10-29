@@ -5,7 +5,7 @@ import type * as GitHub from './GitHub.ts'
 import * as MemoryFileSystem from './MemoryFileSystem.ts'
 import type * as Python from './Python.ts'
 import type * as Wasm from './Wasm.ts'
-import { decode, display, encode, parentOf } from './internal/Fs.ts'
+import { decode, display, encode, parentOf, useCodec, type Codec } from './internal/Fs.ts'
 import * as Shell from './internal/Shell.ts'
 import { awk } from './internal/commands/awk.ts'
 import { curl, wget } from './internal/commands/curl.ts'
@@ -22,6 +22,7 @@ import { wasmCommands, wasmHost } from './internal/commands/wasm.ts'
 import { unzip, zip } from './internal/commands/zip.ts'
 
 export type { Limits } from './internal/Shell.ts'
+export type { Codec } from './internal/Fs.ts'
 
 export type Bash = {
   readonly commands: Map<string, Command.Handler>
@@ -115,6 +116,7 @@ const builtinCommands: Record<string, Command.Handler> = {
 export const commandNames = Object.keys(builtinCommands).sort()
 
 export async function create(options: create.Options = {}): Promise<Bash> {
+  if (options.codec) useCodec(options.codec)
   const fs = options.fs ?? MemoryFileSystem.create({ files: options.files })
   const cwd = FileSystem.resolvePath('/', options.cwd ?? '/home/user')
   const env = {
@@ -323,6 +325,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
 
 export declare namespace create {
   type Options = {
+    codec?: Codec
     commands?: Record<string, Command.Handler>
     cwd?: string
     env?: Record<string, string>
