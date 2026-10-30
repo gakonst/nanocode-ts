@@ -1157,16 +1157,19 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const codexEndpoint = descriptor.subscription
             ? 'https://chatgpt.com/backend-api/codex'
             : 'https://api.openai.com/v1'
+          const provider = descriptor.provider ?? 'claude'
+          const model =
+            descriptor.model ?? (provider === 'codex' ? undefined : this.env.CLAUDE_MODEL)
           try {
+            const limits = await options.limits?.({ provider, model }, this.env)
             const created = await this.instance(scope, true)
             await created.open(
               {
                 scope,
                 session_id: sessionId,
-                provider: descriptor.provider ?? 'claude',
-                model:
-                  descriptor.model ??
-                  (descriptor.provider === 'codex' ? undefined : this.env.CLAUDE_MODEL),
+                provider,
+                model,
+                ...limits,
                 subscription: descriptor.subscription,
                 endpoint:
                   descriptor.provider === 'codex'
@@ -2465,6 +2468,7 @@ export declare namespace create {
     }
     handInstructions?: string
     instructions?: string
+    limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
     liveDeltas?: boolean
     mcp?: {
       servers:
@@ -2499,6 +2503,10 @@ export declare namespace create {
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   }
+
+  type Limits = Pick<Contracts.AgentConfiguration, 'auto_compact_window_tokens' | 'max_tokens'>
+
+  type Session = { provider: Contracts.ModelProvider; model: string | undefined }
 
   type ReturnType<E extends Env> = {
     AgentSession: new (
