@@ -58,6 +58,7 @@ export type SessionAuthority = {
   account_id: string
   session_id: string
   executor_id?: string
+  session_name?: string
 }
 
 export type SessionDescriptor = SessionAuthority & {
@@ -1082,6 +1083,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             account_id: descriptor.account_id,
             session_id: sessionId,
             executor_id: descriptor.executor_id,
+            session_name: descriptor.session_name,
           }
           const enabled = this.executorEnabled(descriptor)
           let remote: HandExecutor | undefined
@@ -1160,8 +1162,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const provider = descriptor.provider ?? 'claude'
           const model =
             descriptor.model ?? (provider === 'codex' ? undefined : this.env.CLAUDE_MODEL)
+          const other = provider === 'codex' ? 'claude' : 'codex'
+          const both = options.harnesses === 'both'
           try {
             const limits = await options.limits?.({ provider, model }, this.env)
+            const otherLimits = both
+              ? await options.limits?.({ provider: other, model: undefined }, this.env)
+              : undefined
             const created = await this.instance(scope, true)
             await created.open(
               {
@@ -1179,6 +1186,22 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   ? {
                       gateway: 'workers_ai' as const,
                       cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID,
+                    }
+                  : {}),
+                ...(both
+                  ? {
+                      providers: {
+                        [other]: {
+                          endpoint:
+                            other === 'codex'
+                              ? 'https://api.openai.com/v1'
+                              : 'https://api.anthropic.com/v1/messages',
+                          ...(otherLimits?.max_tokens === undefined
+                            ? {}
+                            : { max_tokens: otherLimits.max_tokens }),
+                          ...(options.instructions ? { instructions: options.instructions } : {}),
+                        },
+                      },
                     }
                   : {}),
                 remote: enabled,
@@ -1201,7 +1224,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 ...(shell && options.workspaceTools
                   ? { workspace_tools: options.workspaceTools }
                   : {}),
-                ...(descriptor.provider === 'codex' && options.workspace !== false
+                ...((descriptor.provider === 'codex' || both) && options.workspace !== false
                   ? { environment: { cwd: options.workspace?.cwd ?? '/workspace' } }
                   : {}),
               },
@@ -1226,6 +1249,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                         authority: {
                           account_id: authority.account_id,
                           session_id: authority.session_id,
+                          session_name: authority.session_name,
                         },
                         name,
                         input,
@@ -2467,6 +2491,7 @@ export declare namespace create {
       ): string | null | undefined | Promise<string | null | undefined>
     }
     handInstructions?: string
+    harnesses?: 'both' | 'session'
     instructions?: string
     limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
     liveDeltas?: boolean
