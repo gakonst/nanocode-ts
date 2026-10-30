@@ -2116,7 +2116,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     private handsMode(scope: string, descriptor: SessionDescriptor): boolean {
-      return descriptor.hand !== undefined || !!this.hands.get(scope)?.size
+      return (
+        options.hands === 'always' ||
+        descriptor.hand !== undefined ||
+        !!this.hands.get(scope)?.size
+      )
     }
 
     private releaseHands(scope: string): void {
@@ -2491,6 +2495,7 @@ export declare namespace create {
       ): string | null | undefined | Promise<string | null | undefined>
     }
     handInstructions?: string
+    hands?: 'always' | 'attached'
     harnesses?: 'both' | 'session'
     instructions?: string
     limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
