@@ -18,6 +18,7 @@ export type Options = {
   environment?: Contracts.HandEnvironment
   capabilities?: Contracts.HandCapability[]
   toolsOnly?: boolean
+  runtimeId?: string
   protocols?: string | string[]
   maxFrameBytes?: number
   WebSocket?: typeof WebSocket
@@ -162,7 +163,7 @@ export async function prepare(
       ...(options.toolsOnly ? { tools_only: true } : {}),
       ...(options.name ? { name: options.name } : {}),
       ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
-      runtime_id: crypto.randomUUID(),
+      runtime_id: options.runtimeId ?? crypto.randomUUID(),
       send: (text, connection) => {
         if (link?.connection === connection) link.send(text)
       },
