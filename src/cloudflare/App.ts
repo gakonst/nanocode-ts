@@ -71,6 +71,7 @@ export type SessionDescriptor = SessionAuthority & {
   codex_subscription?: boolean
   hand?: string
   read_only?: boolean
+  recorded?: boolean
   grant?: unknown
   expires_at?: number
   hand_token?: string
@@ -111,6 +112,7 @@ const workersAiModels = new Set(['glm-5.3'])
 export type Principal = {
   account: string
   read_only?: boolean
+  recorded?: boolean
   grant?: unknown
   expires_at?: number | null
 }
@@ -219,6 +221,10 @@ function requestedYield(operation: unknown): number {
     }
   })() as { yield_time_ms?: unknown } | undefined
   return typeof requested?.yield_time_ms === 'number' ? requested.yield_time_ms : 0
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
 }
 
 function runtimeOf(catalog: string | undefined): string | null {
@@ -480,6 +486,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (!this.recorded && options.recordSession) {
           if (this.metadata.get('recorded') === undefined) {
             if (
+              !descriptor.recorded &&
               !(await options.recordSession(
                 descriptor.account_id,
                 descriptor.session_name,
@@ -564,11 +571,16 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const input = (await request.json().catch(() => null)) as {
             provider?: unknown
             model?: unknown
+            web_search?: unknown
           } | null
           const provider =
             this.metadata.get(`model_provider:${scope}`) ?? input?.provider ?? 'claude'
           if (provider !== 'claude' && provider !== 'codex')
             return json({ error: 'provider must be claude or codex' }, 400)
+          const webSearch = input?.web_search
+          if (webSearch !== undefined && typeof webSearch !== 'boolean')
+            return json({ error: 'web_search must be a boolean' }, 400)
+          if (webSearch !== undefined) descriptor.web_search = webSearch
           const model =
             this.metadata.get(`model:${scope}`) ??
             (typeof input?.model === 'string' && input.model
@@ -841,6 +853,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let retryAt: number | undefined
       try {
         if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
+        else await nextTask()
         const reader = await this.instance(ownerScope)
         const admissions = this.admissions
         const pending = await reader.pending(ownerScope)
@@ -1118,6 +1131,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (!resident) {
         this.counts.runtime_initializations++
         resident = (async () => {
+          await this.ctx.storage.sync()
+          await nextTask()
           const authority = {
             account_id: descriptor.account_id,
             session_id: sessionId,
@@ -2619,6 +2634,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       codex_subscription,
       ...(handing ? { hand_token: handing[2]! } : {}),
       ...(caller?.read_only ? { read_only: true } : {}),
+      ...(caller?.recorded ? { recorded: true } : {}),
       ...(caller?.grant !== undefined ? { grant: caller.grant } : {}),
       ...(typeof caller?.expires_at === 'number' ? { expires_at: caller.expires_at } : {}),
     }
