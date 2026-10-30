@@ -202,6 +202,39 @@ const ownerScope = 'owner'
 const unfinishedStatuses = new Set(['queued', 'running'])
 const interruptedNote = 'Agent execution interrupted; recovery scheduled'
 
+function requestedYield(operation: unknown): number {
+  const body = operation as { source?: unknown; input?: unknown } | undefined
+  const requested = (() => {
+    try {
+      if (typeof body?.source === 'string') {
+        const pragma = body.source.split('\n', 1)[0]?.trimStart()
+        return pragma?.startsWith('// @exec:')
+          ? JSON.parse(pragma.slice('// @exec:'.length))
+          : undefined
+      }
+      if (typeof body?.input === 'string') return JSON.parse(body.input)
+      return body?.input
+    } catch {
+      return undefined
+    }
+  })() as { yield_time_ms?: unknown } | undefined
+  return typeof requested?.yield_time_ms === 'number' ? requested.yield_time_ms : 0
+}
+
+function runtimeOf(catalog: string | undefined): string | null {
+  if (catalog === undefined) return null
+  try {
+    const runtime = (JSON.parse(catalog) as { runtime_id?: unknown }).runtime_id
+    return typeof runtime === 'string' ? runtime : null
+  } catch {
+    return null
+  }
+}
+
+function handRequestKey(hand: string, runtime: string, id: number): string {
+  return `${hand}\u0000${runtime}\u0000${id}`
+}
+
 function executorFailure(error: unknown): Contracts.HostFailureError {
   const message = error instanceof Error ? error.message : String(error)
   if (!(error instanceof Executor.RejectedError))
@@ -268,6 +301,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly handAuthority = new Map<string, SessionDescriptor>()
     private readonly rechecks = new Set<WebSocket>()
     private readonly handFrames = new Map<WebSocket, Promise<void>>()
+    private readonly handIdentities = new Map<string, { hand: string; runtime: string | null }>()
+    private readonly handReplies = new Map<string, Set<(frame: string) => void>>()
+    private handRequestsPruned = 0
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
     private recorded = false
@@ -307,6 +343,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         DROP TABLE IF EXISTS grant_fences;
         CREATE TABLE IF NOT EXISTS hand_sockets (connection TEXT PRIMARY KEY, scope TEXT NOT NULL, hand TEXT NOT NULL, catalog TEXT NOT NULL, descriptor TEXT) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS watch_sockets (id TEXT PRIMARY KEY, scope TEXT NOT NULL, descriptor TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS hand_requests (hand TEXT NOT NULL, runtime TEXT NOT NULL, id INTEGER NOT NULL, scope TEXT NOT NULL, session_id TEXT NOT NULL, call_id TEXT NOT NULL, deadline INTEGER NOT NULL, replied INTEGER, reply TEXT, PRIMARY KEY (hand, runtime, id)) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
       `)
       if (
         !this.store
@@ -914,6 +952,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         for (const id of this.blocked) if (id !== active) this.blocked.delete(id)
         if (active && next?.cancel_requested && next.report.status === 'running')
           this.blocked.add(active)
+        if (active && next?.report.status === 'running') await this.awaitRecoveredHands(scope)
         if (active) this.driving.set(scope, active)
         const driven = await runtime.drive(active)
         this.driving.delete(scope)
@@ -1264,6 +1303,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 remote: {
                   failed: () => remoteFailed || remote?.failure !== undefined,
                   execute: async (request: any, id: number) => {
+                    if (request.op === 'remote_recover')
+                      return this.recoverHandRequest(scope, request)
                     const executor =
                       request.connection != null
                         ? this.connections.get(request.connection)
@@ -1312,6 +1353,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                         "the hand's access token expired or was revoked",
                       )
                     }
+                    if (
+                      request.op === 'remote_send' &&
+                      request.dispatches &&
+                      request.connection != null
+                    )
+                      this.recordHandRequests(scope, request.connection, request)
                     return executor.execute(request, id)
                   },
                   cancel: (id) => {
@@ -1545,6 +1592,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           : undefined
       const previous = this.hands.get(scope)?.get(hand)
       this.indexHand(scope, hand, connection, executor, false)
+      this.resumeHandRequests(scope, hand, executor)
       const hands = this.hands.get(scope)!
       if (
         previous &&
@@ -1578,7 +1626,160 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (!hands) this.hands.set(scope, (hands = new Map()))
       hands.set(hand, { connection, executor, ready })
       this.connections.set(connection, executor)
+      this.handIdentities.set(connection, { hand, runtime: runtimeOf(executor.catalog) })
       void executor.closed.then(() => this.detachHand(scope, hand, connection))
+    }
+
+    private recordHandRequests(
+      scope: string,
+      connection: string,
+      request: Contracts.RemoteRequest,
+    ) {
+      const identity = this.handIdentities.get(connection)
+      if (!identity?.runtime) return
+      const refused = new Set(request.refused ?? [])
+      const now = Date.now()
+      const timeout = policy(this.env.REMOTE_TIMEOUT_MS, 'REMOTE_TIMEOUT_MS')
+      for (const [index, frame] of (request.frames ?? []).entries()) {
+        if (refused.has(index) || !frame.includes('"type":"request"')) continue
+        let parsed: { type?: unknown; id?: unknown; operation?: Record<string, unknown> }
+        try {
+          parsed = JSON.parse(frame)
+        } catch {
+          continue
+        }
+        const operation = parsed.operation && Object.values(parsed.operation)[0]
+        const context = (
+          operation as { context?: { session_id?: unknown; call_id?: unknown } } | undefined
+        )?.context
+        if (
+          parsed.type !== 'request' ||
+          typeof parsed.id !== 'number' ||
+          typeof context?.session_id !== 'string' ||
+          typeof context.call_id !== 'string'
+        )
+          continue
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO hand_requests (hand, runtime, id, scope, session_id, call_id, deadline) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          identity.hand,
+          identity.runtime,
+          parsed.id,
+          scope,
+          context.session_id,
+          context.call_id,
+          now + timeout + requestedYield(operation),
+        )
+      }
+      if (now - this.handRequestsPruned < timeout) return
+      this.handRequestsPruned = now
+      this.ctx.storage.sql.exec(
+        'DELETE FROM hand_requests WHERE replied < ? OR deadline < ?',
+        now - timeout,
+        now - timeout,
+      )
+    }
+
+    private recordHandReply(connection: string | undefined, message: string | ArrayBuffer) {
+      if (connection === undefined || typeof message !== 'string') return
+      if (!message.includes('"type":"reply"')) return
+      const identity = this.handIdentities.get(connection)
+      const id = /"id":(\d+)/.exec(message)?.[1]
+      if (!identity?.runtime || id === undefined) return
+      this.ctx.storage.sql.exec(
+        'UPDATE hand_requests SET replied = ?, reply = ? WHERE hand = ? AND runtime = ? AND id = ?',
+        Date.now(),
+        message,
+        identity.hand,
+        identity.runtime,
+        Number(id),
+      )
+      const key = handRequestKey(identity.hand, identity.runtime, Number(id))
+      for (const waiter of this.handReplies.get(key) ?? []) waiter(message)
+      this.handReplies.delete(key)
+    }
+
+    private resumeHandRequests(scope: string, hand: string, executor: HandExecutor) {
+      const runtime = runtimeOf(executor.catalog)
+      this.ctx.storage.sql.exec(
+        'DELETE FROM hand_requests WHERE scope = ? AND hand = ? AND runtime != ?',
+        scope,
+        hand,
+        runtime ?? '',
+      )
+      if (!runtime) return
+      const pending = this.ctx.storage.sql
+        .exec(
+          'SELECT id FROM hand_requests WHERE scope = ? AND hand = ? AND runtime = ? AND reply IS NULL',
+          scope,
+          hand,
+          runtime,
+        )
+        .toArray()
+        .map((row) => Number(row.id))
+      if (!pending.length) return
+      try {
+        executor.socket.send(JSON.stringify({ type: 'resume', pending }))
+      } catch {}
+    }
+
+    private async recoverHandRequest(
+      scope: string,
+      request: { session_id?: unknown; call_id?: unknown },
+    ): Promise<{ frame: string } | null> {
+      const row = this.ctx.storage.sql
+        .exec(
+          'SELECT hand, runtime, id, deadline, reply FROM hand_requests WHERE scope = ? AND session_id = ? AND call_id = ? ORDER BY deadline DESC LIMIT 1',
+          scope,
+          String(request.session_id),
+          String(request.call_id),
+        )
+        .toArray()[0]
+      if (!row) return null
+      if (row.reply != null) return { frame: String(row.reply) }
+      const hand = String(row.hand)
+      const runtime = String(row.runtime)
+      const key = handRequestKey(hand, runtime, Number(row.id))
+      const deadline = Math.max(
+        Number(row.deadline),
+        Date.now() + policy(this.env.REMOTE_TIMEOUT_MS, 'REMOTE_TIMEOUT_MS'),
+      )
+      return new Promise((resolve) => {
+        const waiters = this.handReplies.get(key) ?? new Set()
+        this.handReplies.set(key, waiters)
+        const done = (frame: string | null) => {
+          clearInterval(watch)
+          waiters.delete(resolved)
+          resolve(frame === null ? null : { frame })
+        }
+        const resolved = (frame: string) => done(frame)
+        waiters.add(resolved)
+        const watch = setInterval(() => {
+          const connected = this.hands.get(scope)?.get(hand)
+          const restarted =
+            connected !== undefined && runtimeOf(connected.executor.catalog) !== runtime
+          if (restarted || Date.now() > deadline) done(null)
+        }, 1_000)
+      })
+    }
+
+    private async awaitRecoveredHands(scope: string): Promise<void> {
+      const wanted = this.ctx.storage.sql
+        .exec(
+          'SELECT DISTINCT hand, runtime FROM hand_requests WHERE scope = ? AND reply IS NULL',
+          scope,
+        )
+        .toArray()
+        .map((row) => ({ hand: String(row.hand), runtime: String(row.runtime) }))
+      if (!wanted.length) return
+      const deadline = Date.now() + policy(this.env.REMOTE_TIMEOUT_MS, 'REMOTE_TIMEOUT_MS')
+      while (Date.now() < deadline) {
+        const missing = wanted.filter(({ hand, runtime }) => {
+          const entry = this.hands.get(scope)?.get(hand)
+          return !entry?.ready || runtimeOf(entry.executor.catalog) !== runtime
+        })
+        if (!missing.length) return
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
     }
 
     private restoreHands(): void {
@@ -1943,6 +2144,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const deliver = async () => {
         if (connection !== undefined && !(await this.handAllowed(connection)))
           return executor.dispose()
+        this.recordHandReply(connection, message)
         executor.receive(message)
       }
       const next = (this.handFrames.get(socket) ?? Promise.resolve()).then(deliver, deliver)
@@ -2119,9 +2321,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private handsMode(scope: string, descriptor: SessionDescriptor): boolean {
       return (
-        options.hands === 'always' ||
-        descriptor.hand !== undefined ||
-        !!this.hands.get(scope)?.size
+        options.hands === 'always' || descriptor.hand !== undefined || !!this.hands.get(scope)?.size
       )
     }
 
@@ -2143,6 +2343,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       this.ctx.storage.sql.exec('DELETE FROM hand_sockets WHERE connection = ?', connection)
       this.connections.delete(connection)
       this.handAuthority.delete(connection)
+      this.handIdentities.delete(connection)
       const hands = this.hands.get(scope)
       if (hands?.get(hand)?.connection === connection) hands.delete(hand)
       void this.residents

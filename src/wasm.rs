@@ -3,6 +3,7 @@ mod bridge;
 mod cells;
 mod events;
 mod hand;
+mod journals;
 mod mcp;
 mod remote;
 mod store;
@@ -40,6 +41,7 @@ use nanocode::{
     },
     tool_contract::{Tool, ToolCollection},
 };
+use nanocode_code_mode::code_mode::CellJournals;
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
 
@@ -765,14 +767,11 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let placement = config.remote || config.hands;
     let local = config.code_mode;
     let instructions = |application: Option<&str>| {
-        [
-            application,
-            placement.then_some(PLACEMENT_INSTRUCTIONS),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        [application, placement.then_some(PLACEMENT_INSTRUCTIONS)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n")
     };
     let environment = config
         .environment
@@ -852,7 +851,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .any(|tool| tool.name() == name || tool.name() == "web_search")
     };
     let host_search = [host_tool("WebSearch"), host_tool("web__run")];
-    let host_image = config.tools.iter().any(|tool| tool.name() == "image_gen__imagegen");
+    let host_image = config
+        .tools
+        .iter()
+        .any(|tool| tool.name() == "image_gen__imagegen");
     shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     let search = |family: Provider| -> Option<Arc<dyn Tool>> {
         let replaced = match family {
@@ -971,7 +973,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .unwrap_or(if local { "local" } else { "default" })
             .into();
         let host: Arc<dyn CodeModeHost> = if local {
-            Arc::new(cells::host(config.workspace.as_deref()))
+            Arc::new(
+                cells::host(config.workspace.as_deref()).journals(restored(&config.scope).await),
+            )
         } else {
             let host = remote::host(None).await?;
             Arc::new(match &hand_tools {
@@ -1039,6 +1043,20 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             })
         }
     }
+}
+
+async fn restored(scope: &str) -> CellJournals {
+    let restored =
+        CellJournals::with_sink(Arc::new(journals::WorkerJournals::new(scope.to_owned())));
+    match journals::load(scope).await {
+        Ok(sessions) => {
+            for (session_id, cells) in sessions {
+                restored.restore(&session_id, cells, None, HashMap::new());
+            }
+        }
+        Err(error) => tracing::warn!(%error, "stored Code Mode cell journals could not be loaded"),
+    }
+    restored
 }
 
 async fn init(config: Value) -> Result<Value, String> {

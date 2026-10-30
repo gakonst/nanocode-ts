@@ -1,10 +1,14 @@
 use std::{cell::RefCell, collections::HashMap, time::Duration};
 
+use std::sync::Arc;
+
 use nanocode_code_mode::{
-    embedded::{CodeModeHostError, HostFuture},
+    Tool,
+    embedded::{CodeModeExecution, CodeModeHostError, CodeModeObserver, HandCalls, HostFuture},
     remote::{
-        HandToolSelection, RemoteActivity, RemoteCatalog, RemoteClient, RemoteCodeModeHost,
-        RemoteDelivery, RemoteFrame as Frame, RemoteLink, RemoteOperation,
+        HandToolSelection, NOT_RECEIVED, REQUEST_IN_USE, RemoteActivity, RemoteCatalog,
+        RemoteClient, RemoteCodeModeHost, RemoteContext, RemoteDelivery, RemoteFrame as Frame,
+        RemoteLink, RemoteOperation, RemoteTransport,
     },
 };
 use serde_json::{Value, json};
@@ -182,6 +186,77 @@ impl RemoteLink for WorkerLink {
     }
 }
 
+struct Recovering {
+    client: RemoteClient,
+    connection: Option<String>,
+    max_frame_bytes: usize,
+}
+
+impl RemoteTransport for Recovering {
+    fn supports_tool_selection(&self) -> bool {
+        self.client.supports_tool_selection()
+    }
+
+    fn request<'a>(
+        &'a self,
+        operation: RemoteOperation,
+        local_tools: Vec<Arc<dyn Tool>>,
+        observer: Option<&'a mut dyn CodeModeObserver>,
+    ) -> HostFuture<'a, Result<Option<CodeModeExecution>, CodeModeHostError>> {
+        self.client.request(operation, local_tools, observer)
+    }
+
+    fn call(&self, operation: RemoteOperation) -> HostFuture<'_, Result<Value, CodeModeHostError>> {
+        self.client.call(operation)
+    }
+
+    fn recover<'a>(
+        &'a self,
+        context: &'a RemoteContext,
+    ) -> Option<HostFuture<'a, Result<Option<Value>, CodeModeHostError>>> {
+        Some(Box::pin(async move {
+            let found = call(json!({"op": "remote_recover", "connection": self.connection, "session_id": context.session_id, "call_id": context.call_id}))
+                .await
+                .map_err(host_error)?;
+            let Some(text) = found.get("frame").and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            match Frame::decode(text, self.max_frame_bytes)? {
+                Frame::Reply {
+                    result: Ok(value), ..
+                } => Ok(value),
+                Frame::Reply {
+                    result: Err(message),
+                    ..
+                } if message == NOT_RECEIVED || message == REQUEST_IN_USE => {
+                    Err(CodeModeHostError::unsent(message))
+                }
+                Frame::Reply {
+                    result: Err(message),
+                    ..
+                } => Err(error(message)),
+                _ => Err(error("the recovered hand frame is not a reply")),
+            }
+        }))
+    }
+
+    fn route_hands(&self, hands: Arc<dyn HandCalls>) {
+        self.client.route_hands(hands);
+    }
+
+    fn notify(&self, operation: RemoteOperation) -> Result<(), CodeModeHostError> {
+        self.client.notify(operation)
+    }
+
+    fn detach_turn(
+        &self,
+        session_id: &str,
+        observer: &mut (dyn FnMut(&str) -> Box<dyn CodeModeObserver> + Send),
+    ) -> Result<(), CodeModeHostError> {
+        self.client.detach_turn(session_id, observer)
+    }
+}
+
 pub fn catalog(frame: &str, max_frame_bytes: usize) -> Result<Value, String> {
     let catalog = RemoteCatalog::decode(frame, max_frame_bytes).map_err(|e| e.to_string())?;
     Ok(json!({"name": catalog.name, "runtime_id": catalog.runtime_id}))
@@ -203,18 +278,16 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
         .as_str()
         .ok_or("remote catalog frame must be text")?;
     let catalog = RemoteCatalog::decode(text, max_frame_bytes).map_err(|e| e.to_string())?;
+    let max_frame_bytes = catalog
+        .max_frame_bytes
+        .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes));
     let (client, driver) = RemoteClient::new(
         WorkerLink {
-            connection,
+            connection: connection.clone(),
             tool_selection: catalog.tool_selection,
             caches_local_tools: catalog.caches_local_tools,
-            resumes: catalog
-                .resumes()
-                .filter(|_| resumes)
-                .map(str::to_owned),
-            max_frame_bytes: catalog
-                .max_frame_bytes
-                .map_or(max_frame_bytes, |peer| peer.min(max_frame_bytes)),
+            resumes: catalog.resumes().filter(|_| resumes).map(str::to_owned),
+            max_frame_bytes,
         },
         Some(Duration::from_millis(timeout_ms)),
     );
@@ -225,7 +298,13 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
     spawn(async move {
         driver.await;
     });
-    Ok(client
-        .into_host(catalog.definitions.clone())
-        .described(&catalog))
+    Ok(RemoteCodeModeHost::new(
+        Recovering {
+            client,
+            connection,
+            max_frame_bytes,
+        },
+        catalog.definitions.clone(),
+    )
+    .described(&catalog))
 }
