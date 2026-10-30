@@ -1624,9 +1624,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       } catch {}
     }
 
-    async webSocketClose(socket: WebSocket): Promise<void> {
+    async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
       if (this.deleted) return
-      this.handSockets.get(socket)?.park()
+      const executor = this.handSockets.get(socket)
+      if (code === Remote.handLeft) executor?.disconnected(reason || 'the hand left')
+      else executor?.park()
       this.handSockets.delete(socket)
       this.forgetWatcher(socket)
       try {
