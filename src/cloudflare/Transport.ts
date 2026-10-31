@@ -300,43 +300,43 @@ export function create(options: create.Options): create.ReturnType {
     session: () => state,
     snapshot: () => ({ ...state }),
     subagents: {
-      async ask(id, options) {
-        return (await control(`subagents/${id}/question`, {
-          method: 'POST',
-          body: JSON.stringify({ question: options.question }),
-          ...(options.signal ? { signal: options.signal } : {}),
-        })) as Contracts.SubagentAnswer
+      async agents(options = {}) {
+        if (!state.id) return []
+        return (
+          (await control('subagents', options.signal ? { signal: options.signal } : {})) as {
+            agents: Contracts.AgentDirectoryEntry[]
+          }
+        ).agents
       },
       async close(id) {
         return (
           (await control(`subagents/${id}/close`, { method: 'POST' })) as {
-            agents: Contracts.SubagentSummary[]
+            agents: Contracts.AgentSummary[]
           }
         ).agents
       },
       async interrupt(id) {
         return (
           (await control(`subagents/${id}/interrupt`, { method: 'POST' })) as {
-            agents: Contracts.SubagentSummary[]
+            agents: Contracts.AgentSummary[]
           }
         ).agents
       },
-      async list(options = {}) {
-        if (!state.id) return []
-        return (
-          (await control('subagents', options.signal ? { signal: options.signal } : {})) as {
-            subagents: Contracts.SubagentEntry[]
-          }
-        ).subagents
-      },
-      async message(id, options) {
+      async sendUserMessage(id, options) {
         return (await control(`subagents/${id}/messages`, {
           method: 'POST',
           body: JSON.stringify({
-            prompt: options.prompt,
+            message: options.message,
             ...(options.priority ? { priority: options.priority } : {}),
           }),
-        })) as Contracts.SubagentReceipt
+        })) as Contracts.MessageReceipt
+      },
+      async sideQuestion(id, options) {
+        return (await control(`subagents/${id}/side_question`, {
+          method: 'POST',
+          body: JSON.stringify({ question: options.question }),
+          ...(options.signal ? { signal: options.signal } : {}),
+        })) as Contracts.SideAnswer
       },
     },
     restore(saved) {

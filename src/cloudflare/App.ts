@@ -2597,8 +2597,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'subagent ids are positive integers' }, 400)
       if (request.method === 'GET' && action === undefined) {
         const runtime = await this.subagentRuntime(scope, descriptor)
-        const entries = runtime ? await runtime.subagents() : []
-        if (id === undefined) return json({ subagents: entries })
+        const entries = runtime ? await runtime.subagents.agents() : []
+        if (id === undefined) return json({ agents: entries })
         const entry = entries.find((candidate) => candidate.agent_id === id)
         return entry ? json(entry) : json({ error: 'subagent not found' }, 404)
       }
@@ -2608,45 +2608,57 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'method not allowed' }, 405)
       if (action === 'events') return json({ error: 'method not allowed' }, 405)
       const input = await (async () => {
-        if (action !== 'messages' && action !== 'question') return {}
+        if (action !== 'messages' && action !== 'side_question') return {}
         const body = await bodyText(request, valueLimit)
         if (body === undefined) return undefined
         try {
-          return JSON.parse(body) as { prompt?: unknown; priority?: unknown; question?: unknown }
+          return JSON.parse(body) as Record<string, unknown>
         } catch {
           return null
         }
       })()
       if (input === undefined) return json({ error: tooLarge }, 413)
-      if (input === null) return json({ error: 'invalid JSON' }, 400)
-      if (action === 'messages' && (typeof input.prompt !== 'string' || !input.prompt.trim()))
-        return json({ error: 'prompt must be a nonempty string' }, 400)
+      if (input === null || typeof input !== 'object' || Array.isArray(input))
+        return json({ error: 'the body must be a JSON object' }, 400)
+      const allowed = action === 'messages' ? ['message', 'priority'] : ['question']
+      const unknown = Object.keys(input).filter((field) => !allowed.includes(field))
+      if (unknown.length) return json({ error: `unknown field ${unknown[0]}` }, 400)
       if (
         action === 'messages' &&
-        input.priority !== undefined &&
-        input.priority !== 'urgent' &&
-        input.priority !== 'deferred'
+        (typeof input['message'] !== 'string' || !input['message'].trim())
+      )
+        return json({ error: 'message must be a nonempty string' }, 400)
+      if (
+        action === 'messages' &&
+        input['priority'] !== undefined &&
+        input['priority'] !== 'urgent' &&
+        input['priority'] !== 'deferred'
       )
         return json({ error: 'priority must be urgent or deferred' }, 400)
-      if (action === 'question' && (typeof input.question !== 'string' || !input.question.trim()))
+      if (
+        action === 'side_question' &&
+        (typeof input['question'] !== 'string' || !input['question'].trim())
+      )
         return json({ error: 'question must be a nonempty string' }, 400)
       const runtime = await this.subagentRuntime(scope, descriptor)
       if (!runtime) return json({ error: 'subagent not found' }, 404)
       try {
         if (action === 'messages') {
-          const receipt = await runtime.messageSubagent(id, {
-            prompt: input.prompt as string,
-            priority: input.priority as Contracts.SubagentPriority | undefined,
+          const receipt = await runtime.subagents.sendUserMessage(id, {
+            message: input['message'] as string,
+            priority: input['priority'] as Contracts.MessagePriority | undefined,
           })
           this.attend(scope, descriptor)
           return json(receipt, 202)
         }
-        if (action === 'question')
-          return json(await runtime.askSubagent(id, input.question as string))
+        if (action === 'side_question')
+          return json(
+            await runtime.subagents.sideQuestion(id, { question: input['question'] as string }),
+          )
         const agents =
           action === 'interrupt'
-            ? await runtime.interruptSubagent(id)
-            : await runtime.closeSubagent(id)
+            ? await runtime.subagents.interrupt(id)
+            : await runtime.subagents.close(id)
         return json({ agents })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -2701,7 +2713,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           400,
         )
       const runtime = await this.subagentRuntime(scope, descriptor)
-      const entries = runtime ? await runtime.subagents() : []
+      const entries = runtime ? await runtime.subagents.agents() : []
       if (!entries.some((entry) => entry.agent_id === id))
         return json({ error: 'subagent not found' }, 404)
       const subtree = url.searchParams.get('subtree') === '1'
@@ -2774,7 +2786,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname)
     const match = files
       ? undefined
-      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|question))?)?)?$/.exec(
+      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|side_question))?)?)?$/.exec(
           url.pathname,
         )
     const routed = (() => {

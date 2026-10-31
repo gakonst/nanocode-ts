@@ -78,9 +78,9 @@ type Body = {
   hand?: unknown
   harness?: unknown
   kind?: unknown
+  message?: unknown
   model?: unknown
   priority?: unknown
-  prompt?: unknown
   question?: unknown
   sessionId?: unknown
   text?: unknown
@@ -93,19 +93,20 @@ function command(body: Body): Harness.SubagentCommand | string {
     return 'agent_id must be a positive integer'
   if (body.action === 'close' || body.action === 'interrupt')
     return { action: body.action, agent_id: id }
-  if (body.action === 'ask')
+  if (body.action === 'side_question')
     return typeof body.question === 'string' && body.question.trim()
-      ? { action: 'ask', agent_id: id, question: body.question }
+      ? { action: 'side_question', agent_id: id, question: body.question }
       : 'question must be a nonempty string'
-  if (body.action !== 'message') return 'action must be ask, close, interrupt or message'
-  if (typeof body.prompt !== 'string' || !body.prompt.trim())
-    return 'prompt must be a nonempty string'
+  if (body.action !== 'send_user_message')
+    return 'action must be close, interrupt, send_user_message or side_question'
+  if (typeof body.message !== 'string' || !body.message.trim())
+    return 'message must be a nonempty string'
   if (body.priority !== undefined && body.priority !== 'urgent' && body.priority !== 'deferred')
     return 'priority must be urgent or deferred'
   return {
-    action: 'message',
+    action: 'send_user_message',
     agent_id: id,
-    prompt: body.prompt,
+    message: body.message,
     ...(body.priority ? { priority: body.priority } : {}),
   }
 }
@@ -282,7 +283,7 @@ export function create(options: create.Options) {
         after = page.next_cursor
       }
       return Response.json(
-        { subagents: Subagents.entries(updates) },
+        { agents: Subagents.entries(updates) },
         { headers: { 'cache-control': 'no-store' } },
       )
     } finally {
@@ -313,7 +314,9 @@ export function create(options: create.Options) {
       if (effect?.status === 'completed') {
         const outcome = effect.output as Harness.SubagentOutcome
         if ('ok' in outcome)
-          return Response.json(outcome.ok, { status: parsed.action === 'message' ? 202 : 200 })
+          return Response.json(outcome.ok, {
+            status: parsed.action === 'send_user_message' ? 202 : 200,
+          })
         return Response.json(
           { error: outcome.error },
           {

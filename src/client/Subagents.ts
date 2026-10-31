@@ -1,23 +1,23 @@
 import type * as Contracts from '../Contracts.ts'
 
 export type Control = {
-  ask(id: number, options: ask.Options): Promise<Contracts.SubagentAnswer>
-  close(id: number): Promise<readonly Contracts.SubagentSummary[]>
-  interrupt(id: number): Promise<readonly Contracts.SubagentSummary[]>
-  list(options?: list.Options): Promise<readonly Contracts.SubagentEntry[]>
-  message(id: number, options: message.Options): Promise<Contracts.SubagentReceipt>
+  agents(options?: agents.Options): Promise<readonly Contracts.AgentDirectoryEntry[]>
+  close(id: number): Promise<readonly Contracts.AgentSummary[]>
+  interrupt(id: number): Promise<readonly Contracts.AgentSummary[]>
+  sendUserMessage(id: number, options: sendUserMessage.Options): Promise<Contracts.MessageReceipt>
+  sideQuestion(id: number, options: sideQuestion.Options): Promise<Contracts.SideAnswer>
 }
 
-export declare namespace ask {
-  type Options = { question: string; signal?: AbortSignal | undefined }
-}
-
-export declare namespace list {
+export declare namespace agents {
   type Options = { signal?: AbortSignal | undefined }
 }
 
-export declare namespace message {
-  type Options = { priority?: Contracts.SubagentPriority | undefined; prompt: string }
+export declare namespace sendUserMessage {
+  type Options = { message: string; priority?: Contracts.MessagePriority | undefined }
+}
+
+export declare namespace sideQuestion {
+  type Options = { question: string; signal?: AbortSignal | undefined }
 }
 
 export type Update = {
@@ -58,8 +58,8 @@ export declare namespace belongs {
   type Options = { members: Set<number>; subtree: boolean }
 }
 
-export function entries(updates: Iterable<Update>): Contracts.SubagentEntry[] {
-  const found = new Map<number, Contracts.SubagentEntry>()
+export function entries(updates: Iterable<Update>): Contracts.AgentDirectoryEntry[] {
+  const found = new Map<number, Contracts.AgentDirectoryEntry>()
   for (const update of updates) {
     if (update.type === 'added' && typeof update.agent?.id === 'number') {
       const agent = update.agent
@@ -75,7 +75,7 @@ export function entries(updates: Iterable<Update>): Contracts.SubagentEntry[] {
         task: typeof agent.task === 'string' ? agent.task : '',
         ...(agent.model === undefined
           ? {}
-          : { model: agent.model as Contracts.SubagentSummary['model'] }),
+          : { model: agent.model as Contracts.AgentSummary['model'] }),
         ...(typeof agent.thinking === 'string'
           ? { thinking: agent.thinking as Contracts.Thinking }
           : {}),
@@ -85,7 +85,7 @@ export function entries(updates: Iterable<Update>): Contracts.SubagentEntry[] {
     if (update.type !== 'status' && update.type !== 'completion') continue
     const entry = typeof update.id === 'number' ? found.get(update.id) : undefined
     if (!entry || entry.status.state === 'closed') continue
-    entry.status = update.status as Contracts.SubagentStatus
+    entry.status = update.status as Contracts.AgentStatus
   }
   return [...found.values()]
     .sort((left, right) => left.agent_id - right.agent_id)
@@ -100,7 +100,7 @@ export function entries(updates: Iterable<Update>): Contracts.SubagentEntry[] {
 }
 
 export function members(
-  listed: readonly Contracts.SubagentEntry[],
+  listed: readonly Contracts.AgentDirectoryEntry[],
   options: members.Options,
 ): Set<number> {
   const found = new Set([options.id])
@@ -121,7 +121,7 @@ export declare namespace members {
 }
 
 export function tree(
-  listed: readonly Contracts.SubagentEntry[],
+  listed: readonly Contracts.AgentDirectoryEntry[],
   options: tree.Options,
 ): number | undefined {
   const parents = new Map(listed.map((entry) => [entry.agent_id, entry.parent_agent_id]))

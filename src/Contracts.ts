@@ -130,17 +130,17 @@ export type ToolCallContext = {
 
 export type Subagent = { id: number; parent: number | null; tree: number }
 
-export type SubagentStatus =
+export type AgentStatus =
   | { state: 'pending' | 'running' | 'interrupted' | 'closing' | 'closed' }
   | { state: 'completed'; output: unknown }
   | { state: 'failed'; error: string }
 
-export type SubagentSummary = {
+export type AgentSummary = {
   agent_id: number
   role: string
   task: string
   parent_agent_id: number | null
-  status: SubagentStatus
+  status: AgentStatus
   model?: string | { backend: string; model: string }
   thinking?: Thinking
   reasoning_mode: 'standard' | 'pro'
@@ -149,15 +149,15 @@ export type SubagentSummary = {
   usage?: Record<string, unknown>
 }
 
-export type SubagentEntry = SubagentSummary & {
+export type AgentDirectoryEntry = AgentSummary & {
   can_manage: boolean
   can_message: boolean
   resuming?: boolean
 }
 
-export type SubagentPriority = 'deferred' | 'urgent'
+export type MessagePriority = 'deferred' | 'urgent'
 
-export type SubagentReceipt = {
+export type MessageReceipt = {
   disposition: 'queued' | 'started' | 'steered'
   from: { kind: 'user' }
   message_id: number
@@ -165,7 +165,7 @@ export type SubagentReceipt = {
   to_agent_id: number
 }
 
-export type SubagentAnswer = { text: string; usage: Record<string, unknown> | null }
+export type SideAnswer = { text: string; usage: Record<string, unknown> | null }
 
 export type TurnReport = Record<string, unknown> & { request_id: string; status: string }
 

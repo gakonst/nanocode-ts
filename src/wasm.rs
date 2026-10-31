@@ -435,20 +435,20 @@ enum Command {
         #[serde(default)]
         into: Option<String>,
     },
-    Subagents {},
-    MessageSubagent {
+    Agents {},
+    SendUserMessage {
         agent_id: u64,
-        prompt: String,
+        message: String,
         #[serde(default)]
         priority: nanocode::subagents::MessagePriority,
     },
-    InterruptSubagent {
+    Interrupt {
         agent_id: u64,
     },
-    CloseSubagent {
+    Close {
         agent_id: u64,
     },
-    AskSubagent {
+    SideQuestion {
         agent_id: u64,
         question: String,
     },
@@ -1633,7 +1633,7 @@ fn execute(command: Command) -> Executed {
                 .map_err(text)?;
             Ok(Value::Bool(steered))
         }),
-        Command::Subagents {} => executed(async move {
+        Command::Agents {} => executed(async move {
             let session = ready()?;
             session
                 .subagents()?
@@ -1641,9 +1641,9 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)
         }),
-        Command::MessageSubagent {
+        Command::SendUserMessage {
             agent_id,
-            prompt,
+            message,
             priority,
         } => executed(async move {
             let session = ready()?;
@@ -1653,12 +1653,12 @@ fn execute(command: Command) -> Executed {
                     session.inbox.session_id(),
                     AgentId::new(agent_id),
                     priority,
-                    prompt,
+                    message,
                 )
                 .await
                 .map_err(text)
         }),
-        Command::InterruptSubagent { agent_id } => executed(async move {
+        Command::Interrupt { agent_id } => executed(async move {
             let session = ready()?;
             session
                 .subagents()?
@@ -1666,7 +1666,7 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)
         }),
-        Command::CloseSubagent { agent_id } => executed(async move {
+        Command::Close { agent_id } => executed(async move {
             let session = ready()?;
             session
                 .subagents()?
@@ -1674,7 +1674,7 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)
         }),
-        Command::AskSubagent { agent_id, question } => executed(async move {
+        Command::SideQuestion { agent_id, question } => executed(async move {
             let session = ready()?;
             let answer = session
                 .subagents()?

@@ -1459,36 +1459,39 @@ async function create(
       ).moved
     },
 
-    async subagents(): Promise<Contracts.SubagentEntry[]> {
-      return (await internal.command('subagents', {})) as Contracts.SubagentEntry[]
-    },
+    subagents: {
+      async agents(): Promise<Contracts.AgentDirectoryEntry[]> {
+        return (await internal.command('agents', {})) as Contracts.AgentDirectoryEntry[]
+      },
 
-    async messageSubagent(
-      agent_id: number,
-      message: { prompt: string; priority?: Contracts.SubagentPriority | undefined },
-    ): Promise<Contracts.SubagentReceipt> {
-      return (await internal.command('message_subagent', {
-        agent_id,
-        prompt: message.prompt,
-        priority: message.priority ?? 'deferred',
-      })) as Contracts.SubagentReceipt
-    },
+      async close(agent_id: number): Promise<Contracts.AgentSummary[]> {
+        return (await internal.command('close', { agent_id })) as Contracts.AgentSummary[]
+      },
 
-    async askSubagent(agent_id: number, question: string): Promise<Contracts.SubagentAnswer> {
-      return (await internal.command('ask_subagent', {
-        agent_id,
-        question,
-      })) as Contracts.SubagentAnswer
-    },
+      async interrupt(agent_id: number): Promise<Contracts.AgentSummary[]> {
+        return (await internal.command('interrupt', { agent_id })) as Contracts.AgentSummary[]
+      },
 
-    async interruptSubagent(agent_id: number): Promise<Contracts.SubagentSummary[]> {
-      return (await internal.command('interrupt_subagent', {
-        agent_id,
-      })) as Contracts.SubagentSummary[]
-    },
+      async sendUserMessage(
+        agent_id: number,
+        options: { message: string; priority?: Contracts.MessagePriority | undefined },
+      ): Promise<Contracts.MessageReceipt> {
+        return (await internal.command('send_user_message', {
+          agent_id,
+          message: options.message,
+          priority: options.priority ?? 'deferred',
+        })) as Contracts.MessageReceipt
+      },
 
-    async closeSubagent(agent_id: number): Promise<Contracts.SubagentSummary[]> {
-      return (await internal.command('close_subagent', { agent_id })) as Contracts.SubagentSummary[]
+      async sideQuestion(
+        agent_id: number,
+        options: { question: string },
+      ): Promise<Contracts.SideAnswer> {
+        return (await internal.command('side_question', {
+          agent_id,
+          question: options.question,
+        })) as Contracts.SideAnswer
+      },
     },
 
     async completionOrigin(requestId: string): Promise<string | null> {

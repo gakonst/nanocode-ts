@@ -82,14 +82,14 @@ export type ModelCall = {
 export type ServiceTier = Contracts.ServiceTier
 
 export type SubagentCommand =
-  | { action: 'ask'; agent_id: number; question: string }
   | { action: 'close' | 'interrupt'; agent_id: number }
   | {
-      action: 'message'
+      action: 'send_user_message'
       agent_id: number
-      priority?: Contracts.SubagentPriority | undefined
-      prompt: string
+      message: string
+      priority?: Contracts.MessagePriority | undefined
     }
+  | { action: 'side_question'; agent_id: number; question: string }
 
 export type SubagentOutcome = { error: string } | { ok: unknown }
 
@@ -744,21 +744,25 @@ async function control(
     { name: 'nanocode.subagent', replay: 'safe', placed: [submission.id], input: command },
     async (): Promise<SubagentOutcome> => {
       try {
-        if (command.action === 'ask')
-          return { ok: await runtime.askSubagent(command.agent_id, command.question) }
-        if (command.action === 'message') {
-          const receipt = await runtime.messageSubagent(command.agent_id, {
-            prompt: command.prompt,
+        if (command.action === 'close')
+          return { ok: { agents: await runtime.subagents.close(command.agent_id) } }
+        if (command.action === 'interrupt')
+          return { ok: { agents: await runtime.subagents.interrupt(command.agent_id) } }
+        if (command.action === 'send_user_message') {
+          const receipt = await runtime.subagents.sendUserMessage(command.agent_id, {
+            message: command.message,
             priority: command.priority,
           })
           await journal.durable()
           return { ok: receipt }
         }
-        const agents =
-          command.action === 'close'
-            ? await runtime.closeSubagent(command.agent_id)
-            : await runtime.interruptSubagent(command.agent_id)
-        return { ok: { agents } }
+        if (command.action === 'side_question')
+          return {
+            ok: await runtime.subagents.sideQuestion(command.agent_id, {
+              question: command.question,
+            }),
+          }
+        return { error: `unknown subagent action ${(command as { action: unknown }).action}` }
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
       }

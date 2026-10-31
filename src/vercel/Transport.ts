@@ -335,42 +335,42 @@ export function create(options: create.Options): Transport {
     session: () => state,
     snapshot: () => ({ ...state }),
     subagents: {
-      async ask(id, options) {
-        return (await control(
-          { action: 'ask', agent_id: id, question: options.question },
-          options.signal,
-        )) as Contracts.SubagentAnswer
-      },
-      async close(id) {
-        return (
-          (await control({ action: 'close', agent_id: id })) as {
-            agents: Contracts.SubagentSummary[]
-          }
-        ).agents
-      },
-      async interrupt(id) {
-        return (
-          (await control({ action: 'interrupt', agent_id: id })) as {
-            agents: Contracts.SubagentSummary[]
-          }
-        ).agents
-      },
-      async list(options = {}) {
+      async agents(options = {}) {
         if (!state.id) return []
         const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&subagents`, {
           headers: headers(),
           ...(options.signal ? { signal: options.signal } : {}),
         })
         if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
-        return ((await response.json()) as { subagents: Contracts.SubagentEntry[] }).subagents
+        return ((await response.json()) as { agents: Contracts.AgentDirectoryEntry[] }).agents
       },
-      async message(id, options) {
+      async close(id) {
+        return (
+          (await control({ action: 'close', agent_id: id })) as {
+            agents: Contracts.AgentSummary[]
+          }
+        ).agents
+      },
+      async interrupt(id) {
+        return (
+          (await control({ action: 'interrupt', agent_id: id })) as {
+            agents: Contracts.AgentSummary[]
+          }
+        ).agents
+      },
+      async sendUserMessage(id, options) {
         return (await control({
-          action: 'message',
+          action: 'send_user_message',
           agent_id: id,
-          prompt: options.prompt,
+          message: options.message,
           ...(options.priority ? { priority: options.priority } : {}),
-        })) as Contracts.SubagentReceipt
+        })) as Contracts.MessageReceipt
+      },
+      async sideQuestion(id, options) {
+        return (await control(
+          { action: 'side_question', agent_id: id, question: options.question },
+          options.signal,
+        )) as Contracts.SideAnswer
       },
     },
     restore(saved) {
