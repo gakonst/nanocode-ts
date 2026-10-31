@@ -27,6 +27,28 @@ export type Options = {
   reconnectMs?: number
   batchMs?: number
   onStatus?(status: Status): void
+  pricing?: Pricing
+}
+
+export type Access = 'cell' | 'read' | 'run' | 'tool' | 'write'
+
+export type Operation = {
+  access: Access
+  agent: string | undefined
+  command: string | undefined
+  id: number
+  input: unknown
+  kind: string
+  max: number | undefined
+  paths: readonly string[]
+  session: string | undefined
+  source: string | undefined
+}
+
+export type Pricing = {
+  describe?: string
+  payee: string
+  price(operation: Operation): number | undefined | Promise<number | undefined>
 }
 
 export type Status = { state: 'connecting' | 'attached' | 'closed'; reason?: string }
@@ -121,10 +143,253 @@ function tokened(
   return { protocols: Remote.bearerProtocols(token) }
 }
 
+const reading = new Set([
+  'Glob',
+  'Grep',
+  'LS',
+  'NotebookRead',
+  'Read',
+  'grep_files',
+  'list_dir',
+  'read_file',
+  'view_image',
+])
+
+const running = new Set([
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'exec_command',
+  'local_shell',
+  'shell',
+  'write_stdin',
+])
+
+const writing = new Set(['Edit', 'MultiEdit', 'NotebookEdit', 'Write', 'apply_patch', 'write_file'])
+
+const pathFields = ['dir_path', 'file_path', 'notebook_path', 'path'] as const
+
+type Incoming = {
+  agent?: unknown
+  id: number
+  max_usd?: unknown
+  operation?: unknown
+  resumable?: unknown
+}
+
+function meter(pricing: Pricing, cwd: string) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(pricing.payee))
+    throw new Error('pricing.payee must be a 0x-prefixed 20-byte address')
+
+  const quotes = new Map<number, { charge: string; resumable: boolean }>()
+  const advertised = {
+    ...(pricing.describe ? { describe: pricing.describe } : {}),
+    payee: pricing.payee,
+  }
+  return {
+    capability: {
+      description:
+        (pricing.describe ? pricing.describe + ' ' : '') +
+        'This hand charges in USD for the operations it prices: the brain bills each charge to whoever pays for the agent before the result arrives, and refuses an operation that costs more than the request allows before it runs.',
+      name: 'pricing',
+      permission: () => 'granted' as const,
+    },
+
+    catalog: (text: string) => append(text, 'pricing', advertised),
+
+    async inbound(text: string, answer: (text: string) => void): Promise<string | undefined> {
+      if (text.includes('"type":"ack"')) {
+        const ids = (JSON.parse(text) as { ids?: unknown }).ids
+        if (Array.isArray(ids)) for (const id of ids) quotes.delete(id as number)
+        return text
+      }
+      if (!text.includes('"type":"request"')) return text
+
+      const frame = JSON.parse(text) as Incoming
+      const operation = operationOf(frame, cwd)
+      if (!operation) return text
+
+      const refuse = (reason: string) => {
+        answer(JSON.stringify({ type: 'reply', id: frame.id, result: { Err: reason } }))
+        return undefined
+      }
+      const quoted = await Promise.resolve()
+        .then(() => pricing.price(operation))
+        .then(
+          (usd) => ({ usd }),
+          (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+        )
+      if ('error' in quoted)
+        return refuse(`the hand refused this operation: ${quoted.error}; nothing ran`)
+      if (quoted.usd === undefined || quoted.usd === 0) return text
+      if (!Number.isFinite(quoted.usd) || quoted.usd < 0)
+        return refuse('the hand priced this operation at an invalid amount; nothing ran')
+
+      const usd = Math.max(1, Math.round(quoted.usd * 1e6)) / 1e6
+      if (operation.max === undefined)
+        return refuse(
+          `this hand charges ${dollars(usd)} for this operation, and the brain that sent it does not bill hand charges; nothing ran`,
+        )
+      if (usd > operation.max)
+        return refuse(
+          `this operation costs ${dollars(usd)}, more than the ${dollars(operation.max)} this request allows; nothing ran`,
+        )
+
+      const item = [operation.kind, ...operation.paths].join(' ').slice(0, 200)
+      quotes.set(frame.id, {
+        charge: JSON.stringify({ item, usd }),
+        resumable: frame.resumable === true,
+      })
+      return text
+    },
+
+    outbound(text: string) {
+      if (!quotes.size) return text
+
+      const head = text.slice(0, 256)
+      const type = /"type":"(reply|update)"/.exec(head)?.[1]
+      const id = Number(/"id":(\d+)/.exec(head)?.[1])
+      const quote = type ? quotes.get(id) : undefined
+      if (!quote) return text
+
+      if (type === 'reply') {
+        const result = text.indexOf('"result":')
+        const failed = text.startsWith('{"Err"', result + 9)
+        if (failed || !quote.resumable) quotes.delete(id)
+        if (failed) return text
+      }
+      return text.slice(0, text.lastIndexOf('}')) + ',"charge":' + quote.charge + '}'
+    },
+  }
+}
+
+function append(text: string, key: string, value: unknown) {
+  return text.slice(0, text.lastIndexOf('}')) + `,"${key}":` + JSON.stringify(value) + '}'
+}
+
+function dollars(usd: number) {
+  return '$' + String(Number(usd.toFixed(6)))
+}
+
+function operationOf(frame: Incoming, cwd: string): Operation | undefined {
+  if (!frame.operation || typeof frame.operation !== 'object') return undefined
+
+  const [variant, body] = Object.entries(frame.operation)[0] ?? []
+  if (variant !== 'Call' && variant !== 'Execute' && variant !== 'Wait') return undefined
+
+  const fields = (body ?? {}) as {
+    context?: { session_id?: unknown }
+    input?: unknown
+    name?: unknown
+    source?: unknown
+  }
+  const common = {
+    agent: typeof frame.agent === 'string' ? frame.agent : undefined,
+    id: frame.id,
+    max: typeof frame.max_usd === 'number' ? frame.max_usd : undefined,
+    session: typeof fields.context?.session_id === 'string' ? fields.context.session_id : undefined,
+  }
+  if (variant !== 'Call')
+    return {
+      ...common,
+      access: 'cell',
+      command: undefined,
+      input: variant === 'Wait' ? fields.input : undefined,
+      kind: variant === 'Wait' ? 'wait' : 'execute',
+      paths: [],
+      source: typeof fields.source === 'string' ? fields.source : undefined,
+    }
+
+  const name = String(fields.name)
+  const input = fields.input
+  const values = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const command = [values['cmd'], values['command']].find((value) => typeof value === 'string') as
+    | string
+    | undefined
+  return {
+    ...common,
+    access: accessOf(name),
+    command,
+    input,
+    kind: name,
+    paths: pathsOf(input, values, command, cwd),
+    source: undefined,
+  }
+}
+
+function accessOf(name: string): Access {
+  if (reading.has(name)) return 'read'
+  if (writing.has(name)) return 'write'
+  if (running.has(name)) return 'run'
+  return 'tool'
+}
+
+function pathsOf(
+  input: unknown,
+  values: Record<string, unknown>,
+  command: string | undefined,
+  cwd: string,
+) {
+  const found: string[] = []
+  for (const key of pathFields) if (typeof values[key] === 'string') found.push(values[key])
+  if (Array.isArray(values['paths']))
+    for (const path of values['paths']) if (typeof path === 'string') found.push(path)
+
+  const patch = [input, values['input'], values['patch']].find(
+    (value): value is string => typeof value === 'string',
+  )
+  if (patch)
+    for (const match of patch.matchAll(
+      /^\*\*\* (?:Add File|Delete File|Update File|Move to): (.+)$/gm,
+    ))
+      found.push(match[1]!.trim())
+  if (command) found.push(...words(command))
+
+  const base = [values['workdir'], values['cwd']].find(
+    (value): value is string => typeof value === 'string',
+  )
+  return [...new Set(found.map((path) => normalize(path, base, cwd)))]
+}
+
+function words(command: string) {
+  const found: string[] = []
+  for (const segment of command.split(/&&|\|\||[;|&\n()]/)) {
+    let first = true
+    for (const match of segment.matchAll(/'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)/g)) {
+      const word = (match[1] ?? match[2] ?? match[3] ?? '').replace(/^\d*[<>]+/, '')
+      if (first && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
+      if (first) {
+        first = false
+        continue
+      }
+      if (word && !word.startsWith('-')) found.push(word)
+    }
+  }
+  return found
+}
+
+function normalize(path: string, base: string | undefined, cwd: string) {
+  const root = cwd.replace(/\/+$/, '')
+  const from = base === undefined ? root : base.startsWith('/') ? base : root + '/' + base
+  const parts: string[] = []
+  for (const part of (path.startsWith('/') ? path : from + '/' + path).split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+
+  const absolute = '/' + parts.join('/')
+  if (absolute === root) return '.'
+  return absolute.startsWith(root + '/') ? absolute.slice(root.length + 1) : absolute
+}
+
 export async function prepare(
   module: WebAssembly.Module,
   options: Omit<Options, 'url' | 'onStatus'>,
 ): Promise<Prepared> {
+  const cwd = options.cwd ?? '/workspace'
+  const metered = options.pricing ? meter(options.pricing, cwd) : undefined
+  const capabilities = [...(options.capabilities ?? []), ...(metered ? [metered.capability] : [])]
   const runtime = await AgentRuntime.instantiate(module, NO_SQL, { published() {} })
   const send =
     options.fetch ?? ((input: string, init: RequestInit) => globalThis.fetch(input, init))
@@ -137,7 +402,6 @@ export async function prepare(
         : { body: request.body as Uint8Array<ArrayBuffer> }),
       signal,
     })
-  const cwd = options.cwd ?? '/workspace'
   let link:
     | { connection: number; send(text: string): void; close(code: number, reason: string): void }
     | undefined
@@ -159,13 +423,13 @@ export async function prepare(
       ...(options.mcpServers?.length ? { mcp_servers: options.mcpServers } : {}),
       ...(options.mcp ? { mcp: options.mcp } : {}),
       environment: options.environment ?? { shell: 'bash' },
-      ...(options.capabilities?.length ? { capabilities: options.capabilities } : {}),
+      ...(capabilities.length ? { capabilities } : {}),
       ...(options.toolsOnly ? { tools_only: true } : {}),
       ...(options.name ? { name: options.name } : {}),
       ...(options.maxFrameBytes ? { max_frame_bytes: options.maxFrameBytes } : {}),
       runtime_id: options.runtimeId ?? crypto.randomUUID(),
       send: (text, connection) => {
-        if (link?.connection === connection) link.send(text)
+        if (link?.connection === connection) link.send(metered ? metered.outbound(text) : text)
       },
       failed: (reason, connection) => {
         if (link?.connection === connection) link.close(1011, reason.slice(0, 120))
@@ -174,6 +438,10 @@ export async function prepare(
   } catch (error) {
     void runtime.dispose().catch(() => {})
     throw error
+  }
+  const admit = async (text: string, answer: (text: string) => void) => {
+    const admitted = metered ? await metered.inbound(text, answer) : text
+    if (admitted !== undefined) await hand.receive(admitted)
   }
   let used = false
   return {
@@ -207,13 +475,19 @@ export async function prepare(
         const { catalog, connection } = await hand.connect()
         let queue = Promise.resolve()
         const receive = (text: string) => {
-          queue = queue.then(() => hand.receive(text)).catch(() => {})
+          queue = queue.then(() => admit(text, (answer) => link?.send(answer))).catch(() => {})
         }
         const gone = (reason: string) => {
           void hand.closed().catch(() => {})
           finish(reason)
         }
-        const stream = await streamLink({ ...options, url }, catalog, receive, gone, closed)
+        const stream = await streamLink(
+          { ...options, url },
+          metered ? metered.catalog(catalog) : catalog,
+          receive,
+          gone,
+          closed,
+        )
         link = { connection, send: (text) => stream.send(text), close: () => stream.close() }
         onStatus?.({ state: 'attached' })
         return { closed, close: () => stream.close() }
@@ -256,7 +530,7 @@ export async function prepare(
                           } catch {}
                         },
                       }
-                      current.send(opened.catalog)
+                      current.send(metered ? metered.catalog(opened.catalog) : opened.catalog)
                       ready = true
                       for (const text of buffered.splice(0)) current.send(text)
                     },
@@ -285,7 +559,7 @@ export async function prepare(
               typeof event.data === 'string'
                 ? event.data
                 : new TextDecoder().decode(event.data as ArrayBuffer)
-            queue = queue.then(() => hand.receive(text)).catch(() => {})
+            queue = queue.then(() => admit(text, (answer) => link?.send(answer))).catch(() => {})
           })
           let ended = false
           const end = (code: number, reason: string) => {
