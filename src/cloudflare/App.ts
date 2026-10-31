@@ -21,6 +21,7 @@ import * as HandToken from './internal/HandToken.ts'
 import { headerJson, json } from './internal/Http.ts'
 import * as Metadata from './internal/Metadata.ts'
 import * as PlanModels from '../client/Plans.ts'
+import * as Subagents from '../client/Subagents.ts'
 import * as Plans from './Plans.ts'
 import * as Relay from './Relay.ts'
 import * as Sql from './Sql.ts'
@@ -82,12 +83,14 @@ export type ModelDispatch = {
   authority: SessionAuthority
   endpoint: string
   headers: [string, string][]
+  origin: string | null
+  subagent: Contracts.Subagent | null
   subscription: boolean
 }
 
 export type SocketDispatch = Pick<
   ModelDispatch,
-  'provider' | 'authority' | 'endpoint' | 'headers' | 'subscription'
+  'provider' | 'authority' | 'endpoint' | 'headers' | 'origin' | 'subagent' | 'subscription'
 >
 
 export type PrivateBinding = {
@@ -617,6 +620,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ armed: true, after_ms: after })
         }
         if (parts[2] === 'files') return await this.files(scope, url, request)
+        if (parts[2] === 'subagents')
+          return await this.subagents(scope, parts, url, request, descriptor)
         if (parts[2] !== 'turns') return json({ error: 'route not found' }, 404)
         if (request.method === 'GET' && parts.length === 4) {
           const turn = await (await this.instance(scope)).turn(scope, decodeURIComponent(parts[3]))
@@ -1165,10 +1170,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           void connecting?.catch(() => {})
           const githubToken = options.github?.token
           const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
-          const hostFetch = options.codeMode?.fetch?.(authority, this.env)
-          const cellFetch = Egress.guard(
-            hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
-          )
+          const guarded = (subagent?: Contracts.Subagent) => {
+            const hostFetch = options.codeMode?.fetch?.(authority, this.env, subagent)
+            return Egress.guard(
+              hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
+            )
+          }
+          const cellFetch = guarded()
           const pythonRemote = options.workspace
             ? options.workspace.python?.(authority, this.env)
             : undefined
@@ -1176,9 +1184,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             typeof options.mcp?.servers === 'function'
               ? options.mcp.servers(authority, this.env)
               : (options.mcp?.servers ?? [])
-          const mcpFetch =
-            options.mcp?.fetch?.(authority, this.env) ??
+          const mcpFetch = (subagent?: Contracts.Subagent) =>
+            options.mcp?.fetch?.(authority, this.env, subagent) ??
             ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init))
+          const sessionMcpFetch = mcpFetch()
           const mcpStore = mcpServers.length ? options.mcp?.store?.(this.env) : undefined
           const shell =
             options.workspace === false || enabled
@@ -1261,6 +1270,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 remote: enabled,
                 executor: descriptor.executor_id,
                 ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
+                ...(options.maxResidentSubagents === undefined
+                  ? {}
+                  : { max_resident_subagents: options.maxResidentSubagents }),
                 ...withHand(
                   options.instructions,
                   this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -1285,7 +1297,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               {
                 ...(shell ? { workspace: shell.workspace() } : {}),
                 ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
-                fetch: cellFetch,
+                fetch: (input, init, subagent) =>
+                  subagent ? guarded(subagent)(input, init) : cellFetch(input, init),
                 tools: options.tools && {
                   call: async (name, input, signal, context) => {
                     if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
@@ -1391,20 +1404,25 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
                   this.counts.model_dispatches++
                   if (request.provider == null && mcpServers.length)
-                    return mcpFetch(request.endpoint, {
-                      method: request.method,
-                      headers: request.headers,
-                      body:
-                        request.method === 'GET' || request.method === 'HEAD'
-                          ? undefined
-                          : (request.body as Uint8Array<ArrayBuffer>),
-                      signal,
-                    })
+                    return (request.subagent ? mcpFetch(request.subagent) : sessionMcpFetch)(
+                      request.endpoint,
+                      {
+                        method: request.method,
+                        headers: request.headers,
+                        body:
+                          request.method === 'GET' || request.method === 'HEAD'
+                            ? undefined
+                            : (request.body as Uint8Array<ArrayBuffer>),
+                        signal,
+                      },
+                    )
                   const dispatch: ModelDispatch = {
                     endpoint: request.endpoint,
                     headers: request.headers,
                     authority,
+                    origin: request.origin,
                     provider: request.provider ?? descriptor.provider ?? 'claude',
+                    subagent: request.subagent,
                     subscription: descriptor.subscription,
                   }
                   const response = await egress(this.env).fetch(
@@ -1445,6 +1463,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                             provider: request.provider,
                             endpoint: codexEndpoint + '/responses',
                             headers: request.headers,
+                            origin: request.origin,
+                            subagent: request.subagent,
                             subscription: descriptor.subscription,
                           } satisfies SocketDispatch),
                         },
@@ -2199,14 +2219,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         : (JSON.parse(background) as SessionDescriptor).grant
     }
 
-    private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
-      const sessionId = this.metadata.get(this.sessionKey(scope))
-      if (!sessionId) return false
+    private bound(scope: string, base: SessionDescriptor): SessionDescriptor {
       const provider = (this.metadata.get(`model_provider:${scope}`) ??
         'claude') as Contracts.ModelProvider
       const executor = this.metadata.get(`executor:${scope}`) ?? this.legacyExecutor()
       const model = this.metadata.get('model:' + scope)
-      const descriptor: SessionDescriptor = {
+      return {
         ...base,
         executor_id: executor || undefined,
         hand: undefined,
@@ -2218,6 +2236,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
         ),
       }
+    }
+
+    private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
+      const sessionId = this.metadata.get(this.sessionKey(scope))
+      if (!sessionId) return false
+      const descriptor = this.bound(scope, base)
       const resident = this.runtimes.get(scope)
       const busy = this.pumping || !this.queueKnownEmpty() || !!this.metadata.first('background:')
       const current = resident && busy ? await resident.catch(() => undefined) : undefined
@@ -2560,6 +2584,153 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return uploaded instanceof Response ? uploaded : json(uploaded)
     }
 
+    private async subagents(
+      scope: string,
+      parts: string[],
+      url: URL,
+      request: Request,
+      descriptor: SessionDescriptor,
+    ): Promise<Response> {
+      const id = parts[3] === undefined ? undefined : Number(parts[3])
+      const action = parts[4]
+      if (id !== undefined && (!Number.isSafeInteger(id) || id <= 0))
+        return json({ error: 'subagent ids are positive integers' }, 400)
+      if (request.method === 'GET' && action === undefined) {
+        const runtime = await this.subagentRuntime(scope, descriptor)
+        const entries = runtime ? await runtime.subagents() : []
+        if (id === undefined) return json({ subagents: entries })
+        const entry = entries.find((candidate) => candidate.agent_id === id)
+        return entry ? json(entry) : json({ error: 'subagent not found' }, 404)
+      }
+      if (request.method === 'GET' && action === 'events' && id !== undefined)
+        return await this.subagentEvents(scope, id, url, request, descriptor)
+      if (request.method !== 'POST' || id === undefined || action === undefined)
+        return json({ error: 'method not allowed' }, 405)
+      if (action === 'events') return json({ error: 'method not allowed' }, 405)
+      const input = await (async () => {
+        if (action !== 'messages' && action !== 'question') return {}
+        const body = await bodyText(request, valueLimit)
+        if (body === undefined) return undefined
+        try {
+          return JSON.parse(body) as { prompt?: unknown; priority?: unknown; question?: unknown }
+        } catch {
+          return null
+        }
+      })()
+      if (input === undefined) return json({ error: tooLarge }, 413)
+      if (input === null) return json({ error: 'invalid JSON' }, 400)
+      if (action === 'messages' && (typeof input.prompt !== 'string' || !input.prompt.trim()))
+        return json({ error: 'prompt must be a nonempty string' }, 400)
+      if (
+        action === 'messages' &&
+        input.priority !== undefined &&
+        input.priority !== 'urgent' &&
+        input.priority !== 'deferred'
+      )
+        return json({ error: 'priority must be urgent or deferred' }, 400)
+      if (action === 'question' && (typeof input.question !== 'string' || !input.question.trim()))
+        return json({ error: 'question must be a nonempty string' }, 400)
+      const runtime = await this.subagentRuntime(scope, descriptor)
+      if (!runtime) return json({ error: 'subagent not found' }, 404)
+      try {
+        if (action === 'messages') {
+          const receipt = await runtime.messageSubagent(id, {
+            prompt: input.prompt as string,
+            priority: input.priority as Contracts.SubagentPriority | undefined,
+          })
+          this.attend(scope, descriptor)
+          return json(receipt, 202)
+        }
+        if (action === 'question')
+          return json(await runtime.askSubagent(id, input.question as string))
+        const agents =
+          action === 'interrupt'
+            ? await runtime.interruptSubagent(id)
+            : await runtime.closeSubagent(id)
+        return json({ agents })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return json(
+          { error: message },
+          /unknown agent_id|no subagents|not a root session/.test(message) ? 404 : 409,
+        )
+      }
+    }
+
+    private async subagentRuntime(
+      scope: string,
+      base: SessionDescriptor,
+    ): Promise<AgentRuntime.AgentRuntime | undefined> {
+      const resident = this.runtimes.get(scope)
+      const current = resident ? await resident.catch(() => undefined) : undefined
+      if (current?.reusable) return current
+      const sessionId = this.metadata.get(this.sessionKey(scope))
+      if (!sessionId) return undefined
+      const background = this.metadata.get(`background:${scope}`)
+      const runtime = await this.runtime(
+        scope,
+        sessionId,
+        background === undefined
+          ? this.bound(scope, base)
+          : (JSON.parse(background) as SessionDescriptor),
+      )
+      if (!this.pumping && this.queueKnownEmpty() && !this.metadata.first('background:'))
+        this.releaseIdle(true)
+      return runtime
+    }
+
+    private attend(scope: string, descriptor: SessionDescriptor): void {
+      if (!this.metadata.first('background:'))
+        this.metadata.set(`background:${scope}`, JSON.stringify(this.bound(scope, descriptor)))
+      if (!this.pumping) this.ctx.waitUntil(this.pump())
+    }
+
+    private async subagentEvents(
+      scope: string,
+      id: number,
+      url: URL,
+      request: Request,
+      descriptor: SessionDescriptor,
+    ): Promise<Response> {
+      const cursor = this.cursor(url, request)
+      if (!cursor)
+        return json(
+          {
+            error: `after must be a nonnegative integer and limit must be between 1 and ${policy(this.env.EVENT_PAGE_SIZE, 'EVENT_PAGE_SIZE')}`,
+          },
+          400,
+        )
+      const runtime = await this.subagentRuntime(scope, descriptor)
+      const entries = runtime ? await runtime.subagents() : []
+      if (!entries.some((entry) => entry.agent_id === id))
+        return json({ error: 'subagent not found' }, 404)
+      const subtree = url.searchParams.get('subtree') === '1'
+      const members = Subagents.members(entries, { id, subtree })
+      const read = async (after: number): Promise<Contracts.LogPage> => {
+        const events: Contracts.LoggedEvent[] = []
+        for (let next = after; ; ) {
+          if (!(await this.allowed(descriptor))) throw new Error('access token expired or revoked')
+          const page =
+            this.eventHub.recent(next) ??
+            (await (await this.instance(scope)).page(scope, next, cursor.limit))
+          for (const event of page.events) {
+            const update = Subagents.update(event)
+            if (update && Subagents.belongs(update, { members, subtree })) events.push(event)
+          }
+          if (events.length || !page.has_more || page.next_cursor <= next)
+            return { events, next_cursor: page.next_cursor, has_more: page.has_more }
+          next = page.next_cursor
+        }
+      }
+      if (request.headers.get('accept')?.includes('text/event-stream'))
+        return this.eventHub.stream(
+          cursor.after,
+          policy(this.env.EVENT_STREAM_KEEPALIVE_MS, 'EVENT_STREAM_KEEPALIVE_MS'),
+          read,
+        )
+      return json(await read(cursor.after))
+    }
+
     private scopeTimings(scope: string): Timing.Timings {
       let value = this.timings.get(scope)
       if (!value) {
@@ -2603,16 +2774,18 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname)
     const match = files
       ? undefined
-      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm)(?:\/([^/]+)(?:\/(cancel))?)?)?$/.exec(
+      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|question))?)?)?$/.exec(
           url.pathname,
         )
-    if (
-      !files &&
-      (!match ||
-        (match[3] !== undefined && match[2] !== 'turns' && match[2] !== 'hands') ||
-        (match[4] !== undefined && match[2] !== 'turns'))
-    )
-      return json({ error: 'route not found' }, 404)
+    const routed = (() => {
+      if (files) return true
+      if (!match) return false
+      const [, , route, item, action] = match
+      if (route === 'subagents') return action !== 'cancel'
+      if (action !== undefined) return route === 'turns' && action === 'cancel'
+      return item === undefined || route === 'turns' || route === 'hands'
+    })()
+    if (!routed) return json({ error: 'route not found' }, 404)
     let name: string
     try {
       name = decodeURIComponent((files ?? match)![1])
@@ -2639,7 +2812,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       ...(typeof caller?.expires_at === 'number' ? { expires_at: caller.expires_at } : {}),
     }
     let path = files ? `/internal/files${files[2] ?? ''}` : `/internal/${match![2] ?? 'metrics'}`
-    if (match?.[4]) path = `/internal/cancel/${match[3]}`
+    if (match?.[4] && match[2] === 'turns') path = `/internal/cancel/${match[3]}`
+    else if (match?.[4]) path += `/${match[3]}/${match[4]}`
     else if (match?.[3]) path += `/${match[3]}`
     const headers = new Headers(request.headers)
     headers.delete('authorization')
@@ -2705,7 +2879,9 @@ export declare namespace create {
       env: E,
     ): Promise<string | Principal | null> | string | Principal | null
     chaos?: boolean
-    codeMode?: { fetch?(authority: SessionAuthority, env: E): typeof fetch }
+    codeMode?: {
+      fetch?(authority: SessionAuthority, env: E, subagent?: Contracts.Subagent): typeof fetch
+    }
     egress(env: E): PrivateBinding
     github?: {
       token?(
@@ -2719,11 +2895,12 @@ export declare namespace create {
     instructions?: string
     limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
     liveDeltas?: boolean
+    maxResidentSubagents?: number
     mcp?: {
       servers:
         | Contracts.McpServer[]
         | ((authority: SessionAuthority, env: E) => Contracts.McpServer[])
-      fetch?(authority: SessionAuthority, env: E): typeof fetch
+      fetch?(authority: SessionAuthority, env: E, subagent?: Contracts.Subagent): typeof fetch
       store?(env: E): Contracts.McpStore | undefined
     }
     plans?: Plans.Options<E>

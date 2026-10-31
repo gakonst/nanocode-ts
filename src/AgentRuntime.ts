@@ -432,6 +432,7 @@ async function create(
                 headers: request.headers,
                 body: request.body,
                 origin: request.origin ?? null,
+                subagent: request.subagent ?? null,
               },
               controller.signal,
               timing,
@@ -573,12 +574,15 @@ async function create(
           internal.onCancel(id, () => controller.abort())
           const body: Uint8Array | string | undefined =
             request.body instanceof Uint8Array ? request.body : input.body
-          const response = await (state.options.fetch ?? globalThis.fetch)(input.url, {
+          const init: RequestInit = {
             method: input.method ?? 'GET',
             ...(input.headers ? { headers: input.headers } : {}),
             ...(body !== undefined ? { body: body as BodyInit } : {}),
             signal: controller.signal,
-          })
+          }
+          const response = state.options.fetch
+            ? await state.options.fetch(input.url, init, request.subagent ?? null)
+            : await globalThis.fetch(input.url, init)
           return framed(
             {
               status: response.status,
@@ -625,6 +629,7 @@ async function create(
                 provider: request.provider,
                 headers: request.headers,
                 origin: request.origin ?? null,
+                subagent: request.subagent ?? null,
               },
               controller.signal,
               timing,
@@ -676,7 +681,7 @@ async function create(
           const entry = state.sockets.get(request.id)
           if (entry?.closed !== undefined) return { closed: entry.closed }
           if (!entry) return { closed: 'after the client released it' }
-          await state.options.socket!.admit(request.origin ?? null)
+          await state.options.socket!.admit(request.origin ?? null, request.subagent ?? null)
           if (entry.closed !== undefined) return { closed: entry.closed }
           try {
             entry.socket.send(state.decoder.decode(request.body))
@@ -1452,6 +1457,28 @@ async function create(
           moved: Contracts.MovedQueued
         }
       ).moved
+    },
+
+    async subagents(): Promise<Contracts.SubagentEntry[]> {
+      return (await internal.command('subagents', {})) as Contracts.SubagentEntry[]
+    },
+
+    async messageSubagent(
+      agent_id: number,
+      message: { prompt: string; priority?: Contracts.SubagentPriority | undefined },
+    ): Promise<Contracts.SubagentReceipt> {
+      return (await internal.command('message_subagent', {
+        agent_id,
+        prompt: message.prompt,
+        priority: message.priority ?? 'deferred',
+      })) as Contracts.SubagentReceipt
+    },
+
+    async askSubagent(agent_id: number, question: string): Promise<Contracts.SubagentAnswer> {
+      return (await internal.command('ask_subagent', {
+        agent_id,
+        question,
+      })) as Contracts.SubagentAnswer
     },
 
     async interruptSubagent(agent_id: number): Promise<Contracts.SubagentSummary[]> {

@@ -2,6 +2,7 @@ import type * as LiveEvent from '../client/LiveEvent.ts'
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
 import * as ClientTransport from '../client/Transport.ts'
+import type * as Contracts from '../Contracts.ts'
 import * as Files from '../internal/Files.ts'
 
 export const attachmentBytes = 3 * 1024 * 1024
@@ -175,6 +176,21 @@ export function create(options: create.Options): Transport {
     return files.length ? { attachments: files } : {}
   }
 
+  const control = async (
+    command: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> => {
+    if (!state.id) throw new Error('no session yet')
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ kind: 'subagent', sessionId: state.id, ...command }),
+      ...(signal ? { signal } : {}),
+    })
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
+    return await response.json()
+  }
+
   const listing = async (): Promise<Relay.Listing> => {
     if (!state.id) return { hands: [], toolsOnly: [] }
     const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&hands`, {
@@ -318,6 +334,45 @@ export function create(options: create.Options): Transport {
     },
     session: () => state,
     snapshot: () => ({ ...state }),
+    subagents: {
+      async ask(id, options) {
+        return (await control(
+          { action: 'ask', agent_id: id, question: options.question },
+          options.signal,
+        )) as Contracts.SubagentAnswer
+      },
+      async close(id) {
+        return (
+          (await control({ action: 'close', agent_id: id })) as {
+            agents: Contracts.SubagentSummary[]
+          }
+        ).agents
+      },
+      async interrupt(id) {
+        return (
+          (await control({ action: 'interrupt', agent_id: id })) as {
+            agents: Contracts.SubagentSummary[]
+          }
+        ).agents
+      },
+      async list(options = {}) {
+        if (!state.id) return []
+        const response = await fetch(`${url}?sessionId=${encodeURIComponent(state.id)}&subagents`, {
+          headers: headers(),
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+        if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
+        return ((await response.json()) as { subagents: Contracts.SubagentEntry[] }).subagents
+      },
+      async message(id, options) {
+        return (await control({
+          action: 'message',
+          agent_id: id,
+          prompt: options.prompt,
+          ...(options.priority ? { priority: options.priority } : {}),
+        })) as Contracts.SubagentReceipt
+      },
+    },
     restore(saved) {
       state = saved && typeof saved === 'object' ? { ...(saved as Session) } : {}
       warmed = undefined

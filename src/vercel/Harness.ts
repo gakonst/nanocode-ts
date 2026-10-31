@@ -38,6 +38,8 @@ export const scope = 'session'
 
 export const sessionKey = 'nanocode.session'
 
+export const subagentText = '\u0000nanocode:subagent '
+
 export const waitPollMs = 250
 
 const streamedWasmCalls = 20
@@ -78,6 +80,18 @@ export type ModelCall = {
 }
 
 export type ServiceTier = Contracts.ServiceTier
+
+export type SubagentCommand =
+  | { action: 'ask'; agent_id: number; question: string }
+  | { action: 'close' | 'interrupt'; agent_id: number }
+  | {
+      action: 'message'
+      agent_id: number
+      priority?: Contracts.SubagentPriority | undefined
+      prompt: string
+    }
+
+export type SubagentOutcome = { error: string } | { ok: unknown }
 
 export type Session = {
   session_id: string
@@ -505,7 +519,12 @@ export function exceeds(state: SessionState, options: exceeds.Options): boolean 
   let index = 0
   for (const submission of state.submissions) {
     if (submission.id === id) return index >= limit
-    if (submission.kind !== 'chaos' && submission.kind !== 'withdraw' && !cancels(submission))
+    if (
+      submission.kind !== 'chaos' &&
+      submission.kind !== 'withdraw' &&
+      !cancels(submission) &&
+      !commanded(submission)
+    )
       index++
   }
   return false
@@ -550,6 +569,11 @@ async function place(
     )
     return thinking
   }
+  const command = commanded(submission)
+  if (command) {
+    await control(ctx, journal, runtime, submission, command)
+    return thinking
+  }
   if (exceeds(ctx.state(), { id: submission.id, limit })) {
     await ctx.effect(
       `nanocode.place:${submission.id}`,
@@ -568,9 +592,10 @@ async function place(
     })
     return thinking
   }
-  const command = submission.kind === 'prompt' ? effortCommand.exec(submission.text ?? '') : null
-  if (command) {
-    const level = command[1] as Contracts.Thinking
+  const effortLevel =
+    submission.kind === 'prompt' ? effortCommand.exec(submission.text ?? '') : null
+  if (effortLevel) {
+    const level = effortLevel[1] as Contracts.Thinking
     const outcome = (await ctx.effect(
       `nanocode.place:${submission.id}`,
       {
@@ -657,6 +682,11 @@ async function steer(
         await cancelTurn(ctx, journal, runtime, submission, active)
         continue
       }
+      const command = commanded(submission)
+      if (command) {
+        await control(ctx, journal, runtime, submission, command)
+        continue
+      }
       if (
         submission.kind !== 'steer' ||
         exceeds(ctx.state(), { id: submission.id, limit }) ||
@@ -700,6 +730,50 @@ async function cancelTurn(
     },
     async () => ({ cancelled: turn?.report.status ?? null }),
   )
+}
+
+async function control(
+  ctx: DriveContext,
+  journal: Journal.Journal,
+  runtime: AgentRuntime.AgentRuntime,
+  submission: Submission,
+  command: SubagentCommand,
+): Promise<void> {
+  const outcome = (await ctx.effect(
+    `nanocode.place:${submission.id}`,
+    { name: 'nanocode.subagent', replay: 'safe', placed: [submission.id], input: command },
+    async (): Promise<SubagentOutcome> => {
+      try {
+        if (command.action === 'ask')
+          return { ok: await runtime.askSubagent(command.agent_id, command.question) }
+        if (command.action === 'message') {
+          const receipt = await runtime.messageSubagent(command.agent_id, {
+            prompt: command.prompt,
+            priority: command.priority,
+          })
+          await journal.durable()
+          return { ok: receipt }
+        }
+        const agents =
+          command.action === 'close'
+            ? await runtime.closeSubagent(command.agent_id)
+            : await runtime.interruptSubagent(command.agent_id)
+        return { ok: { agents } }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  )) as SubagentOutcome
+  ctx.live({ type: 'subagent_control', request_id: submission.id, ...command, ...outcome } as never)
+}
+
+export function commanded(submission: Submission): SubagentCommand | undefined {
+  if (submission.kind !== 'steer' || !submission.text?.startsWith(subagentText)) return undefined
+  try {
+    return JSON.parse(submission.text.slice(subagentText.length)) as SubagentCommand
+  } catch {
+    return undefined
+  }
 }
 
 function submitted(ctx: DriveContext): Promise<void> {

@@ -23,8 +23,20 @@ struct McpTransport;
 
 impl Sender for McpTransport {
     fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, Error>> {
-        Box::pin(origin::scope(None, WorkerTransport::MCP.send(request)))
+        let origin = origin::Origin {
+            context: None,
+            session: caller(&request.body),
+        };
+        Box::pin(origin.scope(WorkerTransport::MCP.send(request)))
     }
+}
+
+fn caller(body: &[u8]) -> Option<Arc<str>> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .pointer("/params/_meta/x-codex-turn-metadata/session_id")?
+        .as_str()
+        .map(Arc::from)
 }
 
 pub enum Failure {

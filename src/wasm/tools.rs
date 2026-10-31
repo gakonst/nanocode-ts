@@ -25,15 +25,16 @@ impl FunctionHandler for Bridge {
         input: Value,
         context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<Value, String>> {
-        let context = json!({
-            "session_id": context.session_id(),
-            "call_id": context.call_id(),
-            "turn_id": context.turn_id(),
-            "model": context.model(),
-            "instruction_revision": context.instruction_revision(),
-            "origin": context.host_context(),
-        });
         Box::pin(async move {
+            let context = json!({
+                "session_id": context.session_id(),
+                "call_id": context.call_id(),
+                "turn_id": context.turn_id(),
+                "model": context.model(),
+                "instruction_revision": context.instruction_revision(),
+                "origin": context.host_context(),
+                "subagent": super::subagent(context.session_id()).await,
+            });
             call(json!({"op": "tool_call", "name": name, "input": input, "context": context}))
                 .await
                 .map_err(|error| {

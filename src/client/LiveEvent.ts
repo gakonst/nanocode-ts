@@ -11,6 +11,7 @@ type LoggedBody = {
   status?: string
   ok?: { message?: string }
   error?: unknown
+  update?: unknown
 }
 
 export function at(event: LiveEvent): number {
@@ -82,6 +83,8 @@ export function fromLogged(logged: Contracts.LoggedEvent): LiveEvent | undefined
         return undefined
     }
   }
+  if (body.source === 'subagent' && body.update)
+    return { type: 'subagent', update: body.update, ...base }
   if (body.source !== undefined) return undefined
   if (body.type === 'result')
     return {

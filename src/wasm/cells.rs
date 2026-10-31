@@ -55,7 +55,7 @@ impl FunctionHandler for Fetch {
         &'a self,
         _name: &'a str,
         input: Value,
-        _context: ToolContext<'a>,
+        context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<Value, String>> {
         Box::pin(async move {
             let mut input = input;
@@ -70,8 +70,9 @@ impl FunctionHandler for Fetch {
                 ),
                 None => None,
             };
+            let subagent = super::subagent(context.session_id()).await;
             let (mut head, body) = call_framed(
-                json!({"op": "cell_fetch", "request": input}),
+                json!({"op": "cell_fetch", "request": input, "subagent": subagent}),
                 body.as_deref(),
             )
             .await

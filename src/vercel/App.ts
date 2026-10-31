@@ -1,4 +1,6 @@
 import { durableAgent, getWorld, type HostTool } from 'durable-harness'
+import * as AgentRuntime from '../AgentRuntime.ts'
+import * as Subagents from '../client/Subagents.ts'
 import * as Hands from './Hands.ts'
 import * as Harness from './Harness.ts'
 import * as Journal from './Journal.ts'
@@ -69,15 +71,43 @@ export declare namespace select {
 }
 
 type Body = {
+  action?: unknown
+  agent_id?: unknown
   attachments?: unknown
   effort?: unknown
   hand?: unknown
   harness?: unknown
   kind?: unknown
   model?: unknown
+  priority?: unknown
+  prompt?: unknown
+  question?: unknown
   sessionId?: unknown
   text?: unknown
   warm?: unknown
+}
+
+function command(body: Body): Harness.SubagentCommand | string {
+  const id = body.agent_id
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+    return 'agent_id must be a positive integer'
+  if (body.action === 'close' || body.action === 'interrupt')
+    return { action: body.action, agent_id: id }
+  if (body.action === 'ask')
+    return typeof body.question === 'string' && body.question.trim()
+      ? { action: 'ask', agent_id: id, question: body.question }
+      : 'question must be a nonempty string'
+  if (body.action !== 'message') return 'action must be ask, close, interrupt or message'
+  if (typeof body.prompt !== 'string' || !body.prompt.trim())
+    return 'prompt must be a nonempty string'
+  if (body.priority !== undefined && body.priority !== 'urgent' && body.priority !== 'deferred')
+    return 'priority must be urgent or deferred'
+  return {
+    action: 'message',
+    agent_id: id,
+    prompt: body.prompt,
+    ...(body.priority ? { priority: body.priority } : {}),
+  }
 }
 
 function carried(value: unknown): Attachments.File[] | string {
@@ -229,9 +259,85 @@ export function create(options: create.Options) {
     }
   }
 
+  const subagents = async (request: Request, sessionId: string): Promise<Response> => {
+    const refused = await admit(request)
+    if (refused) return refused
+    const state = await agent.sessions.inspect(sessionId).catch(() => undefined)
+    if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
+    const sql = LocalSql.create(Journal.committed(state))
+    const runtime = await AgentRuntime.instantiate(
+      await Wasm.load(),
+      { transaction: (_kind, _operation, statements) => sql.run(statements) },
+      { published: () => {} },
+    )
+    try {
+      const updates: Subagents.Update[] = []
+      for (let after = 0; ; ) {
+        const page = await runtime.page(Harness.scope, after, 512)
+        for (const event of page.events) {
+          const update = Subagents.update(event)
+          if (update) updates.push(update)
+        }
+        if (!page.has_more || page.next_cursor <= after) break
+        after = page.next_cursor
+      }
+      return Response.json(
+        { subagents: Subagents.entries(updates) },
+        { headers: { 'cache-control': 'no-store' } },
+      )
+    } finally {
+      await runtime.dispose().catch(() => undefined)
+      sql.close()
+    }
+  }
+
+  const control = async (request: Request, body: Body): Promise<Response> => {
+    if (typeof body.sessionId !== 'string')
+      return new Response('sessionId is required', { status: 400 })
+    const parsed = command(body)
+    if (typeof parsed === 'string') return Response.json({ error: parsed }, { status: 400 })
+    const refused = await admit(request)
+    if (refused) return refused
+    const sessionId = body.sessionId
+    if (!(await agent.sessions.inspect(sessionId).catch(() => undefined)))
+      return Response.json({ error: 'no such session' }, { status: 404 })
+    const submission = await agent.sessions.send(
+      sessionId,
+      Harness.subagentText + JSON.stringify(parsed),
+      'steer',
+    )
+    while (!request.signal.aborted) {
+      const effect = (await agent.sessions.inspect(sessionId)).effects.get(
+        `nanocode.place:${submission}`,
+      )
+      if (effect?.status === 'completed') {
+        const outcome = effect.output as Harness.SubagentOutcome
+        if ('ok' in outcome)
+          return Response.json(outcome.ok, { status: parsed.action === 'message' ? 202 : 200 })
+        return Response.json(
+          { error: outcome.error },
+          {
+            status: /unknown agent_id|no subagents|not a root session/.test(outcome.error)
+              ? 404
+              : 409,
+          },
+        )
+      }
+      if (effect?.status === 'failed')
+        return Response.json(
+          { error: effect.error?.message ?? 'subagent control failed' },
+          { status: 503 },
+        )
+      await new Promise((resolve) => setTimeout(resolve, Harness.waitPollMs))
+    }
+    return Response.json({ submission }, { status: 202 })
+  }
+
   async function GET(request: Request): Promise<Response> {
     const params = new URL(request.url).searchParams
     if (params.has('file')) return file(request, params)
+    if (params.has('subagents') && params.get('sessionId'))
+      return subagents(request, params.get('sessionId')!)
     if (upgrade && request.headers.get('upgrade')?.toLowerCase() === 'websocket')
       return handRoutes.SOCKET(request, upgrade)
     if (hands !== false && params.has('hands') && params.get('sessionId')) {
@@ -263,6 +369,7 @@ export function create(options: create.Options) {
       .json()
       .catch(() => undefined)) as Body | undefined
     if (!sent || typeof sent !== 'object') return chat.POST(original)
+    if (sent.kind === 'subagent') return control(original, sent)
     if (sent.kind === 'cancel') {
       if (typeof sent.sessionId !== 'string')
         return new Response('sessionId is required', { status: 400 })

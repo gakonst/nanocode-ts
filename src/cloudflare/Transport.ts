@@ -201,6 +201,16 @@ export function create(options: create.Options): create.ReturnType {
     return { session: id, token: ((await response.json()) as { token: string }).token }
   }
 
+  const control = async (suffix: string, init: RequestInit = {}): Promise<unknown> => {
+    if (!state.id) throw new Error('no session yet')
+    const response = await fetch(path(suffix), {
+      ...init,
+      headers: headers(init.body ? { 'content-type': 'application/json' } : {}),
+    })
+    if (!response.ok) throw new Error(await failure(response))
+    return await response.json()
+  }
+
   const listing = async (): Promise<Relay.Listing> => {
     const id = state.id ?? warmed
     if (!id) return { hands: [], toolsOnly: [] }
@@ -289,6 +299,46 @@ export function create(options: create.Options): create.ReturnType {
     },
     session: () => state,
     snapshot: () => ({ ...state }),
+    subagents: {
+      async ask(id, options) {
+        return (await control(`subagents/${id}/question`, {
+          method: 'POST',
+          body: JSON.stringify({ question: options.question }),
+          ...(options.signal ? { signal: options.signal } : {}),
+        })) as Contracts.SubagentAnswer
+      },
+      async close(id) {
+        return (
+          (await control(`subagents/${id}/close`, { method: 'POST' })) as {
+            agents: Contracts.SubagentSummary[]
+          }
+        ).agents
+      },
+      async interrupt(id) {
+        return (
+          (await control(`subagents/${id}/interrupt`, { method: 'POST' })) as {
+            agents: Contracts.SubagentSummary[]
+          }
+        ).agents
+      },
+      async list(options = {}) {
+        if (!state.id) return []
+        return (
+          (await control('subagents', options.signal ? { signal: options.signal } : {})) as {
+            subagents: Contracts.SubagentEntry[]
+          }
+        ).subagents
+      },
+      async message(id, options) {
+        return (await control(`subagents/${id}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            prompt: options.prompt,
+            ...(options.priority ? { priority: options.priority } : {}),
+          }),
+        })) as Contracts.SubagentReceipt
+      },
+    },
     restore(saved) {
       state = saved && typeof saved === 'object' ? { ...(saved as Session) } : {}
       warmed = undefined

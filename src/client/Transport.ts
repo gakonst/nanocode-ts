@@ -1,6 +1,7 @@
 import type * as InternalFiles from '../internal/Files.ts'
 import * as Format from './internal/Format.ts'
 import type * as LiveEvent from './LiveEvent.ts'
+import type * as Subagents from './Subagents.ts'
 import type * as Transcript from './Transcript.ts'
 
 export type Attachment = InternalFiles.Attachment
@@ -30,6 +31,7 @@ export type Transport = {
   send(parameters: Parameters): Promise<void>
   snapshot?(): unknown
   steer?(parameters: Parameters): Promise<boolean>
+  subagents?: Subagents.Control
 }
 
 export function prompt(text: string, options: prompt.Options = {}): string {

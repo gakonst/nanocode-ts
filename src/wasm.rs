@@ -120,6 +120,8 @@ struct Configuration {
     #[serde(default)]
     max_tokens: Option<u32>,
     #[serde(default)]
+    max_resident_subagents: Option<usize>,
+    #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
@@ -433,11 +435,22 @@ enum Command {
         #[serde(default)]
         into: Option<String>,
     },
+    Subagents {},
+    MessageSubagent {
+        agent_id: u64,
+        prompt: String,
+        #[serde(default)]
+        priority: nanocode::subagents::MessagePriority,
+    },
     InterruptSubagent {
         agent_id: u64,
     },
     CloseSubagent {
         agent_id: u64,
+    },
+    AskSubagent {
+        agent_id: u64,
+        question: String,
     },
     CompletionOrigin {
         request_id: String,
@@ -631,6 +644,16 @@ fn current() -> Option<Rc<Session>> {
 
 fn ready() -> Result<Rc<Session>, String> {
     current().ok_or_else(|| "agent runtime is not ready".into())
+}
+
+async fn subagent(session_id: &str) -> Option<Value> {
+    let subagents = current()?.subagents.clone()?;
+    let lineage = subagents.lineage(session_id).await;
+    Some(json!({
+        "id": lineage.first()?,
+        "parent": lineage.get(1),
+        "tree": lineage.last()?,
+    }))
 }
 
 fn described(record: &TurnRecord) -> Result<Value, String> {
@@ -998,6 +1021,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .build()
         .map_err(|error| configuration(format!("build runtime: {error}")))?;
     let subagents = runtime.subagents().cloned();
+    if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
+        subagents.set_max_resident(limit);
+    }
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
         config.started_ms,
@@ -1607,6 +1633,31 @@ fn execute(command: Command) -> Executed {
                 .map_err(text)?;
             Ok(Value::Bool(steered))
         }),
+        Command::Subagents {} => executed(async move {
+            let session = ready()?;
+            session
+                .subagents()?
+                .agents(session.inbox.session_id())
+                .await
+                .map_err(text)
+        }),
+        Command::MessageSubagent {
+            agent_id,
+            prompt,
+            priority,
+        } => executed(async move {
+            let session = ready()?;
+            session
+                .subagents()?
+                .send_user_message(
+                    session.inbox.session_id(),
+                    AgentId::new(agent_id),
+                    priority,
+                    prompt,
+                )
+                .await
+                .map_err(text)
+        }),
         Command::InterruptSubagent { agent_id } => executed(async move {
             let session = ready()?;
             session
@@ -1622,6 +1673,15 @@ fn execute(command: Command) -> Executed {
                 .close(session.inbox.session_id(), AgentId::new(agent_id))
                 .await
                 .map_err(text)
+        }),
+        Command::AskSubagent { agent_id, question } => executed(async move {
+            let session = ready()?;
+            let answer = session
+                .subagents()?
+                .side_question(session.inbox.session_id(), AgentId::new(agent_id), question)
+                .await
+                .map_err(text)?;
+            Ok(json!({"text": answer.text(), "usage": answer.usage()}))
         }),
         Command::CompletionOrigin { request_id } => executed(async move {
             let origin = match &ready()?.subagents {
