@@ -46,6 +46,7 @@ export type Operation = {
 }
 
 export type Pricing = {
+  currency?: 'ousd' | 'usdce'
   describe?: string
   payee: string
   price(operation: Operation): number | undefined | Promise<number | undefined>
@@ -180,9 +181,12 @@ type Incoming = {
 function meter(pricing: Pricing, cwd: string) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(pricing.payee))
     throw new Error('pricing.payee must be a 0x-prefixed 20-byte address')
+  if (pricing.currency !== undefined && pricing.currency !== 'ousd' && pricing.currency !== 'usdce')
+    throw new Error("pricing.currency must be 'ousd' or 'usdce'")
 
   const quotes = new Map<number, { charge: string; resumable: boolean }>()
   const advertised = {
+    ...(pricing.currency ? { currency: pricing.currency } : {}),
     ...(pricing.describe ? { describe: pricing.describe } : {}),
     payee: pricing.payee,
   }
