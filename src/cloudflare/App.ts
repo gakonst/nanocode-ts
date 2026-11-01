@@ -299,8 +299,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly watchers = new Map<WebSocket, Watcher>()
     private unfinished?: boolean
     private admissions = 0
-    private flushing = false
-    private reflush = false
+    private watcherFlush: 'idle' | 'running' | 'again' = 'idle'
     private readonly hands = new Map<
       string,
       Map<string, { connection: string; executor: HandExecutor; ready: boolean }>
@@ -2034,24 +2033,27 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     private notifyWatchers(): void {
-      if (this.flushing) {
-        this.reflush = true
+      if (this.watcherFlush !== 'idle') {
+        this.watcherFlush = 'again'
         return
       }
-      this.flushing = true
       this.ctx.waitUntil(
         (async () => {
           try {
             do {
-              this.reflush = false
+              this.watcherFlush = 'running'
               await this.flushWatchers()
-            } while (this.reflush && !this.deleted)
+            } while (this.flushAgain() && !this.deleted)
           } catch {
           } finally {
-            this.flushing = false
+            this.watcherFlush = 'idle'
           }
         })(),
       )
+    }
+
+    private flushAgain(): boolean {
+      return this.watcherFlush === 'again'
     }
 
     private async flushWatchers(): Promise<void> {
