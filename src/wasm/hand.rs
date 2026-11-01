@@ -53,6 +53,7 @@ pub struct Opening {
 
 struct Host {
     cells: Arc<LocalCells>,
+    name: String,
     own: Vec<Arc<dyn Tool>>,
     workspace: Option<String>,
     environment: Option<HandEnvironment>,
@@ -80,6 +81,7 @@ impl HandHost for Host {
         excluded: Vec<String>,
         brain: HandBrain,
     ) -> Result<Arc<dyn HandSession>, CodeModeHostError> {
+        self.cells.route_hands(&self.name, brain.hand_calls());
         let own = self
             .own
             .iter()
@@ -314,6 +316,7 @@ pub async fn open_hand(opening: Opening) -> Result<Value, String> {
     );
     let host = Host {
         cells: Arc::new(cells::host(workspace.as_deref())),
+        name: name.clone().unwrap_or_default(),
         own,
         workspace,
         environment,
