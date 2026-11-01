@@ -297,7 +297,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly driving = new Map<string, string>()
     private binding?: Promise<void>
     private readonly watchers = new Map<WebSocket, Watcher>()
-    private unfinished?: boolean
+    private queue: 'unknown' | 'pending' | 'empty' = 'unknown'
     private admissions = 0
     private watcherFlush: 'idle' | 'running' | 'again' = 'idle'
     private readonly hands = new Map<
@@ -788,7 +788,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
-            this.unfinished = true
+            this.queue = 'pending'
             this.admissions++
             this.turnTimings.set(input.request_id, { started: admitted, checkpoints: {} })
           }
@@ -862,7 +862,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const admissions = this.admissions
         const pending = await reader.pending(ownerScope)
         const next = pending[0]
-        this.unfinished = next ? true : admissions === this.admissions ? false : undefined
+        this.queue = next ? 'pending' : admissions === this.admissions ? 'empty' : 'unknown'
         const background = this.metadata.first('background:')
         if (!next && !background) {
           immediate = admissions !== this.admissions
@@ -977,12 +977,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (driven.retry) throw new Error('runtime recovery required')
         if (driven.finished) {
           this.turnTimings.delete(driven.finished.report.request_id)
-          this.unfinished =
+          this.queue =
             pending.length === 1 &&
             next!.report.request_id === driven.finished.report.request_id &&
             admissions === this.admissions
-              ? false
-              : undefined
+              ? 'empty'
+              : 'unknown'
         }
         waiting = !!driven.waiting
         const version = this.eventHub.version
@@ -1006,7 +1006,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (active) {
           const fields = { cancelled: true, error: 'request cancelled', ...this.observed(active) }
           this.turnTimings.delete(active)
-          this.unfinished = true
+          this.queue = 'pending'
           const reader = await this.instance(scope ?? ownerScope).catch(() => undefined)
           const turn = await reader?.turn(scope ?? ownerScope, active).catch(() => null)
           if (turn?.cancel_requested && unfinishedStatuses.has(turn.report.status)) {
@@ -1014,7 +1014,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               () => true,
               () => false,
             )
-            if (immediate) this.unfinished = undefined
+            if (immediate) this.queue = 'unknown'
           } else
             await reader?.interrupted(scope ?? ownerScope, active, interruptedNote).catch(() => {})
         }
@@ -1033,8 +1033,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
     }
 
+    private queueUnknown(): boolean {
+      return this.queue === 'unknown'
+    }
+
     private queueKnownEmpty(): boolean {
-      return this.unfinished === false
+      return this.queue === 'empty'
     }
 
     private async unavailable(
@@ -1067,7 +1071,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         })
       }
       this.turnTimings.delete(id)
-      this.unfinished = undefined
+      this.queue = 'unknown'
       return undefined
     }
 
@@ -1643,7 +1647,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const entry = hands.get(hand)
       if (entry?.connection !== connection) return
       entry.ready = true
-      if (this.pumping || this.unfinished === false) return
+      if (this.pumping || this.queue === 'empty') return
       const next = (await (await this.instance(scope)).pending(scope))[0]
       if ((next?.metadata as SessionDescriptor | null | undefined)?.hand === hand && !this.pumping)
         this.ctx.waitUntil(this.pump())
@@ -2249,13 +2253,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const current = resident && busy ? await resident.catch(() => undefined) : undefined
       const runtime = current?.reusable ? current : await this.runtime(scope, sessionId, descriptor)
       await runtime.preconnect()
-      if (this.unfinished === undefined) {
+      if (this.queue === 'unknown') {
         const admissions = this.admissions
         const pending = await runtime.pending(scope)
-        if (this.unfinished === undefined && admissions === this.admissions)
-          this.unfinished = pending.length > 0
+        if (this.queueUnknown() && admissions === this.admissions)
+          this.queue = pending.length > 0 ? 'pending' : 'empty'
       }
-      if (!this.pumping && !this.unfinished && !this.metadata.first('background:'))
+      if (!this.pumping && this.queue !== 'pending' && !this.metadata.first('background:'))
         this.releaseIdle(true)
       return true
     }

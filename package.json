@@ -124,6 +124,9 @@
       "default": "./dist/pyodide/modules.js"
     }
   },
+  "bundleDependencies": [
+    "nanocode-egress"
+  ],
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
     "accounts": "0.21.0",
