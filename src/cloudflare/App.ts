@@ -2411,6 +2411,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       await this.ctx.storage.deleteAlarm()
       await this.ctx.storage.deleteAll()
       this.metadata.reset()
+      setTimeout(() => this.ctx.abort('session deleted'), 0)
       return json({ deleted: true })
     }
 
