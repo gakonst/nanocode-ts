@@ -159,7 +159,7 @@ struct Configuration {
     hand_tools: Option<HashMap<String, remote::ToolSelection>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Environment {
     #[serde(default)]
@@ -789,16 +789,16 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     }
     let placement = config.remote || config.hands;
     let local = config.code_mode;
-    let instructions = |application: Option<&str>| {
-        [application, placement.then_some(PLACEMENT_INSTRUCTIONS)]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    let environment = config
-        .environment
-        .take()
+    let instructions = |application: Option<&str>| application.unwrap_or_default().to_owned();
+    let mut environment = config.environment.take();
+    if placement {
+        let environment = environment.get_or_insert_with(Environment::default);
+        environment.project_instructions = Some(match environment.project_instructions.take() {
+            Some(text) => format!("{text}\n\n{PLACEMENT_INSTRUCTIONS}"),
+            None => PLACEMENT_INSTRUCTIONS.to_owned(),
+        });
+    }
+    let environment = environment
         .map(|environment| environment.resolve(config.workspace.as_deref()))
         .transpose()
         .map_err(configuration)?;
