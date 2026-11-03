@@ -40,6 +40,24 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       throw error
     }
   }
+  const parents = async (path: string) => {
+    if (route(path).point) return
+    let current = ''
+    for (const part of path.split('/').filter(Boolean).slice(0, -1)) {
+      current += '/' + part
+      if (table.some((mount) => inside(mount.point, current)) && !(await base.stat(current)))
+        await base.mkdir(current)
+    }
+  }
+
+  const change = async <T>(
+    path: string,
+    run: (fs: FileSystem, path: string) => Promise<T>,
+  ): Promise<T> => {
+    await parents(path)
+    return call(path, run)
+  }
+
   const points = (dir: string) =>
     table
       .filter(
@@ -70,7 +88,7 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       (await call(path, (fs, inner) => fs.stat(inner))) ??
       (table.some((mount) => inside(mount.point, path === '/' ? '' : path)) ? directory : null),
     read: (path) => call(path, (fs, inner) => fs.read(inner)),
-    write: (path, data, append) => call(path, (fs, inner) => fs.write(inner, data, append)),
+    write: (path, data, append) => change(path, (fs, inner) => fs.write(inner, data, append)),
     list: async (path) => {
       const own = await call(path, (fs, inner) => fs.list(inner)).catch((error) => {
         if (error instanceof FsError && error.code === 'ENOENT' && points(path).length) return []
@@ -79,8 +97,9 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       const extra = points(path)
       return extra.length ? [...new Set([...own, ...extra])].sort() : own
     },
-    mkdir: (path) => call(path, (fs, inner) => fs.mkdir(inner)),
+    mkdir: (path) => change(path, (fs, inner) => fs.mkdir(inner)),
     writeMany: async (dirs, files) => {
+      for (const path of [...dirs, ...files.map((file) => file.path)]) await parents(path)
       const groups = new Map<
         FileSystem,
         { point: string; dirs: string[]; files: NewFile[]; outer: NewFile[] }
@@ -119,6 +138,7 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       const source = route(from)
       const target = route(to)
       if (source.fs !== target.fs) throw new FsError('EXDEV', to)
+      await parents(to)
       return call(from, (fs, inner) => fs.rename(inner, target.path))
     },
     search: async (dir, literals) => {
@@ -144,7 +164,7 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
     ...(base.symlink
       ? {
           symlink: (link: string, path: string) =>
-            call(path, (fs, inner) =>
+            change(path, (fs, inner) =>
               fs.symlink ? fs.symlink(link, inner) : Promise.reject(new FsError('EROFS', inner)),
             ),
         }
