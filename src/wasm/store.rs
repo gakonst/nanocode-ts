@@ -1,12 +1,35 @@
+use std::cell::OnceCell;
+
 use nanocode::durability::{
-    BlobKey, BlobStore, Sql, SqlRow, SqlStatement, StoreError, StoreFuture,
+    BlobKey, BlobStore, Sql, SqlDialect, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::bridge::{call_bytes_with, call_optional_bytes, call_with_body};
 
 const NULL_CELL: u32 = u32::MAX;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Dialect {
+    Postgres,
+    Sqlite,
+}
+
+thread_local! {
+    static DIALECT: OnceCell<SqlDialect> = const { OnceCell::new() };
+}
+
+pub(super) fn configure(dialect: Dialect) -> Result<(), String> {
+    let dialect = match dialect {
+        Dialect::Postgres => SqlDialect::Postgres,
+        Dialect::Sqlite => SqlDialect::Sqlite,
+    };
+    DIALECT
+        .with(|current| current.set(dialect))
+        .map_err(|_| "the SQL dialect is already set".into())
+}
 
 pub struct WorkerStore(&'static str);
 
@@ -130,6 +153,10 @@ impl Rows<'_> {
 }
 
 impl Sql for WorkerStore {
+    fn dialect(&self) -> SqlDialect {
+        DIALECT.with(|current| *current.get_or_init(SqlDialect::default))
+    }
+
     fn transaction<'a>(
         &'a self,
         operation: &'static str,

@@ -284,6 +284,7 @@ export type Statement = [string, ...SqlValue[]]
 export type SqlKind = 'store' | 'log'
 
 export type SqlHost = {
+  readonly dialect?: 'postgres' | 'sqlite'
   readonly value_limit?: number
   transaction(
     kind: SqlKind,

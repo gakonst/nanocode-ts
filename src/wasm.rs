@@ -328,6 +328,7 @@ enum Command {
     },
     HandClosed {},
     Configure {
+        dialect: Option<store::Dialect>,
         #[serde(default)]
         value_limit: Option<usize>,
         #[serde(default)]
@@ -1496,10 +1497,14 @@ fn execute(command: Command) -> Executed {
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
         Command::HandClosed {} => executed(hand::closed()),
         Command::Configure {
+            dialect,
             value_limit,
             logical_limit,
             blob_threshold,
         } => executed(async move {
+            if let Some(dialect) = dialect {
+                store::configure(dialect)?;
+            }
             VALUE_LIMIT.set(value_limit);
             LOGICAL_LIMIT.set(logical_limit);
             BLOB_THRESHOLD.set(blob_threshold);

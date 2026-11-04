@@ -1542,8 +1542,14 @@ async function create(
   const instantiateStarted = performance.now()
   state.engine = await (options.engine ?? localEngine)(module, internal.engineHost())
   state.timings.record('wasm.instantiate', performance.now() - instantiateStarted)
-  if (sql.value_limit !== undefined || options.log_logical_limit !== undefined || options.blobs) {
+  if (
+    sql.dialect !== undefined ||
+    sql.value_limit !== undefined ||
+    options.log_logical_limit !== undefined ||
+    options.blobs
+  ) {
     await internal.command('configure', {
+      dialect: sql.dialect,
       value_limit: sql.value_limit,
       logical_limit: options.log_logical_limit,
       blob_threshold: options.blobs
