@@ -992,7 +992,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           await this.eventHub.wait(delay, version)
         }
         immediate = !this.queueKnownEmpty()
-      } catch {
+      } catch (error) {
+        console.error('Session pump failed', {
+          active,
+          error: String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        })
         if (scope) this.driving.delete(scope)
         if (active) this.blocked.delete(active)
         if (scope && runtime) {
