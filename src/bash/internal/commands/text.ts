@@ -292,6 +292,19 @@ const wc: CommandHandler = streaming(async (ctx) => {
       name: parsed.operands.length ? operand : '',
       bytes: 0,
     }
+    const stat =
+      fields.length === 1 &&
+      fields[0] === 'c' &&
+      !['-', '/dev/stdin', '/dev/fd/0'].includes(operand)
+        ? await ctx.fs.stat(ctx.resolve(operand))
+        : null
+    if (stat?.kind === 'file') {
+      row.counts = [stat.size]
+      row.bytes = stat.size
+      totals[0] += stat.size
+      rows.push(row)
+      continue
+    }
     const failed = await eachBatch(ctx, [operand], (text) => {
       const { counts, bytes } = tally(text)
       row.counts = row.counts.map((value, index) =>
