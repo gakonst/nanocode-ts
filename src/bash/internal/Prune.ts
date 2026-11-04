@@ -1,4 +1,4 @@
-import type { FileStat, FileSystem } from '../FileSystem.ts'
+import type { Conjunction, FileStat, FileSystem } from '../FileSystem.ts'
 
 function inside(path: string, point: string): boolean {
   return path === point || path.startsWith(point + '/')
@@ -79,7 +79,7 @@ export async function pruned(
   root: string,
   literals: string[] | null,
   exact?: { literals: string[]; ignoreCase: boolean } | null,
-  every?: string[][] | null,
+  every?: Conjunction | null,
 ): Promise<Pruned | null> {
   const matched =
     exact && fs.matches ? await fs.matches(root, exact.literals, exact.ignoreCase) : null
@@ -147,25 +147,66 @@ export function literals(patterns: string[], syntax: Syntax): string[] | null {
   return out.length ? out : null
 }
 
-export function conjunction(patterns: string[], syntax: Syntax): string[][] | null {
+export function conjunction(patterns: string[], syntax: Syntax): Conjunction | null {
   if (syntax === 'fixed' || patterns.length !== 1) return null
-  const every: string[][] = []
-  return branches(patterns[0], syntax, every) && every.length > 1 ? every : null
+  const every: Span[] = []
+  if (!branches(patterns[0], syntax, every) || every.length < 2) return null
+  return {
+    groups: every.map((span) => span.set),
+    gaps: every
+      .slice(1)
+      .map((span, index) =>
+        syntax === 'basic' ? null : width(patterns[0].slice(every[index].end, span.start)),
+      ),
+  }
+}
+
+type Span = { set: string[]; start: number; end: number }
+
+function width(source: string): number | null {
+  let total = 0
+  let i = 0
+  while (i < source.length) {
+    const c = source[i]
+    let atom = 1
+    if (c === '\\') {
+      const next = source[i + 1]
+      if (next === undefined || /[0-9kgpPxuNc]/.test(next)) return null
+      if (/[bBAzZG]/.test(next)) atom = 0
+      i += 2
+    } else if (c === '[') {
+      const close = bracket(source, i + 1, true)
+      if (close < 0) return null
+      i = close + 1
+    } else if ('()|^$*+?{'.includes(c)) return null
+    else i++
+    const repeat = /^(?:([*+])|\?|\{(\d+)\}|\{(\d*),(\d*)\})[?+]?/.exec(source.slice(i))
+    if (!repeat || !repeat[0]) {
+      total += atom
+      continue
+    }
+    i += repeat[0].length
+    if (repeat[1] || repeat[4] === '') return null
+    total += atom * Number(repeat[2] ?? repeat[4] ?? 1)
+  }
+  return total
 }
 
 function branches(
   pattern: string,
   syntax: Exclude<Syntax, 'fixed'>,
-  every?: string[][],
+  every?: Span[],
 ): string[] | null {
   const basic = syntax === 'basic'
   const out: string[] = []
   let best: string[] = []
   let run = ''
+  let runStart = 0
+  let atomStart = 0
   let ended = 0
   const shortest = (set: string[]) => Math.min(...set.map((literal) => literal.length))
-  const consider = (set: string[]) => {
-    every?.push(set)
+  const consider = (set: string[], start: number, end: number) => {
+    every?.push({ set, start, end })
     if (
       !best.length ||
       shortest(set) > shortest(best) ||
@@ -173,12 +214,17 @@ function branches(
     )
       best = set
   }
-  const cut = () => {
-    if (run) consider([run])
+  const cut = (end: number) => {
+    if (run) consider([run], runStart, end)
     run = ''
   }
-  const end = () => {
-    cut()
+  const append = (text: string, start: number) => {
+    if (!run) runStart = start
+    atomStart = start
+    run += text
+  }
+  const end = (at: number) => {
+    cut(at)
     if (++ended > 1) every?.splice(0)
     if (!best.length) return false
     out.push(...best)
@@ -199,16 +245,17 @@ function branches(
       : /^\?(?::|P?<[A-Za-z_][\w]*>)/.exec(inner)
         ? inner.replace(/^\?(?::|P?<[A-Za-z_][\w]*>)/, '')
         : inner
-    cut()
+    const open = start - (basic ? 2 : 1)
+    cut(open)
     if (!optional && (basic || !inner.startsWith('?') || body !== inner)) {
       const set = branches(body, syntax)
-      if (set) consider(set)
+      if (set) consider(set, open, last + 1)
     }
     return last
   }
   const quantified = () => {
     run = run.slice(0, -1)
-    cut()
+    cut(atomStart)
   }
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i]
@@ -217,7 +264,7 @@ function branches(
       i++
       if (next === undefined) return null
       if (basic && next === '|') {
-        if (!end()) return null
+        if (!end(i - 1)) return null
         continue
       }
       if (basic && next === '(') {
@@ -231,15 +278,15 @@ function branches(
         continue
       }
       if (/[A-Za-z0-9]/.test(next)) {
-        cut()
+        cut(i - 1)
         i = escape(pattern, i, next)
         continue
       }
       if (syntax !== 'perl' && "<>'`".includes(next)) {
-        cut()
+        cut(i - 1)
         continue
       }
-      run += next
+      append(next, i - 1)
       continue
     }
     if (c === '*') {
@@ -256,7 +303,7 @@ function branches(
       continue
     }
     if (!basic && c === '|') {
-      if (!end()) return null
+      if (!end(i)) return null
       continue
     }
     if (!basic && c === '(') {
@@ -265,18 +312,19 @@ function branches(
       continue
     }
     if (c === '[') {
+      const open = i
       i = bracket(pattern, i + 1, syntax === 'perl')
       if (i < 0) return null
-      cut()
+      cut(open)
       continue
     }
     if (c === '.' || c === '^' || c === '$' || (!basic && c === ')')) {
-      cut()
+      cut(i)
       continue
     }
-    run += c
+    append(c, i)
   }
-  return end() ? out : null
+  return end(pattern.length) ? out : null
 }
 
 function closing(pattern: string, start: number, basic: boolean, perl: boolean): number {

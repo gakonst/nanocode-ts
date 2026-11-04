@@ -402,10 +402,20 @@ function budgeted(
     ...(fs.readlink ? { readlink: (path: string) => (charge(), fs.readlink!(path)) } : {}),
     ...(fs.lstat ? { lstat: (path: string) => (charge(), fs.lstat!(path)) } : {}),
     ...(fs.search
-      ? { search: (dir: string, literals: string[]) => (charge(), fs.search!(dir, literals)) }
+      ? {
+          search: (dir: string, literals: string[], every?: FileSystem.Conjunction) => (
+            charge(),
+            fs.search!(dir, literals, every)
+          ),
+        }
       : {}),
     ...(fs.excerpt
-      ? { excerpt: (path: string, literals: string[]) => (charge(), fs.excerpt!(path, literals)) }
+      ? {
+          excerpt: (path: string, literals: string[], every?: FileSystem.Conjunction) => (
+            charge(),
+            fs.excerpt!(path, literals, every)
+          ),
+        }
       : {}),
     ...(fs.matches
       ? {
