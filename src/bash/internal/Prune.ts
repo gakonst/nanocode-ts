@@ -121,18 +121,44 @@ export function literals(patterns: string[], syntax: Syntax): string[] | null {
 function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] | null {
   const basic = syntax === 'basic'
   const out: string[] = []
-  let best = ''
+  let best: string[] = []
   let run = ''
+  const shortest = (set: string[]) => Math.min(...set.map((literal) => literal.length))
+  const consider = (set: string[]) => {
+    if (
+      !best.length ||
+      shortest(set) > shortest(best) ||
+      (shortest(set) === shortest(best) && set.length < best.length)
+    )
+      best = set
+  }
   const cut = () => {
-    if (run.length > best.length) best = run
+    if (run) consider([run])
     run = ''
   }
   const end = () => {
     cut()
-    if (!best) return false
-    out.push(best)
-    best = ''
+    if (!best.length) return false
+    out.push(...best)
+    best = []
     return true
+  }
+  const nested = (start: number) => {
+    const close = closing(pattern, start, basic, syntax === 'perl')
+    if (close < 0) return -1
+    const last = quantifier(pattern, close + 1, basic)
+    const repeat = pattern.slice(close + 1, last + 1)
+    const inner = pattern.slice(start, basic ? close - 1 : close)
+    const optional = basic
+      ? /^(\*|\\\?|\\\{0*[,\\])/.test(repeat)
+      : /^(\*|\?|\{0*[,}])/.test(repeat)
+    const body = basic ? inner : /^\?(?::|P?<[A-Za-z_][\w]*>)/.exec(inner) ? inner.replace(/^\?(?::|P?<[A-Za-z_][\w]*>)/, '') : inner
+    cut()
+    if (!optional && (basic || !inner.startsWith('?') || body !== inner)) {
+      const set = branches(body, syntax)
+      if (set) consider(set)
+    }
+    return last
   }
   const quantified = () => {
     run = run.slice(0, -1)
@@ -149,9 +175,8 @@ function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] |
         continue
       }
       if (basic && next === '(') {
-        i = group(pattern, i + 1, true)
+        i = nested(i + 1)
         if (i < 0) return null
-        cut()
         continue
       }
       if (basic && (next === '?' || next === '+' || next === '{')) {
@@ -189,9 +214,8 @@ function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] |
       continue
     }
     if (!basic && c === '(') {
-      i = group(pattern, i + 1, false, syntax === 'perl')
+      i = nested(i + 1)
       if (i < 0) return null
-      cut()
       continue
     }
     if (c === '[') {
@@ -209,7 +233,7 @@ function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] |
   return end() ? out : null
 }
 
-function group(pattern: string, start: number, basic: boolean, perl = false): number {
+function closing(pattern: string, start: number, basic: boolean, perl: boolean): number {
   let depth = 1
   for (let i = start; i < pattern.length; i++) {
     const c = pattern[i]
@@ -221,11 +245,11 @@ function group(pattern: string, start: number, basic: boolean, perl = false): nu
     if (c === '\\') {
       const next = pattern[++i]
       if (basic && next === '(') depth++
-      if (basic && next === ')' && --depth === 0) return quantifier(pattern, i + 1, basic)
+      if (basic && next === ')' && --depth === 0) return i
       continue
     }
     if (!basic && c === '(') depth++
-    if (!basic && c === ')' && --depth === 0) return quantifier(pattern, i + 1, basic)
+    if (!basic && c === ')' && --depth === 0) return i
   }
   return -1
 }
