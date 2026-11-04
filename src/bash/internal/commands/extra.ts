@@ -9,7 +9,7 @@ import {
 import { FsError } from '../../FileSystem.ts'
 import { baseOf, byte, decode, encode, parentOf } from '../Fs.ts'
 import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from '../Text.ts'
-import { checksum, perlSource, scan } from './text.ts'
+import { checksum, perlSource, requireRegExp, scan } from './text.ts'
 import {
   allInput,
   device,
@@ -1855,15 +1855,18 @@ const rg: CommandHandler = async (ctx) => {
     (f.has('i') && !f.has('s')) ||
     (smart && !patterns.some((pattern) => /[A-Z]/.test(pattern.replace(/\\[a-zA-Z]/g, ''))))
   let extraFlags = ''
-  const sources = patterns.map((pattern) => {
+  const rewritten = patterns.map((pattern) =>
+    !f.has('F') &&
+    pattern.includes('\\|') &&
+    !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, ''))
+      ? pattern.replace(/\\\|/g, '|')
+      : pattern,
+  )
+  const sources = rewritten.map((pattern) => {
     let source: string
     if (f.has('F')) source = escapeRegExp(pattern)
     else {
-      const perl = perlSource(
-        pattern.includes('\\|') && !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, ''))
-          ? pattern.replace(/\\\|/g, '|')
-          : pattern,
-      )
+      const perl = perlSource(pattern)
       source = perl.source
       extraFlags += perl.flags
     }
@@ -1884,6 +1887,15 @@ const rg: CommandHandler = async (ctx) => {
       2,
     )
   }
+  const require = f.has('U')
+    ? undefined
+    : requireRegExp(
+        literals(
+          f.has('F') ? rewritten : rewritten.map((pattern) => pattern.replace(/^\(\?[imsx]+\)/, '')),
+          f.has('F') ? 'fixed' : 'perl',
+        ),
+        regex,
+      )
   const types = parsed.values.get('t') ?? []
   const notTypes = parsed.values.get('T') ?? []
   for (const type of [...types, ...notTypes])
@@ -2065,6 +2077,7 @@ const rg: CommandHandler = async (ctx) => {
       regex.lastIndex = 0
       const hits = scan(head, {
         regex,
+        require,
         invert: f.has('v'),
         max,
         before: 0,
@@ -2097,6 +2110,7 @@ const rg: CommandHandler = async (ctx) => {
     const prefix = named && !heading ? (display ?? '<stdin>') : undefined
     const matches = scan(text, {
       regex,
+      require,
       invert: f.has('v'),
       max,
       before,
@@ -2120,6 +2134,7 @@ const rg: CommandHandler = async (ctx) => {
       if (has('count-matches')) {
         total = 0
         for (const line of text.split('\n')) {
+          if (require && !require.test(line)) continue
           regex.lastIndex = 0
           total += [...line.matchAll(regex)].length
         }

@@ -340,9 +340,18 @@ export type ScanOptions = {
   separator?: string
   terminator: string
   replace?: string | undefined
+  require?: RegExp | undefined
   silent: boolean
   state: ScanState
   write(text: string): void
+}
+
+export function requireRegExp(found: string[] | null, regex: RegExp): RegExp | undefined {
+  if (!found) return undefined
+  return new RegExp(
+    found.map(escapeRegExp).join('|'),
+    [...regex.flags].filter((flag) => flag === 'i' || flag === 'u' || flag === 'v').join(''),
+  )
 }
 
 export function scan(text: string, options: ScanOptions): number {
@@ -388,7 +397,10 @@ export function scan(text: string, options: ScanOptions): number {
       continue
     }
     regex.lastIndex = 0
-    const hit = regex.test(line) !== options.invert
+    const hit =
+      options.require && !options.require.test(line)
+        ? options.invert
+        : regex.test(line) !== options.invert
     if (!hit) {
       if (context && pendingAfter > 0) {
         emit(i, '-', line)
@@ -637,6 +649,10 @@ const grep: CommandHandler = streaming(async (ctx) => {
   const state: ScanState = { printed: false }
   const listing = f.has('q') || f.has('l') || f.has('L') || f.has('c')
   const separator = f.has('z') ? '\0' : '\n'
+  const require = requireRegExp(
+    literals(patterns, f.has('F') ? 'fixed' : f.has('P') ? 'perl' : f.has('E') ? 'extended' : 'basic'),
+    regex,
+  )
   const search = async (
     source: () => Promise<string | null>,
     name: string,
@@ -660,6 +676,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         offsets: f.has('b'),
         name: named ? name + (f.has('Z') ? '\0' : '') : undefined,
         base,
+        require,
         separator,
         terminator,
         silent,
