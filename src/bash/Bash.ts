@@ -214,7 +214,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       let category: Category | undefined
       try {
         exitCode = await Shell.run(runner, script, {
-          stdin: new Shell.Input(execOptions.stdin ?? ''),
+          stdin: new Shell.Input(execOptions.stdin),
           stdout,
           stderr,
         })

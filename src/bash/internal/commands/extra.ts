@@ -1928,8 +1928,8 @@ const rg: CommandHandler = async (ctx) => {
     return result
   }
   const maxDepth = last(parsed, 'd') === undefined ? Infinity : Number(last(parsed, 'd'))
-  const stdinText = !listFiles && !operands.length ? ctx.stdin.read() : ''
-  const useStdin = stdinText !== ''
+  const useStdin = !listFiles && !operands.length && ctx.stdin.attached
+  const stdinText = useStdin ? ctx.stdin.read() : ''
   const roots = operands.length ? operands : useStdin ? [] : ['.']
   const implicit = !operands.length
   let errors = false

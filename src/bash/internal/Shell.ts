@@ -344,20 +344,27 @@ export class Input {
   #scan = 0
   #pipe: Pipe | undefined
   #done = true
+  #attached: boolean
 
-  constructor(text = '') {
-    this.#text = text
+  constructor(text?: string) {
+    this.#text = text ?? ''
+    this.#attached = text !== undefined
   }
 
   static pipe(pipe: Pipe): Input {
     const input = new Input()
     input.#pipe = pipe
     input.#done = false
+    input.#attached = true
     return input
   }
 
   get ready(): boolean {
     return this.#done
+  }
+
+  get attached(): boolean {
+    return this.#attached
   }
 
   #refuse(size: number): never {
@@ -1886,7 +1893,7 @@ export class Runner {
         this.enter()
         try {
           const status = await this.subshell(() =>
-            this.script(parsed, { stdin: new Input(stdin ?? ''), stdout, stderr: io.stderr }),
+            this.script(parsed, { stdin: new Input(stdin), stdout, stderr: io.stderr }),
           )
           return { status, stdout: stdout.text() }
         } finally {
@@ -2207,7 +2214,7 @@ export class Runner {
               ? Number(this.named(redirect.name) ?? -1)
               : (redirect.fd ?? (op === '>&' ? 1 : 0))
           if (fd === 1 || fd === 2) fds[fd] = new Output(0, false, true)
-          else if (fd === 0) fds[0] = new Input('')
+          else if (fd === 0) fds[0] = new Input()
           else {
             const entry = extra?.get(fd)
             await entry?.output?.settle()
