@@ -141,15 +141,17 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       await parents(to)
       return call(from, (fs, inner) => fs.rename(inner, target.path))
     },
-    search: async (dir, literals) => {
+    search: async (dir, literals, every) => {
       const target = route(dir)
       if (!target.point || !target.fs.search) return null
-      const found = await target.fs.search(target.path, literals)
+      const found = await target.fs.search(target.path, literals, every)
       return found && found.map((path) => full(target.point, path))
     },
-    excerpt: async (path, literals) => {
+    excerpt: async (path, literals, every) => {
       const target = route(path)
-      return target.point && target.fs.excerpt ? target.fs.excerpt(target.path, literals) : null
+      return target.point && target.fs.excerpt
+        ? target.fs.excerpt(target.path, literals, every)
+        : null
     },
     matches: async (dir, literals, ignoreCase) => {
       const target = route(dir)

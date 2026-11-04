@@ -28,8 +28,8 @@ export type FileSystem = {
   symlink?(target: string, path: string): Promise<void>
   readlink?(path: string): Promise<string | null>
   lstat?(path: string): Promise<LinkStat | null>
-  search?(dir: string, literals: string[]): Promise<string[] | null>
-  excerpt?(path: string, literals: string[]): Promise<Uint8Array | null>
+  search?(dir: string, literals: string[], every?: string[][]): Promise<string[] | null>
+  excerpt?(path: string, literals: string[], every?: string[][]): Promise<Uint8Array | null>
   matches?(dir: string, literals: string[], ignoreCase: boolean): Promise<string[] | null>
   writeMany?(dirs: string[], files: NewFile[]): Promise<string[]>
 }

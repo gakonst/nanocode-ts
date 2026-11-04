@@ -10,6 +10,7 @@ import { FsError } from '../../FileSystem.ts'
 import { baseOf, byteLength, decode, encode, fromBase64, toBase64 } from '../Fs.ts'
 import {
   ahead,
+  conjunction,
   exactLiterals,
   literals,
   pruned,
@@ -564,13 +565,9 @@ const grep: CommandHandler = streaming(async (ctx) => {
   let status = 1
   let errors = false
   let directories = false
-  const prunable =
-    !f.has('v') && !f.has('L') && !f.has('c')
-      ? literals(
-          patterns,
-          f.has('F') ? 'fixed' : f.has('P') ? 'perl' : f.has('E') ? 'extended' : 'basic',
-        )
-      : null
+  const syntax = f.has('F') ? 'fixed' : f.has('P') ? 'perl' : f.has('E') ? 'extended' : 'basic'
+  const prunable = !f.has('v') && !f.has('L') && !f.has('c') ? literals(patterns, syntax) : null
+  const every = prunable && !f.has('z') ? conjunction(patterns, syntax) : null
   const exactTerms =
     (f.has('l') || f.has('q')) &&
     !f.has('v') &&
@@ -612,6 +609,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
           path,
           prunable,
           exactTerms && { literals: exactTerms, ignoreCase: f.has('i') },
+          every,
         )
       for (const child of tree ? prunedList(tree, path) : await ctx.fs.list(path))
         await collect(
@@ -649,10 +647,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
   const state: ScanState = { printed: false }
   const listing = f.has('q') || f.has('l') || f.has('L') || f.has('c')
   const separator = f.has('z') ? '\0' : '\n'
-  const require = requireRegExp(
-    literals(patterns, f.has('F') ? 'fixed' : f.has('P') ? 'perl' : f.has('E') ? 'extended' : 'basic'),
-    regex,
-  )
+  const require = requireRegExp(literals(patterns, syntax), regex)
   const search = async (
     source: () => Promise<string | null>,
     name: string,
@@ -733,7 +728,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         ? null
         : partial && target.pruned
           ? (ctx.fs
-              .excerpt?.(target.path, partial)
+              .excerpt?.(target.path, partial, every ?? undefined)
               .then((bytes) => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path))
           : ctx.fs.read(target.path),
     )

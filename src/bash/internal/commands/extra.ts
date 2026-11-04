@@ -26,6 +26,7 @@ import {
 import { mkdirs } from './files.ts'
 import {
   ahead,
+  conjunction,
   exactLiterals,
   listings,
   literals,
@@ -1886,17 +1887,12 @@ const rg: CommandHandler = async (ctx) => {
       2,
     )
   }
+  const literalPatterns = f.has('F')
+    ? rewritten
+    : rewritten.map((pattern) => pattern.replace(/^\(\?[imsx]+\)/, ''))
   const require = f.has('U')
     ? undefined
-    : requireRegExp(
-        literals(
-          f.has('F')
-            ? rewritten
-            : rewritten.map((pattern) => pattern.replace(/^\(\?[imsx]+\)/, '')),
-          f.has('F') ? 'fixed' : 'perl',
-        ),
-        regex,
-      )
+    : requireRegExp(literals(literalPatterns, f.has('F') ? 'fixed' : 'perl'), regex)
   const types = parsed.values.get('t') ?? []
   const notTypes = parsed.values.get('T') ?? []
   for (const type of [...types, ...notTypes])
@@ -1966,8 +1962,9 @@ const rg: CommandHandler = async (ctx) => {
   }
   const prunable =
     !listFiles && !f.has('v') && !has('files-without-match')
-      ? literals(patterns, f.has('F') ? 'fixed' : 'perl')
+      ? literals(literalPatterns, f.has('F') ? 'fixed' : 'perl')
       : null
+  const every = prunable && !f.has('U') ? conjunction(literalPatterns, 'perl') : null
   const exactTerms =
     (f.has('l') || f.has('q')) &&
     !listFiles &&
@@ -1977,7 +1974,7 @@ const rg: CommandHandler = async (ctx) => {
     !f.has('c') &&
     !has('count-matches') &&
     !has('files-without-match')
-      ? exactLiterals(patterns, f.has('F') ? 'fixed' : 'perl')
+      ? exactLiterals(rewritten, f.has('F') ? 'fixed' : 'perl')
       : null
   let narrowed = false
   const lists = listings(ctx.fs)
@@ -2056,6 +2053,7 @@ const rg: CommandHandler = async (ctx) => {
       path,
       prunable,
       exactTerms && { literals: exactTerms, ignoreCase: insensitive },
+      every,
     )
     if (tree && !types.length && !notTypes.length) narrowed = true
     await walk(path, implicit ? '' : root, 0, inherited, git, path, tree)
@@ -2177,7 +2175,7 @@ const rg: CommandHandler = async (ctx) => {
       ? null
       : partial && target.pruned
         ? (ctx.fs
-            .excerpt?.(target.path, partial)
+            .excerpt?.(target.path, partial, every ?? undefined)
             .then((bytes) => bytes ?? ctx.fs.read(target.path)) ?? ctx.fs.read(target.path))
         : ctx.fs.read(target.path),
   )

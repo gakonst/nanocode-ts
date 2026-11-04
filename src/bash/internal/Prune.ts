@@ -79,11 +79,12 @@ export async function pruned(
   root: string,
   literals: string[] | null,
   exact?: { literals: string[]; ignoreCase: boolean } | null,
+  every?: string[][] | null,
 ): Promise<Pruned | null> {
   const matched =
     exact && fs.matches ? await fs.matches(root, exact.literals, exact.ignoreCase) : null
   if (!matched && (!literals || !fs.search)) return null
-  const files = matched ?? (await fs.search!(root, literals!))
+  const files = matched ?? (await fs.search!(root, literals!, every ?? undefined))
   if (!files) return null
   const tree: Pruned = new Map([[root, new Set()]])
   if (matched) tree.exact = true
@@ -146,13 +147,25 @@ export function literals(patterns: string[], syntax: Syntax): string[] | null {
   return out.length ? out : null
 }
 
-function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] | null {
+export function conjunction(patterns: string[], syntax: Syntax): string[][] | null {
+  if (syntax === 'fixed' || patterns.length !== 1) return null
+  const every: string[][] = []
+  return branches(patterns[0], syntax, every) && every.length > 1 ? every : null
+}
+
+function branches(
+  pattern: string,
+  syntax: Exclude<Syntax, 'fixed'>,
+  every?: string[][],
+): string[] | null {
   const basic = syntax === 'basic'
   const out: string[] = []
   let best: string[] = []
   let run = ''
+  let ended = 0
   const shortest = (set: string[]) => Math.min(...set.map((literal) => literal.length))
   const consider = (set: string[]) => {
+    every?.push(set)
     if (
       !best.length ||
       shortest(set) > shortest(best) ||
@@ -166,6 +179,7 @@ function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] |
   }
   const end = () => {
     cut()
+    if (++ended > 1) every?.splice(0)
     if (!best.length) return false
     out.push(...best)
     best = []
