@@ -8,6 +8,7 @@ import {
 } from '../../FileSystem.ts'
 import { baseOf, encode, parentOf } from '../Fs.ts'
 import { globRegExp, posixRegExp } from '../Text.ts'
+import { listings } from '../Prune.ts'
 import { parseDate, strftime } from './text.ts'
 import {
   canonical,
@@ -736,6 +737,19 @@ const FIND_ACTIONS = [
   '-print0',
   '-printf',
 ]
+const FIND_IN_ORDER = [
+  '-prune',
+  '-quit',
+  '-delete',
+  '-exec',
+  '-execdir',
+  '-fprint',
+  '-fprint0',
+  '-fprintf',
+  '-fls',
+  '-ok',
+  '-okdir',
+]
 const FIND_UNARY = [
   '-delete',
   '-print',
@@ -1308,23 +1322,25 @@ const find: CommandHandler = async (ctx) => {
     }
     return false
   }
+  const readAhead = !tokens.some((token) => FIND_IN_ORDER.includes(token))
+  const lists = listings(ctx.fs)
   const walk = async (entry: FindEntry) => {
     if (!depthFirst && entry.depth >= minDepth) await evaluate(root, entry)
     if (entry.stat.kind === 'directory' && entry.depth < maxDepth && !entry.pruned) {
       let names: string[] = []
       try {
-        names = await ctx.fs.list(entry.path)
+        names = await lists.list(entry.path)
       } catch (error) {
         ctx.stderr.write("find: '" + entry.display + "': " + failure(error) + '\n')
         status = 1
       }
-      for (const name of names) {
+      const child = async (name: string): Promise<FindEntry | null> => {
         const path = join(entry.path, name)
         const stat = follow
           ? ((await ctx.fs.stat(path)) ?? (await lstatOf(ctx, path)))
           : await lstatOf(ctx, path)
-        if (!stat) continue
-        await walk({
+        if (!stat) return null
+        return {
           path,
           display: entry.display.endsWith('/') ? entry.display + name : entry.display + '/' + name,
           stat,
@@ -1332,8 +1348,24 @@ const find: CommandHandler = async (ctx) => {
           name,
           root: entry.root,
           pruned: false,
-        })
+        }
       }
+      if (readAhead) {
+        const children: FindEntry[] = []
+        for (const name of names) {
+          const found = await child(name)
+          if (found) children.push(found)
+        }
+        if (entry.depth + 1 < maxDepth)
+          lists.ahead(
+            children.filter((found) => found.stat.kind === 'directory').map((found) => found.path),
+          )
+        for (const found of children) await walk(found)
+      } else
+        for (const name of names) {
+          const found = await child(name)
+          if (found) await walk(found)
+        }
     }
     if (depthFirst && entry.depth >= minDepth) await evaluate(root, entry)
   }

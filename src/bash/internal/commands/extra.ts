@@ -27,6 +27,7 @@ import { mkdirs } from './files.ts'
 import {
   ahead,
   exactLiterals,
+  listings,
   literals,
   pruned,
   prunedList,
@@ -1856,9 +1857,7 @@ const rg: CommandHandler = async (ctx) => {
     (smart && !patterns.some((pattern) => /[A-Z]/.test(pattern.replace(/\\[a-zA-Z]/g, ''))))
   let extraFlags = ''
   const rewritten = patterns.map((pattern) =>
-    !f.has('F') &&
-    pattern.includes('\\|') &&
-    !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, ''))
+    !f.has('F') && pattern.includes('\\|') && !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, ''))
       ? pattern.replace(/\\\|/g, '|')
       : pattern,
   )
@@ -1891,7 +1890,9 @@ const rg: CommandHandler = async (ctx) => {
     ? undefined
     : requireRegExp(
         literals(
-          f.has('F') ? rewritten : rewritten.map((pattern) => pattern.replace(/^\(\?[imsx]+\)/, '')),
+          f.has('F')
+            ? rewritten
+            : rewritten.map((pattern) => pattern.replace(/^\(\?[imsx]+\)/, '')),
           f.has('F') ? 'fixed' : 'perl',
         ),
         regex,
@@ -1979,6 +1980,7 @@ const rg: CommandHandler = async (ctx) => {
       ? exactLiterals(patterns, f.has('F') ? 'fixed' : 'perl')
       : null
   let narrowed = false
+  const lists = listings(ctx.fs)
   const walk = async (
     path: string,
     display: string,
@@ -1990,7 +1992,8 @@ const rg: CommandHandler = async (ctx) => {
   ) => {
     if (depth > maxDepth) return
     const local = rules.concat(await loadRules(path, git))
-    for (const name of tree ? prunedList(tree, path) : await ctx.fs.list(path)) {
+    const children: { path: string; shown: string; directory: boolean }[] = []
+    for (const name of tree ? prunedList(tree, path) : await lists.list(path)) {
       const child = (path === '/' ? '' : path) + '/' + name
       const stat = tree ? prunedStat(tree, child) : await ctx.fs.stat(child)
       if (!stat) continue
@@ -2006,15 +2009,21 @@ const rg: CommandHandler = async (ctx) => {
       }
       const shown =
         display === '' ? name : display.endsWith('/') ? display + name : display + '/' + name
-      if (directory) {
-        await walk(child, shown, depth + 1, local, git, root, tree)
+      if (!directory) {
+        if (types.length && !types.includes('all') && !typeMatch(types, name)) continue
+        if (notTypes.length && typeMatch(notTypes, name)) continue
+      }
+      children.push({ path: child, shown, directory })
+    }
+    if (!tree) lists.ahead(children.filter((child) => child.directory).map((child) => child.path))
+    for (const child of children) {
+      if (child.directory) {
+        await walk(child.path, child.shown, depth + 1, local, git, root, tree)
         continue
       }
-      if (types.length && !types.includes('all') && !typeMatch(types, name)) continue
-      if (notTypes.length && typeMatch(notTypes, name)) continue
       targets.push({
-        path: child,
-        display: shown,
+        path: child.path,
+        display: child.shown,
         explicit: false,
         pruned: !!tree,
         matched: !!tree?.exact,
@@ -2052,7 +2061,10 @@ const rg: CommandHandler = async (ctx) => {
     await walk(path, implicit ? '' : root, 0, inherited, git, path, tree)
   }
   if (listFiles) {
-    for (const target of targets) ctx.stdout.write(target.display + (f.has('0') ? '\0' : '\n'))
+    for (const target of targets) {
+      ctx.stdout.write(target.display + (f.has('0') ? '\0' : '\n'))
+      await pause(ctx)
+    }
     return errors ? 2 : targets.length ? 0 : 1
   }
   const named = f.has('H') || has('vimgrep') || (!f.has('I') && (roots.length > 1 || directories))
@@ -2177,6 +2189,7 @@ const rg: CommandHandler = async (ctx) => {
       found = true
       if (f.has('q')) return 0
       ctx.stdout.write(target.display + (f.has('0') ? '\0' : '\n'))
+      await pause(ctx)
       continue
     }
     let text: string

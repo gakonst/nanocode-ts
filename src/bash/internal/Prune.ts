@@ -46,6 +46,34 @@ export function ahead<T>(
   }
 }
 
+export function listings(fs: Pick<FileSystem, 'list'>): {
+  list: (path: string) => Promise<string[]>
+  ahead: (paths: string[]) => void
+} {
+  const started = new Map<string, Promise<string[]>>()
+  let pending = 0
+  return {
+    list: (path) => {
+      const promise = started.get(path)
+      started.delete(path)
+      return promise ?? fs.list(path)
+    },
+    ahead: (paths) => {
+      for (const path of paths) {
+        if (pending >= AHEAD) return
+        if (started.has(path)) continue
+        pending++
+        const promise = fs.list(path)
+        promise.then(
+          () => pending--,
+          () => pending--,
+        )
+        started.set(path, promise)
+      }
+    },
+  }
+}
+
 export async function pruned(
   fs: FileSystem,
   root: string,
@@ -152,7 +180,11 @@ function branches(pattern: string, syntax: Exclude<Syntax, 'fixed'>): string[] |
     const optional = basic
       ? /^(\*|\\\?|\\\{0*[,\\])/.test(repeat)
       : /^(\*|\?|\{0*[,}])/.test(repeat)
-    const body = basic ? inner : /^\?(?::|P?<[A-Za-z_][\w]*>)/.exec(inner) ? inner.replace(/^\?(?::|P?<[A-Za-z_][\w]*>)/, '') : inner
+    const body = basic
+      ? inner
+      : /^\?(?::|P?<[A-Za-z_][\w]*>)/.exec(inner)
+        ? inner.replace(/^\?(?::|P?<[A-Za-z_][\w]*>)/, '')
+        : inner
     cut()
     if (!optional && (basic || !inner.startsWith('?') || body !== inner)) {
       const set = branches(body, syntax)
