@@ -8,15 +8,25 @@ use nanocode_code_mode::{
 
 use super::store::WorkerStore;
 
-const CREATE: &str = "CREATE TABLE IF NOT EXISTS nanocode_cell_journals (scope TEXT NOT NULL, session_id TEXT NOT NULL, cell_id INTEGER NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (session_id, cell_id, seq))";
+const CREATE: [&str; 2] = [
+    "CREATE TABLE IF NOT EXISTS nanocode_cell_journals (scope TEXT NOT NULL, session_id TEXT NOT NULL, cell_id INTEGER NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (session_id, cell_id, seq))",
+    "CREATE TABLE IF NOT EXISTS nanocode_cell_journals (scope TEXT NOT NULL, session_id TEXT NOT NULL, cell_id BIGINT NOT NULL, seq BIGINT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (session_id, cell_id, seq))",
+];
 
-const INSERT: &str = "INSERT OR REPLACE INTO nanocode_cell_journals (scope, session_id, cell_id, seq, body) VALUES (?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), ?)";
+const INSERT: [&str; 2] = [
+    "INSERT OR REPLACE INTO nanocode_cell_journals (scope, session_id, cell_id, seq, body) VALUES (?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), ?)",
+    "INSERT INTO nanocode_cell_journals (scope, session_id, cell_id, seq, body) VALUES ($1::text, $2::text, CAST($3::text AS BIGINT), CAST($4::text AS BIGINT), $5::text) ON CONFLICT (session_id, cell_id, seq) DO UPDATE SET scope = excluded.scope, body = excluded.body",
+];
 
-const CLEAR: &str =
-    "DELETE FROM nanocode_cell_journals WHERE session_id = ? AND cell_id = CAST(? AS INTEGER)";
+const CLEAR: [&str; 2] = [
+    "DELETE FROM nanocode_cell_journals WHERE session_id = ? AND cell_id = CAST(? AS INTEGER)",
+    "DELETE FROM nanocode_cell_journals WHERE session_id = $1::text AND cell_id = CAST($2::text AS BIGINT)",
+];
 
-const SELECT: &str =
-    "SELECT body FROM nanocode_cell_journals WHERE scope = ? ORDER BY session_id, cell_id, seq";
+const SELECT: [&str; 2] = [
+    "SELECT body FROM nanocode_cell_journals WHERE scope = ? ORDER BY session_id, cell_id, seq",
+    "SELECT body FROM nanocode_cell_journals WHERE scope = $1::text ORDER BY session_id, cell_id, seq",
+];
 
 pub struct WorkerJournals {
     scope: String,
@@ -32,17 +42,19 @@ impl CellJournalSink for WorkerJournals {
     fn save(&self, update: CellJournalUpdate) -> HostFuture<'static, Result<(), String>> {
         let scope = self.scope.clone();
         Box::pin(async move {
+            let store = WorkerStore::durability();
+            let dialect = store.dialect();
             let body = serde_json::to_string(&update).map_err(|error| error.to_string())?;
             let cell = update.cell_id.to_string();
             let seq = update.seq.to_string();
             let insert = SqlStatement {
-                sql: INSERT,
+                sql: dialect.pick(&INSERT),
                 params: vec![&scope, &update.session_id, &cell, &seq, &body],
             };
             let statements = if update.header.is_some() {
                 vec![
                     SqlStatement {
-                        sql: CLEAR,
+                        sql: dialect.pick(&CLEAR),
                         params: vec![&update.session_id, &cell],
                     },
                     insert,
@@ -50,7 +62,7 @@ impl CellJournalSink for WorkerJournals {
             } else {
                 vec![insert]
             };
-            WorkerStore::durability()
+            store
                 .transaction("cell_journal_save", &statements)
                 .await
                 .map(drop)
@@ -62,11 +74,12 @@ impl CellJournalSink for WorkerJournals {
         let session_id = session_id.to_owned();
         Box::pin(async move {
             let cell = cell_id.to_string();
-            let _ = WorkerStore::durability()
+            let store = WorkerStore::durability();
+            let _ = store
                 .transaction(
                     "cell_journal_forget",
                     &[SqlStatement {
-                        sql: CLEAR,
+                        sql: store.dialect().pick(&CLEAR),
                         params: vec![&session_id, &cell],
                     }],
                 )
@@ -76,16 +89,18 @@ impl CellJournalSink for WorkerJournals {
 }
 
 pub async fn load(scope: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, String> {
-    let rows = WorkerStore::durability()
+    let store = WorkerStore::durability();
+    let dialect = store.dialect();
+    let rows = store
         .transaction(
             "cell_journal_load",
             &[
                 SqlStatement {
-                    sql: CREATE,
+                    sql: dialect.pick(&CREATE),
                     params: Vec::new(),
                 },
                 SqlStatement {
-                    sql: SELECT,
+                    sql: dialect.pick(&SELECT),
                     params: vec![scope],
                 },
             ],
