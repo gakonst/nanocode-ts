@@ -39,6 +39,12 @@ export class LimitError extends Error {
   }
 }
 
+export class MachineError extends LimitError {
+  constructor(message: string) {
+    super(message, 127)
+  }
+}
+
 export function megabytes(bytes: number): string {
   return (bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0) + ' MB'
 }
@@ -579,6 +585,7 @@ export type ShellHost = {
   fs: FileSystem
   commands: Map<string, CommandHandler>
   fetch?: typeof fetch
+  fallback?: boolean
   limits: Limits
 }
 
@@ -1844,11 +1851,14 @@ export class Runner {
       )
       return stat ? 126 : 127
     }
+    if (this.host.fallback) throw new MachineError(name + ': command not found' + missing(name))
     io.stderr.write('bash: ' + name + ': command not found' + missing(name) + '\n')
     return 127
   }
 
   async external(name: string, handler: CommandHandler, args: string[], io: IO): Promise<number> {
+    if (this.host.fallback && !this.host.fetch && (name === 'curl' || name === 'wget'))
+      throw new MachineError(name + ': network access is not available in this shell')
     const cwd = this.state.cwd
     const runner = this
     let env: Record<string, string> | undefined
@@ -1923,6 +1933,10 @@ export class Runner {
         throw new LimitError(
           typeof this.signal.reason === 'string' ? this.signal.reason : 'execution aborted',
           124,
+        )
+      if (this.host.fallback && UNSUPPORTED.test(message(error)))
+        throw new MachineError(
+          name + ': ' + message(error) + ' (this simulated shell has no support for this)',
         )
       io.stderr.write(name + ': ' + message(error) + '\n')
       return error instanceof CommandError ? error.status : 1
@@ -3961,7 +3975,7 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
       return 2
     }
     if (error instanceof LimitError) {
-      runner.failure = 'limit'
+      if (!(error instanceof MachineError)) runner.failure = 'limit'
       io.stderr.write('bash: ' + error.message + '\n')
       return error.status
     }
@@ -3977,6 +3991,9 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
     throw error
   }
 }
+
+const UNSUPPORTED =
+  /^(unrecognized|invalid|unsupported|unknown) option|^Unknown option|not supported|network access is not available|Cannot find package 'pyodide'/
 
 function missing(name: string): string {
   if (/^(node|nodejs|npm|npx|pnpm|yarn|bun|bunx|deno|tsc|tsx|ts-node)$/.test(name))
