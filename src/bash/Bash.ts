@@ -9,6 +9,7 @@ import { decode, display, encode, parentOf, useCodec, type Codec } from './inter
 import * as Shell from './internal/Shell.ts'
 import { awk } from './internal/commands/awk.ts'
 import { curl, wget } from './internal/commands/curl.ts'
+import { diffCommands } from './internal/commands/diff.ts'
 import { extraCommands } from './internal/commands/extra.ts'
 import { fileCommands, mkdirs } from './internal/commands/files.ts'
 import { gitCommands } from './internal/commands/git.ts'
@@ -96,6 +97,7 @@ export const defaultLimits: Shell.Limits = {
 const builtinCommands: Record<string, Command.Handler> = {
   ...fileCommands,
   ...textCommands,
+  ...diffCommands,
   ...extraCommands,
   ...systemCommands,
   ...gitCommands(),
