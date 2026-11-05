@@ -5,6 +5,7 @@ export type TestArg = { text: string; op?: boolean; pattern?: string; regex?: st
 export type TestHost = {
   stat(path: string): Promise<FileStat | null>
   lstat?(path: string): Promise<LinkStat | null>
+  arith(text: string): number
   isSet(name: string): boolean
   match(text: string, pattern: string): boolean
   regex(text: string, source: string): boolean
@@ -163,6 +164,7 @@ export async function evaluateTest(
         return false
     }
   }
+  const number = (arg: TestArg) => (double ? host.arith(arg.text) : integer(arg.text))
   async function binary(left: TestArg, op: string, right: TestArg): Promise<boolean> {
     switch (op) {
       case '=':
@@ -181,17 +183,17 @@ export async function evaluateTest(
       case '=~':
         return host.regex(left.text, right.regex ?? right.text)
       case '-eq':
-        return integer(left.text) === integer(right.text)
+        return number(left) === number(right)
       case '-ne':
-        return integer(left.text) !== integer(right.text)
+        return number(left) !== number(right)
       case '-lt':
-        return integer(left.text) < integer(right.text)
+        return number(left) < number(right)
       case '-le':
-        return integer(left.text) <= integer(right.text)
+        return number(left) <= number(right)
       case '-gt':
-        return integer(left.text) > integer(right.text)
+        return number(left) > number(right)
       case '-ge':
-        return integer(left.text) >= integer(right.text)
+        return number(left) >= number(right)
       case '-nt':
       case '-ot': {
         const [a, b] = [await host.stat(left.text), await host.stat(right.text)]
@@ -204,6 +206,8 @@ export async function evaluateTest(
     return false
   }
   if (!args.length) return false
+  if (!double && args.length === 2 && args[0].text !== '!' && !UNARY.has(args[0].text))
+    throw new TestError(args[0].text + ': unary operator expected')
   const value = await or()
   if (pos < args.length) throw new TestError(args[pos].text + ': unexpected argument')
   return value

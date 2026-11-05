@@ -6,9 +6,9 @@ export type ArithScope = {
 }
 
 type Token =
-  | { kind: 'num'; value: ArithValue }
-  | { kind: 'name'; value: string }
-  | { kind: 'op'; value: string }
+  | { kind: 'num'; value: ArithValue; at: number }
+  | { kind: 'name'; value: string; at: number }
+  | { kind: 'op'; value: string; at: number }
 
 const OPERATORS = [
   '<<=',
@@ -64,7 +64,15 @@ const SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 
 const CACHE = new Map<string, Token[]>()
 
-export class ArithError extends Error {}
+export class ArithError extends Error {
+  located = false
+}
+
+function located(token: string, message: string): ArithError {
+  const error = new ArithError(token + ': ' + message + ' (error token is "' + token + '")')
+  error.located = true
+  return error
+}
 
 function normal(value: bigint): ArithValue {
   const wrapped = BigInt.asIntN(64, value)
@@ -76,8 +84,7 @@ function big(value: ArithValue): bigint {
 }
 
 function digits(text: string, base: number, token: string): ArithValue {
-  if (base < 2 || base > 64)
-    throw new ArithError('invalid arithmetic base (error token is "' + token + '")')
+  if (base < 2 || base > 64) throw located(token, 'invalid arithmetic base')
   let value: ArithValue = 0
   for (const c of text) {
     const code = c.charCodeAt(0)
@@ -95,8 +102,7 @@ function digits(text: string, base: number, token: string): ArithValue {
               : c === '_'
                 ? 63
                 : 64
-    if (digit >= base)
-      throw new ArithError('value too great for base (error token is "' + token + '")')
+    if (digit >= base) throw located(token, 'value too great for base')
     if (typeof value === 'number') {
       const next: number = value * base + digit
       value = next <= Number.MAX_SAFE_INTEGER ? next : BigInt(value) * BigInt(base) + BigInt(digit)
@@ -107,14 +113,12 @@ function digits(text: string, base: number, token: string): ArithValue {
 
 function literal(text: string): ArithValue {
   if (/^0[xX]/.test(text)) {
-    if (text.length === 2) throw new ArithError('invalid number (error token is "' + text + '")')
     return digits(text.slice(2), 16, text)
   }
   const hash = text.indexOf('#')
   if (hash > 0) {
     const base = Number(text.slice(0, hash))
-    if (hash === text.length - 1)
-      throw new ArithError('invalid number (error token is "' + text + '")')
+    if (hash === text.length - 1) throw located(text, 'invalid number')
     return digits(text.slice(hash + 1), base, text)
   }
   if (text.length > 1 && text[0] === '0') return digits(text.slice(1), 8, text)
@@ -144,14 +148,14 @@ function tokenize(source: string): Token[] {
     if (code >= 48 && code <= 57) {
       NUMBER.lastIndex = i
       const text = NUMBER.exec(source)![0]
-      tokens.push({ kind: 'num', value: literal(text) })
+      tokens.push({ kind: 'num', value: literal(text), at: i })
       i += text.length
       continue
     }
     if (code === 95 || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
       NAME.lastIndex = i
       const name = NAME.exec(source)![0]
-      tokens.push({ kind: 'name', value: name })
+      tokens.push({ kind: 'name', value: name, at: i })
       i += name.length
       continue
     }
@@ -160,7 +164,7 @@ function tokenize(source: string): Token[] {
       throw new ArithError(
         'syntax error: invalid arithmetic operator (error token is "' + source.slice(i) + '")',
       )
-    tokens.push({ kind: 'op', value: op })
+    tokens.push({ kind: 'op', value: op, at: i })
     i += op.length
   }
   if (CACHE.size > 512) CACHE.clear()
@@ -191,8 +195,7 @@ const BINARY: Record<string, number> = {
 }
 
 function power(base: ArithValue, exponent: ArithValue): ArithValue {
-  if (exponent < 0)
-    throw new ArithError('exponent less than 0 (error token is "' + String(exponent) + '")')
+  if (exponent < 0) throw new ArithError('exponent less than 0')
   if (typeof base === 'number' && typeof exponent === 'number') {
     const result = base ** exponent
     if (Number.isSafeInteger(result)) return result
@@ -240,7 +243,7 @@ function apply(op: string, a: ArithValue, b: ArithValue, run: boolean): ArithVal
     case '%':
       if (b == 0) {
         if (!run) return 0
-        throw new ArithError('division by 0 (error token is "' + String(b) + '")')
+        throw new ArithError('division by 0')
       }
       if (small) {
         const rest = (a as number) % (b as number)
@@ -302,8 +305,9 @@ function numeric(text: string): ArithValue | undefined {
 
 export function evaluateArith(source: string, scope: ArithScope, depth = 0): ArithValue {
   if (depth > 32) throw new ArithError('expression recursion level exceeded')
-  const tokens = tokenize(source)
+  let tokens: Token[] = []
   let pos = 0
+  const rest = (at: number) => source.slice(tokens[at]?.at ?? source.length)
   const peek = () => tokens[pos]
   const isOp = (value: string) => {
     const token = tokens[pos]
@@ -311,11 +315,7 @@ export function evaluateArith(source: string, scope: ArithScope, depth = 0): Ari
   }
   const expect = (value: string) => {
     if (!isOp(value))
-      throw new ArithError(
-        'syntax error in expression (error token is "' +
-          (peek() ? String(peek()!.value) : '') +
-          '")',
-      )
+      throw new ArithError('syntax error in expression (error token is "' + rest(pos) + '")')
     pos++
   }
   const variable = (name: string, index?: number): ArithValue => {
@@ -367,7 +367,8 @@ export function evaluateArith(source: string, scope: ArithScope, depth = 0): Ari
     if (!isOp('?')) return cond
     pos++
     const yes = comma(run && cond != 0)
-    expect(':')
+    if (!isOp(':')) throw new ArithError("`:' expected for conditional expression")
+    pos++
     const no = assign(run && cond == 0)
     return cond != 0 ? yes : no
   }
@@ -428,10 +429,7 @@ export function evaluateArith(source: string, scope: ArithScope, depth = 0): Ari
     pos++
     if (token.kind === 'num') return token.value
     if (token.kind === 'op') {
-      if (token.value !== '(')
-        throw new ArithError(
-          'syntax error: operand expected (error token is "' + token.value + '")',
-        )
+      if (token.value !== '(') throw new ArithError('syntax error: operand expected')
       const value = comma(run)
       expect(')')
       return value
@@ -444,11 +442,31 @@ export function evaluateArith(source: string, scope: ArithScope, depth = 0): Ari
     }
     return value
   }
-  if (!tokens.length) return 0
-  const value = comma(true)
-  if (pos < tokens.length)
-    throw new ArithError(
-      'syntax error in expression (error token is "' + String(tokens[pos].value) + '")',
-    )
-  return value
+  function evaluate(): ArithValue {
+    if (!tokens.length) return 0
+    const value = comma(true)
+    if (pos < tokens.length)
+      throw new ArithError(
+        (ASSIGN.has(String(tokens[pos].value))
+          ? 'attempted assignment to non-variable'
+          : 'syntax error in expression') +
+          ' (error token is "' +
+          rest(pos) +
+          '")',
+      )
+    return value
+  }
+  try {
+    tokens = tokenize(source)
+    return evaluate()
+  } catch (error) {
+    if (!(error instanceof ArithError) || error.located) throw error
+    error.located = true
+    error.message =
+      source.trimStart() +
+      ': ' +
+      error.message +
+      (error.message.includes('(error token is') ? '' : ' (error token is "' + rest(pos - 1) + '")')
+    throw error
+  }
 }
