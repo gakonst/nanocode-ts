@@ -1,6 +1,6 @@
 import { byte } from './Fs.ts'
 
-const CLASSES: Record<string, string> = {
+export const CLASSES: Record<string, string> = {
   alpha: 'a-zA-Z',
   digit: '0-9',
   alnum: 'a-zA-Z0-9',
@@ -86,34 +86,87 @@ export function unescapeGlob(pattern: string): string {
   return pattern.replace(/\\([\s\S])/g, '$1')
 }
 
-export function posixRegExp(pattern: string, extended: boolean, flags = ''): RegExp {
+export function posixRegExp(
+  pattern: string,
+  extended: boolean,
+  flags = '',
+  warnings?: string[],
+): RegExp {
   let out = ''
+  let atom = -1
+  let anchor = false
+  let repeated = false
+  let start = true
+  const groups: number[] = []
+  const emit = (text: string, zero = false) => {
+    atom = out.length
+    out += text
+    anchor = zero
+    repeated = false
+    start &&= zero
+  }
+  const alternate = (text: string) => {
+    if (text === '(') groups.push(out.length)
+    out += text
+    atom = -1
+    anchor = repeated = false
+    start = true
+  }
+  const close = () => {
+    atom = groups.pop() ?? -1
+    out += ')'
+    anchor = repeated = start = false
+  }
+  const repeat = (quantifier: string, name: string) => {
+    if (start && warnings && extended) {
+      warnings.push(name + ' at start of expression')
+      if (atom < 0) return
+    } else if (start && (!extended || name === '*')) return emit(escapeRegExp(name))
+    if (atom >= 0 && (repeated || anchor)) out = out.slice(0, atom) + '(?:' + out.slice(atom) + ')'
+    out += quantifier
+    repeated = true
+    anchor = false
+  }
+  const interval = (from: number, end: string): [string, number] | undefined => {
+    const match = /^(\d*)(,\d*)?/.exec(pattern.slice(from))!
+    if ((!match[1] && !match[2]) || !pattern.startsWith(end, from + match[0].length)) return
+    return [
+      '{' + (match[1] || '0') + (match[2] ?? '') + '}',
+      from + match[0].length + end.length - 1,
+    ]
+  }
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i]
-    if (c === '\\' && i + 1 < pattern.length) {
+    const bounds =
+      c === '{' && extended
+        ? interval(i + 1, '}')
+        : c === '\\' && pattern[i + 1] === '{' && !extended && !start
+          ? interval(i + 2, '\\}')
+          : undefined
+    if (bounds) {
+      repeat(bounds[0], '{...}')
+      i = bounds[1]
+    } else if (c === '\\' && i + 1 < pattern.length) {
       const n = pattern[++i]
-      if (n === '<' || n === '>') out += '\\b'
-      else if (!extended && '(){}+?|'.includes(n)) out += n
-      else if (/[wWsSbBdD1-9]/.test(n)) out += '\\' + n
-      else if (n === 'n') out += '\\n'
-      else if (n === 't') out += '\\t'
-      else if (n === 'r') out += '\\r'
-      else if (n === 'f') out += '\\f'
-      else if (n === 'v') out += '\\v'
-      else out += escapeRegExp(n)
+      if (n === '<' || n === '>' || n === 'b') emit('\\b', true)
+      else if (n === 'B') emit('\\B', true)
+      else if (!extended && (n === '(' || n === '|')) alternate(n)
+      else if (!extended && n === ')') close()
+      else if (!extended && (n === '+' || n === '?')) repeat(n, n)
+      else if (/[wWsS1-9]/.test(n) || (!warnings && /[dDntrfv]/.test(n))) emit('\\' + n)
+      else emit(escapeRegExp(n))
     } else if (c === '[') {
       const result = bracket(pattern, i, false)
       if (result) {
-        out += result[0]
+        emit(result[0])
         i = result[1] - 1
-      } else out += '\\['
-    } else if (!extended && '(){}+?|'.includes(c)) out += '\\' + c
-    else if (c === '*' && (out === '' || out.endsWith('(') || out.endsWith('|') || out === '^'))
-      out += '\\*'
-    else if (extended && c === '{' && !/^\{\d+(,\d*)?\}/.test(pattern.slice(i))) out += '\\{'
-    else if (extended && c === '}' && !/\{\d+(,\d*)?$/.test(out)) out += '\\}'
-    else if (c === '/') out += '\\/'
-    else out += c
+      } else emit('\\[')
+    } else if (c === '*') repeat('*', '*')
+    else if (extended && (c === '+' || c === '?')) repeat(c, c)
+    else if (extended && (c === '(' || c === '|')) alternate(c)
+    else if (extended && c === ')') close()
+    else if ('(){}+?|/'.includes(c)) emit('\\' + c)
+    else emit(c, c === '^' || c === '$')
   }
   return new RegExp(out, flags)
 }

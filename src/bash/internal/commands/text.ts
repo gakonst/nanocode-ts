@@ -20,6 +20,7 @@ import {
   type Pruned,
 } from '../Prune.ts'
 import {
+  CLASSES,
   escapeRegExp,
   escapes,
   format,
@@ -338,7 +339,7 @@ const wc: CommandHandler = streaming(async (ctx) => {
   return status
 })
 
-export type ScanState = { printed: boolean }
+export type ScanState = { printed: boolean; binary?: boolean }
 
 export type ScanOptions = {
   regex: RegExp
@@ -356,6 +357,11 @@ export type ScanOptions = {
   terminator: string
   replace?: string | undefined
   require?: RegExp | undefined
+  empty?: boolean
+  each?: boolean
+  trim?: boolean
+  columns?: number | undefined
+  encoding?: boolean
   silent: boolean
   state: ScanState
   write(text: string): void
@@ -515,6 +521,16 @@ function* leading(lead: Lead, line: string): Generator<RegExpExecArray> {
     yield match
 }
 
+export function* rustMatches(line: string, regex: RegExp): Generator<RegExpExecArray> {
+  let end = -1
+  regex.lastIndex = 0
+  for (const match of line.matchAll(regex)) {
+    if (!match[0] && match.index === end) continue
+    end = match.index + match[0].length
+    yield match
+  }
+}
+
 function leadOf(regex: RegExp): Lead | null {
   let lead = leads.get(regex)
   if (lead === undefined) leads.set(regex, (lead = leadMatcher(regex)))
@@ -543,24 +559,39 @@ export function scan(text: string, options: ScanOptions): number {
         (column !== undefined && !options.column ? encode(all[n].slice(0, column)).length : 0) +
         mark
       : '') +
-    (options.column && column !== undefined ? column + 1 + mark : '')
+    (options.column && column !== undefined
+      ? encode(all[n].slice(0, column)).length + 1 + mark
+      : '')
   const replaced = (line: string) =>
     options.replace === undefined ? line : line.replace(regex, options.replace)
+  const fit = (text: string, mark: string, count = 0) => {
+    const shown = options.trim ? text.replace(/^[ \t\n\v\f\r]+/, '') : text
+    if (options.columns === undefined || byteLength(shown) + (mark ? 1 : 0) <= options.columns)
+      return shown
+    return count
+      ? '[Omitted long line with ' + count + ' matches]'
+      : mark === '-'
+        ? '[Omitted long context line]'
+        : '[Omitted long matching line]'
+  }
+  const unprintable = (text: string) =>
+    !!options.encoding && /(?<![\ud800-\udbff])[\udc80-\udcff]/.test(text)
   let matches = 0
   let lastPrinted = -1
   let pendingAfter = 0
-  const emit = (i: number, mark: string, body: string) => {
-    if (context && options.state.printed && (lastPrinted < 0 || lastPrinted !== i - 1))
+  const emit = (i: number, mark: string, body: string, column?: number) => {
+    if (unprintable(body)) return void (options.state.binary = true)
+    if (context && options.state.printed && (lastPrinted < 0 || lastPrinted < i - 1))
       options.write('--' + options.terminator)
     options.state.printed = true
     lastPrinted = i
-    options.write(prefix(i, mark) + body + options.terminator)
+    options.write(prefix(i, mark, column) + body + options.terminator)
   }
   for (let i = 0; i < all.length; i++) {
     const line = all[i]
     if (matches >= options.max) {
       if (!context || pendingAfter <= 0) break
-      emit(i, '-', line)
+      emit(i, '-', fit(line, '-'))
       pendingAfter--
       continue
     }
@@ -571,7 +602,7 @@ export function scan(text: string, options: ScanOptions): number {
         : (lead ? lead(line, 0) !== null : regex.test(line)) !== options.invert
     if (!hit) {
       if (context && pendingAfter > 0) {
-        emit(i, '-', line)
+        emit(i, '-', fit(line, '-'))
         pendingAfter--
       }
       continue
@@ -579,29 +610,43 @@ export function scan(text: string, options: ScanOptions): number {
     matches++
     if (options.silent) continue
     if (context)
-      for (let j = Math.max(lastPrinted + 1, i - options.before); j < i; j++) emit(j, '-', all[j])
+      for (let j = Math.max(lastPrinted + 1, i - options.before); j < i; j++)
+        emit(j, '-', fit(all[j], '-'))
     if (options.only && !options.invert) {
       regex.lastIndex = 0
-      for (const match of lead ? leading(lead, line) : line.matchAll(regex)) {
-        if (!match[0]) continue
+      for (const match of lead
+        ? leading(lead, line)
+        : options.empty
+          ? rustMatches(line, regex)
+          : line.matchAll(regex)) {
+        if (!match[0] && !options.empty) continue
+        if (unprintable(match[0])) {
+          options.state.binary = true
+          continue
+        }
         options.state.printed = true
         options.write(
           prefix(i, ':', match.index) +
-            (options.replace === undefined
-              ? match[0]
-              : match[0].replace(
-                  new RegExp(regex.source, regex.flags.replace('g', '')),
-                  options.replace,
-                )) +
+            fit(
+              options.replace === undefined
+                ? match[0]
+                : match[0].replace(
+                    new RegExp(regex.source, regex.flags.replace('g', '')),
+                    options.replace,
+                  ),
+              '',
+            ) +
             options.terminator,
         )
       }
+    } else if (options.column && options.each && !options.invert) {
+      const found = [...rustMatches(line, regex)]
+      for (const match of found) emit(i, ':', fit(replaced(line), ':', found.length), match.index)
     } else if (options.column) {
       regex.lastIndex = 0
       const first = options.invert ? null : lead ? lead(line, 0) : regex.exec(line)
-      options.state.printed = true
-      options.write(prefix(i, ':', first?.index ?? 0) + replaced(line) + options.terminator)
-    } else emit(i, ':', replaced(line))
+      emit(i, ':', fit(replaced(line), ':'), first?.index ?? 0)
+    } else emit(i, ':', fit(replaced(line), ':'))
     pendingAfter = options.after
   }
   return matches
@@ -619,7 +664,44 @@ export function perlSource(pattern: string): { source: string; flags: string } {
     .replace(/\(\?P</g, '(?<')
     .replace(/\\A/g, '^')
     .replace(/\\[zZ]/g, '$')
-  return { source, flags }
+  return { source: perlClasses(source), flags }
+}
+
+function perlClasses(source: string): string {
+  let out = ''
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '\\') {
+      out += source.slice(i, i + 2)
+      i++
+      continue
+    }
+    if (source[i] !== '[') {
+      out += source[i]
+      continue
+    }
+    const negate = source[i + 1] === '^'
+    const excluded: string[] = []
+    let body = ''
+    let j = i + (negate ? 2 : 1)
+    for (let first = true; j < source.length && (first || source[j] !== ']'); first = false) {
+      const posix = /^\[:(\^?)([a-z]+):\]/.exec(source.slice(j))
+      if (posix && posix[2] in CLASSES) {
+        if (posix[1]) excluded.push(CLASSES[posix[2]])
+        else body += CLASSES[posix[2]]
+        j += posix[0].length
+      } else if (source[j] === '\\') {
+        body += source.slice(j, j + 2)
+        j += 2
+      } else body += (source[j] === ']' || source[j] === '[' ? '\\' : '') + source[j++]
+    }
+    if (j >= source.length) return out + source.slice(i)
+    const sets = (body ? ['[' + (negate ? '^' : '') + body + ']'] : []).concat(
+      excluded.map((set) => '[^' + set + ']'),
+    )
+    out += sets.length === 1 ? sets[0] : '(?:' + sets.join('|') + ')'
+    i = j
+  }
+  return out
 }
 
 const grep: CommandHandler = streaming(async (ctx) => {
@@ -673,6 +755,10 @@ const grep: CommandHandler = streaming(async (ctx) => {
     },
   })
   const f = parsed.flags
+  if (['E', 'F', 'G', 'P'].filter((flag) => f.has(flag)).length > 1) {
+    ctx.stderr.write('grep: conflicting matchers specified\n')
+    return 2
+  }
   const operands = [...parsed.operands]
   const patterns: string[] = [...(parsed.values.get('e') ?? [])]
   for (const file of parsed.values.get('f') ?? []) {
@@ -691,6 +777,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
     for (const line of operands.shift()!.split('\n')) patterns.push(line)
   }
   let flags = (f.has('i') ? 'i' : '') + 'g'
+  const warnings: string[] = []
   const sources = patterns.map((pattern) => {
     let source: string
     if (f.has('F')) source = escapeRegExp(pattern)
@@ -701,7 +788,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
       if (perl.flags.includes('s') && !flags.includes('s')) flags += 's'
     } else {
       try {
-        source = posixRegExp(pattern, f.has('E'), '').source
+        source = posixRegExp(pattern, f.has('E'), '', warnings).source
       } catch (error) {
         throw new CommandError(
           (error as Error).message.replace(/^Invalid regular expression: /, ''),
@@ -713,6 +800,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
     if (f.has('x')) source = '^(?:' + source + ')$'
     return source
   })
+  for (const warning of warnings) ctx.stderr.write('grep: warning: ' + warning + '\n')
   let regex: RegExp
   try {
     regex = new RegExp(
@@ -825,6 +913,8 @@ const grep: CommandHandler = streaming(async (ctx) => {
   const listing = f.has('q') || f.has('l') || f.has('L') || f.has('c')
   const separator = f.has('z') ? '\0' : '\n'
   const require = requireRegExp(literals(patterns, syntax), regex)
+  const binaries = last(parsed, 'binary-files')
+  const textual = f.has('a') || binaries === 'text'
   const search = async (
     source: () => Promise<string | null>,
     name: string,
@@ -833,11 +923,18 @@ const grep: CommandHandler = streaming(async (ctx) => {
     let matches = 0
     let binary = false
     let base = 0
+    state.binary = false
     for (let text = await source(); text !== null; text = await source()) {
-      binary ||= !f.has('a') && !f.has('z') && text.includes('\0')
-      const silent = listing || binary || last(parsed, 'binary-files') === 'without-match'
+      if (!binary && !textual && !f.has('z') && text.includes('\0')) {
+        if (binaries === 'without-match') {
+          matches = 0
+          break
+        }
+        binary = true
+      }
+      const silent = listing || binary
       let output = ''
-      matches += scan(text, {
+      matches += scan(binary ? text.replace(/\0/g, '\n') : text, {
         regex,
         invert: f.has('v'),
         max: max - matches,
@@ -851,6 +948,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         require,
         separator,
         terminator,
+        encoding: !textual,
         silent,
         state,
         write: (chunk) => void (output += chunk),
@@ -865,7 +963,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         break
       }
     }
-    if (binary && matches && !listing && last(parsed, 'binary-files') !== 'without-match')
+    if ((binary || state.binary) && matches && !listing)
       ctx.stderr.write('grep: ' + name + ': binary file matches\n')
     if (f.has('q')) return matches > 0
     if (f.has('c')) ctx.stdout.write((named ? name + nameEnd : '') + matches + '\n')
