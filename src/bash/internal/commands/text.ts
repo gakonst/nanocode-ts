@@ -3134,34 +3134,70 @@ const column: CommandHandler = async (ctx) => {
   const names = last(parsed, 'N')?.split(',')
   if (parsed.flags.has('J') && !names)
     throw new CommandError('option --table-columns or --table-column required for --json', 1)
-  const { text, status } = await allInput(ctx, parsed.operands)
-  const rows = lines(text)
+  const rows: string[] = []
+  let size = 0
+  const status = await eachInput(ctx, parsed.operands, (text) => {
+    size += text.length
+    budget(ctx.limits, size, ctx.name + ': its input')
+    for (const row of lines(text)) rows.push(row)
+  })
   if (!parsed.flags.has('t') && !parsed.flags.has('J')) {
-    const entries = rows.filter((row) => row !== '')
+    const entries = rows
+      .map((row) => row.split('\0', 1)[0]!)
+      .filter((row) => parsed.flags.has('L') || !/^[ \t\n\v\f\r]*$/.test(row))
+      .map((row) =>
+        /^[ \t\n\v\f\r]*$/.test(row)
+          ? ''
+          : row.replace(/[\udc80-\udcff]/g, (c) => '\\x' + (c.charCodeAt(0) - 0xdc00).toString(16)),
+      )
     if (!entries.length) return status
-    const width = Number(last(parsed, 'c') ?? ctx.env['COLUMNS'] ?? 80)
-    const longest = Math.max(...entries.map((entry) => [...entry].length))
-    const across = parsed.flags.has('x')
+    const given = last(parsed, 'c')
+    const width = given === 'unlimited' ? 0 : Number(given ?? ctx.env['COLUMNS'] ?? 80)
+    const widths = entries.map(columns)
+    const longest = Math.max(...widths)
+    if (longest >= width) {
+      ctx.stdout.write(entries.map((entry) => entry + '\n').join(''))
+      return status
+    }
     const column = (longest + 8) & ~7
-    const columns = Math.floor(width / column) || (across && longest < width ? entries.length : 1)
-    const height = Math.ceil(entries.length / columns)
+    const count = Math.floor(width / column)
+    const pad = (from: number, end: number) => '\t'.repeat((end - (from & ~7)) / 8)
     let out = ''
-    for (let row = 0; row < height; row++) {
-      const cells: string[] = []
-      for (let col = 0; col < columns; col++) {
-        const index = across ? row * columns + col : col * height + row
-        if (index < entries.length && (across ? col < columns : true)) cells.push(entries[index]!)
-      }
-      cells.forEach((cell, index) => {
-        out += cell
-        if (index === cells.length - 1) return
-        let count = [...cell].length
-        while (count < column) {
-          out += '\t'
-          count = (count + 8) & ~7
+    if (parsed.flags.has('x')) {
+      let used = 0
+      let end = column
+      entries.forEach((entry, index) => {
+        out += entry
+        used += widths[index]!
+        if (index === entries.length - 1) return
+        if ((index + 1) % count === 0) {
+          out += '\n'
+          used = 0
+          end = column
+          return
         }
+        out += pad(used, end)
+        used = end
+        end += column
       })
-      out += '\n'
+      if (used) out += '\n'
+    } else {
+      const height = Math.ceil(entries.length / Math.max(count, 1))
+      for (let row = 0; row < height; row++) {
+        let used = 0
+        for (
+          let index = row, end = column;
+          index < entries.length;
+          index += height, end += column
+        ) {
+          out += entries[index]
+          used += widths[index]!
+          if (index + height >= entries.length) break
+          out += pad(used, end)
+          used = end
+        }
+        out += '\n'
+      }
     }
     ctx.stdout.write(out)
     return status
