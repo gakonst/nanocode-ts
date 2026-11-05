@@ -70,6 +70,10 @@ impl InboxHost for WorkerInbox {
         self.live_deltas
     }
 
+    fn live_progress(&self) -> bool {
+        true
+    }
+
     fn publish_live(&self, events: Vec<LoggedEvent>) -> HostFuture<'_, Result<(), String>> {
         Box::pin(async move {
             if events.is_empty() {
