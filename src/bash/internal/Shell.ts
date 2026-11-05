@@ -2603,6 +2603,15 @@ export class Runner {
               this.quick(part.name)) ||
             (await this.param(part, io))
           if (list && part.quoted && !joined) {
+            const opening = pieces[pieces.length - 1]
+            if (
+              !values.length &&
+              opening &&
+              opening.split === false &&
+              opening.quoted &&
+              opening.text === ''
+            )
+              pieces.pop()
             values.forEach((value, index) => {
               if (index) pieces.push({ split: 'break' })
               pieces.push({ text: value, quoted: true, split: false })
