@@ -368,10 +368,163 @@ export function requireRegExp(found: string[] | null, regex: RegExp): RegExp | u
   )
 }
 
+type Lead = (line: string, from: number) => RegExpExecArray | null
+
+const leads = new WeakMap<RegExp, Lead | null>()
+
+function alternates(source: string): boolean {
+  let depth = 0
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '\\') i++
+    else if (c === '[') {
+      for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++
+    } else if (c === '(') depth++
+    else if (c === ')') depth--
+    else if (c === '|' && depth === 0) return true
+  }
+  return false
+}
+
+function opening(branch: string): string | null {
+  let literal = ''
+  for (let i = 0; i < branch.length; i++) {
+    const c = branch[i]
+    if ('?*{'.includes(c)) return literal.slice(0, -1) || null
+    if (c === '+') return literal || null
+    if (c === '\\') {
+      if (!/[\\^$.|?*+()[\]{}/-]/.test(branch[i + 1] ?? '')) return literal || null
+      literal += branch[++i]
+    } else if ('^$.|()[]'.includes(c)) return literal || null
+    else literal += c
+  }
+  return literal || null
+}
+
+function openings(rest: string): string[] | null {
+  if (rest[0] !== '(') {
+    const literal = opening(rest)
+    return literal ? [literal] : null
+  }
+  if (
+    rest.startsWith('(?=') ||
+    rest.startsWith('(?!') ||
+    rest.startsWith('(?<=') ||
+    rest.startsWith('(?<!')
+  )
+    return null
+  let depth = 0
+  let end = -1
+  for (let i = 0; i < rest.length && end < 0; i++) {
+    const c = rest[i]
+    if (c === '\\') i++
+    else if (c === '[') {
+      for (i++; i < rest.length && rest[i] !== ']'; i++) if (rest[i] === '\\') i++
+    } else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) end = i
+  }
+  if (end < 0 || '?*{'.includes(rest[end + 1] ?? '')) return null
+  const inner = rest.slice(
+    rest.startsWith('(?:') ? 3 : rest.startsWith('(?<') ? rest.indexOf('>') + 1 : 1,
+    end,
+  )
+  const branches: string[] = []
+  let from = 0
+  depth = 0
+  for (let i = 0; i <= inner.length; i++) {
+    const c = inner[i]
+    if (c === '\\') i++
+    else if (c === '[') {
+      for (i++; i < inner.length && inner[i] !== ']'; i++) if (inner[i] === '\\') i++
+    } else if (c === '(') depth++
+    else if (c === ')') depth--
+    else if (i === inner.length || (c === '|' && depth === 0)) {
+      branches.push(inner.slice(from, i))
+      from = i + 1
+    }
+  }
+  const found = branches.map(opening)
+  return found.every((literal) => literal) ? (found as string[]) : null
+}
+
+function closing(source: string): number {
+  let depth = 0
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]
+    if (c === '\\') i++
+    else if (c === '[') {
+      for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++
+    } else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return i
+  }
+  return -1
+}
+
+export function leadMatcher(regex: RegExp): Lead | null {
+  let source = regex.source
+  while (source.startsWith('(?:') && closing(source) === source.length - 1)
+    source = source.slice(3, -1)
+  const head = /^\.\{(\d+)(,(\d*))?\}\??/.exec(source)
+  if (!head || head[3] === '') return null
+  const low = Number(head[1])
+  const high = head[2] === undefined ? low : Number(head[3])
+  const rest = source.slice(head[0].length)
+  if (high < low || !rest || alternates(source)) return null
+  const starts = openings(rest)
+  if (!starts) return null
+  const flags = [...regex.flags]
+    .filter((flag) => flag === 'i' || flag === 'u' || flag === 'v')
+    .join('')
+  let find: RegExp
+  let sticky: RegExp
+  try {
+    find = new RegExp(starts.map(escapeRegExp).join('|'), flags + 'g')
+    sticky = new RegExp(regex.source, regex.flags.replace(/[gy]/g, '') + 'y')
+  } catch {
+    return null
+  }
+  const unicode = /[uv]/.test(flags)
+  const pair = (line: string, at: number) =>
+    unicode &&
+    line.charCodeAt(at) >= 0xd800 &&
+    line.charCodeAt(at) <= 0xdbff &&
+    line.charCodeAt(at + 1) >= 0xdc00 &&
+    line.charCodeAt(at + 1) <= 0xdfff
+  return (line, from) => {
+    let cursor = from
+    find.lastIndex = from
+    for (let found = find.exec(line); found; found = find.exec(line)) {
+      let start = found.index
+      if (!unicode) start = Math.max(cursor, start - high)
+      else
+        for (let step = 0; step < high && start > cursor; step++)
+          start -= start - 2 >= cursor && pair(line, start - 2) ? 2 : 1
+      sticky.lastIndex = start
+      const match = sticky.exec(line)
+      if (match) return match
+      cursor = Math.max(cursor, start + (pair(line, start) ? 2 : 1))
+      find.lastIndex = found.index + 1
+    }
+    return null
+  }
+}
+
+function* leading(lead: Lead, line: string): Generator<RegExpExecArray> {
+  for (let match = lead(line, 0); match; match = lead(line, match.index + match[0].length))
+    yield match
+}
+
+function leadOf(regex: RegExp): Lead | null {
+  let lead = leads.get(regex)
+  if (lead === undefined) leads.set(regex, (lead = leadMatcher(regex)))
+  return lead
+}
+
 export function scan(text: string, options: ScanOptions): number {
   const all = text.split(options.separator ?? '\n')
   if (all[all.length - 1] === '') all.pop()
   const regex = options.regex
+  const lead = leadOf(regex)
   const context = !options.silent && !options.only && (options.before > 0 || options.after > 0)
   const starts: number[] = []
   if (options.offsets) {
@@ -414,7 +567,7 @@ export function scan(text: string, options: ScanOptions): number {
     const hit =
       options.require && !options.require.test(line)
         ? options.invert
-        : regex.test(line) !== options.invert
+        : (lead ? lead(line, 0) !== null : regex.test(line)) !== options.invert
     if (!hit) {
       if (context && pendingAfter > 0) {
         emit(i, '-', line)
@@ -428,7 +581,7 @@ export function scan(text: string, options: ScanOptions): number {
       for (let j = Math.max(lastPrinted + 1, i - options.before); j < i; j++) emit(j, '-', all[j])
     if (options.only && !options.invert) {
       regex.lastIndex = 0
-      for (const match of line.matchAll(regex)) {
+      for (const match of lead ? leading(lead, line) : line.matchAll(regex)) {
         if (!match[0]) continue
         options.state.printed = true
         options.write(
@@ -444,7 +597,7 @@ export function scan(text: string, options: ScanOptions): number {
       }
     } else if (options.column) {
       regex.lastIndex = 0
-      const first = options.invert ? null : regex.exec(line)
+      const first = options.invert ? null : lead ? lead(line, 0) : regex.exec(line)
       options.state.printed = true
       options.write(prefix(i, ':', first?.index ?? 0) + replaced(line) + options.terminator)
     } else emit(i, ':', replaced(line))
