@@ -16,6 +16,7 @@ import {
   joinLines,
   lines,
   posixRegExp,
+  unicodeClass,
 } from '../Text.ts'
 import { checksum, perlSource, requireRegExp, rustMatches, scan } from './text.ts'
 import {
@@ -2206,7 +2207,19 @@ const rg: CommandHandler = async (ctx) => {
   const smart = f.has('S') && !f.has('s') && !f.has('i')
   const insensitive =
     (f.has('i') && !f.has('s')) ||
-    (smart && !patterns.some((pattern) => /[A-Z]/.test(pattern.replace(/\\[a-zA-Z]/g, ''))))
+    (smart &&
+      !patterns.some((pattern) => /[A-Z]/.test(pattern.replace(/\\[a-zA-Z]/g, ''))) &&
+      patterns.some((pattern) =>
+        /[^\\^$.|?*+()[\]{}]/.test(
+          pattern
+            .replace(
+              /\\[pP](\{[^}]*\}|\w)|\\[a-zA-Z]|\[:\^?[a-z]+:\]|\{\d*,?\d*\}|\(\?[a-zA-Z]*:?/g,
+              '',
+            )
+            .replace(/\\./g, 'x'),
+        ),
+      ))
+  const blocked = f.has('w') ? unicodeClass('rust') + '\\udc80-\\udcff' : ''
   let extraFlags = ''
   const rewritten = patterns.map((pattern) =>
     !f.has('F') && pattern.includes('\\|') && !/(^|[^\\])\|/.test(pattern.replace(/\\\\/g, ''))
@@ -2217,11 +2230,11 @@ const rg: CommandHandler = async (ctx) => {
     let source: string
     if (f.has('F')) source = escapeRegExp(pattern)
     else {
-      const perl = perlSource(pattern)
+      const perl = perlSource(pattern, true)
       source = perl.source
       extraFlags += perl.flags
     }
-    if (f.has('w')) source = '(?<![\\w])(?:' + source + ')(?![\\w])'
+    if (f.has('w')) source = '(?<![' + blocked + '])(?:' + source + ')(?![' + blocked + '])'
     if (f.has('x')) source = '^(?:' + source + ')$'
     return source
   })
@@ -2264,7 +2277,7 @@ const rg: CommandHandler = async (ctx) => {
     ...(parsed.values.get('iglob') ?? []).map((glob) => ({ glob, insensitive: true })),
   ].map((item) => {
     const negate = item.glob.startsWith('!')
-    const body = negate ? item.glob.slice(1) : item.glob
+    const body = (negate ? item.glob.slice(1) : item.glob).replace(/(?<!\\) +$/, '')
     const directory = body.endsWith('/')
     const { regex: match, anchored } = ignoreRegExp(directory ? body.slice(0, -1) : body)
     return {
@@ -2604,7 +2617,7 @@ const rg: CommandHandler = async (ctx) => {
     if (nul >= 0) {
       const offset = byteLength(text.slice(0, nul))
       const label = display !== undefined && named ? display + ': ' : ''
-      if (!explicit && (silent || offset < 65536))
+      if (!explicit && (counting || offset < 65536))
         return void (found ||= has('files-without-match'))
       if (explicit && offset < 65536 && !silent) {
         if (!lines(text).some(selected)) return
@@ -2624,7 +2637,8 @@ const rg: CommandHandler = async (ctx) => {
           cut = Math.max(cut, next)
         }
         text = decode(bytes.subarray(0, cut))
-        warning = label + 'WARNING: stopped searching binary file after match'
+        if (has('files-without-match')) return void (found ||= !lines(text).some(selected))
+        if (!silent) warning = label + 'WARNING: stopped searching binary file after match'
       } else if (!silent) {
         const all = lines(text)
         const at = all.findIndex((line) => line.includes('\0') && selected(line))
