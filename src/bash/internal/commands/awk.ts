@@ -926,7 +926,7 @@ class Parser {
 
 function regex(source: string): RegExp {
   try {
-    return posixRegExp(source, true)
+    return posixRegExp(source, true, 's')
   } catch {
     throw new AwkError('invalid regular expression /' + source + '/')
   }
