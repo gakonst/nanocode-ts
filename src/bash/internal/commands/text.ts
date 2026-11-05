@@ -401,6 +401,8 @@ export type ScanOptions = {
   trim?: boolean
   columns?: number | undefined
   encoding?: boolean
+  halt?: ((line: string, index: number, at: number) => boolean) | undefined
+  zero?: boolean
   tab?: number | undefined
   passthru?: boolean
   silent: boolean
@@ -598,18 +600,18 @@ export function scan(text: string, options: ScanOptions): number {
   const pad = (value: number) => String(value).padStart(options.tab ?? 0)
   const prefix = (n: number, mark: string, column?: number) => {
     const head =
-      (options.name !== undefined ? options.name + mark : '') +
+      (options.name !== undefined ? options.name + (options.zero ? '\0' : mark) : '') +
       (options.numbers ? pad(n + 1 + (options.base ?? 0)) + mark : '') +
+      (options.column && column !== undefined
+        ? encode(all[n].slice(0, column)).length + 1 + mark
+        : '') +
       (options.offsets
         ? pad(
             (starts[n] ?? 0) +
-              (column !== undefined && !options.column
+              (column !== undefined && (options.only || options.each)
                 ? encode(all[n].slice(0, column)).length
                 : 0),
           ) + mark
-        : '') +
-      (options.column && column !== undefined
-        ? encode(all[n].slice(0, column)).length + 1 + mark
         : '')
     return head && options.tab !== undefined ? head + '\t' : head
   }
@@ -627,6 +629,11 @@ export function scan(text: string, options: ScanOptions): number {
   }
   const unprintable = (text: string) =>
     !!options.encoding && /(?<![\ud800-\udbff])[\udc80-\udcff]/.test(text)
+  const contextColumn = (line: string) => {
+    if (!options.column || !options.invert) return undefined
+    regex.lastIndex = 0
+    return regex.exec(line)?.index
+  }
   let matches = 0
   let lastPrinted = -1
   let pendingAfter = 0
@@ -646,8 +653,8 @@ export function scan(text: string, options: ScanOptions): number {
   for (let i = 0; i < all.length; i++) {
     const line = all[i]
     if (matches >= options.max) {
-      if (!context || pendingAfter <= 0) break
-      emit(i, '-', fit(line, '-'))
+      if (!context || pendingAfter <= 0 || options.halt?.(line, i, i)) break
+      emit(i, '-', fit(line, '-'), contextColumn(line))
       pendingAfter--
       continue
     }
@@ -658,7 +665,8 @@ export function scan(text: string, options: ScanOptions): number {
         : (lead ? lead(line, 0) !== null : regex.test(line)) !== options.invert
     if (!hit) {
       if (context && (pendingAfter > 0 || options.passthru)) {
-        emit(i, '-', fit(line, '-'))
+        if (options.halt?.(line, i, i)) break
+        emit(i, '-', fit(line, '-'), contextColumn(line))
         pendingAfter--
       }
       continue
@@ -666,8 +674,18 @@ export function scan(text: string, options: ScanOptions): number {
     matches++
     if (options.silent) continue
     if (context)
-      for (let j = Math.max(lastPrinted + 1, i - options.before); j < i; j++)
-        emit(j, '-', fit(all[j], '-'))
+      for (let j = Math.max(lastPrinted + 1, i - options.before); j < i; j++) {
+        if (options.halt?.(all[j], j, i)) {
+          if (lastPrinted >= 0 && lastPrinted < j - 1) options.write('--' + options.terminator)
+          return matches - 1
+        }
+        emit(j, '-', fit(all[j], '-'), contextColumn(all[j]))
+      }
+    if (options.halt?.(line, i, i)) {
+      if (context && !options.passthru && lastPrinted >= 0 && lastPrinted < i - 1)
+        options.write('--' + options.terminator)
+      break
+    }
     if (options.only && !options.invert) {
       regex.lastIndex = 0
       for (const match of lead
@@ -701,7 +719,7 @@ export function scan(text: string, options: ScanOptions): number {
     } else if (options.column) {
       regex.lastIndex = 0
       const first = options.invert ? null : lead ? lead(line, 0) : regex.exec(line)
-      emit(i, ':', fit(replaced(line), ':'), first?.index ?? 0)
+      emit(i, ':', fit(replaced(line), ':'), first?.index)
     } else emit(i, ':', fit(replaced(line), ':'))
     pendingAfter = options.after
   }
