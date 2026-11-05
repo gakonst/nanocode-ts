@@ -1,8 +1,8 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use nanocode::durability::{
-    BranchCursor, BranchExport, BranchImport, BranchPage, BranchPoint, SessionStore,
-    SessionSummary, SqlStore,
+    BranchCursor, BranchExport, BranchImport, BranchPage, BranchPoint, RowStore, SessionStore,
+    SessionSummary,
 };
 use serde::Deserialize;
 
@@ -26,7 +26,7 @@ fn sessions() -> Result<SessionStore, String> {
         return Ok(sessions);
     }
     let sessions =
-        nanocode::session_store(SqlStore::new(WorkerStore::durability())).map_err(text)?;
+        nanocode::session_store(RowStore::new(WorkerStore::durability())).map_err(text)?;
     SESSIONS.set(Some(sessions.clone()));
     Ok(sessions)
 }

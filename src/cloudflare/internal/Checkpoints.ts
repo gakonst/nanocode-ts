@@ -48,18 +48,17 @@ export function create(storage: DurableObjectStorage, options: create.Options = 
       const tables = new Set(
         storage.sql
           .exec(
-            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('records', 'blobs', 'turns')",
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('state_rows', 'state_pages', 'log_turns')",
           )
           .toArray()
           .map((row) => row.name),
       )
-      const count = (table: string) => (tables.has(table) ? `(SELECT COUNT(*) FROM ${table})` : '0')
-      const stored = tables.has('records')
-        ? `(SELECT COUNT(*) FROM states) AS states, ${count('records')} + ${count('blobs')} AS records`
-        : '0 AS states, 0 AS records'
-      if (!tables.has('turns')) return row(`SELECT ${stored}, 0 AS unfinished`)
+      const stored = tables.has('state_rows')
+        ? `(SELECT COUNT(*) FROM state_rows WHERE payload IS NOT NULL) AS states, ${tables.has('state_pages') ? '(SELECT COUNT(*) FROM state_pages)' : '0'} AS pages`
+        : '0 AS states, 0 AS pages'
+      if (!tables.has('log_turns')) return row(`SELECT ${stored}, 0 AS unfinished`)
       return row(
-        `SELECT ${stored}, (SELECT COUNT(*) FROM turns WHERE scope = ? AND status IN ('queued', 'running')) AS unfinished`,
+        `SELECT ${stored}, (SELECT COUNT(*) FROM log_turns WHERE scope = ? AND status IN ('queued', 'running')) AS unfinished`,
         scope,
       )
     },

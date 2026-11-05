@@ -33,7 +33,7 @@ use nanocode::{
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
     durability::{
-        BranchCursor, BranchExport, BranchPage, InitialSettings, SessionRecord, SqlStore,
+        BranchCursor, BranchExport, BranchPage, InitialSettings, RowStore, SessionRecord,
     },
     session_host::{
         Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, SessionLog,
@@ -769,8 +769,9 @@ fn codex_harness(
 
 async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
-    let store =
-        nanocode::session_store(SqlStore::new(store::WorkerStore::durability())).map_err(text)?;
+    let store = nanocode::session_store(RowStore::new(store::WorkerStore::durability()))
+        .map_err(text)?
+        .with_logged_prompts();
     let model = config.model().map_err(configuration)?;
     let thinking = config.thinking().map_err(configuration)?;
     if config.code_mode && config.remote {
