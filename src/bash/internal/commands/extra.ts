@@ -13,7 +13,6 @@ import {
   format,
   globRegExp,
   globSource,
-  joinLines,
   lines,
   posixRegExp,
   unicodeClass,
@@ -2047,13 +2046,83 @@ const RG_TYPES: Record<string, string[]> = Object.fromEntries(
     ]),
 )
 
+type Reader = 'map' | 'read' | 'walk'
+
+function preceding(bytes: Uint8Array, options: { count: number; end: number; start: number }) {
+  let count = options.count
+  let pos =
+    options.end > options.start && bytes[options.end - 1] === 10 ? options.end - 1 : options.end
+  for (;;) {
+    const at = pos > options.start ? bytes.lastIndexOf(10, pos - 1) : -1
+    if (at < options.start) return options.start
+    if (count === 0) return at + 1
+    if (at === options.start) return options.start
+    count--
+    pos = at
+  }
+}
+
+function* fills(bytes: Uint8Array, keep: (start: number, end: number) => number) {
+  let size = 65536
+  let start = 0
+  let read = 0
+  while (read < bytes.length) {
+    let end = -1
+    while (end < 0) {
+      if (read - start >= size) size *= 3
+      const from = read
+      read = Math.min(bytes.length, start + size)
+      const last = bytes.lastIndexOf(10, read - 1)
+      end = last >= from ? last + 1 : read === bytes.length ? read : -1
+    }
+    yield { end, read, start }
+    start = keep(start, end)
+  }
+}
+
+function bufferStart(bytes: Uint8Array, offset: number) {
+  let start = 0
+  for (const fill of fills(bytes, (_, end) => end)) {
+    start = fill.start
+    if (fill.end >= offset) break
+  }
+  return start
+}
+
+function nulFill(
+  bytes: Uint8Array,
+  options: { keep: (start: number, end: number) => number; nul: number },
+) {
+  let end = 0
+  for (const fill of fills(bytes, options.keep)) {
+    if (options.nul < fill.read) return { end, start: fill.start }
+    end = fill.end
+  }
+  return { end, start: end }
+}
+
+type Binary = {
+  detected?: number
+  from?: number
+  halt?: (line: string, index: number, at: number) => boolean
+  mapped?: boolean
+  note?: string
+  offset?: () => number
+  reached?: (halted: boolean, matches: number) => boolean
+  searched?: number
+}
+
 const rg: CommandHandler = async (ctx) => {
   const args: string[] = []
   let unrestricted = 0
+  let detection: 'binary' | 'text' | undefined
   for (const arg of ctx.args) {
-    if (/^-u+$/.test(arg)) unrestricted += arg.length - 1
-    else if (arg === '--unrestricted') unrestricted++
-    else if (/^-[ilcwFvnNHIUSsoqxaLp0.zPb]*r[ilcwFvnNHIUSsoqxaLp0.zPb]+$/.test(arg))
+    const step = /^-u+$/.test(arg) ? arg.length - 1 : arg === '--unrestricted' ? 1 : 0
+    if (arg === '--binary' || (step && unrestricted + step >= 3)) detection = 'binary'
+    if (arg === '--text' || /^-[ilcwFvnNHIUSsoqxLp0.zPb]*a/.test(arg)) detection = 'text'
+    unrestricted += step
+    if (step) continue
+    if (/^-[ilcwFvnNHIUSsoqxaLp0.zPb]*r[ilcwFvnNHIUSsoqxaLp0.zPb]+$/.test(arg))
       args.push(arg.replace('r', ''))
     else args.push(arg)
   }
@@ -2141,7 +2210,7 @@ const rg: CommandHandler = async (ctx) => {
       'max-columns': 'M',
       'max-filesize': '',
       'one-file-system': '',
-      binary: '',
+      binary: '#',
       'search-zip': 'z',
       'no-unicode': '',
       multiline: 'U',
@@ -2159,6 +2228,7 @@ const rg: CommandHandler = async (ctx) => {
   })
   const f = parsed.flags
   const longFlags: Record<string, string> = {
+    binary: '#',
     'count-matches': '8',
     'files-without-match': '9',
     'no-ignore': '3',
@@ -2202,7 +2272,8 @@ const rg: CommandHandler = async (ctx) => {
   const hidden = f.has('.') || unrestricted >= 2
   const noIgnore = has('no-ignore') || unrestricted >= 1
   const noVcs = noIgnore || has('no-ignore-vcs')
-  const binaryText = f.has('a') || unrestricted >= 3 || has('null-data')
+  const binaryText = detection === 'text' || has('null-data')
+  const convert = detection === 'binary'
   const terminator = has('null-data') ? '\0' : '\n'
   const smart = f.has('S') && !f.has('s') && !f.has('i')
   const insensitive =
@@ -2219,6 +2290,29 @@ const rg: CommandHandler = async (ctx) => {
             .replace(/\\./g, 'x'),
         ),
       ))
+  const zero = /\\(?:x00|x\{0+\}|u0000|u\{0+\})/
+  if (
+    !binaryText &&
+    !f.has('F') &&
+    patterns.some(
+      (pattern) =>
+        !(
+          pattern.includes('|') &&
+          pattern.split('|').every((branch) => /^(?:\\x00|\\x\{0+\}|\\.|[^\\])$/.test(branch))
+        ) &&
+        zero.test(
+          pattern
+            .replace(/\\\\/g, '')
+            .replace(/\[(?:\\.|[^\]\\])+\]/g, (set) =>
+              /^\[\\x(?:00|\{0+\})\]$/.test(set) ? '\\x00' : '',
+            ),
+        ),
+    )
+  )
+    throw new CommandError(
+      'pattern contains "\\0" but it is impossible to match\n\nConsider enabling text mode with the --text flag (or -a for short). Otherwise,\nbinary detection is enabled and matching a NUL byte is impossible.',
+      2,
+    )
   const blocked = f.has('w') ? unicodeClass('rust') + '\\udc80-\\udcff' : ''
   let extraFlags = ''
   const rewritten = patterns.map((pattern) =>
@@ -2464,6 +2558,7 @@ const rg: CommandHandler = async (ctx) => {
     }
     return errors ? 2 : targets.length ? 0 : 1
   }
+  const mapped = roots.length <= 10 && targets.length === roots.length && !directories && !errors
   const named = f.has('H') || has('vimgrep') || (!f.has('I') && (roots.length > 1 || directories))
   const heading = has('heading') && !has('vimgrep')
   const numbers = (f.has('n') || has('vimgrep') || has('column')) && !f.has('N')
@@ -2511,7 +2606,7 @@ const rg: CommandHandler = async (ctx) => {
   })
   const data = (text: string) =>
     /(?<![\ud800-\udbff])[\udc80-\udcff]/.test(text) ? { bytes: toBase64(encode(text)) } : { text }
-  const searchJson = (text: string, display: string) => {
+  const searchJson = (text: string, display: string, binary: Binary) => {
     const started = performance.now()
     const path = data(display)
     const rows = text.match(/[^\n]*\n|[^\n]+$/g) ?? []
@@ -2523,8 +2618,18 @@ const rg: CommandHandler = async (ctx) => {
     let count = 0
     let shown = -1
     let pending = 0
-    let searched = byteLength(text)
+    let searched = binary.searched ?? byteLength(text)
+    let stop = -1
+    let detected = binary.detected ?? null
     const message = (type: string, i: number, submatches: unknown[]) => {
+      if (
+        binary.mapped &&
+        binary.halt &&
+        binary.detected === undefined &&
+        detected === null &&
+        rows[i].includes('\0')
+      )
+        detected = starts[i] + byteLength(rows[i].slice(0, rows[i].indexOf('\0')))
       out +=
         JSON.stringify({
           type,
@@ -2538,34 +2643,41 @@ const rg: CommandHandler = async (ctx) => {
         }) + '\n'
       shown = i
     }
+    const submatchesOf = (line: string) =>
+      [...rustMatches(line, regex)].map((match) => {
+        const start = byteLength(line.slice(0, match.index))
+        return { match: data(match[0]), start, end: start + byteLength(match[0]) }
+      })
+    const context = (i: number) =>
+      message('context', i, f.has('v') ? submatchesOf(rows[i]!.replace(/\n$/, '')) : [])
     for (let i = 0; i < rows.length; i++) {
       const line = rows[i].replace(/\n$/, '')
       if (matched >= max) {
         if (pending-- <= 0) {
-          searched = starts[i]
+          stop = starts[i]!
           break
         }
-        message('context', i, [])
+        context(i)
         continue
       }
       if (!selected(line)) {
-        if (pending-- > 0) message('context', i, [])
+        if (pending-- > 0) context(i)
         continue
       }
       matched++
-      for (let j = Math.max(shown + 1, i - before); j < i; j++) message('context', j, [])
-      const submatches = f.has('v')
-        ? []
-        : [...rustMatches(line, regex)].map((match) => {
-            const start = byteLength(line.slice(0, match.index))
-            return { match: data(match[0]), start, end: start + byteLength(match[0]) }
-          })
+      for (let j = Math.max(shown + 1, i - before); j < i; j++) context(j)
+      const submatches = f.has('v') ? [] : submatchesOf(line)
       count += submatches.length
       message('match', i, submatches)
       pending = after
     }
     if (!matched) return
     found = true
+    if (stop >= 0) {
+      if (stop <= (binary.from ?? -1)) detected = null
+      searched = binary.mapped ? stop : searched <= 65536 ? 0 : bufferStart(encode(text), stop)
+    }
+    if (binary.mapped && detected !== null && detected < searched) searched = detected
     const begin = JSON.stringify({ type: 'begin', data: { path } }) + '\n'
     const elapsed = performance.now() - started
     const stats = {
@@ -2580,7 +2692,7 @@ const rg: CommandHandler = async (ctx) => {
     ctx.stdout.write(
       begin +
         out +
-        JSON.stringify({ type: 'end', data: { path, binary_offset: null, stats } }) +
+        JSON.stringify({ type: 'end', data: { path, binary_offset: detected, stats } }) +
         '\n',
     )
     totals.bytes_printed += stats.bytes_printed
@@ -2611,47 +2723,12 @@ const rg: CommandHandler = async (ctx) => {
       }) + '\n',
     )
   }
-  const search = (text: string, display: string | undefined, explicit: boolean) => {
-    let warning = ''
-    const nul = binaryText ? -1 : text.indexOf('\0')
-    if (nul >= 0) {
-      const offset = byteLength(text.slice(0, nul))
-      const label = display !== undefined && named ? display + ': ' : ''
-      if (!explicit && (counting || offset < 65536))
-        return void (found ||= has('files-without-match'))
-      if (explicit && offset < 65536 && !silent) {
-        if (!lines(text).some(selected)) return
-        found = true
-        ctx.stdout.write(
-          label + 'binary file matches (found "\\0" byte around offset ' + offset + ')\n',
-        )
-        return
-      }
-      if (!explicit) {
-        const bytes = encode(text)
-        let end = 65536
-        let cut = 0
-        while (offset >= end) {
-          const next = bytes.lastIndexOf(10, end - 1) + 1
-          end = next > cut ? next + 65536 : end + end - cut
-          cut = Math.max(cut, next)
-        }
-        text = decode(bytes.subarray(0, cut))
-        if (has('files-without-match')) return void (found ||= !lines(text).some(selected))
-        if (!silent) warning = label + 'WARNING: stopped searching binary file after match'
-      } else if (!silent) {
-        const all = lines(text)
-        const at = all.findIndex((line) => line.includes('\0') && selected(line))
-        if (at >= 0) {
-          text = joinLines(all.slice(0, at))
-          warning = label + 'binary file matches'
-        }
-      }
-      if (warning) warning += ' (found "\\0" byte around offset ' + offset + ')\n'
-    }
-    if (json) return searchJson(text, display ?? '<stdin>')
+  const report = (text: string, display: string | undefined, binary: Binary) => {
+    if (json) return searchJson(text, display ?? '<stdin>', binary)
+    let halted = false
     let output = ''
     const prefix = named && !heading ? (display ?? '<stdin>') : undefined
+    if (heading && named) state.printed = false
     const matches = scan(text, {
       regex,
       require,
@@ -2674,6 +2751,8 @@ const rg: CommandHandler = async (ctx) => {
       columns,
       silent,
       state,
+      halt: binary.halt && ((line, index, at) => (halted = binary.halt!(line, index, at))),
+      zero: f.has('0'),
       write: (chunk) => void (output += chunk),
     })
     if (matches && !has('files-without-match')) found = true
@@ -2684,24 +2763,130 @@ const rg: CommandHandler = async (ctx) => {
       ctx.stdout.write((display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'))
     }
     if (counting && (matches || has('include-zero'))) {
-      let total = matches
-      if (has('count-matches') || f.has('o')) {
+      let total = f.has('v') && f.has('o') && !has('count-matches') ? 0 : matches
+      if ((has('count-matches') || f.has('o')) && !f.has('v')) {
         total = 0
+        let counted = 0
         for (const line of lines(text)) {
+          if (counted >= max) break
           if (require && !require.test(line)) continue
-          total += [...rustMatches(line, regex)].length
+          const hits = [...rustMatches(line, regex)].length
+          if (hits) counted++
+          total += hits
         }
       }
-      ctx.stdout.write((named ? (display ?? '<stdin>') + ':' : '') + total + terminator)
+      ctx.stdout.write(
+        (named ? (display ?? '<stdin>') + (f.has('0') ? '\0' : ':') : '') + total + terminator,
+      )
     }
-    if (warning && matches && matches < max) output += warning
+    const shown = output
+    if (binary.note && !silent && matches && binary.reached!(halted, matches)) {
+      output += binary.note + ' (found "\\0" byte around offset ' + binary.offset!() + ')\n'
+      state.printed = true
+    }
     if (!silent && output) {
-      if (heading && named) {
-        ctx.stdout.write((firstHeading ? '' : '\n') + (display ?? '<stdin>') + '\n')
-        firstHeading = false
-      }
+      if (heading && named && shown)
+        ctx.stdout.write(
+          (firstHeading ? '' : '\n') + (display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'),
+        )
+      firstHeading = false
       ctx.stdout.write(output)
     }
+  }
+  const keeper = (bytes: Uint8Array) => {
+    const context = Math.max(before, after)
+    if (!context) return (_: number, end: number) => end
+    const ends: number[] = []
+    for (let at = bytes.indexOf(10); at >= 0; at = bytes.indexOf(10, at + 1)) ends.push(at + 1)
+    const hits = lines(decode(bytes)).map(selected)
+    return (start: number, end: number) => {
+      let done = 0
+      while (done < ends.length && ends[done]! <= end) done++
+      let visited = start
+      for (let k = done - 1; k >= 0 && ends[k]! > start; k--) {
+        const shown =
+          hits.slice(Math.max(0, k - after), k + 1).some(Boolean) ||
+          hits.slice(k + 1, Math.min(done, k + before + 1)).some(Boolean)
+        if (!shown) continue
+        visited = ends[k]!
+        break
+      }
+      return Math.max(preceding(bytes, { count: context, end, start }), visited)
+    }
+  }
+  const transcoded = (bytes: Uint8Array) => {
+    const decoder =
+      transcode ??
+      (encoding?.toLowerCase() === 'none'
+        ? undefined
+        : bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+          ? new TextDecoder('utf-8')
+          : bytes[0] === 0xff && bytes[1] === 0xfe
+            ? new TextDecoder('utf-16le')
+            : bytes[0] === 0xfe && bytes[1] === 0xff
+              ? new TextDecoder('utf-16be')
+              : undefined)
+    return decoder ? encode(decoder.decode(bytes)) : bytes
+  }
+  const search = (bytes: Uint8Array, display: string | undefined, reader: Reader) => {
+    const nul = binaryText ? -1 : bytes.indexOf(0)
+    if (nul < 0) return report(decode(bytes), display, { mapped: reader === 'map' })
+    const label = named ? (display ?? '<stdin>') + ': ' : ''
+    if (reader === 'map') {
+      const text = decode(bytes)
+      if (nul < 65536)
+        return report(text, display, {
+          halt: () => true,
+          note: label + 'binary file matches',
+          offset: () => nul,
+          reached: () => true,
+          detected: nul,
+          from: 0,
+          mapped: true,
+        })
+      let at = ''
+      let start = 0
+      return report(text, display, {
+        halt: (line, index) => {
+          if (!line.includes('\0')) return false
+          at = line
+          start = index
+          return true
+        },
+        note: label + 'binary file matches',
+        offset: () =>
+          byteLength(text.split('\n', start).join('\n')) +
+          (start ? 1 : 0) +
+          byteLength(at.slice(0, at.indexOf('\0'))),
+        reached: (halted) => halted,
+        mapped: true,
+      })
+    }
+    const fill = nulFill(bytes, { keep: keeper(bytes.subarray(0, nul)), nul })
+    const cut = fill.end
+    if (reader === 'walk' && !convert) {
+      if (!cut || has('files-without-match')) return void (found ||= has('files-without-match'))
+      const text = decode(bytes.subarray(0, cut))
+      if (counting && !(lines(text).filter(selected).length >= max)) return
+      return report(text, display, {
+        note: label + 'WARNING: stopped searching binary file after match',
+        offset: () => nul,
+        reached: (_, matches) => matches < max,
+        detected: nul,
+        from: cut,
+        searched: fill.start,
+      })
+    }
+    let read = 0
+    for (let at = bytes.indexOf(10); at >= 0 && at < cut; at = bytes.indexOf(10, at + 1)) read++
+    return report(decode(bytes).replaceAll('\0', '\n'), display, {
+      halt: (_, _index, at) => at >= read,
+      note: label + 'binary file matches',
+      offset: () => nul,
+      reached: (halted, matches) => halted || matches < max,
+      detected: nul,
+      from: cut,
+    })
   }
   if (!useStdin && !operands.length && !targets.length && !errors && !narrowed) {
     ctx.stderr.write(
@@ -2709,7 +2894,7 @@ const rg: CommandHandler = async (ctx) => {
     )
     return 2
   }
-  if (useStdin) search(stdinText, f.has('H') ? '<stdin>' : undefined, true)
+  if (useStdin) search(transcoded(encode(stdinText)), f.has('H') ? '<stdin>' : undefined, 'read')
   const partial =
     prunable && !before && !after && !has('column') && !has('vimgrep') && !f.has('U')
       ? prunable
@@ -2734,27 +2919,20 @@ const rg: CommandHandler = async (ctx) => {
       await pause(ctx)
       continue
     }
-    let text: string
+    let raw: Uint8Array
     try {
-      const bytes = await pending
-      const decoder =
-        transcode ??
-        (encoding?.toLowerCase() === 'none'
-          ? undefined
-          : bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
-            ? new TextDecoder('utf-8')
-            : bytes[0] === 0xff && bytes[1] === 0xfe
-              ? new TextDecoder('utf-16le')
-              : bytes[0] === 0xfe && bytes[1] === 0xff
-                ? new TextDecoder('utf-16be')
-                : undefined)
-      text = decoder ? decoder.decode(bytes) : decode(bytes)
+      raw = await pending
     } catch {
       ctx.stderr.write('rg: ' + target.display + ': failed to read\n')
       errors = true
       continue
     }
-    search(text, target.display, target.explicit)
+    const bytes = transcoded(raw)
+    search(
+      bytes,
+      target.display,
+      !target.explicit ? 'walk' : mapped && bytes === raw ? 'map' : 'read',
+    )
     if (found && f.has('q')) return 0
   }
   summary()
