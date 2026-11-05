@@ -3290,6 +3290,20 @@ const column: CommandHandler = async (ctx) => {
   return status
 }
 
+function byteOrder(a: string, b: string): number {
+  const length = Math.min(a.length, b.length)
+  let at = 0
+  while (at < length && a.charCodeAt(at) === b.charCodeAt(at)) at++
+  if (at === length) return a.length - b.length
+  if (a.charCodeAt(at) < 0xd800 && b.charCodeAt(at) < 0xd800)
+    return a.charCodeAt(at) - b.charCodeAt(at)
+  if (at && (a.charCodeAt(at - 1) & 0xfc00) === 0xd800) at--
+  const x = encode(a.slice(at))
+  const y = encode(b.slice(at))
+  for (let i = 0; i < x.length && i < y.length; i++) if (x[i] !== y[i]) return x[i]! - y[i]!
+  return x.length - y.length
+}
+
 const comm: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
     flags: '123z',
@@ -3321,15 +3335,17 @@ const comm: CommandHandler = async (ctx) => {
       delimiter.repeat(show.slice(0, column).filter(Boolean).length) + line + terminator,
     )
   }
-  const checking = parsed.flags.has('C') ? 'never' : parsed.flags.has('c') ? 'always' : 'paired'
+  const choice = ctx.args.filter((arg) => /^--(no)?c/.test(arg)).pop()
+  const checking = choice === undefined ? 'paired' : choice.startsWith('--no') ? 'never' : 'always'
   const warned = [false, false]
   let unpaired = false
   const next = (file: 0 | 1, at: number[]) => {
     const lines = files[file]!
     const index = ++at[file]!
-    if (index >= lines.length || warned[file] || checking === 'never') return
+    if (warned[file] || checking === 'never') return
     if (checking === 'paired' && !unpaired) return
-    if (!(lines[index - 1]! > lines[index]!)) return
+    const end = index >= lines.length ? index - 1 : index
+    if (end < 1 || byteOrder(lines[end - 1]!, lines[end]!) <= 0) return
     if (checking === 'always')
       throw new CommandError('file ' + (file + 1) + ' is not in sorted order', 1)
     ctx.stderr.write('comm: file ' + (file + 1) + ' is not in sorted order\n')
@@ -3340,13 +3356,14 @@ const comm: CommandHandler = async (ctx) => {
   while (at[0]! < a.length || at[1]! < b.length) {
     const x = a[at[0]!]
     const y = b[at[1]!]
-    if (x !== undefined && (y === undefined || x < y)) {
+    const order = x === undefined ? 1 : y === undefined ? -1 : byteOrder(x, y)
+    if (order < 0) {
       unpaired = true
-      write(0, x)
+      write(0, x!)
       next(0, at)
-    } else if (y !== undefined && (x === undefined || y < x)) {
+    } else if (order > 0) {
       unpaired = true
-      write(1, y)
+      write(1, y!)
       next(1, at)
     } else {
       write(2, x!)
