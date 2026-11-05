@@ -7,7 +7,7 @@ import {
   type CommandHandler,
 } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
-import { byteLength, decode, encode, fromBase64, toBase64 } from '../Fs.ts'
+import { byte, byteLength, decode, encode, fromBase64, toBase64 } from '../Fs.ts'
 import {
   ahead,
   conjunction,
@@ -39,7 +39,10 @@ import {
   options,
   pause,
   put,
+  readFailure,
   readInput,
+  readOperand,
+  shellQuote,
 } from './util.ts'
 
 async function eachLine(
@@ -133,7 +136,7 @@ function count(value: string | undefined, fallback: number): number {
 
 function lastLines(text: string, n: number): string {
   let pos = text.length - 1
-  for (let k = 0; k < n && pos >= 0; k++) pos = text.lastIndexOf('\n', pos - 1)
+  for (let k = 0; k < n && pos >= 0; k++) pos = pos ? text.lastIndexOf('\n', pos - 1) : -1
   return pos < 0 ? text : text.slice(pos + 1)
 }
 
@@ -144,6 +147,13 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
     numeric: true,
     long: { lines: 'n', bytes: 'c', quiet: 'q', silent: 'q', verbose: 'v', follow: 'f' },
   })
+  for (const [key, unit] of [
+    ['n', 'lines'],
+    ['c', 'bytes'],
+  ] as const)
+    for (const value of parsed.values.get(key) ?? [])
+      if (!/^[+-]?\d+[kKmMgGbB]?$/.test(value))
+        throw new CommandError('invalid number of ' + unit + ': ‘' + value + '’', 1)
   const lineSpec = last(parsed, 'n')
   const byteSpec = last(parsed, 'c')
   const headers = (parsed.operands.length > 1 || parsed.flags.has('v')) && !parsed.flags.has('q')
@@ -276,13 +286,26 @@ const wc: CommandHandler = streaming(async (ctx) => {
               n--
               i++
             }
+          } else if (code >= 0xdc80 && code <= 0xdcff) {
+            const lead = code - 0xdc00
+            const tail = lead >= 0xfc ? 5 : lead >= 0xf8 ? 4 : lead >= 0xf4 ? 3 : 0
+            let k = 0
+            while (k < tail && (text.charCodeAt(i + 1 + k) & 0xffc0) === 0xdc80) k++
+            if (tail && k === tail) {
+              n -= tail
+              i += tail
+            } else n--
           }
         }
         return n
       }
       if (field === 'c') return (bytes = byteLength(text))
       let max = 0
-      for (const line of text.split('\n')) max = Math.max(max, line.length)
+      for (const line of text.split(/[\n\r\f]/)) {
+        let width = 0
+        for (const c of line) width = c === '\t' ? width + 8 - (width % 8) : width + charWidth(c)
+        max = Math.max(max, width)
+      }
       return max
     })
     return { counts, bytes: fields.includes('c') ? bytes : byteLength(text) }
@@ -1058,25 +1081,73 @@ function parseKey(spec: string): SortKey {
   }
 }
 
-function humanValue(text: string): number {
-  const match = text.trim().match(/^([+-]?\d*\.?\d+)\s*([KMGTPE]?)/i)
-  if (!match) return 0
-  return Number(match[1]) * 1024 ** ' KMGTPE'.indexOf((match[2] || ' ').toUpperCase())
+function humanCompare(a: string, b: string): number {
+  const key = (text: string): [number, number] => {
+    const match = text.match(/^[ \t]*(-?)(\d*(?:\.\d*)?)([kKMGTPEZYRQ]?)/)!
+    const unit = match[3] === 'k' ? 1 : match[3] ? 'KMGTPEZYRQ'.indexOf(match[3]) + 1 : 0
+    const value = (match[1] ? -1 : 1) * (parseFloat(match[2]!) || 0)
+    return [/[1-9]/.test(match[2]!) ? (match[1] ? -unit : unit) : 0, value]
+  }
+  const [x, y] = [key(a), key(b)]
+  return x[0] - y[0] || x[1] - y[1]
 }
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
 
-function versionCompare(a: string, b: string): number {
-  const pa = a.match(/\d+|\D+/g) ?? []
-  const pb = b.match(/\d+|\D+/g) ?? []
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] ?? ''
-    const y = pb[i] ?? ''
-    if (/^\d/.test(x) && /^\d/.test(y)) {
-      if (Number(x) !== Number(y)) return Number(x) - Number(y)
-    } else if (x !== y) return x < y ? -1 : 1
+function versionRank(text: string, at: number, end: number): number {
+  if (at >= end) return -1
+  const c = text.charCodeAt(at)
+  if (c >= 48 && c <= 57) return 0
+  if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) return c
+  return c === 126 ? -2 : c + 256
+}
+
+function versionParts(a: string, aEnd: number, b: string, bEnd: number): number {
+  const digit = (text: string, at: number, end: number) =>
+    at < end && text.charCodeAt(at) >= 48 && text.charCodeAt(at) <= 57
+  let i = 0
+  let j = 0
+  while (i < aEnd || j < bEnd) {
+    let first = 0
+    while ((i < aEnd && !digit(a, i, aEnd)) || (j < bEnd && !digit(b, j, bEnd))) {
+      const x = versionRank(a, i, aEnd)
+      const y = versionRank(b, j, bEnd)
+      if (x !== y) return x - y
+      i++
+      j++
+    }
+    while (i < aEnd && a[i] === '0') i++
+    while (j < bEnd && b[j] === '0') j++
+    while (digit(a, i, aEnd) && digit(b, j, bEnd)) {
+      if (!first) first = a.charCodeAt(i) - b.charCodeAt(j)
+      i++
+      j++
+    }
+    if (digit(a, i, aEnd)) return 1
+    if (digit(b, j, bEnd)) return -1
+    if (first) return first
   }
   return 0
+}
+
+function versionPrefix(text: string): number {
+  const suffix = text.match(/(?:\.[A-Za-z~][A-Za-z0-9~]*)*$/)!
+  return suffix.index === 0 ? text.length : suffix.index!
+}
+
+function versionCompare(a: string, b: string): number {
+  if (a === b) return 0
+  if (!a || !b) return a ? 1 : -1
+  if (a[0] === '.' || b[0] === '.') {
+    if (a[0] !== b[0]) return a[0] === '.' ? -1 : 1
+    for (const special of ['.', '..'])
+      if (a === special || b === special) return a === special ? -1 : 1
+  }
+  const aPrefix = versionPrefix(a)
+  const bPrefix = versionPrefix(b)
+  const result = versionParts(a, aPrefix, b, bPrefix)
+  if (result || (aPrefix === a.length && bPrefix === b.length)) return result
+  return versionParts(a, a.length, b, b.length)
 }
 
 type Compact = { numeric: boolean; reverse: boolean; stable: boolean; unique: boolean }
@@ -1329,6 +1400,7 @@ const sort: CommandHandler = async (ctx) => {
   })
   const f = parsed.flags
   const { text, status } = await allInput(ctx, parsed.operands)
+  if (status) return 2
   if (!parsed.values.has('k') && ![...'cCRfbhMVd'].some((flag) => f.has(flag))) {
     await compactSort(
       ctx,
@@ -1356,18 +1428,29 @@ const sort: CommandHandler = async (ctx) => {
   const keys = (parsed.values.get('k') ?? []).map(parseKey)
   const split = (line: string): string[] =>
     separator !== undefined ? line.split(separator) : (line.match(/\s*\S+/g) ?? [''])
-  const extract = (line: string, key: SortKey): string => {
+  const extract = (line: string, key: SortKey, blanks: boolean): string => {
     const fields = split(line)
-    if (key.end === Infinity) {
-      const rest = fields.slice(key.start - 1).join(separator ?? '')
-      return (separator === undefined ? rest.replace(/^\s+/, '') : rest).slice(key.startChar - 1)
+    const gap = separator?.length ?? 0
+    const begin = (field: number) => {
+      let at = 0
+      for (let i = 0; i < field - 1; i++) at += (fields[i]?.length ?? 0) + gap
+      return Math.min(at, line.length)
     }
-    const span = fields.slice(key.start - 1, key.end).join(separator ?? '')
-    const trimmed = separator === undefined ? span.replace(/^\s+/, '') : span
-    const endOffset = key.endChar
-      ? trimmed.length - (fields[key.end - 1] ?? '').replace(/^\s+/, '').length + key.endChar
-      : trimmed.length
-    return trimmed.slice(key.startChar - 1, endOffset)
+    const skip = (at: number) => {
+      if (blanks) while (at < line.length && /\s/.test(line[at]!)) at++
+      return at
+    }
+    const start =
+      key.start > fields.length ? line.length : skip(begin(key.start)) + key.startChar - 1
+    const fieldEnd = (field: number) =>
+      field > fields.length ? line.length : begin(field) + fields[field - 1]!.length
+    const end =
+      key.end === Infinity
+        ? line.length
+        : key.endChar
+          ? Math.min(skip(begin(key.end)) + key.endChar, fieldEnd(key.end))
+          : fieldEnd(key.end)
+    return line.slice(start, Math.max(start, end))
   }
   type Order = {
     numeric: boolean
@@ -1391,14 +1474,14 @@ const sort: CommandHandler = async (ctx) => {
     if (order.fold) text = text.toUpperCase()
     if (order.blanks) text = text.trimStart()
     if (order.numeric) return parseFloat(text.trim()) || 0
-    if (order.human) return humanValue(text)
+    if (order.human) return text
     if (order.month) return MONTHS.indexOf(text.trim().slice(0, 3).toUpperCase())
     return text
   }
   const comparator = (order: Order): ((a: string | number, b: string | number) => number) => {
     const sign = order.reverse ? -1 : 1
-    if (order.numeric || order.human || order.month)
-      return (a, b) => sign * ((a as number) - (b as number))
+    if (order.numeric || order.month) return (a, b) => sign * ((a as number) - (b as number))
+    if (order.human) return (a, b) => sign * humanCompare(a as string, b as string)
     if (order.version) return (a, b) => sign * versionCompare(a as string, b as string)
     return (a, b) => (a < b ? -sign : a > b ? sign : 0)
   }
@@ -1416,7 +1499,7 @@ const sort: CommandHandler = async (ctx) => {
     index,
     rank: 0,
     keys: keys.length
-      ? keys.map((key, k) => prepare(extract(line, key), keyOrders[k]))
+      ? keys.map((key, k) => prepare(extract(line, key, keyOrders[k]!.blanks), keyOrders[k]))
       : [prepare(line, globalOrder)],
   })
   const compare = (a: Item, b: Item): number => {
@@ -1519,6 +1602,20 @@ const uniq: CommandHandler = streaming(async (ctx) => {
   return status
 })
 
+function bytewise(text: string): string {
+  if (/^[\u0000-\u007f]*$/.test(text)) return text
+  const bytes = encode(text)
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 8192)
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192) as unknown as number[])
+  return out
+}
+
+function unbytewise(units: string): string {
+  if (/^[\u0000-\u007f]*$/.test(units)) return units
+  return decode(Uint8Array.from(units, (c) => c.charCodeAt(0)))
+}
+
 function ranges(spec: string): (n: number) => boolean {
   const parts = spec.split(',').map((part) => {
     const match = part.match(/^(\d*)(-?)(\d*)$/)
@@ -1580,7 +1677,7 @@ const cut: CommandHandler = streaming(async (ctx) => {
   const delimiter = last(parsed, 'd') ?? '\t'
   if (delimiter.length !== 1) throw new CommandError('the delimiter must be a single character')
   const output = last(parsed, 'output-delimiter') ?? (fields ? delimiter : '')
-  const spans = !fields && !complement && output === '' ? merged((fields ?? chars)!) : undefined
+  const spans = !fields && !complement ? merged((fields ?? chars)!) : undefined
   const status = await eachBatch(ctx, parsed.operands, (text) => {
     const out: string[] = []
     for (const line of lines(text)) {
@@ -1595,11 +1692,17 @@ const cut: CommandHandler = streaming(async (ctx) => {
             .filter((_, index) => pick(index + 1))
             .join(output),
         )
-      } else if (spans && !/[\uD800-\uDFFF]/.test(line)) {
-        let picked = ''
-        for (const [from, to] of spans) picked += line.slice(from - 1, to)
-        out.push(picked)
-      } else out.push([...line].filter((_, index) => pick(index + 1)).join(output))
+      } else {
+        const units = bytewise(line)
+        const between = bytewise(output)
+        const picked = spans
+          ? spans
+              .filter(([from]) => from <= units.length)
+              .map(([from, to]) => units.slice(from - 1, to))
+              .join(between)
+          : [...units].filter((_, index) => pick(index + 1)).join(between)
+        out.push(unbytewise(picked))
+      }
     }
     return put(ctx, joinLines(out))
   })
@@ -1618,9 +1721,23 @@ const CLASS_CHARS: Record<string, string> = {
 CLASS_CHARS.alpha = CLASS_CHARS.lower + CLASS_CHARS.upper
 CLASS_CHARS.alnum = CLASS_CHARS.alpha + CLASS_CHARS.digit
 
+const TR_ESCAPES: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+}
+
 function trSet(spec: string): string[] {
   const out: string[] = []
-  const [text] = escapes(spec)
+  const text = bytewise(
+    spec.replace(/\\([0-7]{1,3}|[\s\S])/g, (_, body: string) =>
+      /^[0-7]/.test(body) ? byte(parseInt(body, 8)) : (TR_ESCAPES[body] ?? body),
+    ),
+  )
   for (let i = 0; i < text.length; i++) {
     const cls = text.slice(i).match(/^\[:(\w+):\]/)
     if (cls && CLASS_CHARS[cls[1]]) {
@@ -1738,7 +1855,7 @@ const tr: CommandHandler = streaming(async (ctx) => {
       const next = await ctx.stdin.readChars(1)
       chunk += next
     }
-    await put(ctx, convert(chunk))
+    await put(ctx, unbytewise(convert(bytewise(chunk))))
   }
   return 0
 })
@@ -1805,14 +1922,25 @@ const seq: CommandHandler = async (ctx) => {
   return 0
 }
 
-const rev: CommandHandler = streaming(
-  async (ctx) =>
-    await eachLine(ctx, ctx.args, (line) =>
+const rev: CommandHandler = streaming(async (ctx) => {
+  const end = ctx.args.indexOf('--')
+  const option = ctx.args
+    .slice(0, end < 0 ? undefined : end)
+    .find((arg) => arg.startsWith('-') && arg !== '-')
+  if (option !== undefined)
+    throw new CommandError(
+      "invalid option -- '" + option[1] + "'\nTry 'rev --help' for more information.",
+      1,
+    )
+  return await eachLine(
+    ctx,
+    ctx.args.filter((_, index) => index !== end),
+    (line) =>
       /[\uD800-\uDFFF]/.test(line)
         ? [...line].reverse().join('')
         : line.split('').reverse().join(''),
-    ),
-)
+  )
+})
 
 const tac: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
@@ -1925,7 +2053,7 @@ const paste: CommandHandler = async (ctx) => {
           text = await readInput(ctx, operand)
         } catch (error) {
           if (!(error instanceof FsError)) throw error
-          ctx.stderr.write('paste: ' + operand + ': No such file or directory\n')
+          ctx.stderr.write('paste: ' + shellQuote(operand) + ': No such file or directory\n')
           status = 1
           continue
         }
@@ -1965,7 +2093,7 @@ const paste: CommandHandler = async (ctx) => {
     try {
       columns.push(lines(decode(await ctx.fs.read(ctx.resolve(operand)))))
     } catch {
-      ctx.stderr.write('paste: ' + operand + ': No such file or directory\n')
+      ctx.stderr.write('paste: ' + shellQuote(operand) + ': No such file or directory\n')
       status = 1
     }
   }
@@ -2502,7 +2630,7 @@ const base64: CommandHandler = async (ctx) => {
     long: { decode: 'd', 'ignore-garbage': 'i', wrap: 'w' },
   })
   const operand = parsed.operands[0] ?? '-'
-  const bytes = operand === '-' ? encode(ctx.stdin.read()) : await ctx.fs.read(ctx.resolve(operand))
+  const bytes = operand === '-' ? encode(ctx.stdin.read()) : await readOperand(ctx, operand, 1)
   if (parsed.flags.has('d')) {
     const raw = decode(bytes)
     const text = (
@@ -2540,7 +2668,7 @@ const base64: CommandHandler = async (ctx) => {
   const encoded = toBase64(bytes)
   const wrap = Number(last(parsed, 'w') ?? 76)
   if (!(wrap > 0)) {
-    await put(ctx, encoded + '\n')
+    await put(ctx, encoded)
     return 0
   }
   let out = ''
@@ -2550,7 +2678,7 @@ const base64: CommandHandler = async (ctx) => {
     await put(ctx, out)
     out = ''
   }
-  await put(ctx, encoded.length ? out : '\n')
+  await put(ctx, out)
   return 0
 }
 
@@ -2594,16 +2722,8 @@ export function checksum(
         try {
           bytes = await read(operand)
         } catch (error) {
-          ctx.stderr.write(
-            ctx.name +
-              ': ' +
-              operand +
-              ': ' +
-              (error instanceof FsError && error.code === 'EISDIR'
-                ? 'Is a directory'
-                : 'No such file or directory') +
-              '\n',
-          )
+          if (!(error instanceof FsError)) throw error
+          ctx.stderr.write(ctx.name + ': ' + readFailure(ctx, operand, error) + '\n')
           status = 1
           continue
         }
@@ -2846,6 +2966,23 @@ const fold: CommandHandler = async (ctx) => {
   return status
 }
 
+const wide =
+  /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6\u{1b000}-\u{1b2ff}\u{20000}-\u{3fffd}]|\p{Emoji_Presentation}/u
+const narrowless = /[\p{Mn}\p{Me}\p{Cf}\p{Cc}\udc80-\udcff]/u
+
+function charWidth(c: string): number {
+  if (c === '\u00ad') return 1
+  if (narrowless.test(c)) return 0
+  return wide.test(c) ? 2 : 1
+}
+
+function columns(text: string): number {
+  if (/^[\x20-\x7e]*$/.test(text)) return text.length
+  let n = 0
+  for (const c of text) n += charWidth(c)
+  return n
+}
+
 const column: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
     flags: 'tnxeL',
@@ -2865,10 +3002,10 @@ const column: CommandHandler = async (ctx) => {
     if (!entries.length) return status
     const width = Number(last(parsed, 'c') ?? ctx.env['COLUMNS'] ?? 80)
     const longest = Math.max(...entries.map((entry) => [...entry].length))
-    const column = (longest + 8) & ~7
-    const columns = Math.max(1, Math.floor(width / column))
-    const height = Math.ceil(entries.length / columns)
     const across = parsed.flags.has('x')
+    const column = (longest + 8) & ~7
+    const columns = Math.floor(width / column) || (across && longest < width ? entries.length : 1)
+    const height = Math.ceil(entries.length / columns)
     let out = ''
     for (let row = 0; row < height; row++) {
       const cells: string[] = []
@@ -2892,21 +3029,32 @@ const column: CommandHandler = async (ctx) => {
   }
   const separator = last(parsed, 's')
   const cells = rows
-    .filter((row) => row.trim() !== '')
+    .map((row) => row.split('\0', 1)[0]!)
     .map((row) =>
       separator
-        ? row.split(new RegExp('[' + separator.replace(/[\]\\^-]/g, '\\$&') + ']'))
-        : row.trim().split(/\s+/),
+        ? row === ''
+          ? []
+          : row.split(new RegExp('[' + separator.replace(/[\]\\^-]/g, '\\$&') + ']'))
+        : row.split(/[ \t]+/).filter((cell) => cell !== ''),
+    )
+    .filter((row) => row.length || parsed.flags.has('L'))
+    .map((row) =>
+      row.map((cell) =>
+        cell.replace(/[\udc80-\udcff]/g, (c) => '\\x' + (c.charCodeAt(0) - 0xdc00).toString(16)),
+      ),
     )
   const widths: number[] = []
   for (const row of cells)
-    row.forEach((cell, index) => (widths[index] = Math.max(widths[index] ?? 0, cell.length)))
+    row.forEach((cell, index) => (widths[index] = Math.max(widths[index] ?? 0, columns(cell))))
   const gap = last(parsed, 'o') ?? '  '
   ctx.stdout.write(
     joinLines(
       cells.map((row) =>
-        row
-          .map((cell, index) => (index === row.length - 1 ? cell : cell.padEnd(widths[index])))
+        widths
+          .map((width, index) => {
+            const cell = row[index] ?? ''
+            return index === widths.length - 1 ? cell : cell + ' '.repeat(width - columns(cell))
+          })
           .join(gap),
       ),
     ),
@@ -2915,29 +3063,73 @@ const column: CommandHandler = async (ctx) => {
 }
 
 const comm: CommandHandler = async (ctx) => {
-  const parsed = options(ctx.args, { flags: '123' })
+  const parsed = options(ctx.args, {
+    flags: '123z',
+    long: {
+      'check-order': 'c',
+      'nocheck-order': 'C',
+      'output-delimiter': 'output-delimiter',
+      total: 't',
+      'zero-terminated': 'z',
+    },
+  })
   const [left, right] = parsed.operands
   if (left === undefined || right === undefined) throw new CommandError('missing operand')
-  const read = async (name: string) =>
-    lines(name === '-' ? ctx.stdin.read() : decode(await ctx.fs.read(ctx.resolve(name))))
-  const [a, b] = [await read(left), await read(right)]
-  const show = [!parsed.flags.has('1'), !parsed.flags.has('2'), !parsed.flags.has('3')]
-  const write = (column: number, line: string) => {
-    if (!show[column]) return
-    ctx.stdout.write('\t'.repeat(show.slice(0, column).filter(Boolean).length) + line + '\n')
+  const terminator = parsed.flags.has('z') ? '\0' : '\n'
+  const read = async (name: string) => {
+    const text = name === '-' ? ctx.stdin.read() : decode(await readOperand(ctx, name, 1))
+    const parts = text.split(terminator)
+    if (parts[parts.length - 1] === '') parts.pop()
+    return parts
   }
-  let i = 0
-  let j = 0
-  while (i < a.length || j < b.length) {
-    if (j >= b.length || (i < a.length && a[i] < b[j])) write(0, a[i++])
-    else if (i >= a.length || b[j] < a[i]) write(1, b[j++])
-    else {
-      write(2, a[i])
-      i++
-      j++
+  const files = [await read(left), await read(right)]
+  const show = [!parsed.flags.has('1'), !parsed.flags.has('2'), !parsed.flags.has('3')]
+  const delimiter = last(parsed, 'output-delimiter') ?? '\t'
+  const counts = [0, 0, 0]
+  const write = (column: number, line: string) => {
+    counts[column]++
+    if (!show[column]) return
+    ctx.stdout.write(
+      delimiter.repeat(show.slice(0, column).filter(Boolean).length) + line + terminator,
+    )
+  }
+  const checking = parsed.flags.has('C') ? 'never' : parsed.flags.has('c') ? 'always' : 'paired'
+  const warned = [false, false]
+  let unpaired = false
+  const next = (file: 0 | 1, at: number[]) => {
+    const lines = files[file]!
+    const index = ++at[file]!
+    if (index >= lines.length || warned[file] || checking === 'never') return
+    if (checking === 'paired' && !unpaired) return
+    if (!(lines[index - 1]! > lines[index]!)) return
+    if (checking === 'always')
+      throw new CommandError('file ' + (file + 1) + ' is not in sorted order', 1)
+    ctx.stderr.write('comm: file ' + (file + 1) + ' is not in sorted order\n')
+    warned[file] = true
+  }
+  const at = [0, 0]
+  const [a, b] = files as [string[], string[]]
+  while (at[0]! < a.length || at[1]! < b.length) {
+    const x = a[at[0]!]
+    const y = b[at[1]!]
+    if (x !== undefined && (y === undefined || x < y)) {
+      unpaired = true
+      write(0, x)
+      next(0, at)
+    } else if (y !== undefined && (x === undefined || y < x)) {
+      unpaired = true
+      write(1, y)
+      next(1, at)
+    } else {
+      write(2, x!)
+      next(0, at)
+      next(1, at)
     }
   }
-  return 0
+  if (parsed.flags.has('t')) ctx.stdout.write([...counts, 'total'].join(delimiter) + terminator)
+  if (!warned[0] && !warned[1]) return 0
+  ctx.stderr.write('comm: input is not in sorted order\n')
+  return 1
 }
 
 export const textCommands: Record<string, CommandHandler> = {

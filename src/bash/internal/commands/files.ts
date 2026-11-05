@@ -186,7 +186,11 @@ const cat: CommandHandler = streaming(async (ctx) => {
       blank = part === ''
       const numbered = parsed.flags.has('b') ? part !== '' : parsed.flags.has('n')
       const ended = ends && (trailing || i < parts.length - 1)
-      out.push((numbered ? String(++line).padStart(6) + '\t' : '') + part + (ended ? '$' : ''))
+      out.push(
+        (numbered ? String(++line).padStart(6) + '\t' : '') +
+          (ended && part.endsWith('\r') ? part.slice(0, -1) + '^M' : part) +
+          (ended ? '$' : ''),
+      )
     }
     return out.join('\n') + (trailing && out.length ? '\n' : '')
   }
@@ -654,7 +658,7 @@ type FindEntry = {
 }
 
 const quote = (value: string) =>
-  /^[\w@%+=:,.\/-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'"
+  /^[\w@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\\''") + "'"
 
 function emacsRegExp(pattern: string): string {
   let out = ''
@@ -1212,7 +1216,7 @@ const find: CommandHandler = async (ctx) => {
       case '-samefile':
         return entry.path === ctx.resolve(arg)
       case '-perm': {
-        const prefix = /^[-\/+]/.test(arg) ? arg[0] : ''
+        const prefix = /^[-/+]/.test(arg) ? arg[0] : ''
         const bits = permBits(prefix ? arg.slice(1) : arg, 0)
         if (bits === undefined) throw new CommandError("invalid mode '" + arg + "'", 1)
         const actual = entry.stat.mode & 0o7777

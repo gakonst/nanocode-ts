@@ -149,6 +149,107 @@ export async function readInput(
   return decode(await ctx.fs.read(path))
 }
 
+const escapes: Record<string, string> = {
+  '\x07': '\\a',
+  '\b': '\\b',
+  '\t': '\\t',
+  '\n': '\\n',
+  '\v': '\\v',
+  '\f': '\\f',
+  '\r': '\\r',
+}
+
+export function shellQuote(name: string, always = false): string {
+  if (name === '') return "''"
+  const parts = name.match(
+    /[\u0000-\u001f\u007f\udc80-\udcff]+|[^\u0000-\u001f\u007f\udc80-\udcff]+/g,
+  )!
+  if (parts.length > 1 || parts[0] !== name || /[\u0000-\u001f\u007f\udc80-\udcff]/.test(name))
+    return parts
+      .map((part) =>
+        /^[\u0000-\u001f\u007f\udc80-\udcff]/.test(part)
+          ? "$'" +
+            [...part]
+              .map(
+                (c) =>
+                  escapes[c] ??
+                  '\\' +
+                    (c.charCodeAt(0) >= 0xdc80 ? c.charCodeAt(0) - 0xdc00 : c.charCodeAt(0))
+                      .toString(8)
+                      .padStart(3, '0'),
+              )
+              .join('') +
+            "'"
+          : shellQuote(part, true),
+      )
+      .join('')
+  const special =
+    /[ !"$&'()*:;<=>?[\\^`|]/.test(name) || /^[#~]/.test(name) || name === '{' || name === '}'
+  if (!special && !always) return name
+  if (!name.includes("'")) return "'" + name + "'"
+  if (!/[$`"\\!]/.test(name)) return '"' + name + '"'
+  return "'" + name.replaceAll("'", "'\\''") + "'"
+}
+
+const quoting = new Set([
+  'base64',
+  'cat',
+  'comm',
+  'cut',
+  'join',
+  'md5sum',
+  'nl',
+  'od',
+  'paste',
+  'sha1sum',
+  'sha224sum',
+  'sha256sum',
+  'sha384sum',
+  'sha512sum',
+  'uniq',
+  'wc',
+])
+
+export function readFailure(ctx: CommandContext, operand: string, error: FsError): string {
+  const reason =
+    error.code === 'ENOENT'
+      ? 'No such file or directory'
+      : error.code === 'EISDIR'
+        ? 'Is a directory'
+        : error.message
+  if (ctx.name === 'head' || ctx.name === 'tail')
+    return error.code === 'EISDIR'
+      ? 'error reading ' + shellQuote(operand, true) + ': ' + reason
+      : 'cannot open ' + shellQuote(operand, true) + ' for reading: ' + reason
+  if (ctx.name === 'tac')
+    return 'failed to open ' + shellQuote(operand, true) + ' for reading: ' + reason
+  if (ctx.name === 'sort')
+    return (
+      (error.code === 'EISDIR' ? 'read failed: ' : 'cannot read: ') +
+      shellQuote(operand) +
+      ': ' +
+      reason
+    )
+  if (ctx.name === 'rev') return 'cannot open ' + operand + ': ' + reason
+  return (quoting.has(ctx.name) ? shellQuote(operand) : operand) + ': ' + reason
+}
+
+export async function readOperand(
+  ctx: CommandContext,
+  operand: string,
+  status: number,
+): Promise<Uint8Array> {
+  const path = ctx.resolve(operand)
+  try {
+    const stat = await ctx.fs.stat(path)
+    if (stat) budget(ctx.limits, 2 * stat.size, ctx.name + ': ' + operand)
+    return await ctx.fs.read(path)
+  } catch (error) {
+    if (!(error instanceof FsError)) throw error
+    throw new CommandError(readFailure(ctx, operand, error), status)
+  }
+}
+
 export async function eachInput(
   ctx: CommandContext,
   operands: string[],
@@ -162,18 +263,7 @@ export async function eachInput(
       text = await readInput(ctx, operand, size)
     } catch (error) {
       if (!(error instanceof FsError)) throw error
-      ctx.stderr.write(
-        ctx.name +
-          ': ' +
-          operand +
-          ': ' +
-          (error.code === 'ENOENT'
-            ? 'No such file or directory'
-            : error.code === 'EISDIR'
-              ? 'Is a directory'
-              : error.message) +
-          '\n',
-      )
+      ctx.stderr.write(ctx.name + ': ' + readFailure(ctx, operand, error) + '\n')
       status = 1
       continue
     }
@@ -272,18 +362,7 @@ export async function eachBatch(
       text = await readInput(ctx, operand)
     } catch (error) {
       if (!(error instanceof FsError)) throw error
-      ctx.stderr.write(
-        ctx.name +
-          ': ' +
-          operand +
-          ': ' +
-          (error.code === 'ENOENT'
-            ? 'No such file or directory'
-            : error.code === 'EISDIR'
-              ? 'Is a directory'
-              : error.message) +
-          '\n',
-      )
+      ctx.stderr.write(ctx.name + ': ' + readFailure(ctx, operand, error) + '\n')
       status = 1
       continue
     }
