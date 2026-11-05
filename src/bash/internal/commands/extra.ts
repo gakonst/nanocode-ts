@@ -2588,10 +2588,12 @@ const rg: CommandHandler = async (ctx) => {
   const after = Number(last(parsed, 'A') ?? context)
   const before = Number(last(parsed, 'B') ?? context)
   const max = last(parsed, 'm') === undefined ? Infinity : Number(last(parsed, 'm'))
-  const replace = last(parsed, 'r')
-    ?.replace(/\$\{(\d+)\}/g, '$$$1')
-    .replace(/\$\{(\w+)\}/g, '$$<$1>')
-    .replace(/\$([A-Za-z_]\w*)/g, '$$<$1>')
+  const replace = last(parsed, 'r')?.replace(/\$(?:\$|\{(\w+)\}|(\w+))/g, (all, braced, bare) => {
+    const key: string | undefined = braced ?? bare
+    if (key === undefined) return all
+    if (!/^\d+$/.test(key)) return '$<' + key + '>'
+    return Number(key) ? '$' + Number(key) : '$&'
+  })
   const state = { printed: false }
   let found = false
   let firstHeading = true
@@ -2774,6 +2776,8 @@ const rg: CommandHandler = async (ctx) => {
       silent,
       state,
       halt: binary.halt && ((line, index, at) => (halted = binary.halt!(line, index, at))),
+      onlyContext: true,
+      trailing: true,
       zero: f.has('0'),
       write: (chunk) => void (output += chunk),
     })
