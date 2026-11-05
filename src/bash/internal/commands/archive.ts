@@ -85,7 +85,7 @@ export function pack(entries: TarEntry[]): Uint8Array {
     }
   }
   parts.push(new Uint8Array(1024))
-  const total = parts.reduce((sum, part) => sum + part.length, 0)
+  const total = Math.ceil(parts.reduce((sum, part) => sum + part.length, 0) / 10240) * 10240
   const out = new Uint8Array(total)
   let offset = 0
   for (const part of parts) {
