@@ -19,7 +19,6 @@ const KEYWORDS = new Set([
   'BEGIN',
   'END',
   'function',
-  'func',
   'if',
   'else',
   'while',
@@ -60,20 +59,47 @@ const BUILTINS = new Set([
   'system',
   'close',
   'fflush',
-  'gensub',
   'systime',
   'strftime',
-  'and',
-  'or',
-  'xor',
-  'lshift',
-  'rshift',
-  'compl',
-  'asort',
-  'asorti',
+  'mktime',
 ])
+
+const ARITY: Record<string, [number, number]> = {
+  length: [0, 1],
+  substr: [2, 3],
+  index: [2, 2],
+  split: [2, 3],
+  sub: [2, 3],
+  gsub: [2, 3],
+  match: [2, 2],
+  sprintf: [1, Infinity],
+  sin: [1, 1],
+  cos: [1, 1],
+  atan2: [2, 2],
+  exp: [1, 1],
+  log: [1, 1],
+  sqrt: [1, 1],
+  int: [1, 1],
+  rand: [0, 0],
+  srand: [0, 1],
+  tolower: [1, 1],
+  toupper: [1, 1],
+  system: [1, 1],
+  close: [1, 1],
+  fflush: [0, 1],
+  systime: [0, 0],
+  strftime: [0, 3],
+  mktime: [1, 1],
+}
+
+const GRAMMAR = new Set(['split', 'sub', 'gsub', 'match'])
+
+const USAGE =
+  'Usage: mawk [Options] [Program] [file ...]\n\nProgram:\n    The -f option value is the name of a file containing program text.\n    If no -f option is given, a \"--\" ends option processing; the following\n    parameters are the program text.\n\nOptions:\n    -f program-file  Program  text is read from file instead of from the\n                     command-line.  Multiple -f options are accepted.\n    -F value         sets the field separator, FS, to value.\n    -v var=value     assigns value to program variable var.\n    --               unambiguous end of options.\n\n    Implementation-specific options are prefixed with \"-W\".  They can be\n    abbreviated:\n\n    -W version       show version information and exit.\n    -W compat        pre-POSIX 2001.\n    -W dump          show assembler-like listing of program and exit.\n    -W help          show this message and exit.\n    -W interactive   set unbuffered output, line-buffered input.\n    -W exec file     use file as program as well as last option.\n    -W posix         stricter POSIX checking.\n    -W random=number set initial random seed.\n    -W sprintf=number adjust size of sprintf buffer.\n    -W usage         show this message and exit.\n'
+
+const VERSION =
+  'mawk 1.3.4 20240123\nCopyright 2008-2023,2024, Thomas E. Dickey\nCopyright 1991-1996,2014, Michael D. Brennan\n\nrandom-funcs:       arc4random_stir/arc4random\nregex-funcs:        internal\n\ncompiled limits:\nsprintf buffer      8192\nmaximum-integer     9223372036854775808\n'
 const PUNCT = [
-  '**=',
   '+=',
   '-=',
   '*=',
@@ -90,7 +116,6 @@ const PUNCT = [
   '||',
   '>>',
   '!~',
-  '**',
   '{',
   '}',
   '(',
@@ -117,6 +142,39 @@ const PUNCT = [
 ]
 
 class AwkError extends Error {}
+
+function binary(text: string): string {
+  return /[^\x00-\x7f]/.test(text) ? latin(encode(text)) : text
+}
+
+function latin(bytes: Uint8Array): string {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    out += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return out
+}
+
+function raw(text: string): Uint8Array {
+  const bytes = new Uint8Array(text.length)
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff
+  return bytes
+}
+
+function unicode(text: string): string {
+  return /[^\x00-\x7f]/.test(text) ? decode(raw(text)) : text
+}
+
+function ascii(text: string, upper: boolean): string {
+  return upper
+    ? text.replace(/[a-z]+/g, (run) => run.toUpperCase())
+    : text.replace(/[A-Z]+/g, (run) => run.toLowerCase())
+}
+
+function numberText(n: number): string {
+  if (Number.isInteger(n) && Math.abs(n) <= 2 ** 63)
+    return Math.abs(n) < 1e16 ? String(n) : BigInt(n).toString()
+  return Number.isNaN(n) ? '-nan' : formatNumber(n)
+}
 
 function lex(source: string): Token[] {
   const tokens: Token[] = []
@@ -218,26 +276,18 @@ function lex(source: string): Token[] {
     if (name) {
       const word = name[0]
       i += word.length
-      if (KEYWORDS.has(word))
-        tokens.push({ type: word === 'func' ? 'function' : word, value: word, line })
+      if (KEYWORDS.has(word)) tokens.push({ type: word, value: word, line })
       else if (BUILTINS.has(word)) tokens.push({ type: 'builtin', value: word, line })
       else if (source[i] === '(') tokens.push({ type: 'funcname', value: word, line })
       else tokens.push({ type: 'name', value: word, line })
       continue
     }
     const punct = PUNCT.find((p) => source.startsWith(p, i))
-    if (!punct)
-      throw new AwkError(
-        'syntax error at source line ' + line + ": unexpected character '" + c + "'",
-      )
-    tokens.push({
-      type: 'punct',
-      value: punct === '**=' ? '^=' : punct === '**' ? '^' : punct,
-      line,
-    })
+    if (!punct) throw new AwkError(line + ": unexpected character '" + c + "'")
+    tokens.push({ type: 'punct', value: punct, line })
     i += punct.length
   }
-  tokens.push({ type: 'eof', value: '', line })
+  tokens.push({ type: 'eof', value: '', line: source.endsWith('\n') ? line : line + 1 })
   return tokens
 }
 
@@ -287,6 +337,9 @@ type Program = {
 class Parser {
   tokens: Token[]
   pos = 0
+  braces = 0
+  inFunction = false
+  calls: string[] = []
 
   constructor(tokens: Token[]) {
     this.tokens = tokens
@@ -308,12 +361,17 @@ class Parser {
 
   fail(): never {
     const token = this.peek()
+    if (token.type === 'eof' && this.braces)
+      throw new AwkError('line ' + token.line + ': missing } near end of file')
     throw new AwkError(
-      'syntax error at source line ' +
+      'line ' +
         token.line +
-        " near '" +
-        (token.type === 'eof' ? 'end of program' : token.value.replace('\n', 'newline')) +
-        "'",
+        ': syntax error at or near ' +
+        (token.type === 'eof'
+          ? 'end of file'
+          : token.type === 'newline'
+            ? 'end of line'
+            : token.value),
     )
   }
 
@@ -330,6 +388,18 @@ class Parser {
     this.terminators()
     while (this.peek().type !== 'eof') {
       const token = this.peek()
+      if (this.is('}')) {
+        this.pos++
+        const next = this.peek()
+        throw new AwkError(
+          'line ' +
+            token.line +
+            ": extra '}'\nawk: line " +
+            token.line +
+            ': syntax error at or near ' +
+            (next.type === 'eof' || next.type === 'newline' ? 'end of line' : next.value),
+        )
+      }
       if (token.type === 'BEGIN') {
         this.pos++
         this.newlines()
@@ -357,7 +427,9 @@ class Parser {
         }
         this.take(')')
         this.newlines()
+        this.inFunction = true
         program.functions.set(name.value, { params, body: this.block() })
+        this.inFunction = false
       } else {
         const rule: Rule = { active: false }
         if (!this.is('{')) {
@@ -373,11 +445,21 @@ class Parser {
       }
       this.terminators()
     }
+    const line = this.peek().line
+    const missing = this.calls.filter((name) => !program.functions.has(name))
+    if (missing.length)
+      throw new AwkError(
+        [...new Set(missing)]
+          .reverse()
+          .map((name) => 'line ' + line + ': function ' + name + ' never defined')
+          .join('\nawk: '),
+      )
     return program
   }
 
   block(): Stmt[] {
     this.take('{')
+    this.braces++
     const body: Stmt[] = []
     this.terminators()
     while (!this.is('}')) {
@@ -386,6 +468,7 @@ class Parser {
       this.terminators()
     }
     this.take('}')
+    this.braces--
     return body
   }
 
@@ -481,6 +564,8 @@ class Parser {
         return { k: token.type }
       case 'exit':
       case 'return': {
+        if (token.type === 'return' && !this.inFunction)
+          throw new AwkError('line ' + token.line + ': return outside function body')
         this.pos++
         const e =
           this.is(';') ||
@@ -550,6 +635,8 @@ class Parser {
         const op = this.tokens[this.pos++].value
         redirect = { op, target: this.concat(true) }
       }
+      if (token.type === 'printf' && !args.length)
+        throw new AwkError('line ' + token.line + ': no arguments in call to printf')
       return { k: token.type, args, redirect }
     }
     return { k: 'expr', e: this.expr() }
@@ -768,6 +855,7 @@ class Parser {
         this.take('(')
         const args = this.list(')')
         this.take(')')
+        this.calls.push(token.value)
         return { k: 'call', name: token.value, args }
       }
       case 'builtin': {
@@ -776,6 +864,13 @@ class Parser {
           return { k: 'builtin', name: 'length', args: [] }
         this.take('(')
         const args = this.list(')')
+        const [min, max] = ARITY[token.value] ?? [0, Infinity]
+        if (args.length < min || args.length > max) {
+          if (GRAMMAR.has(token.value)) this.fail()
+          throw new AwkError(
+            'line ' + token.line + ': wrong number of arguments in call to ' + token.value,
+          )
+        }
         this.take(')')
         return { k: 'builtin', name: token.value, args }
       }
@@ -936,7 +1031,7 @@ Object.defineProperty(AwkArray.prototype, 'size', {
 })
 type Cell = Value | Map<string, Value>
 
-const NUMERIC = /^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/
+const NUMERIC = /^[ \t\n\v\f\r]*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?[ \t\n\v\f\r]*$/
 
 function looksNumeric(text: string): boolean {
   return NUMERIC.test(text)
@@ -955,13 +1050,13 @@ function toNum(value: Value): number {
     const quick = +text
     if (quick === quick) return quick
   }
-  const match = text.match(/^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/)
+  const hex = text.match(/^[ \t\n\v\f\r]*([+-]?)0[xX]([0-9a-fA-F]+)/)
+  if (hex) return (hex[1] === '-' ? -1 : 1) * parseInt(hex[2]!, 16)
+  const match = text.match(/^[ \t\n\v\f\r]*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/)
   if (match) return Number(match[0])
-  const hex = text.match(/^\s*[+-]?0[xX][0-9a-fA-F]+/)
-  if (hex) return 0
-  const special = text.trim().match(/^([+-])(inf|nan)/i)
+  const special = text.match(/^[ \t\n\v\f\r]*([+-]?)(inf|nan)/i)
   if (special)
-    return special[2].toLowerCase() === 'inf' ? (special[1] === '-' ? -Infinity : Infinity) : NaN
+    return special[2]!.toLowerCase() === 'inf' ? (special[1] === '-' ? -Infinity : Infinity) : NaN
   return 0
 }
 
@@ -1120,18 +1215,18 @@ function stmtKids(s: Stmt): { stmts: Stmt[]; exprs: Expr[] } {
 }
 
 function strlen(text: string): number {
-  return /[\uD800-\uDFFF]/.test(text) ? [...text].length : text.length
+  return text.length
 }
 
 function substr(text: string, from: number, count: number): string {
-  let start = Math.round(from)
-  let length = Number.isNaN(count) ? 0 : count === Infinity ? Infinity : Math.round(count)
-  if (Number.isNaN(start)) start = 1
-  if (start < 1) start = 1
+  let start = Number.isNaN(from) ? 1 : Math.trunc(from)
+  let length = Number.isNaN(count) ? 0 : Math.trunc(count)
+  if (start < 1) {
+    length -= start
+    start = 1
+  }
   if (length <= 0) return ''
-  if (!/[\uD800-\uDFFF]/.test(text))
-    return text.slice(start - 1, length === Infinity ? undefined : start - 1 + length)
-  return [...text].slice(start - 1, length === Infinity ? undefined : start - 1 + length).join('')
+  return text.slice(start - 1, length === Infinity ? undefined : start - 1 + length)
 }
 
 class Interpreter {
@@ -1188,7 +1283,7 @@ class Interpreter {
     set('RLENGTH', -1)
     set('FILENAME', '')
     const environ = new Map<string, Value>()
-    for (const [key, value] of Object.entries(ctx.env)) environ.set(key, new Strnum(value))
+    for (const [key, value] of Object.entries(ctx.env)) environ.set(key, new Strnum(binary(value)))
     this.globals.set('ENVIRON', environ)
   }
 
@@ -1203,9 +1298,9 @@ class Interpreter {
     if (typeof value === 'string') return value
     if (value === undefined) return ''
     if (value instanceof Strnum) return value.text
-    if (Number.isInteger(value) && Math.abs(value) < 1e16) return String(value)
+    if (Number.isInteger(value) && Math.abs(value) <= 2 ** 63) return numberText(value)
     const spec = this.scalar(output ? 'OFMT' : 'CONVFMT')
-    if (!Number.isFinite(value)) return Number.isNaN(value) ? 'nan' : value < 0 ? '-inf' : 'inf'
+    if (!Number.isFinite(value)) return numberText(value)
     const fmt = this.str(spec)
     return fmt === '%.6g' ? formatNumber(value) : format(fmt, [value], false).text
   }
@@ -1325,7 +1420,7 @@ class Interpreter {
   splitFields(text: string, fs: string): string[] {
     if (text === '') return []
     if (fs === ' ') {
-      const trimmed = text.trim()
+      const trimmed = text.replace(/^[ \t\n]+|[ \t\n]+$/g, '')
       return trimmed === '' ? [] : trimmed.split(/[ \t\n]+/)
     }
     if (fs === '') return [...text]
@@ -2044,18 +2139,6 @@ class Interpreter {
           return result.count
         }
       }
-      case 'gensub': {
-        if (missing(3)) return fail('gensub: not enough arguments')
-        const re = this.pattern(args[0], scope)
-        const rest = args.slice(1).map((arg) => this.expr(arg, scope))
-        return () => {
-          const pattern = re()
-          return this.gensub(
-            pattern,
-            rest.map((fn) => fn()),
-          )
-        }
-      }
       case 'match': {
         if (missing(2)) return fail('match: not enough arguments')
         const source = this.expr(args[0], scope)
@@ -2066,15 +2149,12 @@ class Interpreter {
           return this.match(text, re(), target)
         }
       }
-      case 'asort':
-      case 'asorti':
-        return () => this.sortArray(name, args)
     }
     const fns = args.map((arg) => this.expr(arg, scope))
     if (fns.length === 1) {
       const only = fns[0]
-      if (name === 'tolower') return () => this.str(only()).toLowerCase()
-      if (name === 'toupper') return () => this.str(only()).toUpperCase()
+      if (name === 'tolower') return () => ascii(this.str(only()), false)
+      if (name === 'toupper') return () => ascii(this.str(only()), true)
       if (name === 'int') return () => Math.trunc(toNum(only()))
     }
     return () =>
@@ -2143,7 +2223,14 @@ class Interpreter {
           const parts = pieces.map((piece): (() => string) => {
             if (typeof piece === 'string') return () => piece
             const arg = s.args[1 + used++]
-            if (!arg) return () => format(piece.spec, [], false).text
+            if (!arg)
+              return () => {
+                throw this.runtime(
+                  'not enough arguments passed to printf("' +
+                    (first.k === 'str' ? first.v : '') +
+                    '")',
+                )
+              }
             if (piece.plain && piece.conv === 's') {
               if (arg.k === 'field' || arg.k === 'str' || arg.k === 'concat')
                 return this.text(arg, scope)
@@ -2153,7 +2240,7 @@ class Interpreter {
                 return value === undefined
                   ? ''
                   : typeof value === 'number'
-                    ? formatNumber(value)
+                    ? numberText(value)
                     : typeof value === 'string'
                       ? value
                       : value.text
@@ -2184,7 +2271,10 @@ class Interpreter {
           this.tick()
           const values: FormatValue[] = []
           for (let i = 0; i < rest.length; i++) values.push(this.formatArg(rest[i]()))
-          sink(this.sprintf(this.str(spec()), values))
+          const given = this.str(spec())
+          if (this.needs(given) > values.length)
+            throw this.runtime('not enough arguments passed to printf("' + given + '")')
+          sink(this.sprintf(given, values))
           return 0
         }
       }
@@ -2340,7 +2430,7 @@ class Interpreter {
     if (!this.buffer) return
     const text = this.buffer
     this.buffer = ''
-    this.ctx.stdout.write(text)
+    this.ctx.stdout.write(unicode(text))
   }
 
   scan(): boolean | 'pause' {
@@ -2398,10 +2488,8 @@ class Interpreter {
       case '*':
         return a * b
       case '/':
-        if (b === 0) throw new AwkError('division by zero')
         return a / b
       case '%':
-        if (b === 0) throw new AwkError('division by zero in %')
         return a % b
       case '^':
         return a ** b
@@ -2530,23 +2618,14 @@ class Interpreter {
         if (result.count) await this.assignTo(target, result.text)
         return result.count
       }
-      case 'gensub': {
-        const re = await this.toRegex(args[0])
-        const values: Value[] = []
-        for (const arg of args.slice(1)) values.push(await this.eval(arg))
-        return this.gensub(re, values)
-      }
       case 'match': {
         const source = this.str(await this.eval(args[0]))
         return this.match(source, await this.toRegex(args[1]), args[2])
       }
-      case 'asort':
-      case 'asorti':
-        return this.sortArray(name, args)
       case 'system': {
         await this.flushAll()
-        const result = await this.ctx.exec(this.str(await this.eval(args[0])))
-        this.print(result.stdout)
+        const result = await this.ctx.exec(unicode(this.str(await this.eval(args[0]))))
+        this.print(binary(result.stdout))
         return result.status
       }
       case 'close': {
@@ -2575,12 +2654,12 @@ class Interpreter {
       case 'index':
         return text(0).indexOf(text(1)) + 1
       case 'sprintf':
-        return values.length
-          ? this.sprintf(
-              text(0),
-              values.slice(1).map((value) => this.formatArg(value)),
-            )
-          : ''
+        if (this.needs(text(0)) > values.length - 1)
+          throw this.runtime('not enough arguments passed to sprintf("' + text(0) + '")')
+        return this.sprintf(
+          text(0),
+          values.slice(1).map((value) => this.formatArg(value)),
+        )
       case 'sin':
         return Math.sin(num(0))
       case 'cos':
@@ -2603,9 +2682,9 @@ class Interpreter {
         return previous
       }
       case 'tolower':
-        return text(0).toLowerCase()
+        return ascii(text(0), false)
       case 'toupper':
-        return text(0).toUpperCase()
+        return ascii(text(0), true)
       case 'systime':
         return Math.floor(Date.now() / 1000)
       case 'strftime':
@@ -2613,18 +2692,22 @@ class Interpreter {
           values.length ? text(0) : '%a %b %e %H:%M:%S %Z %Y',
           new Date(values.length > 1 ? num(1) * 1000 : Date.now()),
         )
-      case 'and':
-        return Number(BigInt(Math.trunc(num(0))) & BigInt(Math.trunc(num(1))))
-      case 'or':
-        return Number(BigInt(Math.trunc(num(0))) | BigInt(Math.trunc(num(1))))
-      case 'xor':
-        return Number(BigInt(Math.trunc(num(0))) ^ BigInt(Math.trunc(num(1))))
-      case 'lshift':
-        return num(0) * 2 ** num(1)
-      case 'rshift':
-        return Math.floor(num(0) / 2 ** num(1))
-      case 'compl':
-        return Number(~BigInt(Math.trunc(num(0))) & 0x1fffffffffffffn)
+      case 'mktime': {
+        const parts = text(0)
+          .trim()
+          .split(/[ \t\n]+/)
+          .map(Number)
+        if (parts.length < 6 || parts.some((part) => !Number.isFinite(part))) return -1
+        const [year, month, day, hour, minute, second] = parts as [
+          number,
+          number,
+          number,
+          number,
+          number,
+          number,
+        ]
+        return Date.UTC(year, month - 1, day, hour, minute, second) / 1000
+      }
       case 'fflush':
         return 0
     }
@@ -2691,25 +2774,6 @@ class Interpreter {
     return parts
   }
 
-  gensub(re: RegExp, values: Value[]): string {
-    const replacement = this.str(values[0])
-    const how = this.str(values[1])
-    const target = values.length > 2 ? this.str(values[2]) : (this.fields[0] ?? '')
-    const global = /^[gG]/.test(how)
-    const which = global ? 0 : Math.max(1, Math.trunc(toNum(how)))
-    let count = 0
-    return target.replace(this.global(re), (...matchArgs: unknown[]) => {
-      let end = matchArgs.length - 2
-      if (typeof matchArgs[matchArgs.length - 1] === 'object') end--
-      const groups = matchArgs.slice(0, end) as string[]
-      count++
-      if (!global && count !== which) return groups[0]
-      return replacement.replace(/\\(\d)|&|\\&/g, (token, digit: string | undefined) =>
-        token === '\\&' ? '&' : token === '&' ? groups[0] : (groups[Number(digit)] ?? ''),
-      )
-    })
-  }
-
   match(source: string, re: RegExp, target: Expr | undefined): number {
     re.lastIndex = 0
     const found = re.exec(source)
@@ -2725,26 +2789,6 @@ class Interpreter {
     return start
   }
 
-  sortArray(name: string, args: Expr[]): number {
-    const source = args[0]
-    if (source?.k !== 'var') throw new AwkError(name + ': argument is not an array')
-    const array = this.array(source.name)
-    const items = name === 'asort' ? [...array.values()] : [...array.keys()]
-    items.sort((a, b) =>
-      isNumberish(a) && isNumberish(b) && typeof a !== 'string' && typeof b !== 'string'
-        ? toNum(a) - toNum(b)
-        : this.str(a) < this.str(b)
-          ? -1
-          : this.str(a) > this.str(b)
-            ? 1
-            : 0,
-    )
-    const target = args[1]?.k === 'var' ? this.array((args[1] as { name: string }).name) : array
-    target.clear()
-    items.forEach((item, index) => target.set(String(index + 1), item))
-    return items.length
-  }
-
   global(re: RegExp): RegExp {
     let global = this.globalCache.get(re)
     if (!global) {
@@ -2752,6 +2796,24 @@ class Interpreter {
       this.globalCache.set(re, global)
     }
     return global
+  }
+
+  needs(spec: string): number {
+    const pieces = compileFormat(spec)
+    return pieces ? pieces.filter((piece) => typeof piece !== 'string').length : 0
+  }
+
+  runtime(message: string): AwkError {
+    return new AwkError(
+      'run time error: ' +
+        message +
+        '\n\tFILENAME="' +
+        this.str(this.scalar('FILENAME')) +
+        '" FNR=' +
+        this.str(this.scalar('FNR')) +
+        ' NR=' +
+        this.str(this.scalar('NR')),
+    )
   }
 
   sprintf(spec: string, values: FormatValue[]): string {
@@ -2773,7 +2835,7 @@ class Interpreter {
       const value = used < values.length ? values[used] : undefined
       used++
       if (piece.plain && piece.conv === 's')
-        out += value === undefined ? '' : typeof value === 'number' ? formatNumber(value) : value
+        out += value === undefined ? '' : typeof value === 'number' ? numberText(value) : value
       else if (piece.plain && piece.conv === 'd' && typeof value === 'number') {
         const int = Math.trunc(Number.isFinite(value) ? value : 0)
         out += (int < 0 || Object.is(int, -0) ? '-' : '') + Math.abs(int).toString()
@@ -2796,8 +2858,8 @@ class Interpreter {
       let reader = this.readers.get(command)
       if (!reader) {
         await this.flushAll()
-        const result = await this.ctx.exec(command)
-        reader = { lines: splitRecords(result.stdout, '\n'), pos: 0 }
+        const result = await this.ctx.exec(unicode(command))
+        reader = { lines: splitRecords(binary(result.stdout), '\n'), pos: 0 }
         this.readers.set(command, reader)
       }
       line = reader.lines[reader.pos++]
@@ -2809,8 +2871,8 @@ class Interpreter {
         try {
           content =
             file === '-' || file === '/dev/stdin' || file === '/dev/fd/0'
-              ? await this.ctx.stdin.text()
-              : decode(await this.ctx.fs.read(this.ctx.resolve(file)))
+              ? binary(await this.ctx.stdin.text())
+              : latin(await this.ctx.fs.read(this.ctx.resolve(unicode(file))))
         } catch {
           return -1
         }
@@ -2863,7 +2925,7 @@ class Interpreter {
     }
     if (key === '/dev/stderr') {
       this.flushOut()
-      this.ctx.stderr.write(text)
+      this.ctx.stderr.write(unicode(text))
       return
     }
     let output = this.outputs.get(key)
@@ -2879,10 +2941,21 @@ class Interpreter {
   async flush(key: string, output: { kind: 'file' | 'pipe'; text: string; append: boolean }) {
     this.flushOut()
     if (output.kind === 'pipe') {
-      const result = await this.ctx.exec(key, output.text)
-      this.print(result.stdout)
+      const result = await this.ctx.exec(unicode(key), unicode(output.text))
+      this.print(binary(result.stdout))
     } else {
-      await this.ctx.fs.write(this.ctx.resolve(key), encode(output.text), output.append)
+      await this.ctx.fs
+        .write(this.ctx.resolve(unicode(key)), raw(output.text), output.append)
+        .catch((error: unknown) => {
+          if (!(error instanceof FsError)) throw error
+          throw new AwkError(
+            'cannot open "' +
+              key +
+              '" for output (' +
+              error.message.slice(error.message.lastIndexOf(': ') + 2) +
+              ')',
+          )
+        })
       output.append = true
     }
     output.text = ''
@@ -2924,11 +2997,11 @@ class Interpreter {
       case 'printf': {
         if (!s.args.length) throw new AwkError('printf: no format')
         const values: FormatValue[] = []
+        const spec = this.str(await this.eval(s.args[0]))
         for (const arg of s.args.slice(1)) values.push(this.formatArg(await this.eval(arg)))
-        await this.write(
-          format(this.str(await this.eval(s.args[0])), values, false).text,
-          s.redirect,
-        )
+        if (this.needs(spec) > values.length)
+          throw this.runtime('not enough arguments passed to printf("' + spec + '")')
+        await this.write(format(spec, values, false).text, s.redirect)
         return
       }
       case 'if':
@@ -3041,9 +3114,23 @@ export const awk: CommandHandler = streaming(async (ctx) => {
       const eq = assignment.indexOf('=')
       if (eq < 0) throw new CommandError('-v: invalid assignment ' + assignment, 2)
       assigns.push([assignment.slice(0, eq), assignment.slice(eq + 1)])
-    } else if (arg === '-f')
-      source = (source ?? '') + decode(await ctx.fs.read(ctx.resolve(args[++i]))) + '\n'
-    else if (
+    } else if (arg === '-f') {
+      const file = args[++i] ?? ''
+      const text = await ctx.fs.read(ctx.resolve(file)).then(decode, (error: unknown) => {
+        if (!(error instanceof FsError)) throw error
+        throw new CommandError('cannot open "' + file + '" (No such file or directory)', 2)
+      })
+      source = (source ?? '') + text + '\n'
+    } else if (/^(-W ?|--)(v|version)$/.test(arg) || (arg === '-W' && args[i + 1] === 'version')) {
+      ctx.stdout.write(VERSION)
+      return 0
+    } else if (
+      /^(-W ?|--)(help|usage)$/.test(arg) ||
+      (arg === '-W' && /^(help|usage)$/.test(args[i + 1] ?? ''))
+    ) {
+      ctx.stdout.write(USAGE)
+      return 0
+    } else if (
       arg.startsWith('--') ||
       (arg.startsWith('-') && arg.length > 1 && !/^-[Fvf]/.test(arg))
     ) {
@@ -3052,23 +3139,25 @@ export const awk: CommandHandler = streaming(async (ctx) => {
     } else break
   }
   if (source === undefined) {
-    if (i >= args.length)
-      throw new CommandError('usage: awk [-F fs][-v var=value][prog | -f progfile][file ...]', 2)
+    if (i >= args.length) {
+      ctx.stderr.write(USAGE)
+      return 0
+    }
     source = args[i++]
   }
   const operands = args.slice(i)
   let program: Program
   try {
-    program = new Parser(lex(source)).program()
+    program = new Parser(lex(binary(source))).program()
   } catch (error) {
-    if (error instanceof AwkError) throw new CommandError(error.message, 2)
+    if (error instanceof AwkError) throw new CommandError(unicode(error.message), 2)
     throw error
   }
   const interp = new Interpreter(ctx, program)
   try {
     interp.prepare()
   } catch (error) {
-    if (error instanceof AwkError) throw new CommandError(error.message, 2)
+    if (error instanceof AwkError) throw new CommandError(unicode(error.message), 2)
     throw error
   }
   const unescape = (value: string) =>
@@ -3076,10 +3165,10 @@ export const awk: CommandHandler = streaming(async (ctx) => {
       /\\(.)/g,
       (_, c: string) => ({ n: '\n', t: '\t', '\\': '\\', r: '\r' })[c] ?? '\\' + c,
     )
-  if (fs !== undefined) interp.globals.set('FS', fs === 't' ? '\t' : unescape(fs))
-  for (const [name, value] of assigns) interp.globals.set(name, new Strnum(unescape(value)))
+  if (fs !== undefined) interp.globals.set('FS', fs === 't' ? '\t' : binary(unescape(fs)))
+  for (const [name, value] of assigns) interp.globals.set(name, new Strnum(binary(unescape(value))))
   const argv = new Map<string, Value>([['0', 'awk']])
-  operands.forEach((operand, index) => argv.set(String(index + 1), new Strnum(operand)))
+  operands.forEach((operand, index) => argv.set(String(index + 1), new Strnum(binary(operand))))
   interp.globals.set('ARGV', argv)
   interp.globals.set('ARGC', operands.length + 1)
   let exitCode = 0
@@ -3090,16 +3179,25 @@ export const awk: CommandHandler = streaming(async (ctx) => {
     let text = ''
     try {
       text =
-        operand === '-' ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(operand)))
+        operand === '-'
+          ? binary(await ctx.stdin.text())
+          : latin(await ctx.fs.read(ctx.resolve(operand)))
     } catch (error) {
       if (!(error instanceof FsError)) throw error
     }
     preloaded = operand
-    interp.globals.set('FILENAME', operand === '-' && !operands.includes('-') ? '' : operand)
+    interp.globals.set(
+      'FILENAME',
+      operand === '-' && !operands.includes('-') ? '' : binary(operand),
+    )
     interp.load(text)
   }
   const stdin = () => {
-    const next = batches(ctx.stdin)
+    const chunks = batches(ctx.stdin)
+    const next = async () => {
+      const text = await chunks()
+      return text === null ? null : binary(text)
+    }
     const more = async (): Promise<string | null> => {
       if (interp.str(interp.scalar('RS')) === '\n') return next()
       let all = ''
@@ -3122,7 +3220,7 @@ export const awk: CommandHandler = streaming(async (ctx) => {
       for (const operand of inputs) {
         const assignment = operand.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/)
         if (assignment) {
-          interp.globals.set(assignment[1], new Strnum(unescape(assignment[2])))
+          interp.globals.set(assignment[1], new Strnum(binary(unescape(assignment[2]))))
           continue
         }
         consumed = true
@@ -3146,13 +3244,12 @@ export const awk: CommandHandler = streaming(async (ctx) => {
         }
         let text: string
         try {
-          text = decode(await ctx.fs.read(ctx.resolve(operand)))
+          text = latin(await ctx.fs.read(ctx.resolve(operand)))
         } catch (error) {
           if (!(error instanceof FsError)) throw error
-          interp.flushOut()
+          await interp.flushAll()
           ctx.stderr.write('awk: cannot open "' + operand + '" (No such file or directory)\n')
-          exitCode = 2
-          continue
+          return 2
         }
         if (await runFile(interp, program, text, operand)) {
           exiting = true
@@ -3179,14 +3276,17 @@ export const awk: CommandHandler = streaming(async (ctx) => {
   } catch (error) {
     if (error instanceof AwkError) {
       await interp.flushAll()
-      throw new CommandError(error.message, 2)
+      throw new CommandError(unicode(error.message), 2)
     }
     interp.flushOut()
     if (error instanceof NextSignal || error instanceof NextFileSignal)
       throw new CommandError('next used in BEGIN or END action', 2)
     throw error
   }
-  await interp.flushAll()
+  await interp.flushAll().catch((error: unknown) => {
+    if (!(error instanceof AwkError)) throw error
+    throw new CommandError(unicode(error.message), 2)
+  })
   return exitCode
 })
 
@@ -3198,7 +3298,7 @@ async function runFile(
   more?: () => Promise<string | null>,
 ): Promise<boolean> {
   interp.preload = undefined
-  interp.globals.set('FILENAME', name)
+  interp.globals.set('FILENAME', binary(name))
   if (text !== undefined) {
     interp.globals.set('FNR', 0)
     interp.load(text)
