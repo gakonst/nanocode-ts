@@ -7,7 +7,7 @@ import {
   type CommandHandler,
 } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
-import { baseOf, byte, byteLength, decode, encode, parentOf } from '../Fs.ts'
+import { baseOf, byte, byteLength, decode, encode, parentOf, toBase64 } from '../Fs.ts'
 import {
   escapeRegExp,
   format,
@@ -1754,106 +1754,219 @@ function ignoredBy(rules: IgnoreRule[], path: string, directory: boolean): boole
   return result
 }
 
-const RG_TYPES: Record<string, string[]> = {
-  c: ['*.[chH]', '*.[chH].in', '*.cats'],
-  cpp: [
-    '*.[ChH]',
-    '*.[ChH].in',
-    '*.[ch]pp',
-    '*.[ch]pp.in',
-    '*.[ch]xx',
-    '*.[ch]xx.in',
-    '*.cc',
-    '*.cc.in',
-    '*.hh',
-    '*.hh.in',
-    '*.inl',
-  ],
-  cs: ['*.cs'],
-  css: ['*.css', '*.scss'],
-  go: ['*.go'],
-  html: ['*.ejs', '*.htm', '*.html'],
-  java: ['*.java', '*.jsp', '*.jspx', '*.properties'],
-  js: ['*.cjs', '*.js', '*.jsx', '*.mjs', '*.vue'],
-  json: ['*.json', '*.sarif', 'composer.lock'],
-  jsonl: ['*.jsonl'],
-  kotlin: ['*.kt', '*.kts'],
-  lua: ['*.lua'],
-  make: [
-    '*.mak',
-    '*.mk',
-    '[Gg][Nn][Uu]makefile',
-    '[Gg][Nn][Uu]makefile.am',
-    '[Gg][Nn][Uu]makefile.in',
-    '[Mm]akefile',
-    '[Mm]akefile.am',
-    '[Mm]akefile.in',
-  ],
-  markdown: ['*.markdown', '*.md', '*.mdown', '*.mdwn', '*.mdx', '*.mkd', '*.mkdn'],
-  md: ['*.markdown', '*.md', '*.mdown', '*.mdwn', '*.mdx', '*.mkd', '*.mkdn'],
-  php: ['*.php', '*.php3', '*.php4', '*.php5', '*.php7', '*.php8', '*.pht', '*.phtml'],
-  py: ['*.py', '*.pyi'],
-  python: ['*.py', '*.pyi'],
-  ruby: ['*.gemspec', '*.rb', '*.rbw', '.irbrc', 'Gemfile', 'Rakefile', 'config.ru'],
-  rust: ['*.rs'],
-  sh: [
-    '*.bash',
-    '*.bashrc',
-    '*.csh',
-    '*.cshrc',
-    '*.ksh',
-    '*.kshrc',
-    '*.sh',
-    '*.tcsh',
-    '*.zsh',
-    '.bash_login',
-    '.bash_logout',
-    '.bash_profile',
-    '.bashrc',
-    '.cshrc',
-    '.kshrc',
-    '.login',
-    '.logout',
-    '.profile',
-    '.tcshrc',
-    '.zlogin',
-    '.zlogout',
-    '.zprofile',
-    '.zshenv',
-    '.zshrc',
-    'bash_login',
-    'bash_logout',
-    'bash_profile',
-    'bashrc',
-    'profile',
-    'zlogin',
-    'zlogout',
-    'zprofile',
-    'zshenv',
-    'zshrc',
-  ],
-  solidity: ['*.sol'],
-  sql: ['*.psql', '*.sql'],
-  swift: ['*.swift'],
-  toml: ['*.toml', 'Cargo.lock'],
-  ts: ['*.cts', '*.mts', '*.ts', '*.tsx'],
-  txt: ['*.txt'],
-  typescript: ['*.cts', '*.mts', '*.ts', '*.tsx'],
-  xml: [
-    '*.dtd',
-    '*.rng',
-    '*.sch',
-    '*.xhtml',
-    '*.xjb',
-    '*.xml',
-    '*.xml.dist',
-    '*.xsd',
-    '*.xsl',
-    '*.xslt',
-  ],
-  yaml: ['*.yaml', '*.yml'],
-  zig: ['*.zig'],
-}
+const RG_TYPE_LIST = `ada: *.adb, *.ads
+agda: *.agda, *.lagda
+aidl: *.aidl
+alire: alire.toml
+amake: *.bp, *.mk
+asciidoc: *.adoc, *.asc, *.asciidoc
+asm: *.S, *.asm, *.s
+asp: *.ascx, *.ascx.cs, *.ascx.vb, *.asp, *.aspx, *.aspx.cs, *.aspx.vb
+ats: *.ats, *.dats, *.hats, *.sats
+avro: *.avdl, *.avpr, *.avsc
+awk: *.awk
+bat: *.bat
+batch: *.bat
+bazel: *.BUILD, *.bazel, *.bazelrc, *.bzl, BUILD, MODULE.bazel, WORKSPACE, WORKSPACE.bazel
+bitbake: *.bb, *.bbappend, *.bbclass, *.conf, *.inc
+brotli: *.br
+buildstream: *.bst
+bzip2: *.bz2, *.tbz2
+c: *.[chH], *.[chH].in, *.cats
+cabal: *.cabal
+candid: *.did
+carp: *.carp
+cbor: *.cbor
+ceylon: *.ceylon
+clojure: *.clj, *.cljc, *.cljs, *.cljx
+cmake: *.cmake, CMakeLists.txt
+cmd: *.bat, *.cmd
+cml: *.cml
+coffeescript: *.coffee
+config: *.cfg, *.conf, *.config, *.ini
+coq: *.v
+cpp: *.[ChH], *.[ChH].in, *.[ch]pp, *.[ch]pp.in, *.[ch]xx, *.[ch]xx.in, *.cc, *.cc.in, *.hh, *.hh.in, *.inl
+creole: *.creole
+crystal: *.cr, *.ecr, Projectfile, shard.yml
+cs: *.cs
+csharp: *.cs
+cshtml: *.cshtml
+csproj: *.csproj
+css: *.css, *.scss
+csv: *.csv
+cuda: *.cu, *.cuh
+cython: *.pxd, *.pxi, *.pyx
+d: *.d
+dart: *.dart
+devicetree: *.dts, *.dtsi
+dhall: *.dhall
+diff: *.diff, *.patch
+dita: *.dita, *.ditamap, *.ditaval
+docker: *Dockerfile*
+dockercompose: docker-compose.*.yml, docker-compose.yml
+dts: *.dts, *.dtsi
+dvc: *.dvc, Dvcfile
+ebuild: *.ebuild, *.eclass
+edn: *.edn
+elisp: *.el
+elixir: *.eex, *.ex, *.exs, *.heex, *.leex, *.livemd
+elm: *.elm
+erb: *.erb
+erlang: *.erl, *.hrl
+fennel: *.fnl
+fidl: *.fidl
+fish: *.fish
+flatbuffers: *.fbs
+fortran: *.F, *.F77, *.F90, *.F95, *.f, *.f77, *.f90, *.f95, *.pfo
+fsharp: *.fs, *.fsi, *.fsx
+fut: *.fut
+gap: *.g, *.gap, *.gd, *.gi, *.tst
+gn: *.gn, *.gni
+go: *.go
+gprbuild: *.gpr
+gradle: *.gradle, *.gradle.kts, gradle-wrapper.*, gradle.properties, gradlew, gradlew.bat
+graphql: *.graphql, *.graphqls
+groovy: *.gradle, *.groovy
+gzip: *.gz, *.tgz
+h: *.h, *.hh, *.hpp
+haml: *.haml
+hare: *.ha
+haskell: *.c2hs, *.cpphs, *.hs, *.hsc, *.lhs
+hbs: *.hbs
+hs: *.hs, *.lhs
+html: *.ejs, *.htm, *.html
+hy: *.hy
+idris: *.idr, *.lidr
+janet: *.janet
+java: *.java, *.jsp, *.jspx, *.properties
+jinja: *.j2, *.jinja, *.jinja2
+jl: *.jl
+js: *.cjs, *.js, *.jsx, *.mjs, *.vue
+json: *.json, *.sarif, composer.lock
+jsonl: *.jsonl
+julia: *.jl
+jupyter: *.ipynb, *.jpynb
+k: *.k
+kotlin: *.kt, *.kts
+lean: *.lean
+less: *.less
+license: *[.-]LICEN[CS]E*, AGPL-*[0-9]*, APACHE-*[0-9]*, BSD-*[0-9]*, CC-BY-*, COPYING, COPYING[.-]*, COPYRIGHT, COPYRIGHT[.-]*, EULA, EULA[.-]*, GFDL-*[0-9]*, GNU-*[0-9]*, GPL-*[0-9]*, LGPL-*[0-9]*, LICEN[CS]E, LICEN[CS]E[.-]*, MIT-*[0-9]*, MPL-*[0-9]*, NOTICE, NOTICE[.-]*, OFL-*[0-9]*, PATENTS, PATENTS[.-]*, UNLICEN[CS]E, UNLICEN[CS]E[.-]*, agpl[.-]*, gpl[.-]*, lgpl[.-]*, licen[cs]e, licen[cs]e.*
+lilypond: *.ily, *.ly
+lisp: *.el, *.jl, *.lisp, *.lsp, *.sc, *.scm
+lock: *.lock, package-lock.json
+log: *.log
+lua: *.lua
+lz4: *.lz4
+lzma: *.lzma
+m4: *.ac, *.m4
+make: *.mak, *.mk, [Gg][Nn][Uu]makefile, [Gg][Nn][Uu]makefile.am, [Gg][Nn][Uu]makefile.in, [Mm]akefile, [Mm]akefile.am, [Mm]akefile.in
+mako: *.mako, *.mao
+man: *.[0-9][cEFMmpSx], *.[0-9lnpx]
+markdown: *.markdown, *.md, *.mdown, *.mdwn, *.mdx, *.mkd, *.mkdn
+matlab: *.m
+md: *.markdown, *.md, *.mdown, *.mdwn, *.mdx, *.mkd, *.mkdn
+meson: meson.build, meson.options, meson_options.txt
+minified: *.min.css, *.min.html, *.min.js
+mint: *.mint
+mk: mkfile
+ml: *.ml
+motoko: *.mo
+msbuild: *.csproj, *.fsproj, *.proj, *.props, *.sln, *.targets, *.vcxproj
+nim: *.nim, *.nimble, *.nimf, *.nims
+nix: *.nix
+objc: *.h, *.m
+objcpp: *.h, *.mm
+ocaml: *.ml, *.mli, *.mll, *.mly
+org: *.org, *.org_archive
+pants: BUILD
+pascal: *.dpr, *.inc, *.lpr, *.pas, *.pp
+pdf: *.pdf
+perl: *.PL, *.perl, *.pl, *.plh, *.plx, *.pm, *.t
+php: *.php, *.php3, *.php4, *.php5, *.php7, *.php8, *.pht, *.phtml
+po: *.po
+pod: *.pod
+postscript: *.eps, *.ps
+prolog: *.P, *.pl, *.pro, *.prolog
+protobuf: *.proto
+ps: *.cdxml, *.ps1, *.ps1xml, *.psd1, *.psm1
+puppet: *.epp, *.erb, *.pp, *.rb
+purs: *.purs
+py: *.py, *.pyi
+python: *.py, *.pyi
+qmake: *.prf, *.pri, *.pro
+qml: *.qml
+r: *.R, *.Rmd, *.Rnw, *.r
+racket: *.rkt
+raku: *.p6, *.pl6, *.pm6, *.raku, *.rakudoc, *.rakumod, *.rakutest
+rdoc: *.rdoc
+readme: *README, README*
+reasonml: *.re, *.rei
+red: *.r, *.red, *.reds
+rescript: *.res, *.resi
+robot: *.robot
+rst: *.rst
+ruby: *.gemspec, *.rb, *.rbw, .irbrc, Gemfile, Rakefile, config.ru
+rust: *.rs
+sass: *.sass, *.scss
+scala: *.sbt, *.scala
+sh: *.bash, *.bashrc, *.csh, *.cshrc, *.ksh, *.kshrc, *.sh, *.tcsh, *.zsh, .bash_login, .bash_logout, .bash_profile, .bashrc, .cshrc, .kshrc, .login, .logout, .profile, .tcshrc, .zlogin, .zlogout, .zprofile, .zshenv, .zshrc, bash_login, bash_logout, bash_profile, bashrc, profile, zlogin, zlogout, zprofile, zshenv, zshrc
+slim: *.skim, *.slim, *.slime
+smarty: *.tpl
+sml: *.sig, *.sml
+solidity: *.sol
+soy: *.soy
+spark: *.spark
+spec: *.spec
+sql: *.psql, *.sql
+stylus: *.styl
+sv: *.h, *.sv, *.svh, *.v, *.vg
+svg: *.svg
+swift: *.swift
+swig: *.def, *.i
+systemd: *.automount, *.conf, *.device, *.link, *.mount, *.path, *.scope, *.service, *.slice, *.socket, *.swap, *.target, *.timer
+taskpaper: *.taskpaper
+tcl: *.tcl
+tex: *.bib, *.cls, *.dtx, *.ins, *.ltx, *.sty, *.tex
+texinfo: *.texi
+textile: *.textile
+tf: *.auto.tfvars, *.auto.tfvars.json, *.terraform.lock.hcl, *.terraformrc, *.tf, *.tf.json, *.tfrc, terraform.rc, terraform.tfvars, terraform.tfvars.json
+thrift: *.thrift
+toml: *.toml, Cargo.lock
+ts: *.cts, *.mts, *.ts, *.tsx
+twig: *.twig
+txt: *.txt
+typescript: *.cts, *.mts, *.ts, *.tsx
+typoscript: *.ts, *.typoscript
+usd: *.usd, *.usda, *.usdc
+v: *.v, *.vsh
+vala: *.vala
+vb: *.vb
+vcl: *.vcl
+verilog: *.sv, *.svh, *.v, *.vh
+vhdl: *.vhd, *.vhdl
+vim: *.vim, .gvimrc, .vimrc, _gvimrc, _vimrc, gvimrc, vimrc
+vimscript: *.vim, .gvimrc, .vimrc, _gvimrc, _vimrc, gvimrc, vimrc
+webidl: *.idl, *.webidl, *.widl
+wiki: *.mediawiki, *.wiki
+xml: *.dtd, *.rng, *.sch, *.xhtml, *.xjb, *.xml, *.xml.dist, *.xsd, *.xsl, *.xslt
+xz: *.txz, *.xz
+yacc: *.y
+yaml: *.yaml, *.yml
+yang: *.yang
+z: *.Z
+zig: *.zig
+zsh: *.zsh, .zlogin, .zlogout, .zprofile, .zshenv, .zshrc, zlogin, zlogout, zprofile, zshenv, zshrc
+zstd: *.zst, *.zstd
+`
+
+const RG_TYPES: Record<string, string[]> = Object.fromEntries(
+  RG_TYPE_LIST.trim()
+    .split('\n')
+    .map((line) => [
+      line.slice(0, line.indexOf(': ')),
+      line.slice(line.indexOf(': ') + 2).split(', '),
+    ]),
+)
 
 const rg: CommandHandler = async (ctx) => {
   const args: string[] = []
@@ -1885,7 +1998,7 @@ const rg: CommandHandler = async (ctx) => {
     args.splice(replaceAt, 1)
   const parsed = options(args, {
     flags: 'ilcwFvnNHIUSsoqxaLp0.zPb+',
-    values: 'eAgCBtTmfrdjM',
+    values: 'eAgCBtTmfrdjME',
     long: {
       include: 'g',
       'ignore-case': 'i',
@@ -1955,6 +2068,14 @@ const rg: CommandHandler = async (ctx) => {
       multiline: 'U',
       crlf: '',
       engine: 'engine',
+      encoding: 'E',
+      json: '%',
+      'no-json': '',
+      'type-list': '&',
+      'include-zero': '^',
+      passthru: '~',
+      passthrough: '~',
+      'null-data': '!',
     },
   })
   const f = parsed.flags
@@ -1968,9 +2089,18 @@ const rg: CommandHandler = async (ctx) => {
     heading: '2',
     vimgrep: '7',
     trim: '+',
+    json: '%',
+    'type-list': '&',
+    'include-zero': '^',
+    passthru: '~',
+    'null-data': '!',
   }
   const has = (key: string) => f.has(longFlags[key] ?? key)
   const listFiles = has('files')
+  if (has('type-list')) {
+    ctx.stdout.write(RG_TYPE_LIST)
+    return 0
+  }
   const patterns = [...(parsed.values.get('e') ?? [])]
   for (const file of parsed.values.get('f') ?? []) {
     try {
@@ -1993,7 +2123,8 @@ const rg: CommandHandler = async (ctx) => {
   const hidden = f.has('.') || unrestricted >= 2
   const noIgnore = has('no-ignore') || unrestricted >= 1
   const noVcs = noIgnore || has('no-ignore-vcs')
-  const binaryText = f.has('a') || unrestricted >= 3
+  const binaryText = f.has('a') || unrestricted >= 3 || has('null-data')
+  const terminator = has('null-data') ? '\0' : '\n'
   const smart = f.has('S') && !f.has('s') && !f.has('i')
   const insensitive =
     (f.has('i') && !f.has('s')) ||
@@ -2018,7 +2149,15 @@ const rg: CommandHandler = async (ctx) => {
   })
   let regex: RegExp
   try {
-    const flags = new Set(('g' + (insensitive ? 'i' : '') + extraFlags).split(''))
+    const flags = new Set(
+      (
+        'g' +
+        (insensitive ? 'i' : '') +
+        (f.has('U') || has('null-data') ? '' : 's') +
+        (has('null-data') ? 'm' : '') +
+        extraFlags
+      ).split(''),
+    )
     regex = new RegExp(
       sources.length ? sources.map((source) => '(?:' + source + ')').join('|') : '(?!)',
       [...flags].join(''),
@@ -2102,8 +2241,28 @@ const rg: CommandHandler = async (ctx) => {
     }
     return rules
   }
+  const encoding = last(parsed, 'E')
+  let transcode: TextDecoder | undefined
+  if (
+    encoding !== undefined &&
+    encoding.toLowerCase() !== 'auto' &&
+    encoding.toLowerCase() !== 'none'
+  )
+    try {
+      transcode = new TextDecoder(encoding)
+    } catch {
+      throw new CommandError(
+        'error parsing flag --encoding: grep config error: unknown encoding: ' + encoding,
+        2,
+      )
+    }
   const prunable =
-    !listFiles && !f.has('v') && !has('files-without-match')
+    !listFiles &&
+    !transcode &&
+    !f.has('v') &&
+    !has('files-without-match') &&
+    !has('passthru') &&
+    !has('include-zero')
       ? literals(literalPatterns, f.has('F') ? 'fixed' : 'perl')
       : null
   const every = prunable && !f.has('U') ? conjunction(literalPatterns, 'perl') : null
@@ -2235,6 +2394,132 @@ const rg: CommandHandler = async (ctx) => {
     regex.lastIndex = 0
     return regex.test(line) !== f.has('v')
   }
+  const json = has('json') && !silent
+  const begun = performance.now()
+  const totals = {
+    bytes_printed: 0,
+    bytes_searched: 0,
+    elapsed: 0,
+    matched_lines: 0,
+    matches: 0,
+    searches: 0,
+    searches_with_match: 0,
+  }
+  const duration = (ms: number) => {
+    const nanos = Math.round(ms * 1e6)
+    return {
+      secs: Math.floor(nanos / 1e9),
+      nanos: nanos % 1e9,
+      human: (nanos / 1e9).toFixed(6) + 's',
+    }
+  }
+  const sorted = (value: { secs: number; nanos: number; human: string }) => ({
+    human: value.human,
+    nanos: value.nanos,
+    secs: value.secs,
+  })
+  const data = (text: string) =>
+    /(?<![\ud800-\udbff])[\udc80-\udcff]/.test(text) ? { bytes: toBase64(encode(text)) } : { text }
+  const searchJson = (text: string, display: string) => {
+    const started = performance.now()
+    const path = data(display)
+    const rows = text.match(/[^\n]*\n|[^\n]+$/g) ?? []
+    const starts: number[] = []
+    for (let i = 0, offset = 0; i < rows.length; offset += byteLength(rows[i++]))
+      starts.push(offset)
+    let out = ''
+    let matched = 0
+    let count = 0
+    let shown = -1
+    let pending = 0
+    let searched = byteLength(text)
+    const message = (type: string, i: number, submatches: unknown[]) => {
+      out +=
+        JSON.stringify({
+          type,
+          data: {
+            path,
+            lines: data(rows[i]),
+            line_number: f.has('N') ? null : i + 1,
+            absolute_offset: starts[i],
+            submatches,
+          },
+        }) + '\n'
+      shown = i
+    }
+    for (let i = 0; i < rows.length; i++) {
+      const line = rows[i].replace(/\n$/, '')
+      if (matched >= max) {
+        if (pending-- <= 0) {
+          searched = starts[i]
+          break
+        }
+        message('context', i, [])
+        continue
+      }
+      if (!selected(line)) {
+        if (pending-- > 0) message('context', i, [])
+        continue
+      }
+      matched++
+      for (let j = Math.max(shown + 1, i - before); j < i; j++) message('context', j, [])
+      const submatches = f.has('v')
+        ? []
+        : [...rustMatches(line, regex)].map((match) => {
+            const start = byteLength(line.slice(0, match.index))
+            return { match: data(match[0]), start, end: start + byteLength(match[0]) }
+          })
+      count += submatches.length
+      message('match', i, submatches)
+      pending = after
+    }
+    if (!matched) return
+    found = true
+    const begin = JSON.stringify({ type: 'begin', data: { path } }) + '\n'
+    const elapsed = performance.now() - started
+    const stats = {
+      elapsed: duration(elapsed),
+      searches: 1,
+      searches_with_match: 1,
+      bytes_searched: searched,
+      bytes_printed: byteLength(begin + out),
+      matched_lines: matched,
+      matches: count,
+    }
+    ctx.stdout.write(
+      begin +
+        out +
+        JSON.stringify({ type: 'end', data: { path, binary_offset: null, stats } }) +
+        '\n',
+    )
+    totals.bytes_printed += stats.bytes_printed
+    totals.bytes_searched += stats.bytes_searched
+    totals.elapsed += elapsed
+    totals.matched_lines += matched
+    totals.matches += count
+    totals.searches++
+    totals.searches_with_match++
+  }
+  const summary = () => {
+    if (!json) return
+    ctx.stdout.write(
+      JSON.stringify({
+        data: {
+          elapsed_total: sorted(duration(performance.now() - begun)),
+          stats: {
+            bytes_printed: totals.bytes_printed,
+            bytes_searched: totals.bytes_searched,
+            elapsed: sorted(duration(totals.elapsed)),
+            matched_lines: totals.matched_lines,
+            matches: totals.matches,
+            searches: totals.searches,
+            searches_with_match: totals.searches_with_match,
+          },
+        },
+        type: 'summary',
+      }) + '\n',
+    )
+  }
   const search = (text: string, display: string | undefined, explicit: boolean) => {
     let warning = ''
     const nul = binaryText ? -1 : text.indexOf('\0')
@@ -2272,6 +2557,7 @@ const rg: CommandHandler = async (ctx) => {
       }
       if (warning) warning += ' (found "\\0" byte around offset ' + offset + ')\n'
     }
+    if (json) return searchJson(text, display ?? '<stdin>')
     let output = ''
     const prefix = named && !heading ? (display ?? '<stdin>') : undefined
     const matches = scan(text, {
@@ -2286,8 +2572,10 @@ const rg: CommandHandler = async (ctx) => {
       offsets: f.has('b'),
       column: has('column') || has('vimgrep'),
       name: prefix,
-      terminator: '\n',
+      separator: terminator,
+      terminator,
       replace,
+      passthru: has('passthru'),
       empty: true,
       each: has('vimgrep'),
       trim: has('trim'),
@@ -2303,7 +2591,7 @@ const rg: CommandHandler = async (ctx) => {
       found = true
       ctx.stdout.write((display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'))
     }
-    if (counting && matches) {
+    if (counting && (matches || has('include-zero'))) {
       let total = matches
       if (has('count-matches') || f.has('o')) {
         total = 0
@@ -2312,7 +2600,7 @@ const rg: CommandHandler = async (ctx) => {
           total += [...rustMatches(line, regex)].length
         }
       }
-      ctx.stdout.write((named ? (display ?? '<stdin>') + ':' : '') + total + '\n')
+      ctx.stdout.write((named ? (display ?? '<stdin>') + ':' : '') + total + terminator)
     }
     if (warning && matches && matches < max) output += warning
     if (!silent && output) {
@@ -2356,7 +2644,19 @@ const rg: CommandHandler = async (ctx) => {
     }
     let text: string
     try {
-      text = decode(await pending)
+      const bytes = await pending
+      const decoder =
+        transcode ??
+        (encoding?.toLowerCase() === 'none'
+          ? undefined
+          : bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+            ? new TextDecoder('utf-8')
+            : bytes[0] === 0xff && bytes[1] === 0xfe
+              ? new TextDecoder('utf-16le')
+              : bytes[0] === 0xfe && bytes[1] === 0xff
+                ? new TextDecoder('utf-16be')
+                : undefined)
+      text = decoder ? decoder.decode(bytes) : decode(bytes)
     } catch {
       ctx.stderr.write('rg: ' + target.display + ': failed to read\n')
       errors = true
@@ -2365,6 +2665,7 @@ const rg: CommandHandler = async (ctx) => {
     search(text, target.display, target.explicit)
     if (found && f.has('q')) return 0
   }
+  summary()
   if (errors) return 2
   return found ? 0 : 1
 }
