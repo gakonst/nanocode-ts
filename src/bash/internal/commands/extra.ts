@@ -30,6 +30,7 @@ import {
   pause,
   put,
   readInput,
+  readOperand,
 } from './util.ts'
 import { mkdirs } from './files.ts'
 import {
@@ -219,26 +220,69 @@ const cmp: CommandHandler = async (ctx) => {
   const b = await read(right)
   const length = Math.min(a.length, b.length)
   const quiet = parsed.flags.has('s')
+  const printed = (byte: number) => {
+    const high = byte >= 0x80 ? 'M-' : ''
+    const low = byte & 0x7f
+    return (
+      high +
+      (low < 0x20
+        ? '^' + String.fromCharCode(low + 64)
+        : low === 0x7f
+          ? '^?'
+          : String.fromCharCode(low))
+    )
+  }
   let line = 1
   let differ = false
+  let buffered = ''
+  let written = 0
   for (let i = 0; i < length; i++) {
     const x = a[i]!
     const y = b[i]!
     if (x !== y) {
       differ = true
       if (parsed.flags.has('l')) {
-        ctx.stdout.write(
+        if (buffered.length >= 4096) {
+          if (written >= 1 << 16) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0))
+            if (ctx.stdout.closed) throw new PipeError()
+          }
+          ctx.stdout.write(buffered.slice(0, 4096))
+          buffered = buffered.slice(4096)
+          written += 4096
+        }
+        buffered +=
           String(i + 1).padStart(String(length).length) +
-            ' ' +
-            x.toString(8).padStart(3) +
-            ' ' +
-            y.toString(8).padStart(3) +
-            '\n',
-        )
+          ' ' +
+          x.toString(8).padStart(3) +
+          ' ' +
+          (parsed.flags.has('b') ? printed(x).padEnd(4) + ' ' : '') +
+          y.toString(8).padStart(3) +
+          (parsed.flags.has('b') ? ' ' + printed(y) : '') +
+          '\n'
         continue
       }
       if (!quiet)
-        ctx.stdout.write(left + ' ' + right + ' differ: byte ' + (i + 1) + ', line ' + line + '\n')
+        ctx.stdout.write(
+          left +
+            ' ' +
+            right +
+            ' differ: byte ' +
+            (i + 1) +
+            ', line ' +
+            line +
+            (parsed.flags.has('b')
+              ? ' is ' +
+                x.toString(8).padStart(3) +
+                ' ' +
+                printed(x) +
+                ' ' +
+                y.toString(8).padStart(3) +
+                ' ' +
+                printed(y)
+              : '') +
+            '\n',
+        )
       return 1
     }
     if (x === 10) line++
@@ -249,11 +293,15 @@ const cmp: CommandHandler = async (ctx) => {
       ctx.stderr.write(
         'cmp: EOF on ' +
           shorter +
-          (length ? ' after byte ' + length + ', line ' + line : ' which is empty') +
+          (length
+            ? ' after byte ' + length + (parsed.flags.has('l') ? '' : ', line ' + line)
+            : ' which is empty') +
           '\n',
       )
+    ctx.stdout.write(buffered)
     return 1
   }
+  ctx.stdout.write(buffered)
   return differ ? 1 : 0
 }
 
@@ -863,18 +911,31 @@ const tree: CommandHandler = async (ctx) => {
   let directories = 0
   let files = 0
   let status = 0
+  const visible = (name: string) =>
+    (f.has('a') || !name.startsWith('.')) && !ignore.some((glob) => glob.test(name))
+  const matches = (name: string) =>
+    !f.has('d') && (!pattern.length || pattern.some((glob) => glob.test(name)))
+  const shown = async (path: string, level: number): Promise<boolean> => {
+    if (level > depth) return false
+    for (const name of (await ctx.fs.list(path)).filter(visible)) {
+      const child = path === '/' ? '/' + name : path + '/' + name
+      const stat = await ctx.fs.stat(child)
+      if (!stat) continue
+      if (stat.kind === 'directory' ? await shown(child, level + 1) : matches(name)) return true
+    }
+    return false
+  }
   const walk = async (path: string, display: string, prefix: string, level: number) => {
-    if (level > depth) return
-    const names = (await ctx.fs.list(path)).filter(
-      (name) => (f.has('a') || !name.startsWith('.')) && !ignore.some((glob) => glob.test(name)),
-    )
+    if (level > depth) return 0
+    const names = (await ctx.fs.list(path)).filter(visible)
     const children: { name: string; directory: boolean; size: number }[] = []
     for (const name of names) {
-      const stat = await ctx.fs.stat(path === '/' ? '/' + name : path + '/' + name)
+      const child = path === '/' ? '/' + name : path + '/' + name
+      const stat = await ctx.fs.stat(child)
       if (!stat) continue
       const directory = stat.kind === 'directory'
-      if (!directory && f.has('d')) continue
-      if (!directory && pattern.length && !pattern.some((glob) => glob.test(name))) continue
+      if (!directory && !matches(name)) continue
+      if (directory && f.has('U') && !(await shown(child, level + 1))) continue
       children.push({ name, directory, size: stat.size })
     }
     if (f.has('D')) children.sort((a, b) => Number(b.directory) - Number(a.directory))
@@ -902,6 +963,7 @@ const tree: CommandHandler = async (ctx) => {
         )
       } else files++
     }
+    return children.length
   }
   for (const operand of parsed.operands.length ? parsed.operands : ['.']) {
     const path = ctx.resolve(operand)
@@ -911,9 +973,8 @@ const tree: CommandHandler = async (ctx) => {
       status = 2
       continue
     }
-    directories++
     ctx.stdout.write(operand + (f.has('F') && !operand.endsWith('/') ? '/' : '') + '\n')
-    await walk(path, operand, '', 1)
+    if (await walk(path, operand, '', 1)) directories++
   }
   if (!f.has('R'))
     ctx.stdout.write(
@@ -1128,7 +1189,8 @@ const xxd: CommandHandler = async (ctx) => {
     values: 'lc',
     long: { plain: 'p', ps: 'p', postscript: 'p', revert: 'r' },
   })
-  const data = await bytesOf(ctx, parsed.operands[0] ?? '-')
+  const operand = parsed.operands[0] ?? '-'
+  const data = operand === '-' ? await bytesOf(ctx, operand) : await readOperand(ctx, operand, 2)
   if (parsed.flags.has('r')) {
     const text = decode(data)
     const chunks: { offset: number; hex: string }[] = []
@@ -1177,11 +1239,13 @@ const xxd: CommandHandler = async (ctx) => {
 }
 
 const od: CommandHandler = async (ctx) => {
-  const parsed = options(ctx.args, { flags: 'cxbdos', values: 'AtNj' })
-  let data = await bytesOf(ctx, parsed.operands[0] ?? '-')
-  const skip = Number(last(parsed, 'j') ?? 0)
+  const parsed = options(ctx.args, { flags: 'cxbdosv', values: 'AtNj' })
+  const operand = parsed.operands[0] ?? '-'
+  let data = operand === '-' ? await bytesOf(ctx, operand) : await readOperand(ctx, operand, 1)
+  const size = (text: string) => (/^0[0-7]+$/.test(text) ? parseInt(text, 8) : Number(text))
+  const skip = size(last(parsed, 'j') ?? '0')
   const limit = last(parsed, 'N')
-  data = data.slice(skip, limit === undefined ? undefined : skip + Number(limit))
+  data = data.slice(skip, limit === undefined ? undefined : skip + size(limit))
   const f = parsed.flags
   const raw =
     last(parsed, 't') ??
@@ -1253,10 +1317,23 @@ const od: CommandHandler = async (ctx) => {
   const label = (offset: number) =>
     address === 'n'
       ? ''
-      : offset.toString(address === 'x' ? 16 : address === 'd' ? 10 : 8).padStart(7, '0')
+      : (offset + skip).toString(address === 'x' ? 16 : address === 'd' ? 10 : 8).padStart(7, '0')
+  let repeated = false
   for (let offset = 0; offset < data.length; offset += 16) {
+    const end = Math.min(offset + 16, data.length)
+    if (
+      !f.has('v') &&
+      offset &&
+      end - offset === 16 &&
+      data.subarray(offset - 16, offset).every((byte, i) => byte === data[offset + i])
+    ) {
+      if (!repeated) ctx.stdout.write('*\n')
+      repeated = true
+      continue
+    }
+    repeated = false
     let line = label(offset)
-    for (let i = offset; i < Math.min(offset + 16, data.length); i += width) line += cell(i)
+    for (let i = offset; i < end; i += width) line += cell(i)
     ctx.stdout.write(line + '\n')
     if (ctx.stdout.backlog) await pause(ctx)
   }
@@ -1335,10 +1412,13 @@ const join: CommandHandler = async (ctx) => {
   const split = (line: string) => (sep === undefined ? line.trim().split(/\s+/) : line.split(sep))
   const f1 = Number(last(parsed, '1') ?? 1) - 1
   const f2 = Number(last(parsed, '2') ?? 1) - 1
-  const lines = async (operand: string) =>
-    (await allInput(ctx, [operand])).text.split('\n').filter(Boolean).map(split)
+  const lines = async (operand: string) => {
+    const input = await allInput(ctx, [operand])
+    return input.status ? undefined : input.text.split('\n').filter(Boolean).map(split)
+  }
   const a = await lines(left)
-  const b = await lines(right)
+  const b = a && (await lines(right))
+  if (!a || !b) return 1
   const key = (value: string | undefined) =>
     parsed.flags.has('i') ? (value ?? '').toLowerCase() : (value ?? '')
   const only = parsed.values.get('v') ?? []
@@ -2390,7 +2470,7 @@ const truncate: CommandHandler = async (ctx) => {
   if (spec === undefined && reference === undefined)
     throw new CommandError("you must specify either '--size' or '--reference'")
   if (!parsed.operands.length) throw new CommandError('missing file operand')
-  const match = spec?.match(/^([-+<>\/%]?)(\d+)([KMGT]?)(i?B?)$/i)
+  const match = spec?.match(/^([-+<>/%]?)(\d+)([KMGT]?)(i?B?)$/i)
   if (spec !== undefined && !match) throw new CommandError("Invalid number: '" + spec + "'")
   const unit = match
     ? (match[4]?.toUpperCase() === 'B' && !match[4].toLowerCase().startsWith('i') ? 1000 : 1024) **
@@ -2647,9 +2727,9 @@ const fmt: CommandHandler = async (ctx) => {
         space: atEnd || parsed.flags.has('u') ? (final ? 2 : 1) : space,
         gap: atEnd || parsed.flags.has('u') ? (final ? '  ' : ' ') : gap,
         period,
-        punct: /[!-\/:-@\[-\x60{-~]$/.test(text),
+        punct: /[!-/:-@[-\x60{-~]$/.test(text),
         final,
-        paren: /^[(\['\x60"]/.test(text),
+        paren: /^[(['\x60"]/.test(text),
       })
     }
     return words
@@ -3394,7 +3474,7 @@ function bcTokens(source: string): string[] {
     }
     const op = source
       .slice(i)
-      .match(/^(?:\+\+|--|\+=|-=|\*=|\/=|%=|\^=|==|<=|>=|!=|&&|\|\||[-+*\/%^=<>!(){}\[\],])/)
+      .match(/^(?:\+\+|--|\+=|-=|\*=|\/=|%=|\^=|==|<=|>=|!=|&&|\|\||[-+*/%^=<>!(){}[\],])/)
     if (!op) throw new BcError('illegal character: ' + c)
     tokens.push(op[0])
     i += op[0].length

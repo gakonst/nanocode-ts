@@ -1,8 +1,8 @@
 import { CommandError, budget, flatten, streaming, type CommandHandler } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
-import { decode, encode } from '../Fs.ts'
+import { byte, decode, encode } from '../Fs.ts'
 import { posixRegExp } from '../Text.ts'
-import { options, put } from './util.ts'
+import { last, options, put } from './util.ts'
 
 type Address =
   | { kind: 'line'; line: number }
@@ -10,6 +10,45 @@ type Address =
   | { kind: 'regex'; regex: RegExp | null }
   | { kind: 'step'; first: number; step: number }
   | { kind: 'relative'; count: number }
+
+const controls: Record<string, string> = {
+  a: '\x07',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+}
+
+const listEscapes: Record<number, string> = {
+  7: '\\a',
+  8: '\\b',
+  9: '\\t',
+  10: '\\n',
+  11: '\\v',
+  12: '\\f',
+  13: '\\r',
+  92: '\\\\',
+}
+
+function listed(space: string, width: number): string {
+  let out = ''
+  let column = 0
+  for (const byte of encode(space)) {
+    const text =
+      listEscapes[byte] ??
+      (byte >= 0x20 && byte < 0x7f
+        ? String.fromCharCode(byte)
+        : '\\' + byte.toString(8).padStart(3, '0'))
+    if (width > 0 && column + text.length > width - 1) {
+      out += '\\\n'
+      column = 0
+    }
+    out += text
+    column += text.length
+  }
+  return out + '$\n'
+}
 
 type SedCommand = {
   name: string
@@ -63,7 +102,7 @@ class Parser {
       if (this.src[this.pos] === '[') {
         const end = this.src.slice(this.pos).match(/^\[\^?\]?(\[:\w+:\]|[^\]])*\]/)
         if (end) {
-          out += end[0]
+          out += end[0].replace(/\\([afnrtv])/g, (_, c: string) => controls[c] ?? c)
           this.pos += end[0].length
           continue
         }
@@ -78,7 +117,7 @@ class Parser {
   regex(source: string, flags: string): RegExp | null {
     if (source === '') return null
     try {
-      return posixRegExp(source, this.extended, flags)
+      return posixRegExp(source, this.extended, flags.includes('m') ? flags : flags + 's')
     } catch (error) {
       this.fail('invalid regular expression: ' + (error as Error).message)
     }
@@ -125,6 +164,10 @@ class Parser {
     if (this.src[this.pos] === '\\') {
       this.pos++
       if (this.src[this.pos] === '\n') this.pos++
+      else if (this.src.startsWith('\\\n', this.pos)) {
+        this.pos++
+        return ''
+      }
     }
     let out = ''
     while (this.pos < this.src.length && this.src[this.pos] !== '\n') {
@@ -248,6 +291,15 @@ class Parser {
           }
           break
         }
+        case 'l': {
+          this.blanks()
+          const match = this.src.slice(this.pos).match(/^\d+/)
+          if (match) {
+            command.code = Number(match[0])
+            this.pos += match[0].length
+          }
+          break
+        }
         case 'p':
         case 'P':
         case 'd':
@@ -260,7 +312,6 @@ class Parser {
         case 'H':
         case 'x':
         case '=':
-        case 'l':
         case 'z':
         case 'F':
           break
@@ -479,10 +530,12 @@ export const sed: CommandHandler = streaming(async (ctx) => {
       throw new CommandError("can't find label for jump to `" + command.label + "'")
   const quiet = parsed.flags.has('n')
   const separator = parsed.flags.has('z') ? '\0' : '\n'
+  const lineLength = Number(last(parsed, 'l') ?? 70)
   const writes = new Map<string, string>()
   let lastRegex: RegExp | null = null
   let exitCode = 0
   let quit = false
+  let fileName = '-'
   const run = async (
     read: () => Promise<string | null>,
     write: (text: string) => Promise<void>,
@@ -516,6 +569,8 @@ export const sed: CommandHandler = streaming(async (ctx) => {
     }
     let lineNumber = 0
     let hold = ''
+    let chomped = true
+    let holdChomped = true
     const grow = (text: string, before: number): string => {
       if (text.length >>> 20 !== before >>> 20)
         budget(ctx.limits, 4 * text.length, 'sed: the pattern and hold space')
@@ -536,7 +591,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
     let missing = false
     const emit = (value: string) => {
       out += (missing ? separator : '') + value
-      missing = isLast() && !trailing
+      missing = !chomped
       if (!missing) out += separator
       if (out.length > 65536) {
         chunks.push(out)
@@ -598,6 +653,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
       await fill()
       if (index >= input.length || quit) break
       let space = input[index++]
+      chomped = !isLast() || trailing
       lineNumber++
       let appended = ''
       let substituted = false
@@ -637,12 +693,27 @@ export const sed: CommandHandler = streaming(async (ctx) => {
             let result = ''
             let last = 0
             let previous = -1
+            const split = (at: number, empty: RegExpExecArray) => {
+              const code = space.charCodeAt(at)
+              if (!(code >= 0x80) || (code >= 0xdc80 && code <= 0xdcff)) return false
+              result += space.slice(last, at)
+              const bytes = encode(String.fromCodePoint(space.codePointAt(at)!))
+              for (let j = 0; j < bytes.length; j++) {
+                if (j && (++count === target || (command.global && count > target))) {
+                  changed = true
+                  result += replacement(empty)
+                }
+                result += byte(bytes[j]!)
+              }
+              last = at + (code >= 0xd800 && code <= 0xdbff ? 2 : 1)
+              return true
+            }
             for (let position = 0; position <= space.length; ) {
               global.lastIndex = position
               const match = global.exec(space)
               if (!match) break
               if (match[0] === '' && match.index === previous) {
-                position = match.index + 1
+                position = split(match.index, match) ? last : match.index + 1
                 continue
               }
               count++
@@ -653,6 +724,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
               previous = last
               position = match[0] === '' ? last + 1 : last
               if (count >= target && !command.global) break
+              if (match[0] === '' && split(last, match)) position = last
             }
             result += space.slice(last)
             if (changed) {
@@ -704,6 +776,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
               break
             }
             space = input[index++]
+            chomped = !isLast() || trailing
             lineNumber++
             break
           case 'N':
@@ -713,22 +786,28 @@ export const sed: CommandHandler = streaming(async (ctx) => {
               break
             }
             space = grow(space + '\n' + input[index++], space.length)
+            chomped = !isLast() || trailing
             lineNumber++
             break
           case 'g':
             space = hold
+            chomped = holdChomped
             break
           case 'G':
             space = grow(space + '\n' + hold, space.length)
+            chomped = holdChomped
             break
           case 'h':
             hold = space
+            holdChomped = chomped
             break
           case 'H':
             hold = grow(hold + '\n' + space, hold.length)
+            holdChomped = chomped
             break
           case 'x':
             ;[space, hold] = [hold, space]
+            ;[chomped, holdChomped] = [holdChomped, chomped]
             break
           case 'a':
             appended += command.text + '\n'
@@ -745,13 +824,13 @@ export const sed: CommandHandler = streaming(async (ctx) => {
             out += lineNumber + '\n'
             break
           case 'l':
-            out += JSON.stringify(space).slice(1, -1).replace(/\\"/g, '"') + '$\n'
+            out += listed(space, command.code ?? lineLength)
             break
           case 'z':
             space = ''
             break
           case 'F':
-            out += '-\n'
+            out += fileName + '\n'
             break
           case 'r':
           case 'R':
@@ -793,7 +872,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
         }
       }
       if (!deleted && !restart && !quiet)
-        out += (missing ? separator : '') + space + (isLast() && !trailing && !appended ? '' : separator)
+        out += (missing ? separator : '') + space + (!chomped && !appended ? '' : separator)
       out += appended
       if (out.length > 65536) {
         chunks.push(out)
@@ -842,6 +921,27 @@ export const sed: CommandHandler = streaming(async (ctx) => {
         status = 2
       }
     }
+  } else if (parsed.flags.has('s') && operands.length) {
+    let pending = false
+    for (const operand of operands) {
+      if (quit) break
+      let text: string
+      try {
+        text =
+          operand === '-' ? await ctx.stdin.text() : decode(await ctx.fs.read(ctx.resolve(operand)))
+      } catch (error) {
+        if (!(error instanceof FsError)) throw error
+        ctx.stderr.write("sed: can't read " + operand + ': No such file or directory\n')
+        status = 2
+        continue
+      }
+      fileName = operand
+      await run(whole(text), async (chunk) => {
+        if (!chunk) return
+        await put(ctx, (pending ? separator : '') + chunk)
+        pending = !chunk.endsWith(separator)
+      })
+    }
   } else {
     const inputs = operands.length ? operands : ['-']
     let i = 0
@@ -856,15 +956,16 @@ export const sed: CommandHandler = streaming(async (ctx) => {
             return chunk
           }
           stream = undefined
-          if (ending && !ending.endsWith('\n') && i < inputs.length) {
-            ending = '\n'
-            return '\n'
+          if (ending && !ending.endsWith(separator) && i < inputs.length) {
+            ending = separator
+            return separator
           }
           continue
         }
         if (i >= inputs.length) return null
         const operand = inputs[i++]
         ending = ''
+        fileName = operand
         if (operand === '-') {
           const input = ctx.stdin
           stream = () => input.chunk()
