@@ -2000,9 +2000,10 @@ const rg: CommandHandler = async (ctx) => {
       const decision = override(relative, directory)
       if (decision === 'exclude') continue
       if (decision !== 'include') {
-        if (!hidden && name.startsWith('.')) continue
         if (name === '.git' && directory && !hidden) continue
-        if (ignoredBy(local, child, directory)) continue
+        const ignored = ignoredBy(local, child, directory)
+        if (ignored) continue
+        if (ignored === undefined && !hidden && name.startsWith('.')) continue
       }
       const shown =
         display === '' ? name : display.endsWith('/') ? display + name : display + '/' + name
@@ -2159,7 +2160,7 @@ const rg: CommandHandler = async (ctx) => {
       ctx.stdout.write(output)
     }
   }
-  if (!useStdin && !targets.length && !errors && !narrowed) {
+  if (!useStdin && !operands.length && !targets.length && !errors && !narrowed) {
     ctx.stderr.write(
       "rg: No files were searched, which means ripgrep probably applied a filter you didn't expect.\nRunning with --debug will show why files are being skipped.\n",
     )
