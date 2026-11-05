@@ -385,6 +385,8 @@ export type ScanOptions = {
   trim?: boolean
   columns?: number | undefined
   encoding?: boolean
+  tab?: number | undefined
+  passthru?: boolean
   silent: boolean
   state: ScanState
   write(text: string): void
@@ -565,7 +567,10 @@ export function scan(text: string, options: ScanOptions): number {
   if (all[all.length - 1] === '') all.pop()
   const regex = options.regex
   const lead = leadOf(regex)
-  const context = !options.silent && !options.only && (options.before > 0 || options.after > 0)
+  const context =
+    !options.silent &&
+    !options.only &&
+    (options.before > 0 || options.after > 0 || !!options.passthru)
   const starts: number[] = []
   if (options.offsets) {
     let offset = 0
@@ -574,17 +579,24 @@ export function scan(text: string, options: ScanOptions): number {
       offset += encode(line).length + 1
     }
   }
-  const prefix = (n: number, mark: string, column?: number) =>
-    (options.name !== undefined ? options.name + mark : '') +
-    (options.numbers ? n + 1 + (options.base ?? 0) + mark : '') +
-    (options.offsets
-      ? (starts[n] ?? 0) +
-        (column !== undefined && !options.column ? encode(all[n].slice(0, column)).length : 0) +
-        mark
-      : '') +
-    (options.column && column !== undefined
-      ? encode(all[n].slice(0, column)).length + 1 + mark
-      : '')
+  const pad = (value: number) => String(value).padStart(options.tab ?? 0)
+  const prefix = (n: number, mark: string, column?: number) => {
+    const head =
+      (options.name !== undefined ? options.name + mark : '') +
+      (options.numbers ? pad(n + 1 + (options.base ?? 0)) + mark : '') +
+      (options.offsets
+        ? pad(
+            (starts[n] ?? 0) +
+              (column !== undefined && !options.column
+                ? encode(all[n].slice(0, column)).length
+                : 0),
+          ) + mark
+        : '') +
+      (options.column && column !== undefined
+        ? encode(all[n].slice(0, column)).length + 1 + mark
+        : '')
+    return head && options.tab !== undefined ? head + '\t' : head
+  }
   const replaced = (line: string) =>
     options.replace === undefined ? line : line.replace(regex, options.replace)
   const fit = (text: string, mark: string, count = 0) => {
@@ -604,7 +616,12 @@ export function scan(text: string, options: ScanOptions): number {
   let pendingAfter = 0
   const emit = (i: number, mark: string, body: string, column?: number) => {
     if (unprintable(body)) return void (options.state.binary = true)
-    if (context && options.state.printed && (lastPrinted < 0 || lastPrinted < i - 1))
+    if (
+      context &&
+      !options.passthru &&
+      options.state.printed &&
+      (lastPrinted < 0 || lastPrinted < i - 1)
+    )
       options.write('--' + options.terminator)
     options.state.printed = true
     lastPrinted = i
@@ -624,7 +641,7 @@ export function scan(text: string, options: ScanOptions): number {
         ? options.invert
         : (lead ? lead(line, 0) !== null : regex.test(line)) !== options.invert
     if (!hit) {
-      if (context && pendingAfter > 0) {
+      if (context && (pendingAfter > 0 || options.passthru)) {
         emit(i, '-', fit(line, '-'))
         pendingAfter--
       }
@@ -729,7 +746,7 @@ function perlClasses(source: string): string {
 
 const grep: CommandHandler = streaming(async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'ivncLlrRhHqsoxwEFGPZaIUzb',
+    flags: 'ivncLlrRhHqsoxwEFGPZaIUzbT',
     values: 'eABCmfd',
     numeric: true,
     long: {
@@ -771,6 +788,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
       'line-buffered': '',
       'no-ignore-case': '',
       'byte-offset': 'b',
+      'initial-tab': 'T',
       label: 'label',
       'binary-files': 'binary-files',
       directories: 'd',
@@ -799,7 +817,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
     if (!operands.length) throw new CommandError('usage: grep [OPTION]... PATTERNS [FILE]...', 2)
     for (const line of operands.shift()!.split('\n')) patterns.push(line)
   }
-  let flags = (f.has('i') ? 'i' : '') + 'g'
+  let flags = (f.has('i') ? 'i' : '') + (f.has('P') && f.has('z') ? '' : 's') + 'g'
   const warnings: string[] = []
   const sources = patterns.map((pattern) => {
     let source: string
@@ -942,6 +960,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
     source: () => Promise<string | null>,
     name: string,
     stream: boolean,
+    piped = false,
   ): Promise<boolean> => {
     let matches = 0
     let binary = false
@@ -972,6 +991,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         separator,
         terminator,
         encoding: !textual,
+        tab: f.has('T') ? (piped ? 19 : String(byteLength(text)).length) : undefined,
         silent,
         state,
         write: (chunk) => void (output += chunk),
@@ -1003,7 +1023,8 @@ const grep: CommandHandler = streaming(async (ctx) => {
     }
   }
   const stdin = (): [() => Promise<string | null>, boolean] => {
-    if (!before && !after && !f.has('b')) return [batches(ctx.stdin, separator), true]
+    if (!before && !after && !f.has('b') && !(f.has('T') && ctx.stdin.ready))
+      return [batches(ctx.stdin, separator), true]
     let done = false
     return [
       async () => {
@@ -1016,11 +1037,13 @@ const grep: CommandHandler = streaming(async (ctx) => {
   }
   const stdinName = last(parsed, 'label') ?? '(standard input)'
   if (!operands.length && !recursive) {
+    const piped = !ctx.stdin.ready
     const [source, stream] = stdin()
-    if (await search(source, stdinName, stream)) status = 0
+    if (await search(source, stdinName, stream, piped)) status = 0
   } else {
     let stdinUsed = false
-    const partial = prunable && !f.has('b') && !before && !after && !f.has('z') ? prunable : null
+    const partial =
+      prunable && !f.has('b') && !f.has('T') && !before && !after && !f.has('z') ? prunable : null
     const take = ahead(targets, (target) =>
       target === '-' || target.matched || device(target.path) !== undefined
         ? null
@@ -1058,7 +1081,8 @@ const grep: CommandHandler = streaming(async (ctx) => {
           continue
         }
       }
-      if (await search(source, display, stream)) {
+      const piped = target === '-' ? !ctx.stdin.ready : device(target.path) !== undefined
+      if (await search(source, display, stream, piped)) {
         status = 0
         if (f.has('q')) return 0
       }
