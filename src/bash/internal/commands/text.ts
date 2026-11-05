@@ -1626,7 +1626,7 @@ const sort: CommandHandler = async (ctx) => {
   })
   const prepare = (text: string, order: Order): string | number => {
     if (order.fold)
-      text = /^[\x00-\x7f]*$/.test(text)
+      text = !/[\u0080-\uffff]/.test(text)
         ? text.toUpperCase()
         : text.replace(/[a-z]+/g, (letters) => letters.toUpperCase())
     if (order.blanks) text = text.trimStart()
