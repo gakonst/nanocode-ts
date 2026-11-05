@@ -619,6 +619,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ armed: true, after_ms: after })
         }
         if (parts[2] === 'files') return await this.files(scope, url, request)
+        if (parts[2] === 'side_question') return await this.sideQuestion(scope, request, descriptor)
         if (parts[2] === 'subagents')
           return await this.subagents(scope, parts, url, request, descriptor)
         if (parts[2] !== 'turns') return json({ error: 'route not found' }, 404)
@@ -2685,6 +2686,37 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
     }
 
+    private async sideQuestion(
+      scope: string,
+      request: Request,
+      descriptor: SessionDescriptor,
+    ): Promise<Response> {
+      if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+      const body = await bodyText(request, valueLimit)
+      if (body === undefined) return json({ error: tooLarge }, 413)
+      const input = (() => {
+        try {
+          return JSON.parse(body) as unknown
+        } catch {
+          return null
+        }
+      })()
+      if (input === null || typeof input !== 'object' || Array.isArray(input))
+        return json({ error: 'the body must be a JSON object' }, 400)
+      const unknown = Object.keys(input).filter((field) => field !== 'question')
+      if (unknown.length) return json({ error: `unknown field ${unknown[0]}` }, 400)
+      const question = (input as { question?: unknown }).question
+      if (typeof question !== 'string' || !question.trim())
+        return json({ error: 'question must be a nonempty string' }, 400)
+      const runtime = await this.subagentRuntime(scope, descriptor)
+      if (!runtime) return json({ error: 'the session has no conversation to ask about yet' }, 409)
+      try {
+        return json(await runtime.sideQuestion({ question }))
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : String(error) }, 409)
+      }
+    }
+
     private async subagentRuntime(
       scope: string,
       base: SessionDescriptor,
@@ -2802,7 +2834,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname)
     const match = files
       ? undefined
-      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|side_question))?)?)?$/.exec(
+      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents|side_question)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|side_question))?)?)?$/.exec(
           url.pathname,
         )
     const routed = (() => {

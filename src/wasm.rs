@@ -449,7 +449,8 @@ enum Command {
         agent_id: u64,
     },
     SideQuestion {
-        agent_id: u64,
+        #[serde(default)]
+        agent_id: Option<u64>,
         question: String,
     },
     CompletionOrigin {
@@ -1677,11 +1678,14 @@ fn execute(command: Command) -> Executed {
         }),
         Command::SideQuestion { agent_id, question } => executed(async move {
             let session = ready()?;
-            let answer = session
-                .subagents()?
-                .side_question(session.inbox.session_id(), AgentId::new(agent_id), question)
-                .await
-                .map_err(text)?;
+            let answer = match agent_id {
+                Some(agent_id) => session
+                    .subagents()?
+                    .side_question(session.inbox.session_id(), AgentId::new(agent_id), question)
+                    .await
+                    .map_err(text)?,
+                None => session.inbox.agent().side_question(question).await.map_err(text)?,
+            };
             Ok(json!({"text": answer.text(), "usage": answer.usage()}))
         }),
         Command::CompletionOrigin { request_id } => executed(async move {

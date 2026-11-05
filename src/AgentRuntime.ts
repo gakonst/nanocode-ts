@@ -1433,6 +1433,12 @@ async function create(
       return (await internal.command('compact', {})) as Contracts.Compacted
     },
 
+    async sideQuestion(options: { question: string }): Promise<Contracts.SideAnswer> {
+      return (await internal.command('side_question', {
+        question: options.question,
+      })) as Contracts.SideAnswer
+    },
+
     async steer(requestId: string, prompt: string, into?: string): Promise<boolean> {
       return (await internal.command('steer', { request_id: requestId, prompt, into })) === true
     },
