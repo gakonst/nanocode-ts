@@ -31,6 +31,7 @@ export type FileSystem = {
   search?(dir: string, literals: string[], every?: Conjunction): Promise<string[] | null>
   excerpt?(path: string, literals: string[], every?: Conjunction): Promise<Uint8Array | null>
   matches?(dir: string, literals: string[], ignoreCase: boolean): Promise<string[] | null>
+  scanLimit?(dir: string): Promise<number | null>
   writeMany?(dirs: string[], files: NewFile[]): Promise<string[]>
 }
 

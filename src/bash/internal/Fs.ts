@@ -51,6 +51,7 @@ export function masked(fs: FileSystem, umask: number): FileSystem {
     ...(fs.search ? { search: fs.search.bind(fs) } : {}),
     ...(fs.excerpt ? { excerpt: fs.excerpt.bind(fs) } : {}),
     ...(fs.matches ? { matches: fs.matches.bind(fs) } : {}),
+    ...(fs.scanLimit ? { scanLimit: fs.scanLimit.bind(fs) } : {}),
   }
 }
 

@@ -9,6 +9,16 @@ export type Pruned = Map<string, Set<string>> & { exact?: boolean }
 const AHEAD = 64
 const AHEAD_BYTES = 16 << 20
 
+export function unindexed(files: number, limit: number): string {
+  return (
+    'the pattern has no literal of three or more characters for the index of this path, so it would read all ' +
+    files +
+    ' files (at most ' +
+    limit +
+    ' without one); add such a literal or search a smaller directory'
+  )
+}
+
 export function ahead<T>(
   items: T[],
   load: (item: T) => Promise<Uint8Array> | null,

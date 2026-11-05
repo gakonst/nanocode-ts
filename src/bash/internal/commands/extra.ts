@@ -34,6 +34,7 @@ import {
   prunedList,
   prunedStat,
   type Pruned,
+  unindexed,
 } from '../Prune.ts'
 import { make } from './make.ts'
 import { yq } from './yaml.ts'
@@ -2056,7 +2057,13 @@ const rg: CommandHandler = async (ctx) => {
       every,
     )
     if (tree && !types.length && !notTypes.length) narrowed = true
+    const walked = targets.length
     await walk(path, implicit ? '' : root, 0, inherited, git, path, tree)
+    const limit = tree || listFiles ? null : await ctx.fs.scanLimit?.(path)
+    if (typeof limit === 'number' && targets.length - walked > limit) {
+      ctx.stderr.write('rg: ' + root + ': ' + unindexed(targets.length - walked, limit) + '\n')
+      return 2
+    }
   }
   if (listFiles) {
     for (const target of targets) {

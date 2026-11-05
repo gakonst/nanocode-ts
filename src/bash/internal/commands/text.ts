@@ -14,6 +14,7 @@ import {
   exactLiterals,
   literals,
   pruned,
+  unindexed,
   prunedList,
   prunedStat,
   type Pruned,
@@ -730,6 +731,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
     []
   let status = 1
   let errors = false
+  let unbounded = false
   let directories = false
   const syntax = f.has('F') ? 'fixed' : f.has('P') ? 'perl' : f.has('E') ? 'extended' : 'basic'
   const prunable = !f.has('v') && !f.has('L') && !f.has('c') ? literals(patterns, syntax) : null
@@ -777,6 +779,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
           exactTerms && { literals: exactTerms, ignoreCase: f.has('i') },
           every,
         )
+      const walked = targets.length
       for (const child of tree ? prunedList(tree, path) : await ctx.fs.list(path))
         await collect(
           (path === '/' ? '' : path) + '/' + child,
@@ -784,6 +787,13 @@ const grep: CommandHandler = streaming(async (ctx) => {
           false,
           tree,
         )
+      const limit = top && !tree ? await ctx.fs.scanLimit?.(path) : null
+      if (typeof limit === 'number' && targets.length - walked > limit) {
+        ctx.stderr.write(
+          'grep: ' + display + ': ' + unindexed(targets.length - walked, limit) + '\n',
+        )
+        unbounded = true
+      }
       return
     }
     if (!top || recursive) {
@@ -803,6 +813,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
       if (operand === '-') targets.push('-')
       else await collect(operand, operand, true)
     }
+  if (unbounded) return 2
   const named = f.has('H') || (!f.has('h') && (operands.length > 1 || directories))
   const context = Number(last(parsed, 'n') ?? 0)
   const after = Number(last(parsed, 'A') ?? last(parsed, 'C') ?? context)

@@ -159,6 +159,10 @@ export function create(base: FileSystem, options: create.Options): FileSystem {
       const found = await target.fs.matches(target.path, literals, ignoreCase)
       return found && found.map((path) => full(target.point, path))
     },
+    scanLimit: async (dir) => {
+      const target = route(dir)
+      return target.point && target.fs.scanLimit ? target.fs.scanLimit(target.path) : null
+    },
     ...optional('chmod'),
     ...optional('utimes'),
     ...optional('readlink'),

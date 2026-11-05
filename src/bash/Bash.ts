@@ -425,6 +425,7 @@ function budgeted(
           ),
         }
       : {}),
+    ...(fs.scanLimit ? { scanLimit: (dir: string) => fs.scanLimit!(dir) } : {}),
     ...(fs.writeMany
       ? {
           writeMany: (dirs: string[], files: FileSystem.NewFile[]) => {
