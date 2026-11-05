@@ -2122,6 +2122,13 @@ const rg: CommandHandler = async (ctx) => {
     if (arg === '--binary' || (step && unrestricted + step >= 3)) detection = 'binary'
     if (arg === '--text' || /^-[ilcwFvnNHIUSsoqxLp0.zPb]*a/.test(arg)) detection = 'text'
     unrestricted += step
+    if (unrestricted > 3)
+      throw new CommandError(
+        'error parsing flag ' +
+          (step === 1 && arg.startsWith('--') ? arg : '-u') +
+          ': flag can only be repeated up to 3 times',
+        2,
+      )
     if (step) continue
     if (/^-[ilcwFvnNHIUSsoqxaLp0.zPb]*r[ilcwFvnNHIUSsoqxaLp0.zPb]+$/.test(arg))
       args.push(arg.replace('r', ''))
@@ -2157,7 +2164,9 @@ const rg: CommandHandler = async (ctx) => {
       'count-matches': '8',
       'word-regexp': 'w',
       'fixed-strings': 'F',
+      'no-fixed-strings': ',',
       'invert-match': 'v',
+      'no-invert-match': ';',
       'line-number': 'n',
       'no-line-number': 'N',
       'with-filename': 'H',
@@ -2172,7 +2181,7 @@ const rg: CommandHandler = async (ctx) => {
       type: 't',
       'type-not': 'T',
       hidden: '.',
-      'no-heading': '',
+      'no-heading': '_',
       heading: '2',
       'smart-case': 'S',
       'case-sensitive': 's',
@@ -2198,6 +2207,7 @@ const rg: CommandHandler = async (ctx) => {
       colors: '',
       'no-messages': '',
       column: '6',
+      'no-column': '=',
       vimgrep: '7',
       pcre2: 'P',
       'no-config': '',
@@ -2219,7 +2229,7 @@ const rg: CommandHandler = async (ctx) => {
       engine: 'engine',
       encoding: 'E',
       json: '%',
-      'no-json': '',
+      'no-json': '$',
       'type-list': '&',
       'include-zero': '^',
       passthru: '~',
@@ -2244,6 +2254,16 @@ const rg: CommandHandler = async (ctx) => {
     'include-zero': '^',
     passthru: '~',
     'null-data': '!',
+  }
+  let mode = ''
+  for (const key of parsed.order) {
+    if ('l9c8%'.includes(key)) mode = key
+    else if (key === '$' && mode === '%') mode = ''
+  }
+  for (const key of 'l9c8%') if (key !== mode || f.has('q')) f.delete(key)
+  for (const group of ['nN', 'HI', '2_', '6=', 'isS', 'wx', 'F,', 'v;']) {
+    const winner = parsed.order.filter((key) => group.includes(key)).pop()
+    for (const key of group) if (key !== winner) f.delete(key)
   }
   const has = (key: string) => f.has(longFlags[key] ?? key)
   const listFiles = has('files')
@@ -2560,9 +2580,10 @@ const rg: CommandHandler = async (ctx) => {
     return errors ? 2 : targets.length ? 0 : 1
   }
   const mapped = roots.length <= 10 && targets.length === roots.length && !directories && !errors
-  const named = f.has('H') || has('vimgrep') || (!f.has('I') && (roots.length > 1 || directories))
+  const named = f.has('H') || (!f.has('I') && (has('vimgrep') || roots.length > 1 || directories))
   const heading = has('heading') && !has('vimgrep')
-  const numbers = (f.has('n') || has('vimgrep') || has('column')) && !f.has('N')
+  const column = has('column') || (has('vimgrep') && !f.has('='))
+  const numbers = f.has('n') || (!f.has('N') && (has('vimgrep') || column))
   const context = Number(last(parsed, 'C') ?? 0)
   const after = Number(last(parsed, 'A') ?? context)
   const before = Number(last(parsed, 'B') ?? context)
@@ -2729,7 +2750,7 @@ const rg: CommandHandler = async (ctx) => {
     let halted = false
     let output = ''
     const prefix = named && !heading ? (display ?? '<stdin>') : undefined
-    if (heading && named) state.printed = false
+    if (heading) state.printed = false
     const matches = scan(text, {
       regex,
       require,
@@ -2740,7 +2761,7 @@ const rg: CommandHandler = async (ctx) => {
       only: f.has('o'),
       numbers,
       offsets: f.has('b'),
-      column: has('column') || has('vimgrep'),
+      column,
       name: prefix,
       separator: terminator,
       terminator,
@@ -2786,9 +2807,10 @@ const rg: CommandHandler = async (ctx) => {
       state.printed = true
     }
     if (!silent && output) {
-      if (heading && named && shown)
+      if (heading && shown)
         ctx.stdout.write(
-          (firstHeading ? '' : '\n') + (display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'),
+          (firstHeading ? '' : '\n') +
+            (named ? (display ?? '<stdin>') + (f.has('0') ? '\0' : '\n') : ''),
         )
       firstHeading = false
       ctx.stdout.write(output)
@@ -2897,9 +2919,7 @@ const rg: CommandHandler = async (ctx) => {
   }
   if (useStdin) search(transcoded(encode(stdinText)), f.has('H') ? '<stdin>' : undefined, 'read')
   const partial =
-    prunable && !before && !after && !has('column') && !has('vimgrep') && !f.has('U')
-      ? prunable
-      : null
+    prunable && !before && !after && !column && !has('vimgrep') && !f.has('U') ? prunable : null
   const take = ahead(targets, (target) =>
     target.matched
       ? null

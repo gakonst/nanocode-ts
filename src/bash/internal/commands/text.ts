@@ -713,7 +713,7 @@ export function scan(text: string, options: ScanOptions): number {
             options.terminator,
         )
       }
-    } else if (options.column && options.each && !options.invert) {
+    } else if (options.each && !options.invert) {
       const found = [...rustMatches(line, regex)]
       for (const match of found) emit(i, ':', fit(replaced(line), ':', found.length), match.index)
     } else if (options.column) {
