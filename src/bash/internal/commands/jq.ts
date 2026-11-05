@@ -2730,6 +2730,9 @@ function contains(a: Json, b: Json): boolean {
 }
 
 export function parseStream(text: string): Json[] {
+  try {
+    return [JSON.parse(text)]
+  } catch {}
   const values: Json[] = []
   let pos = 0
   const fail = (message: string): never => {
