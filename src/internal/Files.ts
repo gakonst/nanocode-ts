@@ -1,4 +1,4 @@
-import type { FileSystem } from '../bash/FileSystem.ts'
+import type { FileKind, FileSystem } from '../bash/FileSystem.ts'
 
 export const workspace = '/workspace'
 
@@ -23,7 +23,14 @@ export type Attachment = { name: string; path: string; type: string; size: numbe
 
 export type Options = { root?: string; maxBytes?: number }
 
-export type UploadOptions = { dir?: string; maxBytes?: number; maxFiles?: number }
+export type UploadOptions = {
+  dir?: string
+  maxBytes?: number
+  maxFiles?: number
+  replace?: boolean
+}
+
+export type Entry = { kind: FileKind; mtime: number; name: string; size: number }
 
 const ascii = (bytes: Uint8Array, start: number, end: number) =>
   String.fromCharCode(...bytes.subarray(start, end))
@@ -130,6 +137,24 @@ export async function response(
   })
 }
 
+export async function listing(
+  fs: FileSystem,
+  raw: string,
+  options: Options = {},
+): Promise<Response> {
+  const path = resolve(raw, options.root)
+  if (!path) return problem('directories are listed under ' + (options.root ?? workspace), 400)
+  const stat = await fs.stat(path).catch(() => null)
+  if (!stat) return problem('no such directory', 404)
+  if (stat.kind !== 'directory') return problem('not a directory', 400)
+  const entries: Entry[] = []
+  for (const name of (await fs.list(path)).sort()) {
+    const entry = await fs.stat(path + '/' + name).catch(() => null)
+    if (entry) entries.push({ kind: entry.kind, mtime: entry.mtime, name, size: entry.size })
+  }
+  return Response.json({ entries, path }, { headers: { 'cache-control': 'private, no-cache' } })
+}
+
 export async function write(fs: FileSystem, path: string, bytes: Uint8Array): Promise<void> {
   let dir = ''
   for (const part of path.split('/').slice(1, -1)) {
@@ -153,15 +178,16 @@ export async function upload(
   const existing = (await fs.stat(dir).catch(() => null))
     ? await fs.list(dir).catch(() => [] as string[])
     : []
-  if (existing.length >= (options.maxFiles ?? maxUploads))
-    return problem('this session holds ' + existing.length + ' attachments, the most it takes', 409)
   const safe = safeName(name)
+  const taken = new Set(existing)
+  const replacing = options.replace === true && taken.has(safe)
+  if (!replacing && existing.length >= (options.maxFiles ?? maxUploads))
+    return problem('this session holds ' + existing.length + ' attachments, the most it takes', 409)
   const dot = safe.lastIndexOf('.')
   const stem = dot > 0 ? safe.slice(0, dot) : safe
   const extension = dot > 0 ? safe.slice(dot) : ''
-  const taken = new Set(existing)
   let chosen = safe
-  for (let n = 2; taken.has(chosen); n++) chosen = stem + '-' + n + extension
+  if (!replacing) for (let n = 2; taken.has(chosen); n++) chosen = stem + '-' + n + extension
   const path = dir + '/' + chosen
   await write(fs, path, bytes)
   return { name: chosen, path, type: sniff(bytes).split(';')[0]!, size: bytes.length }

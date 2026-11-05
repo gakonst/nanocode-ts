@@ -2583,7 +2583,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const root = options.workspace?.cwd ?? '/workspace'
       const fs = SqlFileSystem.create(this.store, { scope })
       const rest = url.pathname.slice('/internal/files'.length)
-      if (request.method === 'GET') return await Files.response(fs, rest, { root })
+      if (request.method === 'GET')
+        return url.searchParams.has('list')
+          ? await Files.listing(fs, rest, { root })
+          : await Files.response(fs, rest, { root })
       if (request.method !== 'POST' || rest) return json({ error: 'method not allowed' }, 405)
       if (Number(request.headers.get('content-length') ?? 0) > Files.maxUploadBytes) {
         await request.body?.cancel().catch(() => undefined)
@@ -2592,6 +2595,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const bytes = new Uint8Array(await request.arrayBuffer())
       const uploaded = await Files.upload(fs, url.searchParams.get('name') ?? '', bytes, {
         dir: root + '/uploads',
+        replace: url.searchParams.get('replace') === '1',
       })
       return uploaded instanceof Response ? uploaded : json(uploaded)
     }
