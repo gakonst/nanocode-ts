@@ -1895,6 +1895,8 @@ export class Runner {
   async external(name: string, handler: CommandHandler, args: string[], io: IO): Promise<number> {
     if (this.host.fallback && !this.host.fetch && (name === 'curl' || name === 'wget'))
       throw new MachineError(name + ': network access is not available in this shell')
+    if (this.host.fallback && name === 'file')
+      throw new MachineError('file: (this simulated shell has no libmagic database of file types)')
     const cwd = this.state.cwd
     const runner = this
     let env: Record<string, string> | undefined
