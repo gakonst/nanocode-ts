@@ -1,4 +1,12 @@
-import { durableAgent, getWorld, type HostTool } from 'durable-harness'
+import * as AsyncHooks from 'node:async_hooks'
+import {
+  chatRoute,
+  createDriveRoute,
+  durableAgent,
+  getWorld,
+  type HostTool,
+  waitUntil,
+} from 'durable-harness'
 import * as AgentRuntime from '../AgentRuntime.ts'
 import * as Subagents from '../client/Subagents.ts'
 import * as Hands from './Hands.ts'
@@ -111,6 +119,8 @@ function command(body: Body): Harness.SubagentCommand | string {
   }
 }
 
+type Sending = { fresh: boolean; kind: string; text: string; sent?: Promise<string> }
+
 function carried(value: unknown): Attachments.File[] | string {
   if (!Array.isArray(value) || value.length > 8) return 'attachments must be at most 8 files'
   let total = 0
@@ -139,6 +149,7 @@ export function create(options: create.Options) {
     marks,
     traceAudience,
     runAhead,
+    drive,
     directDriveMs,
     deadlineMarginMs,
     defaultSelection: chosenDefault,
@@ -172,7 +183,61 @@ export function create(options: create.Options) {
     ...(directDriveMs ? { directDriveMs } : {}),
     ...(deadlineMarginMs ? { deadlineMarginMs } : {}),
   })
-  const chat = agent.chatRoute(authorize ? { authorize } : {})
+  const sessions = agent.sessions
+  const turns =
+    drive === 'queue'
+      ? undefined
+      : createDriveRoute({
+          after: (work) => waitUntil(work()),
+          drive: (id, meta) => sessions.drive(id, meta),
+        })
+  const sending = new AsyncHooks.AsyncLocalStorage<Sending>()
+  const submit = (id: string, text: string, kind: string) =>
+    sessions.send(
+      id,
+      text,
+      kind as Parameters<typeof sessions.send>[2],
+      turns ? { wake: 'backstop', waitUntil } : {},
+    )
+  const chat = chatRoute(
+    {
+      start: () =>
+        sessions.start({ config: { durability: kernel === 'on' ? 'run-ahead' : 'strict' } }),
+      send: (id, text, kind) => sessions.send(id, text, kind),
+      inspect: (id) => sessions.inspect(id),
+      liveEnd: (id) => {
+        const current = sending.getStore()
+        if (current && !current.sent) {
+          current.sent = submit(id, current.text, current.kind)
+          current.sent.catch(() => undefined)
+        }
+        return current?.fresh ? Promise.resolve(0) : sessions.liveEnd(id)
+      },
+      liveEntries: (id, entries) => sessions.liveEntries(id, entries),
+    },
+    {
+      ...(authorize ? { authorize } : {}),
+      async send(id, text, kind) {
+        const current = sending.getStore()
+        const submission = await (current?.sent && current.text === text && current.kind === kind
+          ? current.sent
+          : submit(id, text, kind))
+        turns?.drive(id, { why: kind })
+        return submission
+      },
+    },
+  )
+  const post = (request: Request, body: Body, fresh: boolean) =>
+    typeof body.text === 'string'
+      ? sending.run(
+          {
+            fresh,
+            kind: typeof body.kind === 'string' ? body.kind : 'prompt',
+            text: body.text,
+          },
+          () => chat.POST(request),
+        )
+      : chat.POST(request)
   const handRoutes = Hands.route({
     world: getWorld,
     owns: async (sessionId, channel) =>
@@ -410,7 +475,7 @@ export function create(options: create.Options) {
         signal: original.signal,
       })
     }
-    if (typeof body.sessionId === 'string') return chat.POST(request)
+    if (typeof body.sessionId === 'string') return post(request, body, false)
     if (body.warm === true) {
       const started = await start(request, body)
       if (started instanceof Response) return started
@@ -422,13 +487,15 @@ export function create(options: create.Options) {
     const started = await start(request, body)
     if (started instanceof Response) return started
     const { sessionId } = started
-    return chat.POST(
+    return post(
       new Request(request.url, {
         body: JSON.stringify({ ...body, sessionId }),
         headers: request.headers,
         method: 'POST',
         signal: request.signal,
       }),
+      body,
+      true,
     )
   }
 
@@ -468,6 +535,7 @@ export declare namespace create {
     deadlineMarginMs?: number
     defaultSelection?: Selection
     directDriveMs?: number
+    drive?: 'route' | 'queue'
     durability?: 'on' | 'strict'
     harnesses: SelectionHarness[]
     marks?: boolean

@@ -72,6 +72,7 @@ export type AgentConfiguration = {
   subagents?: boolean
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>
   remote?: boolean
+  code_mode?: boolean
   executor?: string
   hands?: boolean
   event_coalesce_ms?: number

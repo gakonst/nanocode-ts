@@ -130,6 +130,26 @@ function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
 
 const settledKey = (batches: number) => `nanocode.settled:${batches}`
 
+const ulid = /^wrun_([0-9A-HJKMNP-TV-Z]{26})$/
+
+const crockford = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+function runSessionUuid(runId: string): string | undefined {
+  const match = ulid.exec(runId)
+  if (!match) return undefined
+  let value = 0n
+  for (const char of match[1]!) value = (value << 5n) | BigInt(crockford.indexOf(char))
+  const bytes = new Uint8Array(16)
+  for (let index = 15; index >= 0; index--) {
+    bytes[index] = Number(value & 255n)
+    value >>= 8n
+  }
+  bytes[6] = (bytes[6]! & 15) | 112
+  bytes[8] = (bytes[8]! & 63) | 128
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export function create(options: create.Options = {}): Harness {
   const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
   const definitions = [...tools.values()].map((tool) => ({
@@ -224,6 +244,7 @@ export function create(options: create.Options = {}): Harness {
             max_tokens: session.max_tokens,
             service_tier: session.service_tier,
             subagents: options.subagents,
+            ...(options.codeMode === false ? { code_mode: false } : {}),
             instructions:
               executor && options.handInstructions
                 ? [options.instructions, options.handInstructions].filter(Boolean).join('\n\n')
@@ -293,13 +314,17 @@ export function create(options: create.Options = {}): Harness {
       }
       counts.open_ms = performance.now() - opening
       let applied: Contracts.Thinking | undefined
+      const placing = new Map<string, Promise<unknown>>()
+      let read = ctx.pending().length > 0
       for (;;) {
-        await ctx.refresh()
+        await Promise.all(placing.values())
+        if (read) read = false
+        else await ctx.refresh()
         const pending = ctx.pending()
         let thinking =
           pending[0] && effort(ctx.state(), { before: pending[0].id, initial: session.thinking })
-        for (const submission of pending)
-          thinking = await place(
+        for (const submission of pending) {
+          const placed = await place(
             ctx,
             journal,
             runtime,
@@ -310,6 +335,14 @@ export function create(options: create.Options = {}): Harness {
             files,
             options.promptImages?.(session) ?? true,
           )
+          thinking = placed.thinking
+          if (!placed.placing) continue
+          placing.set(submission.id, placed.placing)
+          placed.placing.then(
+            () => placing.delete(submission.id),
+            (error: unknown) => ctx.halt?.(error),
+          )
+        }
         const next = (await runtime.pending(scope))[0]
         if (!next) {
           if (await runtime.settle()) return
@@ -329,6 +362,7 @@ export function create(options: create.Options = {}): Harness {
           driving,
           next.report.request_id,
           options.maxPrompts,
+          placing,
         )
         const driven = await driving
         await steering
@@ -384,7 +418,16 @@ export function create(options: create.Options = {}): Harness {
         const thinking = chosen?.provider ? chosen.thinking : options.thinking
         const max_tokens = chosen?.provider ? chosen.max_tokens : undefined
         const service_tier = chosen?.provider ? chosen.service_tier : undefined
-        const session = await ctx.effect(
+        const derived = ctx.isMemoized(sessionKey) ? undefined : runSessionUuid(ctx.runId)
+        const chosenSession: Session = {
+          session_id: derived ?? Contracts.sessionUuid(),
+          provider,
+          ...(model ? { model } : {}),
+          ...(thinking ? { thinking } : {}),
+          ...(max_tokens ? { max_tokens } : {}),
+          ...(service_tier ? { service_tier } : {}),
+        }
+        const recording = ctx.effect(
           sessionKey,
           {
             name: sessionKey,
@@ -397,16 +440,17 @@ export function create(options: create.Options = {}): Harness {
               ...(service_tier ? { service_tier } : {}),
             },
           },
-          async (): Promise<Session> => ({
-            session_id: Contracts.sessionUuid(),
-            provider,
-            ...(model ? { model } : {}),
-            ...(thinking ? { thinking } : {}),
-            ...(max_tokens ? { max_tokens } : {}),
-            ...(service_tier ? { service_tier } : {}),
-          }),
+          async (): Promise<Session> => chosenSession,
         )
+        const recorded = recording.then((stored) => {
+          if (derived && JSON.stringify(stored) !== JSON.stringify(chosenSession))
+            throw new Restart(`${sessionKey} was recorded by another drive`)
+          return stored
+        })
+        if (derived) recorded.catch((error: unknown) => ctx.halt?.(error))
+        const session = derived ? chosenSession : await recorded
         await run(ctx, journal, session, counts)
+        await recorded
         if (ctx.signal.aborted) {
           outcome = 'stopped'
           throw ctx.signal.reason
@@ -452,6 +496,7 @@ export function create(options: create.Options = {}): Harness {
 export declare namespace create {
   type Options = {
     batchMs?: number
+    codeMode?: boolean
     dispatch?: Gateway.Dispatch
     durability?: Journal.Durability
     endpoint?: string
@@ -558,7 +603,7 @@ async function place(
   hand?: string,
   workspace?: FileSystem.FileSystem,
   seesImages = true,
-): Promise<Contracts.Thinking | undefined> {
+): Promise<{ thinking: Contracts.Thinking | undefined; placing?: Promise<unknown> }> {
   if (cancels(submission)) {
     await cancelTurn(
       ctx,
@@ -567,12 +612,12 @@ async function place(
       submission,
       (await runtime.pending(scope))[0]?.report.request_id,
     )
-    return thinking
+    return { thinking }
   }
   const command = commanded(submission)
   if (command) {
     await control(ctx, journal, runtime, submission, command)
-    return thinking
+    return { thinking }
   }
   if (exceeds(ctx.state(), { id: submission.id, limit })) {
     await ctx.effect(
@@ -590,7 +635,7 @@ async function place(
       message: `this session takes at most ${limit} prompts; start a new session`,
       request_id: submission.id,
     })
-    return thinking
+    return { thinking }
   }
   const effortLevel =
     submission.kind === 'prompt' ? effortCommand.exec(submission.text ?? '') : null
@@ -615,7 +660,7 @@ async function place(
         ? { type: 'effort', thinking: outcome.thinking, request_id: submission.id }
         : { type: 'error', message: outcome.error, request_id: submission.id },
     )
-    return outcome.thinking ?? thinking
+    return { thinking: outcome.thinking ?? thinking }
   }
   const attached = Attachments.parse(submission.text ?? '')
   const images: string[] = []
@@ -632,16 +677,17 @@ async function place(
     ...(hand ? { hand } : {}),
     metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) },
   })
-  await journal.durable()
-  await ctx.effect(
-    `nanocode.place:${submission.id}`,
-    {
-      name: 'nanocode.place',
-      replay: 'safe',
-      placed: [submission.id],
-      input: { request_id: submission.id },
-    },
-    async () => ({ submitted: submitted.submitted }),
+  const placing = journal.durable().then(() =>
+    ctx.effect(
+      `nanocode.place:${submission.id}`,
+      {
+        name: 'nanocode.place',
+        replay: 'safe',
+        placed: [submission.id],
+        input: { request_id: submission.id },
+      },
+      async () => ({ submitted: submitted.submitted }),
+    ),
   )
   if (submitted.submitted === 'too_large')
     ctx.live({
@@ -653,7 +699,7 @@ async function place(
       type: 'error',
       message: `message ${submission.id} was already submitted with another prompt`,
     })
-  return thinking
+  return { thinking, placing }
 }
 
 async function steer(
@@ -663,6 +709,7 @@ async function steer(
   driving: Promise<unknown>,
   active: string,
   limit: number | undefined,
+  placing: ReadonlyMap<string, Promise<unknown>>,
 ): Promise<void> {
   let done = false
   const finished = driving.then(
@@ -678,6 +725,7 @@ async function steer(
     if (done || ctx.signal.aborted) return
     await ctx.refresh()
     for (const submission of ctx.pending()) {
+      if (placing.has(submission.id)) continue
       if (cancels(submission)) {
         await cancelTurn(ctx, journal, runtime, submission, active)
         continue
@@ -807,7 +855,7 @@ async function callTool(
   const tool = tools.get(name)
   if (!tool) throw new Error(`no host tool is named ${name}`)
   try {
-    await journal.durable()
+    if (tool.replay !== 'safe') await journal.durable()
     return await ctx.effect(
       `tool:${callId}`,
       { name: `tool.${name}`, replay: tool.replay, input },
