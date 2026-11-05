@@ -1244,8 +1244,10 @@ function versionPrefix(text: string): number {
   return suffix.index === 0 ? text.length : suffix.index!
 }
 
-export function versionCompare(a: string, b: string): number {
-  if (a === b) return 0
+export function versionCompare(left: string, right: string): number {
+  if (left === right) return 0
+  const a = bytewise(left)
+  const b = bytewise(right)
   if (!a || !b) return a ? 1 : -1
   if (a[0] === '.' || b[0] === '.') {
     if (a[0] !== b[0]) return a[0] === '.' ? -1 : 1
@@ -1339,7 +1341,18 @@ function numberAt(text: string, start: number, end: number): number {
     next !== 88
   )
     return negative ? -value || 0 : value
-  return parseFloat(text.slice(start, end).trim()) || 0
+  return leadingNumber(text.slice(start, end))
+}
+
+function leadingNumber(text: string): number {
+  return Number(/^[ \t\n\v\f\r]*(-?\d*(?:\.\d*)?)/.exec(text)![1]) || 0
+}
+
+function generalNumber(text: string): number {
+  const match =
+    /^[ \t\n\v\f\r]*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[+-]?inf(?:inity)?)/i.exec(text)
+  if (!match) return -Infinity
+  return /inf/i.test(match[1]!) ? (match[1]!.startsWith('-') ? -1 : 1) * Infinity : Number(match[1])
 }
 
 async function compactSort(
@@ -1363,6 +1376,13 @@ async function compactSort(
       let y = b < length ? text.charCodeAt(b) : -1
       if (x === mark) x = -1
       if (y === mark) y = -1
+      if (x !== y && x >= 0 && y >= 0 && (x >= 0xd800 || y >= 0xd800)) {
+        if ((text.charCodeAt(a - 1) & 0xfc00) === 0xd800) {
+          a--
+          b--
+        }
+        return byteOrder(text.slice(a, endOf(a)), text.slice(b, endOf(b))) < 0 ? -1 : 1
+      }
       if (x !== y) return x < y ? -1 : 1
       if (x < 0) return 0
       a++
@@ -1482,9 +1502,10 @@ async function compactSort(
 
 const sort: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'nrufbsghVMcCRzd',
+    flags: 'nrufbsghVMcCRzdm',
     values: 'ktoST',
     long: {
+      merge: 'm',
       'numeric-sort': 'n',
       reverse: 'r',
       unique: 'u',
@@ -1510,13 +1531,13 @@ const sort: CommandHandler = async (ctx) => {
   const f = parsed.flags
   const { text, status } = await allInput(ctx, parsed.operands)
   if (status) return 2
-  if (!parsed.values.has('k') && ![...'cCRfbhMVd'].some((flag) => f.has(flag))) {
+  if (!parsed.values.has('k') && ![...'cCRfbhMVdmg'].some((flag) => f.has(flag))) {
     await compactSort(
       ctx,
       text,
       f.has('z') ? '\0' : '\n',
       {
-        numeric: f.has('n') || f.has('g'),
+        numeric: f.has('n'),
         reverse: f.has('r'),
         stable: f.has('s'),
         unique: f.has('u'),
@@ -1562,6 +1583,7 @@ const sort: CommandHandler = async (ctx) => {
     return line.slice(start, Math.max(start, end))
   }
   type Order = {
+    general: boolean
     numeric: boolean
     human: boolean
     version: boolean
@@ -1572,6 +1594,7 @@ const sort: CommandHandler = async (ctx) => {
     reverse: boolean
   }
   const orderOf = (flags: string): Order => ({
+    general: flags.includes('g'),
     numeric: flags.includes('n') || flags.includes('g'),
     human: flags.includes('h'),
     version: flags.includes('V'),
@@ -1582,20 +1605,28 @@ const sort: CommandHandler = async (ctx) => {
     reverse: flags.includes('r'),
   })
   const prepare = (text: string, order: Order): string | number => {
-    if (order.fold) text = text.toUpperCase()
+    if (order.fold)
+      text = /^[\x00-\x7f]*$/.test(text)
+        ? text.toUpperCase()
+        : text.replace(/[a-z]+/g, (letters) => letters.toUpperCase())
     if (order.blanks) text = text.trimStart()
     if (order.dictionary) text = text.replace(/[^A-Za-z0-9 \t]/g, '')
-    if (order.numeric) return parseFloat(text.trim()) || 0
+    if (order.general) return generalNumber(text)
+    if (order.numeric) return leadingNumber(text)
     if (order.human) return text
     if (order.month) return MONTHS.indexOf(text.trim().slice(0, 3).toUpperCase())
     return text
   }
-  const comparator = (order: Order): ((a: string | number, b: string | number) => number) => {
+  const comparator = (
+    order: Order,
+  ): ((a: string | number, b: string | number, odd: boolean) => number) => {
     const sign = order.reverse ? -1 : 1
-    if (order.numeric || order.month) return (a, b) => sign * ((a as number) - (b as number))
+    if (order.numeric || order.month)
+      return (a, b) => sign * ((a as number) === (b as number) ? 0 : (a as number) - (b as number))
     if (order.human) return (a, b) => sign * humanCompare(a as string, b as string)
     if (order.version) return (a, b) => sign * versionCompare(a as string, b as string)
-    return (a, b) => (a < b ? -sign : a > b ? sign : 0)
+    return (a, b, odd) =>
+      odd ? sign * byteOrder(a as string, b as string) : a < b ? -sign : a > b ? sign : 0
   }
   const global = [...f].join('')
   const globalOrder = orderOf(global)
@@ -1605,8 +1636,15 @@ const sort: CommandHandler = async (ctx) => {
   const lineSign = f.has('r') ? -1 : 1
   const stable = f.has('s')
   const unique = f.has('u')
-  type Item = { line: string; index: number; rank: number; keys: (string | number)[] }
+  type Item = {
+    index: number
+    keys: (string | number)[]
+    line: string
+    odd: boolean
+    rank: number
+  }
   const decorate = (line: string, index: number): Item => ({
+    odd: /[\ud800-\udfff]/.test(line),
     line,
     index,
     rank: 0,
@@ -1615,27 +1653,70 @@ const sort: CommandHandler = async (ctx) => {
       : [prepare(line, globalOrder)],
   })
   const compare = (a: Item, b: Item): number => {
+    const odd = a.odd || b.odd
     for (let k = 0; k < keyCompare.length; k++) {
-      const result = keyCompare[k](a.keys[k], b.keys[k])
+      const result = keyCompare[k](a.keys[k], b.keys[k], odd)
       if (result) return result
     }
     if (keys.length && stable) return 0
     if (!keys.length) {
-      const result = globalCompare(a.keys[0], b.keys[0])
+      const result = globalCompare(a.keys[0], b.keys[0], odd)
       if (result || stable || unique) return result
     }
     if (unique) return 0
     if (a.rank !== b.rank) return (a.rank - b.rank) * lineSign
+    if (odd) return lineSign * byteOrder(a.line, b.line)
     return a.line < b.line ? -lineSign : a.line > b.line ? lineSign : 0
   }
   if (f.has('c') || f.has('C')) {
     for (let i = 1; i < items.length; i++) {
-      if (compare(decorate(items[i - 1], i - 1), decorate(items[i], i)) > 0) {
-        if (f.has('c')) ctx.stderr.write('sort: -:' + (i + 1) + ': disorder: ' + items[i] + '\n')
+      const order = compare(decorate(items[i - 1], i - 1), decorate(items[i], i))
+      if (order > 0 || (unique && order === 0)) {
+        if (f.has('c'))
+          ctx.stderr.write(
+            'sort: ' +
+              (parsed.operands[0] ?? '-') +
+              ':' +
+              (i + 1) +
+              ': disorder: ' +
+              items[i] +
+              '\n',
+          )
         return 1
       }
     }
     return 0
+  }
+  if (f.has('m')) {
+    const runs: Item[][] = []
+    let offset = 0
+    await eachInput(ctx, parsed.operands, (chunk) => {
+      const run = f.has('z')
+        ? chunk.split('\0').filter((item, index, all) => item !== '' || index < all.length - 1)
+        : lines(chunk)
+      runs.push(run.map((line, index) => decorate(line, offset + index)))
+      offset += run.length
+    })
+    const heads = runs.map(() => 0)
+    const merged: Item[] = []
+    for (;;) {
+      let best = -1
+      for (let k = 0; k < runs.length; k++) {
+        if (heads[k]! >= runs[k]!.length) continue
+        if (best < 0 || compare(runs[k]![heads[k]!]!, runs[best]![heads[best]!]!) < 0) best = k
+      }
+      if (best < 0) break
+      const item = runs[best]![heads[best]!++]!
+      if (!unique || !merged.length || compare(merged[merged.length - 1]!, item) !== 0)
+        merged.push(item)
+    }
+    const output = f.has('z')
+      ? merged.map((item) => item.line + '\0').join('')
+      : joinLines(merged.map((item) => item.line))
+    const out = last(parsed, 'o')
+    if (out !== undefined) await ctx.fs.write(ctx.resolve(out), encode(output))
+    else await put(ctx, output)
+    return status
   }
   let sorted = items.map(decorate)
   if (f.has('R')) {
@@ -1645,7 +1726,17 @@ const sort: CommandHandler = async (ctx) => {
     }
   } else {
     if (keys.length && !stable && !unique && sorted.length > 1000) {
-      const order = sorted.slice().sort((a, b) => (a.line < b.line ? -1 : a.line > b.line ? 1 : 0))
+      const order = sorted
+        .slice()
+        .sort((a, b) =>
+          a.odd || b.odd
+            ? byteOrder(a.line, b.line)
+            : a.line < b.line
+              ? -1
+              : a.line > b.line
+                ? 1
+                : 0,
+        )
       for (let i = 1; i < order.length; i++)
         order[i].rank = order[i].line === order[i - 1].line ? order[i - 1].rank : i
     }
