@@ -550,7 +550,7 @@ export function scan(text: string, options: ScanOptions): number {
   let lastPrinted = -1
   let pendingAfter = 0
   const emit = (i: number, mark: string, body: string) => {
-    if (context && options.state.printed && lastPrinted !== i - 1)
+    if (context && options.state.printed && (lastPrinted < 0 || lastPrinted !== i - 1))
       options.write('--' + options.terminator)
     options.state.printed = true
     lastPrinted = i
