@@ -22,6 +22,14 @@ struct Ran {
     truncated: bool,
 }
 
+fn head(mut output: String, limit: usize) -> (String, bool) {
+    if output.len() <= limit {
+        return (output, false);
+    }
+    output.truncate(output.floor_char_boundary(limit));
+    (output, true)
+}
+
 fn failure(error: Value) -> String {
     error
         .get("detail")
@@ -131,8 +139,8 @@ impl ForegroundExecutor for HostShell {
                 Some(u64::try_from(command.timeout.as_millis()).unwrap_or(u64::MAX)),
             )
             .await?;
-            let (stdout, stdout_cut) = redact_and_limit(ran.stdout, &[], command.max_stdout);
-            let (stderr, stderr_cut) = redact_and_limit(ran.stderr, &[], command.max_stderr);
+            let (stdout, stdout_cut) = head(ran.stdout, command.max_stdout);
+            let (stderr, stderr_cut) = head(ran.stderr, command.max_stderr);
             Ok(ForegroundOutput {
                 stdout,
                 stderr,
