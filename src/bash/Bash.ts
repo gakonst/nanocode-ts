@@ -189,6 +189,13 @@ export async function create(options: create.Options = {}): Promise<Bash> {
         BASH: '/bin/bash',
         BASH_VERSION: '5.2.21(1)-release',
         HOSTNAME: 'localhost',
+        HOSTTYPE: 'x86_64',
+        MACHTYPE: 'x86_64-pc-linux-gnu',
+        BASH_EXECUTION_STRING: script,
+        BASH_LOADABLES_PATH:
+          '/usr/local/lib/bash:/usr/lib/bash:/opt/local/lib/bash:/usr/pkg/lib/bash:/opt/pkg/lib/bash:.',
+        OPTERR: '1',
+        PS4: '+ ',
         SHLVL: '1',
         IFS: ' \t\n',
         OPTIND: '1',
@@ -198,6 +205,8 @@ export async function create(options: create.Options = {}): Promise<Bash> {
         EUID: '1000',
       }))
         if (!state.vars.has(name)) state.vars.set(name, [value])
+      if (!state.vars.has('BASH_VERSINFO'))
+        state.vars.set('BASH_VERSINFO', ['5', '2', '21', '1', 'release', 'x86_64-pc-linux-gnu'])
       const budget = { used: 0, refused: false }
       const runner = new Shell.Runner(
         {
@@ -321,7 +330,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
   if (options.fs && options.files)
     for (const [path, content] of Object.entries(options.files))
       await shell.writeFile(path, content)
-  for (const dir of [cwd, '/tmp']) await mkdirs(fs, dir)
+  for (const dir of [cwd, env.HOME, '/tmp']) await mkdirs(fs, dir)
   return shell
 }
 

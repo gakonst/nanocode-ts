@@ -16,6 +16,14 @@ export class JqError extends Error {
   }
 }
 
+class CompileError extends Error {
+  readonly at: number
+  constructor(message: string, at: number) {
+    super(message)
+    this.at = at
+  }
+}
+
 class BreakSignal {
   readonly label: string
   constructor(label: string) {
@@ -23,7 +31,230 @@ class BreakSignal {
   }
 }
 
-type Token = { t: string; v: string; parts?: (string | string[])[] }
+type Token = { t: string; v: string; at: number; parts?: (string | string[])[] }
+
+const BUILTINS = [
+  'input_line_number/0',
+  'input_filename/0',
+  'now/0',
+  'localtime/0',
+  'gmtime/0',
+  'mktime/0',
+  'strflocaltime/1',
+  'strftime/1',
+  'strptime/1',
+  'stderr/0',
+  'debug/0',
+  'input/0',
+  'modulemeta/0',
+  'get_jq_origin/0',
+  'get_prog_origin/0',
+  'get_search_list/0',
+  'halt_error/1',
+  'halt/0',
+  'env/0',
+  'format/1',
+  'error/0',
+  'max/0',
+  'min/0',
+  'sort/0',
+  'nan/0',
+  'infinite/0',
+  'isnormal/0',
+  'isnan/0',
+  'isinfinite/0',
+  'type/0',
+  'utf8bytelength/0',
+  'length/0',
+  'contains/1',
+  'has/1',
+  'delpaths/1',
+  'getpath/1',
+  'setpath/2',
+  'implode/0',
+  'explode/0',
+  'split/1',
+  'rtrimstr/1',
+  'ltrimstr/1',
+  'endswith/1',
+  'startswith/1',
+  'keys_unsorted/0',
+  'keys/0',
+  'tostring/0',
+  'tonumber/0',
+  'fromjson/0',
+  'tojson/0',
+  'lgamma_r/0',
+  'modf/0',
+  'frexp/0',
+  'ldexp/2',
+  'trunc/0',
+  'significand/0',
+  'scalbln/2',
+  'scalb/2',
+  'round/0',
+  'rint/0',
+  'nexttoward/2',
+  'nextafter/2',
+  'nearbyint/0',
+  'logb/0',
+  'log1p/0',
+  'lgamma/0',
+  'gamma/0',
+  'fmod/2',
+  'fmin/2',
+  'fmax/2',
+  'fma/3',
+  'fdim/2',
+  'fabs/0',
+  'expm1/0',
+  'exp10/0',
+  'erfc/0',
+  'erf/0',
+  'drem/2',
+  'copysign/2',
+  'ceil/0',
+  'yn/2',
+  'jn/2',
+  'y1/0',
+  'y0/0',
+  'tgamma/0',
+  'tanh/0',
+  'tan/0',
+  'sqrt/0',
+  'sinh/0',
+  'sin/0',
+  'remainder/2',
+  'pow/2',
+  'log2/0',
+  'log10/0',
+  'log/0',
+  'j1/0',
+  'j0/0',
+  'hypot/2',
+  'floor/0',
+  'exp2/0',
+  'exp/0',
+  'cosh/0',
+  'cos/0',
+  'cbrt/0',
+  'atanh/0',
+  'atan2/2',
+  'atan/0',
+  'asinh/0',
+  'asin/0',
+  'acosh/0',
+  'acos/0',
+  'empty/0',
+  'not/0',
+  'path/1',
+  'range/2',
+  'halt_error/0',
+  'error/1',
+  'map/1',
+  'select/1',
+  'sort_by/1',
+  'group_by/1',
+  'unique/0',
+  'unique_by/1',
+  'max_by/1',
+  'min_by/1',
+  'add/0',
+  'del/1',
+  'abs/0',
+  'map_values/1',
+  'recurse/1',
+  'recurse/2',
+  'recurse/0',
+  'to_entries/0',
+  'from_entries/0',
+  'with_entries/1',
+  'reverse/0',
+  'indices/1',
+  'index/1',
+  'rindex/1',
+  'paths/0',
+  'paths/1',
+  'isfinite/0',
+  'arrays/0',
+  'objects/0',
+  'iterables/0',
+  'booleans/0',
+  'numbers/0',
+  'normals/0',
+  'finites/0',
+  'strings/0',
+  'nulls/0',
+  'values/0',
+  'scalars/0',
+  'join/1',
+  'flatten/1',
+  'flatten/0',
+  'range/1',
+  'fromdateiso8601/0',
+  'todateiso8601/0',
+  'fromdate/0',
+  'todate/0',
+  'match/2',
+  'match/1',
+  'test/2',
+  'test/1',
+  'capture/2',
+  'capture/1',
+  'scan/2',
+  'scan/1',
+  'splits/2',
+  'splits/1',
+  'split/2',
+  'sub/3',
+  'sub/2',
+  'gsub/3',
+  'gsub/2',
+  'while/2',
+  'until/2',
+  'limit/2',
+  'range/3',
+  'first/1',
+  'isempty/1',
+  'all/2',
+  'any/2',
+  'all/1',
+  'any/1',
+  'all/0',
+  'any/0',
+  'last/1',
+  'nth/2',
+  'first/0',
+  'last/0',
+  'nth/1',
+  'combinations/0',
+  'combinations/1',
+  'transpose/0',
+  'in/1',
+  'inside/1',
+  'repeat/1',
+  'inputs/0',
+  'ascii_downcase/0',
+  'ascii_upcase/0',
+  'truncate_stream/1',
+  'fromstream/1',
+  'tostream/0',
+  'bsearch/1',
+  'walk/1',
+  'pick/1',
+  'debug/1',
+  'INDEX/2',
+  'INDEX/1',
+  'JOIN/2',
+  'JOIN/3',
+  'JOIN/4',
+  'IN/1',
+  'IN/2',
+  'pow10/0',
+  'builtins/0',
+]
+
+const DEFINED = new Set(BUILTINS)
 
 const PUNCT = [
   '?//=',
@@ -87,6 +318,7 @@ function lex(source: string): Token[] {
   let i = 0
   while (i < source.length) {
     const c = source[i]
+    const start = i
     if (/\s/.test(c)) {
       i++
       continue
@@ -148,7 +380,7 @@ function lex(source: string): Token[] {
       if (i >= source.length) throw new JqError('unterminated string literal')
       i++
       if (text || !parts.length) parts.push(text)
-      tokens.push({ t: 'str', v: '', parts })
+      tokens.push({ t: 'str', v: '', at: start, parts })
       continue
     }
     const number = source.slice(i).match(/^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/)
@@ -156,42 +388,48 @@ function lex(source: string): Token[] {
       number &&
       !(c === '.' && tokens.length && [')', ']', '}'].includes(tokens[tokens.length - 1].v))
     ) {
-      tokens.push({ t: 'num', v: number[0] })
+      tokens.push({ t: 'num', v: number[0], at: start })
       i += number[0].length
       continue
     }
     if (c === '.' && /[A-Za-z_]/.test(source[i + 1] ?? '')) {
       const name = source.slice(i + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/)![0]
-      tokens.push({ t: 'field', v: name })
+      tokens.push({ t: 'field', v: name, at: start })
       i += 1 + name.length
       continue
     }
     if (c === '$') {
       const name = source.slice(i + 1).match(/^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?/)
       if (!name) throw new JqError("syntax error: unexpected '$'")
-      tokens.push({ t: 'var', v: name[0] })
+      tokens.push({ t: 'var', v: name[0], at: start })
       i += 1 + name[0].length
       continue
     }
     if (c === '@') {
       const name = source.slice(i + 1).match(/^[A-Za-z0-9_]+/)
       if (!name) throw new JqError("syntax error: unexpected '@'")
-      tokens.push({ t: 'format', v: name[0] })
+      tokens.push({ t: 'format', v: name[0], at: start })
       i += 1 + name[0].length
       continue
     }
     const ident = source.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*/)
     if (ident) {
-      tokens.push({ t: KEYWORDS.has(ident[0]) ? ident[0] : 'ident', v: ident[0] })
+      tokens.push({ t: KEYWORDS.has(ident[0]) ? ident[0] : 'ident', v: ident[0], at: start })
       i += ident[0].length
       continue
     }
     const punct = PUNCT.find((p) => source.startsWith(p, i))
-    if (!punct) throw new JqError("syntax error: unexpected character '" + c + "'")
-    tokens.push({ t: punct, v: punct })
+    if (!punct)
+      throw new CompileError(
+        'syntax error, unexpected INVALID_CHARACTER' +
+          (tokens.length ? '' : ', expecting end of file') +
+          ' (Unix shell quoting issues?)',
+        start,
+      )
+    tokens.push({ t: punct, v: punct, at: start })
     i += punct.length
   }
-  tokens.push({ t: 'eof', v: '' })
+  tokens.push({ t: 'eof', v: '', at: tokens[tokens.length - 1]?.at ?? 0 })
   return tokens
 }
 
@@ -215,12 +453,12 @@ type Node =
   | { k: 'reduce'; source: Node; pattern: Pattern; init: Node; update: Node }
   | { k: 'foreach'; source: Node; pattern: Pattern; init: Node; update: Node; extract?: Node }
   | { k: 'def'; name: string; params: string[]; body: Node; rest: Node }
-  | { k: 'call'; name: string; args: Node[] }
-  | { k: 'var'; name: string }
+  | { k: 'call'; name: string; args: Node[]; at?: number }
+  | { k: 'var'; name: string; at?: number }
   | { k: 'as'; source: Node; patterns: Pattern[]; body: Node }
   | { k: 'assign'; op: string; left: Node; right: Node }
   | { k: 'label'; name: string; body: Node }
-  | { k: 'break'; name: string }
+  | { k: 'break'; name: string; at?: number }
 
 type Pattern =
   | { k: 'var'; name: string }
@@ -248,17 +486,22 @@ class Parser {
     return this.tokens[this.pos++]
   }
 
-  fail(): never {
+  fail(expecting?: string): never {
     const token = this.peek()
-    throw new JqError(
+    const name =
+      expecting && token.v && ')]}'.includes(token.v) ? 'INVALID_CHARACTER' : tokenName(token)
+    throw new CompileError(
       'syntax error, unexpected ' +
-        (token.t === 'eof' ? 'end of file' : token.t === 'str' ? 'string' : token.v || token.t),
+        name +
+        (expecting ? ', expecting ' + expecting : '') +
+        ' (Unix shell quoting issues?)',
+      token.at,
     )
   }
 
   program(): Node {
     const node = this.pipe()
-    if (!this.is('eof')) this.fail()
+    if (!this.is('eof')) this.fail('end of file')
     return node
   }
 
@@ -528,7 +771,7 @@ class Parser {
         return { k: 'index', target: { k: 'identity' }, key: { k: 'literal', v: token.v } }
       case 'var':
         this.pos++
-        return { k: 'var', name: token.v }
+        return { k: 'var', name: token.v, at: token.at }
       case '__loc__':
         this.pos++
         return { k: 'literal', v: { file: '<stdin>', line: 1 } }
@@ -617,7 +860,7 @@ class Parser {
         if ((token.v === 'true' || token.v === 'false' || token.v === 'null') && !this.is('('))
           return { k: 'literal', v: token.v === 'null' ? null : token.v === 'true' }
         if (token.v === 'break' && this.is('var'))
-          return { k: 'break', name: this.tokens[this.pos++].v }
+          return { k: 'break', name: this.tokens[this.pos++].v, at: token.at }
         const args: Node[] = []
         if (this.is('(')) {
           this.pos++
@@ -628,7 +871,7 @@ class Parser {
           }
           this.take(')')
         }
-        return { k: 'call', name: token.v, args }
+        return { k: 'call', name: token.v, args, at: token.at }
       }
       case '-': {
         this.pos++
@@ -660,7 +903,7 @@ class Parser {
       if (token.t === 'var') {
         this.pos++
         key = { k: 'literal', v: token.v }
-        value = { k: 'var', name: token.v }
+        value = { k: 'var', name: token.v, at: token.at }
       } else if (token.t === 'ident' || KEYWORDS.has(token.t)) {
         this.pos++
         key = { k: 'literal', v: token.v }
@@ -749,8 +992,11 @@ export function compare(a: Json, b: Json): number {
     return ORDER.indexOf(ta) - ORDER.indexOf(tb)
   }
   if (ta === 'boolean') return a === b ? 0 : a === false ? -1 : 1
-  if (ta === 'number')
+  if (ta === 'number') {
+    if (Number.isNaN(a)) return -1
+    if (Number.isNaN(b)) return 1
     return (a as number) < (b as number) ? -1 : (a as number) > (b as number) ? 1 : 0
+  }
   if (ta === 'string')
     return (a as string) < (b as string) ? -1 : (a as string) > (b as string) ? 1 : 0
   if (ta === 'array') {
@@ -820,9 +1066,9 @@ function binop(op: string, a: Json, b: Json): Json {
     case '*':
       if (typeof a === 'number' && typeof b === 'number') return a * b
       if (typeof a === 'string' && typeof b === 'number')
-        return b > 0 ? a.repeat(Math.max(0, Math.ceil(b))) : null
+        return Math.trunc(b) < 0 ? null : a.repeat(Math.trunc(b))
       if (typeof b === 'string' && typeof a === 'number')
-        return a > 0 ? b.repeat(Math.max(0, Math.ceil(a))) : null
+        return Math.trunc(a) < 0 ? null : b.repeat(Math.trunc(a))
       if (typeOf(a) === 'object' && typeOf(b) === 'object')
         return deepMerge(a as Record<string, Json>, b as Record<string, Json>)
       throw new JqError(describe(a) + ' and ' + describe(b) + ' cannot be multiplied')
@@ -882,7 +1128,7 @@ function index(value: Json, key: PathKey): Json {
   }
   if (typeof key === 'string') {
     if (typeOf(value) === 'object') return (value as Record<string, Json>)[key] ?? null
-    throw new JqError('Cannot index ' + typeOf(value) + ' with "' + key + '"')
+    throw new JqError('Cannot index ' + typeOf(value) + ' with string "' + key + '"')
   }
   if (Array.isArray(value)) {
     const i = Math.floor(key < 0 ? value.length + key : key)
@@ -896,7 +1142,7 @@ function setPath(root: Json, path: Path, value: Json, at = 0): Json {
   const key = path[at]
   if (typeof key === 'string') {
     if (root !== null && typeOf(root) !== 'object')
-      throw new JqError('Cannot index ' + typeOf(root) + ' with "' + key + '"')
+      throw new JqError('Cannot index ' + typeOf(root) + ' with string "' + key + '"')
     const object = { ...((root ?? {}) as Record<string, Json>) }
     object[key] = setPath(object[key] ?? null, path, value, at + 1)
     return object
@@ -1169,6 +1415,7 @@ export type JqOptions = {
   env: Record<string, string>
   vars: Record<string, Json>
   inputs: () => Json | undefined
+  filename: () => Json
   stderr: (text: string) => void
   tick: () => void
   limit: number
@@ -1254,15 +1501,11 @@ class Interpreter {
         return
       case 'alt': {
         let any = false
-        try {
-          for (const value of this.eval(node.left, input, env)) {
-            if (truthy(value)) {
-              any = true
-              yield value
-            }
+        for (const value of this.eval(node.left, input, env)) {
+          if (truthy(value)) {
+            any = true
+            yield value
           }
-        } catch (error) {
-          if (!(error instanceof JqError)) throw error
         }
         if (!any) yield* this.eval(node.right, input, env)
         return
@@ -1432,7 +1675,8 @@ class Interpreter {
     }
     const entry = entries[at]
     for (const key of this.eval(entry.key, input, env)) {
-      if (typeof key !== 'string') throw new JqError('Object keys must be strings')
+      if (typeof key !== 'string')
+        throw new JqError('Cannot use ' + describe(key) + ' as object key')
       for (const value of this.eval(entry.value!, input, env))
         yield* this.object(entries, at + 1, { ...acc, [key]: value }, input, env)
     }
@@ -1561,15 +1805,11 @@ class Interpreter {
       }
       case 'alt': {
         let any = false
-        try {
-          for (const item of this.paths(node.left, input, env)) {
-            if (truthy(item[1])) {
-              any = true
-              yield item
-            }
+        for (const item of this.paths(node.left, input, env)) {
+          if (truthy(item[1])) {
+            any = true
+            yield item
           }
-        } catch (error) {
-          if (!(error instanceof JqError)) throw error
         }
         if (!any) yield* this.paths(node.right, input, env)
         return
@@ -1883,10 +2123,6 @@ class Interpreter {
         for (const [path, value] of allPaths(input, []))
           if (path.length && [...this.eval(args[0], value, env)].some(truthy)) yield path as Json
         return
-      case 'leaf_paths/0':
-        for (const [path, value] of allPaths(input, []))
-          if (path.length && (value === null || typeof value !== 'object')) yield path as Json
-        return
       case 'del/1':
         yield deletePaths(
           input,
@@ -1909,22 +2145,23 @@ class Interpreter {
           for (const path of one(0)) yield setPath(input, path as Path, value)
         return
       case 'to_entries/0':
-        if (typeOf(input) !== 'object') throw new JqError(describe(input) + ' has no keys')
-        yield Object.entries(input as object).map(([k, v]) => ({ key: k, value: v as Json }))
+        if (Array.isArray(input)) yield input.map((value, key) => ({ key, value }))
+        else if (typeOf(input) !== 'object') throw new JqError(describe(input) + ' has no keys')
+        else yield Object.entries(input as object).map(([k, v]) => ({ key: k, value: v as Json }))
         return
       case 'from_entries/0': {
         if (!Array.isArray(input)) throw new JqError('Cannot iterate over ' + describe(input))
         const out: Record<string, Json> = {}
         for (const entry of input) {
           if (typeOf(entry) !== 'object')
-            throw new JqError('Cannot index ' + typeOf(entry) + ' with "key"')
+            throw new JqError('Cannot index ' + typeOf(entry) + ' with string "key"')
           const record = entry as Record<string, Json>
           const k = record.key ?? record.k ?? record.name ?? record.Name ?? record.Key ?? record.K
           const v =
             'value' in record ? record.value : 'v' in record ? record.v : (record.Value ?? null)
-          if (k === null || k === undefined)
-            throw new JqError('Cannot use null (null) as object key')
-          out[typeof k === 'string' ? k : toJson(k)] = v
+          if (typeof k !== 'string')
+            throw new JqError('Cannot use ' + describe(k ?? null) + ' as object key')
+          out[k] = v
         }
         yield out
         return
@@ -1955,9 +2192,6 @@ class Interpreter {
           (acc, item) => add(acc, item),
           null,
         )
-        return
-      case 'add/1':
-        yield all(0).reduce<Json>((acc, item) => add(acc, item), null)
         return
       case 'any/0':
         yield (input as Json[]).some(truthy)
@@ -2015,8 +2249,9 @@ class Interpreter {
         return
       case 'fabs/0':
       case 'abs/0':
-        if (typeof input !== 'number') throw new JqError(describe(input) + ' has no absolute value')
-        yield Math.abs(input)
+        if (typeof input === 'number') yield Math.abs(input)
+        else if (compare(input, 0) < 0) throw new JqError(describe(input) + ' cannot be negated')
+        else yield input
         return
       case 'sqrt/0':
         yield Math.sqrt(input as number)
@@ -2057,12 +2292,17 @@ class Interpreter {
       case 'tostring/0':
         yield tostring(input)
         return
-      case 'tonumber/0':
-        if (typeof input === 'number') yield input
-        else if (typeof input === 'string' && input.trim() !== '' && !Number.isNaN(Number(input)))
-          yield Number(input)
-        else throw new JqError("Cannot parse '" + tostring(input) + "' as JSON")
+      case 'tonumber/0': {
+        if (typeof input === 'number') {
+          yield input
+          return
+        }
+        const value = typeof input === 'string' ? parseOne(input) : null
+        if (typeof value !== 'number')
+          throw new JqError(describe(input) + ' cannot be parsed as a number')
+        yield value
         return
+      }
       case 'type/0':
         yield typeOf(input)
         return
@@ -2117,9 +2357,12 @@ class Interpreter {
           : null
         return
       case 'reverse/0':
-        if (typeof input === 'string') yield [...input].reverse().join('')
-        else if (input === null) yield []
-        else yield [...(input as Json[])].reverse()
+        if (Array.isArray(input)) yield [...input].reverse()
+        else if (input === null || input === '' || input === 0) yield []
+        else if (typeof input === 'object' && !Object.keys(input).length) yield []
+        else if (typeof input === 'boolean')
+          throw new JqError('boolean (' + input + ') has no length')
+        else throw new JqError('Cannot index ' + typeOf(input) + ' with number')
         return
       case 'contains/1':
         for (const b of one(0)) yield contains(input, b)
@@ -2152,16 +2395,6 @@ class Interpreter {
           yield typeof input === 'string' && typeof b === 'string' && input.endsWith(b) && b.length
             ? input.slice(0, -b.length)
             : input
-        return
-      case 'trim/0':
-      case 'ltrim/0':
-      case 'rtrim/0':
-        need('string')
-        yield name === 'trim'
-          ? (input as string).trim()
-          : name === 'ltrim'
-            ? (input as string).trimStart()
-            : (input as string).trimEnd()
         return
       case 'explode/0':
         need('string')
@@ -2205,15 +2438,12 @@ class Interpreter {
         }
         return
       case 'ascii_downcase/0':
-        need('string')
-        yield (input as string).replace(/[A-Z]/g, (c) => c.toLowerCase())
+        if (typeof input !== 'string') throw new JqError('explode input must be a string')
+        yield input.replace(/[A-Z]/g, (c) => c.toLowerCase())
         return
       case 'ascii_upcase/0':
-        need('string')
-        yield (input as string).replace(/[a-z]/g, (c) => c.toUpperCase())
-        return
-      case 'ascii/0':
-        yield String.fromCharCode(input as number)
+        if (typeof input !== 'string') throw new JqError('explode input must be a string')
+        yield input.replace(/[a-z]/g, (c) => c.toUpperCase())
         return
       case 'recurse/0':
         for (const [, value] of allPaths(input, [])) yield value
@@ -2239,11 +2469,11 @@ class Interpreter {
         yield this.options.env as Json
         return
       case 'builtins/0':
-        yield []
+        yield BUILTINS
         return
       case 'input/0': {
         const next = this.options.inputs()
-        if (next === undefined) throw new JqError('No more inputs')
+        if (next === undefined) throw new JqError('break')
         yield next
         return
       }
@@ -2264,7 +2494,7 @@ class Interpreter {
         yield input
         return
       case 'input_filename/0':
-        yield null
+        yield this.options.filename()
         return
       case 'test/1':
       case 'test/2':
@@ -2355,9 +2585,8 @@ class Interpreter {
         return
       case 'fromjson/0': {
         if (typeof input !== 'string')
-          throw new JqError(describe(input) + ' cannot be parsed as JSON')
-        const parsed = parseStream(input)
-        yield parsed[0] ?? null
+          throw new JqError(describe(input) + ' only strings can be parsed')
+        yield parseOne(input)
         return
       }
       case 'first/0':
@@ -2394,6 +2623,7 @@ class Interpreter {
         return
       case 'limit/2':
         for (const n of one(0)) {
+          if ((n as number) < 0) yield* one(1)
           if ((n as number) <= 0) continue
           let i = 0
           for (const value of one(1)) {
@@ -2606,18 +2836,13 @@ class Interpreter {
         yield out
         return
       }
-      case 'to_number/0':
-        yield Number(input)
-        return
-      case 'toarray/0':
-        yield Array.isArray(input) ? input : [input]
-        return
       case 'halt/0':
         throw new HaltSignal(0)
       case 'halt_error/0':
       case 'halt_error/1':
         for (const code of args.length ? one(0) : [5]) {
-          this.options.stderr(typeof input === 'string' ? input : toJson(input) + '\n')
+          if (input !== null)
+            this.options.stderr(typeof input === 'string' ? input : toJson(input) + '\n')
           throw new HaltSignal(code as number)
         }
         return
@@ -2680,14 +2905,6 @@ class Interpreter {
       case 'input_line_number/0':
         yield 0
         return
-      case 'trimstr/1':
-        for (const b of one(0))
-          yield typeof input === 'string' && typeof b === 'string'
-            ? input
-                .replace(new RegExp('^' + b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '')
-                .replace(new RegExp(b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '')
-            : input
-        return
     }
     throw new JqError(name + '/' + args.length + ' is not defined')
   }
@@ -2729,100 +2946,382 @@ function contains(a: Json, b: Json): boolean {
   return compare(a, b) === 0
 }
 
+type Source = { name: string; text: string }
+
+type Input = { value: Json; name: string; line: number }
+
+type Scope = { funcs: ReadonlySet<string>; vars: ReadonlySet<string>; labels: ReadonlySet<string> }
+
+const USAGE =
+  '\nUse jq --help for help with command-line options,\nor see the jq manpage, or online docs  at https://jqlang.github.io/jq'
+
+function tokenName(token: Token): string {
+  if (token.t === 'eof') return 'end of file'
+  if (token.t === 'str') return 'QQSTRING_START'
+  if (token.t === 'num') return 'LITERAL'
+  if (token.t === 'ident') return 'IDENT'
+  if (token.t === 'field') return 'FIELD'
+  if (token.t === 'var') return 'BINDING'
+  if (token.t === 'format') return 'FORMAT'
+  return token.v.length === 1 && !/\w/.test(token.v) ? "'" + token.v + "'" : token.v
+}
+
+function check(node: Node, scope: Scope, errors: CompileError[]) {
+  const visit = (child: Node | undefined, inner: Scope = scope) => {
+    if (child) check(child, inner, errors)
+  }
+  const bind = (names: readonly string[]): Scope => ({
+    ...scope,
+    vars: new Set([...scope.vars, ...names]),
+  })
+  const patterns = (pattern: Pattern) => {
+    if (pattern.k === 'array') pattern.items.forEach(patterns)
+    if (pattern.k === 'object')
+      for (const entry of pattern.entries) {
+        visit(entry.key)
+        if (entry.pattern) patterns(entry.pattern)
+      }
+  }
+  switch (node.k) {
+    case 'call':
+      if (!scope.funcs.has(node.name + '/' + node.args.length))
+        errors.push(
+          new CompileError(node.name + '/' + node.args.length + ' is not defined', node.at ?? 0),
+        )
+      for (const arg of node.args) visit(arg)
+      return
+    case 'var':
+      if (!scope.vars.has(node.name))
+        errors.push(new CompileError('$' + node.name + ' is not defined', node.at ?? 0))
+      return
+    case 'break':
+      if (!scope.labels.has(node.name))
+        errors.push(new CompileError('$*label-' + node.name + ' is not defined', node.at ?? 0))
+      return
+    case 'label':
+      visit(node.body, { ...scope, labels: new Set([...scope.labels, node.name]) })
+      return
+    case 'def': {
+      const funcs = new Set([...scope.funcs, node.name + '/' + node.params.length])
+      const values = node.params
+        .filter((param) => param.startsWith('$'))
+        .map((param) => param.slice(1))
+      visit(node.body, {
+        funcs: new Set([...funcs, ...node.params.map((param) => param.replace(/^\$/, '') + '/0')]),
+        vars: new Set([...scope.vars, ...values]),
+        labels: scope.labels,
+      })
+      visit(node.rest, { ...scope, funcs })
+      return
+    }
+    case 'as':
+      visit(node.source)
+      node.patterns.forEach(patterns)
+      visit(node.body, bind(node.patterns.flatMap(patternNames)))
+      return
+    case 'reduce':
+    case 'foreach': {
+      const inner = bind(patternNames(node.pattern))
+      visit(node.source)
+      patterns(node.pattern)
+      visit(node.init, inner)
+      visit(node.update, inner)
+      if (node.k === 'foreach') visit(node.extract, inner)
+      return
+    }
+    case 'string':
+      for (const part of node.parts) if (typeof part !== 'string') visit(part)
+      return
+    case 'object':
+      for (const entry of node.entries) {
+        visit(entry.key)
+        visit(entry.value)
+      }
+      return
+    case 'if':
+      visit(node.cond)
+      visit(node.then)
+      for (const branch of node.elifs) {
+        visit(branch.cond)
+        visit(branch.then)
+      }
+      visit(node.else)
+      return
+    case 'try':
+      visit(node.body)
+      visit(node.handler)
+      return
+    case 'index':
+      visit(node.target)
+      visit(node.key)
+      return
+    case 'slice':
+      visit(node.target)
+      visit(node.from)
+      visit(node.to)
+      return
+    case 'iterate':
+      visit(node.target)
+      return
+    case 'neg':
+      visit(node.e)
+      return
+    case 'array':
+      visit(node.e)
+      return
+    case 'pipe':
+    case 'comma':
+    case 'alt':
+    case 'binop':
+    case 'and':
+    case 'or':
+    case 'assign':
+      visit(node.left)
+      visit(node.right)
+      return
+  }
+}
+
+function compileErrors(source: string, errors: readonly CompileError[]): string {
+  const text = [...errors]
+    .sort((a, b) => a.at - b.at)
+    .map((error) => {
+      const start = source.lastIndexOf('\n', error.at - 1) + 1
+      const end = source.indexOf('\n', error.at)
+      return (
+        'jq: error: ' +
+        error.message +
+        ' at <top-level>, line ' +
+        source.slice(0, start).split('\n').length +
+        ':\n' +
+        source.slice(start, end < 0 ? undefined : end) +
+        ' '.repeat(error.at - start) +
+        '\n'
+      )
+    })
+    .join('')
+  return text + 'jq: ' + errors.length + ' compile error' + (errors.length > 1 ? 's' : '') + '\n'
+}
+
+function reason(error: FsError): string {
+  return error.message.slice(error.message.lastIndexOf(': ') + 2)
+}
+
+function scanJson(text: string): { values: { value: Json; end: number }[]; error?: string } {
+  const values: { value: Json; end: number }[] = []
+  const stack: Json[] = []
+  let next: Json | undefined
+  let token = ''
+  let raw = ''
+  let state: 'normal' | 'string' | 'escape' = 'normal'
+  let line = 1
+  let column = 0
+  const at = () => ' at line ' + line + ', column ' + column
+  const done = (end: number) => {
+    if (stack.length || next === undefined) return
+    values.push({ value: next, end })
+    next = undefined
+  }
+  const value = (found: Json): string | undefined => {
+    if (next !== undefined) return 'Expected separator between values'
+    next = found
+    return undefined
+  }
+  const set = (object: Json, key: string, found: Json) =>
+    Object.defineProperty(object, key, {
+      value: found,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  const literal = (): string | undefined => {
+    if (!token) return undefined
+    const word = token
+    token = ''
+    const pattern =
+      word[0] === 't'
+        ? 'true'
+        : word[0] === 'f'
+          ? 'false'
+          : word[0] === 'n'
+            ? word.length === 3
+              ? 'nan'
+              : 'null'
+            : undefined
+    if (pattern !== undefined) {
+      if (word !== pattern) return 'Invalid literal'
+      return value(
+        pattern === 'true' ? true : pattern === 'false' ? false : pattern === 'null' ? null : NaN,
+      )
+    }
+    if (!/^[+-]?((\d+\.?\d*|\.\d+)([eE][+-]?\d+)?|inf(inity)?|s?nan\d*)$/i.test(word))
+      return 'Invalid numeric literal'
+    const bare = word.replace(/^[+-]/, '').toLowerCase()
+    if (bare.startsWith('inf')) return value(word[0] === '-' ? -Infinity : Infinity)
+    return value(bare.includes('nan') ? NaN : Number(word))
+  }
+  const structure = (c: string): string | undefined => {
+    const top = stack[stack.length - 1]
+    if (c === '[' || c === '{') {
+      if (next !== undefined) return 'Expected separator between values'
+      stack.push(c === '[' ? [] : {})
+      return undefined
+    }
+    if (c === ':') {
+      if (next === undefined) return "Expected string key before ':'"
+      if (top === undefined || typeOf(top) !== 'object') return "':' not as part of an object"
+      if (typeof next !== 'string') return 'Object keys must be strings'
+      stack.push(next)
+      next = undefined
+      return undefined
+    }
+    if (c === ',') {
+      if (next === undefined) return "Expected value before ','"
+      if (top === undefined) return "',' not as part of an object or array"
+      if (Array.isArray(top)) top.push(next)
+      else if (typeof top === 'string') {
+        set(stack[stack.length - 2]!, top, next)
+        stack.pop()
+      } else return 'Objects must consist of key:value pairs'
+      next = undefined
+      return undefined
+    }
+    if (c === ']') {
+      if (!Array.isArray(top)) return "Unmatched ']'"
+      if (next !== undefined) top.push(next)
+      else if (top.length) return 'Expected another array element'
+      next = stack.pop()
+      return undefined
+    }
+    if (top === undefined) return "Unmatched '}'"
+    if (next !== undefined) {
+      if (typeof top !== 'string') return 'Objects must consist of key:value pairs'
+      set(stack[stack.length - 2]!, top, next)
+      stack.pop()
+    } else {
+      if (typeOf(top) !== 'object') return "Unmatched '}'"
+      if (Object.keys(top as object).length) return 'Expected another key-value pair'
+    }
+    next = stack.pop()
+    return undefined
+  }
+  const unescape = (): string | { error: string } => {
+    let out = ''
+    for (let i = 0; i < raw.length; i++) {
+      const code = raw.charCodeAt(i)
+      if (raw[i] !== '\\') {
+        if (code > 0 && code < 0x1f)
+          return {
+            error: 'Invalid string: control characters from U+0000 through U+001F must be escaped',
+          }
+        out += raw[i]
+        continue
+      }
+      const c = raw[++i]
+      const simple: Record<string, string> = {
+        '"': '"',
+        '\\': '\\',
+        '/': '/',
+        b: '\b',
+        f: '\f',
+        n: '\n',
+        r: '\r',
+        t: '\t',
+      }
+      if (c !== undefined && c in simple) {
+        out += simple[c]
+        continue
+      }
+      if (c !== 'u') return { error: 'Invalid escape' }
+      const hex = raw.slice(i + 1, i + 5)
+      if (hex.length < 4) return { error: 'Invalid \\uXXXX escape' }
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return { error: 'Invalid characters in \\uXXXX escape' }
+      i += 4
+      let point = parseInt(hex, 16)
+      if (point >= 0xd800 && point <= 0xdbff) {
+        const low = /^\\u([0-9a-fA-F]{4})/.exec(raw.slice(i + 1))
+        const second = low ? parseInt(low[1]!, 16) : 0
+        if (second < 0xdc00 || second > 0xdfff)
+          return { error: 'Invalid \\uXXXX\\uXXXX surrogate pair escape' }
+        i += 6
+        point = 0x10000 + ((point - 0xd800) << 10) + (second - 0xdc00)
+      } else if (point >= 0xdc00 && point <= 0xdfff) point = 0xfffd
+      out += String.fromCodePoint(point)
+    }
+    return out
+  }
+  for (let i = text.charCodeAt(0) === 0xfeff ? 1 : 0; i < text.length; i++) {
+    const c = text[i]!
+    const code = c.charCodeAt(0)
+    column +=
+      code < 0x80
+        ? 1
+        : code < 0x800
+          ? 2
+          : code >= 0xdc00 && code < 0xe000
+            ? 0
+            : code >= 0xd800 && code < 0xdc00
+              ? 4
+              : 3
+    if (c === '\n') {
+      line++
+      column = 0
+    }
+    if (state !== 'normal') {
+      if (c === '"' && state === 'string') {
+        const decoded = unescape()
+        if (typeof decoded !== 'string') return { values, error: decoded.error + at() }
+        raw = ''
+        state = 'normal'
+        const message = value(decoded)
+        if (message) return { values, error: message + at() }
+        done(i)
+      } else {
+        raw += c
+        state = c === '\\' && state === 'string' ? 'escape' : 'string'
+      }
+      continue
+    }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '"' || '[,]{:}'.includes(c)) {
+      const message = literal()
+      if (message) return { values, error: message + at() }
+      done(i)
+      if (c === '"') state = 'string'
+      else if ('[,]{:}'.includes(c)) {
+        const problem = structure(c)
+        if (problem) return { values, error: problem + at() }
+        done(i)
+      }
+    } else token += c
+  }
+  if (state !== 'normal') return { values, error: 'Unfinished string at EOF' + at() }
+  const message = literal()
+  if (message) return { values, error: message + ' at EOF' + at() }
+  done(text.length)
+  if (stack.length) return { values, error: 'Unfinished JSON term at EOF' + at() }
+  return { values }
+}
+
+function parseOne(text: string): Json {
+  const scanned = scanJson(text)
+  const problem =
+    scanned.error ??
+    (scanned.values.length === 0
+      ? 'Expected JSON value'
+      : scanned.values.length > 1
+        ? 'Unexpected extra JSON values'
+        : undefined)
+  if (problem !== undefined) throw new JqError(problem + " (while parsing '" + text + "')")
+  return scanned.values[0]!.value
+}
+
 export function parseStream(text: string): Json[] {
   try {
     return [JSON.parse(text)]
   } catch {}
-  const values: Json[] = []
-  let pos = 0
-  const fail = (message: string): never => {
-    const line = text.slice(0, pos).split('\n').length
-    throw new JqError(
-      message + ' at line ' + line + ', column ' + (pos - text.lastIndexOf('\n', pos - 1)),
-    )
-  }
-  const space = () => {
-    while (pos < text.length && /\s/.test(text[pos])) pos++
-  }
-  const value = (): Json => {
-    space()
-    const c = text[pos]
-    if (c === '{') {
-      pos++
-      const out: Record<string, Json> = {}
-      space()
-      if (text[pos] === '}') {
-        pos++
-        return out
-      }
-      for (;;) {
-        space()
-        if (text[pos] !== '"') fail('Object keys must be strings')
-        const key = value() as string
-        space()
-        if (text[pos] !== ':') fail('Objects must consist of key:value pairs')
-        pos++
-        out[key] = value()
-        space()
-        if (text[pos] === ',') {
-          pos++
-          continue
-        }
-        if (text[pos] === '}') {
-          pos++
-          return out
-        }
-        fail('Expected separator between values')
-      }
-    }
-    if (c === '[') {
-      pos++
-      const out: Json[] = []
-      space()
-      if (text[pos] === ']') {
-        pos++
-        return out
-      }
-      for (;;) {
-        out.push(value())
-        space()
-        if (text[pos] === ',') {
-          pos++
-          continue
-        }
-        if (text[pos] === ']') {
-          pos++
-          return out
-        }
-        fail('Expected separator between values')
-      }
-    }
-    if (c === '"') {
-      const match = text
-        .slice(pos)
-        .match(/^"(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/)
-      if (!match) fail('Invalid string literal')
-      pos += match![0].length
-      return JSON.parse(match![0])
-    }
-    const literal = text
-      .slice(pos)
-      .match(/^(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|NaN|-?Infinity|nan)/)
-    if (!literal) fail(pos >= text.length ? 'Unfinished JSON term' : 'Invalid literal')
-    pos += literal![0].length
-    const word = literal![0]
-    if (word === 'true') return true
-    if (word === 'false') return false
-    if (word === 'null') return null
-    if (word === 'NaN' || word === 'nan') return NaN
-    return Number(word)
-  }
-  for (;;) {
-    space()
-    if (pos >= text.length) break
-    values.push(value())
-  }
-  return values
+  const scanned = scanJson(text)
+  if (scanned.error !== undefined) throw new JqError(scanned.error)
+  return scanned.values.map((entry) => entry.value)
 }
 
 export const jq: CommandHandler = async (ctx) => {
@@ -2853,6 +3352,24 @@ export const jq: CommandHandler = async (ctx) => {
       positional.push(mode === 'args' ? arg : (parseStream(arg)[0] ?? null))
       continue
     }
+    if (arg === '--version') {
+      ctx.stdout.write('jq-1.7\n')
+      return 0
+    }
+    if (
+      (arg === '--arg' || arg === '--argjson' || arg === '--slurpfile' || arg === '--rawfile') &&
+      args[i + 2] === undefined
+    )
+      throw new CommandError(
+        arg +
+          ' takes two parameters (e.g. ' +
+          arg +
+          ' varname ' +
+          (arg === '--arg' ? 'value' : arg === '--argjson' ? 'text' : 'filename') +
+          ')' +
+          USAGE,
+        2,
+      )
     if (arg === '--arg') {
       vars[args[i + 1]] = args[i + 2]
       named[args[i + 1]] = args[i + 2]
@@ -2862,20 +3379,31 @@ export const jq: CommandHandler = async (ctx) => {
       try {
         parsed = parseStream(args[i + 2] ?? '')[0]
       } catch {
-        throw new CommandError('Invalid JSON text passed to --argjson', 2)
+        throw new CommandError('invalid JSON text passed to --argjson' + USAGE, 2)
       }
       vars[args[i + 1]] = parsed
       named[args[i + 1]] = parsed
       i += 2
     } else if (arg === '--slurpfile' || arg === '--rawfile') {
-      const content = decode(await ctx.fs.read(ctx.resolve(args[i + 2])))
-      vars[args[i + 1]] = arg === '--rawfile' ? content : parseStream(content)
+      const bad = 'Bad JSON in ' + arg + ' ' + args[i + 1] + ' ' + args[i + 2] + ': '
+      const content = await ctx.fs.read(ctx.resolve(args[i + 2])).then(decode, (error: unknown) => {
+        if (!(error instanceof FsError)) throw error
+        throw new CommandError(bad + 'Could not open ' + args[i + 2] + ': ' + reason(error), 2)
+      })
+      const scanned = arg === '--rawfile' ? undefined : scanJson(content)
+      if (scanned?.error !== undefined) throw new CommandError(bad + scanned.error, 2)
+      vars[args[i + 1]] = scanned ? scanned.values.map((entry) => entry.value) : content
       i += 2
     } else if (arg === '--args') mode = 'args'
     else if (arg === '--jsonargs') mode = 'jsonargs'
     else if (arg === '--tab') tab = true
-    else if (arg === '--indent') indent = Number(args[++i])
-    else if (arg === '-f' || arg === '--from-file')
+    else if (arg === '--indent') {
+      if (args[i + 1] === undefined)
+        throw new CommandError('--indent takes one parameter' + USAGE, 2)
+      indent = Number(args[++i])
+      if (!(indent >= -1 && indent <= 7))
+        throw new CommandError('--indent takes a number between -1 and 7' + USAGE, 2)
+    } else if (arg === '-f' || arg === '--from-file')
       filter = decode(await ctx.fs.read(ctx.resolve(args[++i])))
     else if (arg.startsWith('--')) {
       const long: Record<string, () => void> = {
@@ -2895,7 +3423,7 @@ export const jq: CommandHandler = async (ctx) => {
         '--seq': () => (sequence = true),
         '--stream': () => (streaming = true),
       }
-      if (!long[arg]) throw new CommandError('Unknown option: ' + arg, 2)
+      if (!long[arg]) throw new CommandError('Unknown option ' + arg + USAGE, 2)
       long[arg]()
     } else if (arg.startsWith('-') && arg.length > 1 && !/^-\d/.test(arg)) {
       for (const flag of arg.slice(1)) {
@@ -2909,78 +3437,128 @@ export const jq: CommandHandler = async (ctx) => {
         else if (flag === 'e') exitStatus = true
         else if (flag === 'a') asciiOutput = true
         else if (flag === 'C' || flag === 'M') continue
-        else throw new CommandError('Unknown option: -' + flag, 2)
+        else throw new CommandError('Unknown option ' + arg + USAGE, 2)
       }
     } else if (filter === undefined) filter = arg
     else files.push(arg)
   }
   if (filter === undefined) filter = '.'
   vars.__named = named
-  let program: Node
+  let program: Node | undefined
+  const errors: CompileError[] = []
   try {
     program = new Parser(lex(filter)).program()
+    const names = Object.keys(vars).filter((name) => name !== '__named')
+    check(
+      program,
+      { funcs: DEFINED, vars: new Set([...names, 'ENV', '__loc__', 'ARGS']), labels: new Set() },
+      errors,
+    )
   } catch (error) {
     if (error instanceof JqError)
       throw new CommandError('error: ' + error.message + '\njq: 1 compile error', 3)
-    throw error
+    if (!(error instanceof CompileError)) throw error
+    errors.push(error)
   }
-  let text = ''
+  if (!program || errors.length) {
+    ctx.stderr.write(compileErrors(filter, errors))
+    return 3
+  }
+  const sources: Source[] = []
+  let failed = false
   if (files.length) {
     for (const file of files) {
       try {
-        text += decode(await ctx.fs.read(ctx.resolve(file))) + (rawInput ? '' : '\n')
+        sources.push({ name: file, text: decode(await ctx.fs.read(ctx.resolve(file))) })
       } catch (error) {
         if (!(error instanceof FsError)) throw error
-        ctx.stderr.write('jq: error: Could not open ' + file + ': No such file or directory\n')
-        return 2
+        failed = true
+        if (error.code !== 'EISDIR')
+          ctx.stderr.write('jq: error: Could not open file ' + file + ': ' + reason(error) + '\n')
       }
     }
-  } else text = ctx.stdin.read()
-  let inputs: Json[]
-  try {
-    if (rawInput) {
-      const lines = text.split('\n')
-      if (lines[lines.length - 1] === '') lines.pop()
-      inputs = slurp ? [text] : lines
-    } else {
-      const parsed = parseStream(sequence ? text.replace(/\x1e/g, '\n') : text)
-      const events = (value: Json): Json[] => {
-        const out: Json[] = []
-        const walk = (node: Json, path: Json[], top: boolean) => {
-          const entries: [Json, Json][] = Array.isArray(node)
-            ? node.map((child, index) => [index, child])
-            : node !== null && typeof node === 'object'
-              ? Object.entries(node)
-              : []
-          if (!entries.length) {
-            out.push([path, node])
-            return
-          }
-          for (const [key, child] of entries) walk(child, [...path, key], false)
-          if (!top || path.length || entries.length)
-            out.push([[...path, entries[entries.length - 1]![0]]])
+  } else sources.push({ name: '<stdin>', text: ctx.stdin.read() })
+  const queue: Input[] = []
+  let failure: string | undefined
+  if (rawInput) {
+    const text = sources.map((source) => source.text).join('')
+    const name = sources[sources.length - 1]?.name ?? '<stdin>'
+    const lines = text.split('\n')
+    if (lines[lines.length - 1] === '') lines.pop()
+    if (slurp) queue.push({ value: text, name, line: lines.length })
+    else lines.forEach((value, i) => queue.push({ value, name, line: i + 1 }))
+  } else {
+    const text = sources.map((source) => source.text).join('')
+    const scanned = scanJson(sequence ? text.replace(/\x1e/g, '\n') : text)
+    failure = scanned.error
+    let source = 0
+    let start = 0
+    let counted = 0
+    let lines = 0
+    const values = scanned.values.map((entry): Input => {
+      while (source < sources.length - 1 && entry.end >= start + sources[source]!.text.length) {
+        start += sources[source]!.text.length
+        source++
+        counted = start
+        lines = 0
+      }
+      const newline = text.indexOf('\n', entry.end)
+      const stop = Math.min(
+        start + (sources[source]?.text.length ?? 0),
+        newline < 0 ? text.length : newline + 1,
+      )
+      for (; counted < stop; counted++) if (text[counted] === '\n') lines++
+      return { value: entry.value, name: sources[source]?.name ?? '<stdin>', line: lines }
+    })
+    const events = (value: Json): Json[] => {
+      const out: Json[] = []
+      const walk = (node: Json, path: Json[], top: boolean) => {
+        const entries: [Json, Json][] = Array.isArray(node)
+          ? node.map((child, index) => [index, child])
+          : node !== null && typeof node === 'object'
+            ? Object.entries(node)
+            : []
+        if (!entries.length) {
+          out.push([path, node])
+          return
         }
-        walk(value, [], true)
-        return out
+        for (const [key, child] of entries) walk(child, [...path, key], false)
+        if (!top || path.length || entries.length)
+          out.push([[...path, entries[entries.length - 1]![0]]])
       }
-      const stream = streaming ? parsed.flatMap(events) : parsed
-      inputs = slurp ? [stream] : stream
+      walk(value, [], true)
+      return out
     }
-  } catch (error) {
-    if (error instanceof JqError) {
-      ctx.stderr.write('jq: error (at <stdin>:0): Cannot parse input: ' + error.message + '\n')
-      return 5
-    }
-    throw error
+    const stream = streaming
+      ? values.flatMap((input) => events(input.value).map((value) => ({ ...input, value })))
+      : values
+    const end = stream[stream.length - 1]
+    if (!slurp) queue.push(...stream)
+    else if (failure === undefined)
+      queue.push({
+        value: stream.map((input) => input.value),
+        name: end?.name ?? sources[sources.length - 1]?.name ?? '<stdin>',
+        line: end?.line ?? 0,
+      })
   }
   let cursor = 0
-  const queue = nullInput ? [null as Json] : inputs.splice(0, inputs.length)
-  const pending = nullInput ? inputs : []
+  let current: Input | undefined
+  const take = (): Input | undefined => {
+    const input = queue[cursor++]
+    const source = sources[sources.length - 1]
+    current =
+      input ??
+      (source
+        ? { value: null, name: source.name, line: source.text.split('\n').length - 1 }
+        : current)
+    return input
+  }
   let steps = 0
   const interp = new Interpreter({
     env: ctx.env,
     vars,
-    inputs: () => (nullInput ? pending.shift() : queue[cursor++]),
+    inputs: () => take()?.value,
+    filename: () => current?.name ?? null,
     stderr: (text) => ctx.stderr.write(text),
     tick: () => {
       if (++steps % 4096 === 0 && ctx.signal.aborted)
@@ -3005,34 +3583,42 @@ export const jq: CommandHandler = async (ctx) => {
       )
     ctx.stdout.write((sequence ? '\x1e' : '') + out + (rawOutput0 ? '\0' : join ? '' : '\n'))
   }
-  try {
-    while (cursor < queue.length) {
-      const input = queue[cursor++]
-      try {
-        for (const value of interp.eval(program, input, env)) {
-          emit(value)
-          await pause(ctx)
-        }
-      } catch (error) {
-        if (error instanceof JqError) {
-          const message =
-            error.value !== null && typeof error.value === 'object'
-              ? toJson(error.value) + ' (not a string)'
-              : typeof error.value === 'string'
-                ? error.value
-                : toJson(error.value) + ' (not a string)'
-          ctx.stderr.write('jq: error (at <stdin>:' + cursor + '): ' + message + '\n')
-          status = 5
-          continue
-        }
-        if (error instanceof BreakSignal) continue
-        throw error
+  const run = async (input: Json): Promise<number> => {
+    try {
+      for (const value of interp.eval(program, input, env)) {
+        emit(value)
+        await pause(ctx)
       }
+      return 0
+    } catch (error) {
+      if (error instanceof JqError) {
+        ctx.stderr.write(
+          'jq: error (at ' +
+            (current ? current.name + ':' + current.line : '<unknown>') +
+            ')' +
+            (typeof error.value === 'string'
+              ? ': ' + error.value
+              : ' (not a string): ' + toJson(error.value)) +
+            '\n',
+        )
+        return 5
+      }
+      if (error instanceof BreakSignal) return 0
+      throw error
     }
+  }
+  try {
+    if (nullInput) status = await run(null)
+    else for (let input = take(); input; input = take()) status = await run(input.value)
   } catch (error) {
     if (error instanceof HaltSignal) return error.code
     throw error
   }
+  if (failure !== undefined && (!nullInput || cursor > queue.length))
+    ctx.stderr.write('jq: parse error: ' + failure + '\n')
+  else failure = undefined
+  if (failed) return 2
+  if (failure !== undefined) return 5
   if (status) return status
   if (exitStatus) return last === undefined ? 4 : truthy(last) ? 0 : 1
   return 0

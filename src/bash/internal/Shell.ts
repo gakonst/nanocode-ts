@@ -6,6 +6,7 @@ import {
   ansiEscape,
   forced,
   parse,
+  parseLines,
   type Assign,
   type Command,
   type Part,
@@ -618,8 +619,9 @@ export class State {
   stack: string[] = []
   traps = new Map<string, string>()
   shopt = new Set<string>()
+  aliases = new Map<string, string>()
   positional: string[] = []
-  arg0 = 'bash'
+  arg0 = '/bin/bash'
   optind = 1
   optpos = 1
   cwd = '/'
@@ -784,6 +786,7 @@ export class Runner {
   #ignored = false
   #depth = 0
   #condition = 0
+  loops = 0
   #substitution: number | undefined
   #trapping = false
 
@@ -822,6 +825,7 @@ export class Runner {
   fork(state: State, signal = this.signal): Runner {
     const runner = new Runner(this.host, state, signal, this.#shared)
     runner.#depth = this.#depth
+    runner.loops = this.loops
     runner.#condition = this.#condition
     return runner
   }
@@ -839,7 +843,7 @@ export class Runner {
         status = error.status
       else if (error instanceof PipeError) status = 141
       else if (error instanceof FatalError && io) {
-        if (!error.reported) io.stderr.write('bash: ' + error.message + '\n')
+        if (!error.reported) io.stderr.write(this.prefix() + error.message + '\n')
         status = 1
       } else throw error
     }
@@ -873,6 +877,15 @@ export class Runner {
 
   resolve(path: string): string {
     return resolvePath(this.state.cwd, path)
+  }
+
+  prefix(): string {
+    return (
+      (this.state.vars.get('BASH_SOURCE')?.[0] ?? this.state.arg0) +
+      ': line ' +
+      (this.get('LINENO') ?? '1') +
+      ': '
+    )
   }
 
   get(name: string): string | undefined {
@@ -947,7 +960,7 @@ export class Runner {
       return guard(runner, stdio, () => runner.isolated(() => runner.andOr(item, stdio)))
     })()
       .catch((error) => {
-        stdio.stderr.write('bash: ' + message(error) + '\n')
+        stdio.stderr.write(this.prefix() + message(error) + '\n')
         return 1
       })
       .then((status) => {
@@ -985,7 +998,7 @@ export class Runner {
       return guard(runner, stdio, () => runner.isolated(() => run(runner, stdio)))
     })()
       .catch((error) => {
-        io.stderr.write('bash: ' + message(error) + '\n')
+        io.stderr.write(this.prefix() + message(error) + '\n')
         return 1
       })
       .then((status) => {
@@ -1029,9 +1042,7 @@ export class Runner {
       this.state.jobs.has(job.pid)
     )
       io.stderr.write(
-        'bash: line ' +
-          (this.get('LINENO') ?? '1') +
-          ': ' +
+        this.prefix() +
           job.pid +
           ' ' +
           (SIGNAL_NAMES[job.signal] ?? 'Killed').padEnd(24) +
@@ -1202,7 +1213,7 @@ export class Runner {
           : this.compound(command, io))
       } catch (error) {
         if (!(error instanceof ExpansionError)) throw error
-        io.stderr.write('bash: ' + error.message + '\n')
+        io.stderr.write(this.prefix() + error.message + '\n')
         return 1
       }
     }
@@ -1212,7 +1223,7 @@ export class Runner {
       redirected = await this.redirect(command.redirects, io)
     } catch (error) {
       if (!(error instanceof FsError || error instanceof CommandError)) throw error
-      io.stderr.write('bash: ' + message(error) + '\n')
+      io.stderr.write(this.prefix() + message(error) + '\n')
       return 1
     }
     const head =
@@ -1233,11 +1244,11 @@ export class Runner {
       return await this.compound(command, redirected.io)
     } catch (error) {
       if (error instanceof ExpansionError) {
-        io.stderr.write('bash: ' + error.message + '\n')
+        io.stderr.write(this.prefix() + error.message + '\n')
         return 1
       }
       if (error instanceof FatalError && !error.reported && command.redirects.length) {
-        redirected.io.stderr.write('bash: ' + error.message + '\n')
+        redirected.io.stderr.write(this.prefix() + error.message + '\n')
         error.reported = true
       }
       throw error
@@ -1352,14 +1363,19 @@ export class Runner {
       }
       case 'cfor': {
         let status = 0
-        await this.arith(command.init, io)
+        const arith = (word: Word) =>
+          this.arith(word, io).catch((error: unknown) => {
+            if (error instanceof ArithError) error.message = '((: ' + error.message
+            throw error
+          })
+        await arith(command.init)
         for (let iteration = 1; ; iteration++) {
           this.iteration(iteration)
-          if (command.cond.length && (await this.arith(command.cond, io)) === 0) break
+          if (command.cond.length && (await arith(command.cond)) === 0) break
           const signal = await this.body(command.body, io)
           if (typeof signal === 'number') status = signal
           else if (signal === 'break') break
-          await this.arith(command.step, io)
+          await arith(command.step)
         }
         return status
       }
@@ -1398,7 +1414,7 @@ export class Runner {
           return (await this.arith(command.expr, io)) !== 0 ? 0 : 1
         } catch (error) {
           if (!(error instanceof ArithError)) throw error
-          io.stderr.write('bash: ' + error.message + '\n')
+          io.stderr.write(this.prefix() + '((: ' + error.message + '\n')
           return 1
         }
       case 'test': {
@@ -1419,7 +1435,7 @@ export class Runner {
             )
           }
         }
-        return this.test(args, true, io)
+        return this.test(args, '[[', io)
       }
     }
     return 0
@@ -1431,18 +1447,28 @@ export class Runner {
   }
 
   async body(script: Script, io: IO): Promise<number | 'break' | 'continue'> {
+    this.loops++
     try {
       return await this.script(script, io)
     } catch (error) {
       if (!(error instanceof LoopSignal)) throw error
       if (error.levels > 1) throw new LoopSignal(error.kind, error.levels - 1)
       return error.kind
+    } finally {
+      this.loops--
     }
   }
 
-  async test(args: TestArg[], double: boolean, io: IO): Promise<number> {
+  async test(args: TestArg[], name: '[[' | '[' | 'test', io: IO): Promise<number> {
     try {
-      const result = await evaluateTest(args, double, {
+      const result = await evaluateTest(args, name === '[[', {
+        arith: (text) =>
+          Number(
+            evaluateArith(text, {
+              get: (n) => this.get(n) ?? '',
+              set: (n, value) => this.set(n, String(value)),
+            }),
+          ),
         stat: (path) => this.host.fs.stat(this.resolve(path)),
         lstat: (path) =>
           this.host.fs.lstat ? this.host.fs.lstat(this.resolve(path)) : Promise.resolve(null),
@@ -1463,7 +1489,7 @@ export class Runner {
       return result ? 0 : 1
     } catch (error) {
       if (!(error instanceof TestError || error instanceof globalThis.SyntaxError)) throw error
-      io.stderr.write((double ? 'bash: ' : 'bash: test: ') + error.message + '\n')
+      io.stderr.write(this.prefix() + (name === '[[' ? '' : name + ': ') + error.message + '\n')
       return 2
     }
   }
@@ -1657,7 +1683,7 @@ export class Runner {
       }
     }
     if (builtin === 'local' && !this.state.frames.length) {
-      io.stderr.write('bash: local: can only be used in a function\n')
+      io.stderr.write(this.prefix() + 'local: can only be used in a function\n')
       return 1
     }
     const exporting = builtin === 'export' || flags.has('x')
@@ -1752,7 +1778,13 @@ export class Runner {
         continue
       }
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-        io.stderr.write('bash: ' + builtin + ': `' + name + "': not a valid identifier\n")
+        io.stderr.write(
+          this.prefix() +
+            builtin +
+            ': `' +
+            (typeof target === 'string' ? target : name) +
+            "': not a valid identifier\n",
+        )
         status = 1
         continue
       }
@@ -1777,7 +1809,7 @@ export class Runner {
         }
       }
       if (scoped && this.state.readonly.has(name)) {
-        io.stderr.write('bash: ' + builtin + ': ' + name + ': readonly variable\n')
+        io.stderr.write(this.prefix() + builtin + ': ' + name + ': readonly variable\n')
         status = 1
         continue
       }
@@ -1822,7 +1854,7 @@ export class Runner {
           error instanceof FsError ||
           error instanceof ArithError
         ) {
-          io.stderr.write('bash: ' + name + ': ' + message(error) + '\n')
+          io.stderr.write(this.prefix() + name + ': ' + message(error) + '\n')
           return error instanceof CommandError ? error.status : 1
         }
         throw error
@@ -1847,12 +1879,16 @@ export class Runner {
         return this.source(path, args, io, true, name)
       }
       io.stderr.write(
-        'bash: ' + name + ': ' + (stat ? 'Is a directory' : 'No such file or directory') + '\n',
+        this.prefix() +
+          name +
+          ': ' +
+          (stat ? 'Is a directory' : 'No such file or directory') +
+          '\n',
       )
       return stat ? 126 : 127
     }
     if (this.host.fallback) throw new MachineError(name + ': command not found' + missing(name))
-    io.stderr.write('bash: ' + name + ': command not found' + missing(name) + '\n')
+    io.stderr.write(this.prefix() + name + ': command not found' + missing(name) + '\n')
     return 127
   }
 
@@ -1897,7 +1933,7 @@ export class Runner {
           parsed = parse(script)
         } catch (error) {
           if (!(error instanceof ParseError)) throw error
-          io.stderr.write('bash: ' + error.message + '\n')
+          io.stderr.write(this.prefix() + error.message + '\n')
           return { status: 2, stdout: '' }
         }
         this.enter()
@@ -1974,12 +2010,15 @@ export class Runner {
     this.state.positional = args
     this.state.frames.push(frame)
     const trap = this.state.traps.get('RETURN')
+    const loops = this.loops
+    this.loops = 0
     try {
       return await this.command(body, io)
     } catch (error) {
       if (error instanceof ReturnSignal) return error.status
       throw error
     } finally {
+      this.loops = loops
       await this.returnTrap(trap, io)
       this.state.frames.pop()
       const state = this.state
@@ -2058,15 +2097,7 @@ export class Runner {
     arg0?: string,
     label?: string,
   ): Promise<number> {
-    const text = decode(await this.host.fs.read(path))
-    let script: Script
-    try {
-      script = parse(text)
-    } catch (error) {
-      if (!(error instanceof ParseError)) throw error
-      io.stderr.write('bash: ' + path + ': ' + error.message + '\n')
-      return 2
-    }
+    const parsed = parseLines(decode(await this.host.fs.read(path)))
     const run = async () => {
       this.enter()
       const positional = this.state.positional
@@ -2076,7 +2107,10 @@ export class Runner {
       this.state.vars.set('BASH_SOURCE', [arg0 ?? label ?? path, ...(sources ?? [])])
       const trap = this.state.traps.get('RETURN')
       try {
-        return await this.script(script, io)
+        const status = await this.script(parsed.script, io)
+        if (!parsed.error) return status
+        io.stderr.write(syntax(parsed.error, arg0 ?? label ?? path))
+        return 2
       } catch (error) {
         if (error instanceof ReturnSignal) return error.status
         throw error
@@ -2099,6 +2133,14 @@ export class Runner {
     const table = () => (extra === io.fds ? (extra = new Map(io.fds ?? [])) : extra!)
     const writes: Output[] = []
     const bad = (fd: number | string) => new CommandError(fd + ': Bad file descriptor')
+    const failed =
+      (target: string) =>
+      (error: unknown): never => {
+        if (!(error instanceof FsError)) throw error
+        throw new CommandError(
+          target + ': ' + error.message.slice(error.message.lastIndexOf(': ') + 2),
+        )
+      }
     const device = (target: string) => {
       const match = /^\/dev\/fd\/(\d+)$/.exec(target)
       if (!match) return undefined
@@ -2128,7 +2170,7 @@ export class Runner {
         stat.kind === 'file'
       )
         throw new CommandError(target + ': cannot overwrite existing file')
-      if (!append || !stat) await this.host.fs.write(path, new Uint8Array(0))
+      if (!append || !stat) await this.host.fs.write(path, new Uint8Array(0)).catch(failed(target))
       if (!stat && this.state.umask !== 0o022 && this.host.fs.chmod)
         await this.host.fs.chmod(path, 0o666 & ~this.state.umask)
       const out = Output.spill(this.host.limits.maxBufferLength, (text) =>
@@ -2146,7 +2188,7 @@ export class Runner {
         if (!found) throw bad(fd)
         return found
       }
-      return new Input(decode(await this.host.fs.read(this.resolve(target))))
+      return new Input(decode(await this.host.fs.read(this.resolve(target)).catch(failed(target))))
     }
     const flush = async () => {
       for (const out of writes) await out.settle()
@@ -2281,7 +2323,7 @@ export class Runner {
         this.#substitution = 0
         return text.replace(/\n+$/, '')
       } catch (error) {
-        io.stderr.write('bash: ' + message(error) + '\n')
+        io.stderr.write(this.prefix() + message(error) + '\n')
         this.#substitution = 1
         return ''
       }
@@ -2930,6 +2972,9 @@ async function physical(fs: FileSystem, path: string): Promise<string> {
   return '/' + parts.join('/')
 }
 
+const SIGNAL_SPECS =
+  /^(EXIT|ERR|DEBUG|RETURN|HUP|INT|QUIT|ILL|TRAP|ABRT|IOT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM|STKFLT|CHLD|CONT|STOP|TSTP|TTIN|TTOU|URG|XCPU|XFSZ|VTALRM|PROF|WINCH|IO|POLL|PWR|SYS|RTMIN(\+\d+)?|RTMAX(-\d+)?|\d+)$/
+
 const SIGNAL_NUMBERS: Record<string, number> = {
   HUP: 1,
   INT: 2,
@@ -3043,7 +3088,8 @@ export const BUILTINS: Record<string, Builtin> = {
       const job = this.job(id)
       if (!job) {
         io.stderr.write(
-          'bash: wait: ' +
+          this.prefix() +
+            'wait: ' +
             (id.startsWith('%')
               ? id + ': no such job'
               : 'pid ' + id + ' is not a child of this shell') +
@@ -3058,6 +3104,9 @@ export const BUILTINS: Record<string, Builtin> = {
     return status
   },
   async jobs(args, io) {
+    const missing = args.filter((arg) => !arg.startsWith('-') && !this.job(arg))
+    for (const arg of missing) io.stderr.write(this.prefix() + 'jobs: ' + arg + ': no such job\n')
+    if (missing.length) return 1
     const pids = args.includes('-p')
     const long = args.includes('-l')
     const running = args.includes('-r')
@@ -3133,7 +3182,7 @@ export const BUILTINS: Record<string, Builtin> = {
       if (job) {
         if (job.status !== undefined) {
           if (target.startsWith('%')) {
-            io.stderr.write('bash: kill: ' + target + ': no such job\n')
+            io.stderr.write(this.prefix() + 'kill: ' + target + ': no such job\n')
             status = 1
           }
           continue
@@ -3157,12 +3206,15 @@ export const BUILTINS: Record<string, Builtin> = {
         throw new ExitSignal(128 + signal)
       }
       if (!/^-?\d+$/.test(target) && !target.startsWith('%')) {
-        io.stderr.write('bash: kill: ' + target + ': arguments must be process or job IDs\n')
+        io.stderr.write(
+          this.prefix() + 'kill: ' + target + ': arguments must be process or job IDs\n',
+        )
         status = 1
         continue
       }
       io.stderr.write(
-        'bash: kill: ' +
+        this.prefix() +
+          'kill: ' +
           (target.startsWith('%')
             ? target + ': no such job'
             : '(' + target + ') - No such process') +
@@ -3172,9 +3224,56 @@ export const BUILTINS: Record<string, Builtin> = {
     }
     return status
   },
-  alias: noop,
-  unalias: noop,
-  hash: noop,
+  async alias(args, io) {
+    let status = 0
+    const names = args.filter((arg) => arg !== '-p')
+    if (!names.length)
+      for (const [name, value] of [...this.state.aliases].sort())
+        io.stdout.write('alias ' + name + '=' + shellQuote(value) + '\n')
+    for (const arg of names) {
+      const eq = arg.indexOf('=')
+      const value = this.state.aliases.get(arg)
+      if (eq > 0) this.state.aliases.set(arg.slice(0, eq), arg.slice(eq + 1))
+      else if (value !== undefined) io.stdout.write('alias ' + arg + '=' + shellQuote(value) + '\n')
+      else {
+        io.stderr.write(this.prefix() + 'alias: ' + arg + ': not found\n')
+        status = 1
+      }
+    }
+    return status
+  },
+  async unalias(args, io) {
+    if (args.includes('-a')) {
+      this.state.aliases.clear()
+      return 0
+    }
+    let status = 0
+    for (const arg of args) {
+      if (this.state.aliases.delete(arg)) continue
+      io.stderr.write(this.prefix() + 'unalias: ' + arg + ': not found\n')
+      status = 1
+    }
+    return status
+  },
+  async hash(args, io) {
+    let status = 0
+    const names = args.filter((arg) => !arg.startsWith('-'))
+    if (!args.length) io.stdout.write('hash: hash table empty\n')
+    for (const name of names) {
+      if (BUILTINS[name] || this.state.functions.has(name) || this.host.commands.has(name)) continue
+      io.stderr.write(this.prefix() + 'hash: ' + name + ': not found\n')
+      status = 1
+    }
+    return status
+  },
+  async fg(_args, io) {
+    io.stderr.write(this.prefix() + 'fg: no job control\n')
+    return 1
+  },
+  async bg(_args, io) {
+    io.stderr.write(this.prefix() + 'bg: no job control\n')
+    return 1
+  },
   ulimit: noop,
   async disown(args) {
     const ids = args.filter((arg) => !arg.startsWith('-') || /^-\d/.test(arg))
@@ -3192,7 +3291,8 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   async cd(args, io) {
     const target = args.filter((arg) => arg !== '-P' && arg !== '-L')[0] ?? this.get('HOME') ?? '/'
-    const destination = target === '-' ? (this.get('OLDPWD') ?? this.state.cwd) : target
+    const destination = target === '-' ? this.get('OLDPWD') : target
+    if (destination === undefined) throw new CommandError('OLDPWD not set')
     const logical = this.resolve(destination)
     const stat = await this.host.fs.stat(logical)
     if (!stat) throw new CommandError(target + ': No such file or directory')
@@ -3208,20 +3308,32 @@ export const BUILTINS: Record<string, Builtin> = {
     if (!args.length || args[0] === '-p') {
       for (const [signal, action] of this.state.traps)
         if (args.length < 2 || args.includes(signal))
-          io.stdout.write('trap -- ' + shellQuote(action) + ' ' + signal + '\n')
+          io.stdout.write(
+            'trap -- ' +
+              shellQuote(action) +
+              ' ' +
+              (/^(EXIT|ERR|DEBUG|RETURN|\d+)$/.test(signal) ? signal : 'SIG' + signal) +
+              '\n',
+          )
       return 0
     }
     if (args[0] === '-l') return 0
     const rest = args[0] === '--' ? args.slice(1) : args
     const reset = rest.length === 1 || (/^(-|\d+)$/.test(rest[0]) && rest[0] !== '0')
     const action = reset ? '-' : rest[0]
+    let status = 0
     for (const raw of reset && rest[0] !== '-' ? rest : rest.slice(1)) {
       let signal = raw.toUpperCase().replace(/^SIG/, '')
       if (signal === '0') signal = 'EXIT'
+      if (!SIGNAL_SPECS.test(signal) || Number(signal) > 64) {
+        io.stderr.write(this.prefix() + 'trap: ' + raw + ': invalid signal specification\n')
+        status = 1
+        continue
+      }
       if (action === '-') this.state.traps.delete(signal)
       else this.state.traps.set(signal, action)
     }
-    return 0
+    return status
   },
   async shopt(args, io) {
     let mode = ''
@@ -3272,7 +3384,7 @@ export const BUILTINS: Record<string, Builtin> = {
     if (position < 0) {
       this.set(name, '?')
       if (silent) this.set('OPTARG', letter)
-      else io.stderr.write('bash: illegal option -- ' + letter + '\n')
+      else io.stderr.write(this.state.arg0 + ': illegal option -- ' + letter + '\n')
     } else if (letters[position + 1] === ':') {
       if (next < arg.length) {
         this.set('OPTARG', arg.slice(next))
@@ -3285,7 +3397,7 @@ export const BUILTINS: Record<string, Builtin> = {
         this.set(name, ':')
         this.set('OPTARG', letter)
       } else {
-        io.stderr.write('bash: option requires an argument -- ' + letter + '\n')
+        io.stderr.write(this.state.arg0 + ': option requires an argument -- ' + letter + '\n')
         this.set(name, '?')
       }
       next = arg.length
@@ -3392,15 +3504,19 @@ export const BUILTINS: Record<string, Builtin> = {
       )
     return 0
   },
-  async unset(args) {
+  async unset(args, io) {
     let functions = false
     let refs = false
+    let status = 0
     for (let arg of args) {
       if (arg === '-f') functions = true
       else if (arg === '-v') functions = false
       else if (arg === '-n') refs = true
       else if (functions) this.state.functions.delete(arg)
-      else if (refs && this.state.refs.has(arg)) this.state.refs.delete(arg)
+      else if (!/^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?$/.test(arg)) {
+        io.stderr.write(this.prefix() + 'unset: `' + arg + "': not a valid identifier\n")
+        status = 1
+      } else if (refs && this.state.refs.has(arg)) this.state.refs.delete(arg)
       else {
         arg = this.target(arg)
         const element = arg.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/)
@@ -3427,7 +3543,7 @@ export const BUILTINS: Record<string, Builtin> = {
         this.state.exported.delete(arg)
       }
     }
-    return 0
+    return status
   },
   async set(args, io) {
     if (!args.length) {
@@ -3533,7 +3649,7 @@ export const BUILTINS: Record<string, Builtin> = {
             const found = fd === 0 ? io.stdin : io.fds?.get(fd)?.input
             if (!found) {
               io.stderr.write(
-                'bash: read: ' + fd + ': invalid file descriptor: Bad file descriptor\n',
+                this.prefix() + 'read: ' + fd + ': invalid file descriptor: Bad file descriptor\n',
               )
               return 1
             }
@@ -3598,7 +3714,7 @@ export const BUILTINS: Record<string, Builtin> = {
         const found = fd === 0 ? io.stdin : io.fds?.get(fd)?.input
         if (!found) {
           io.stderr.write(
-            'bash: mapfile: ' + fd + ': invalid file descriptor: Bad file descriptor\n',
+            this.prefix() + 'mapfile: ' + fd + ': invalid file descriptor: Bad file descriptor\n',
           )
           return 1
         }
@@ -3640,18 +3756,15 @@ export const BUILTINS: Record<string, Builtin> = {
     return 0
   },
   async eval(args, io) {
-    const source = args.join(' ')
-    let script: Script
-    try {
-      script = parse(source)
-    } catch (error) {
-      if (!(error instanceof ParseError)) throw error
-      io.stderr.write('bash: eval: ' + error.message + '\n')
-      return 2
-    }
+    const parsed = parseLines(args.join(' '))
+    const label = (this.state.vars.get('BASH_SOURCE')?.[0] ?? this.state.arg0) + ': eval'
+    const line = Number(this.get('LINENO') ?? '1') - 1
     this.enter()
     try {
-      return await this.script(script, io)
+      const status = await this.script(parsed.script, io)
+      if (!parsed.error) return status
+      io.stderr.write(syntax(parsed.error, label, line))
+      return 2
     } finally {
       this.leave()
     }
@@ -3663,13 +3776,31 @@ export const BUILTINS: Record<string, Builtin> = {
   async exit(args) {
     throw new ExitSignal(args.length ? count(args[0], 0) & 255 : this.state.status)
   },
-  async return(args) {
+  async return(args, io) {
+    if (!this.state.vars.has('BASH_SOURCE')) {
+      io.stderr.write(
+        this.prefix() + "return: can only `return' from a function or sourced script\n",
+      )
+      return 2
+    }
     throw new ReturnSignal(args.length ? count(args[0], 0) & 255 : this.state.status)
   },
-  async break(args) {
+  async break(args, io) {
+    if (!this.loops) {
+      io.stderr.write(
+        this.prefix() + "break: only meaningful in a `for', `while', or `until' loop\n",
+      )
+      return 0
+    }
     throw new LoopSignal('break', count(args[0], 1))
   },
-  async continue(args) {
+  async continue(args, io) {
+    if (!this.loops) {
+      io.stderr.write(
+        this.prefix() + "continue: only meaningful in a `for', `while', or `until' loop\n",
+      )
+      return 0
+    }
     throw new LoopSignal('continue', count(args[0], 1))
   },
   async let(args) {
@@ -3685,18 +3816,18 @@ export const BUILTINS: Record<string, Builtin> = {
   async test(args, io) {
     return this.test(
       args.map((text) => ({ text })),
-      false,
+      'test',
       io,
     )
   },
   async '['(args, io) {
     if (args[args.length - 1] !== ']') {
-      io.stderr.write("bash: [: missing `]'\n")
+      io.stderr.write(this.prefix() + "[: missing `]'\n")
       return 2
     }
     return this.test(
       args.slice(0, -1).map((text) => ({ text })),
-      false,
+      '[',
       io,
     )
   },
@@ -3728,7 +3859,7 @@ export const BUILTINS: Record<string, Builtin> = {
       )
         kinds.push('file')
       if (!kinds.length) {
-        if (!terse) io.stderr.write('bash: type: ' + name + ': not found\n')
+        if (!terse) io.stderr.write(this.prefix() + 'type: ' + name + ': not found\n')
         status = 1
         continue
       }
@@ -3877,20 +4008,16 @@ export const BUILTINS: Record<string, Builtin> = {
     return this.subshell(async () => {
       if (flags.length) await BUILTINS.set.call(this, flags, io)
       if (command) {
-        const source = args[i] ?? ''
-        let script: Script
-        try {
-          script = parse(source)
-        } catch (error) {
-          if (!(error instanceof ParseError)) throw error
-          io.stderr.write('bash: -c: ' + error.message + '\n')
-          return 2
-        }
-        if (args[i + 1] !== undefined) this.state.arg0 = args[i + 1]
+        const parsed = parseLines(args[i] ?? '')
+        this.state.arg0 = args[i + 1] ?? 'bash'
         this.state.positional = args.slice(i + 2)
+        this.state.vars.delete('BASH_SOURCE')
         this.enter()
         try {
-          return await this.script(script, io)
+          const status = await this.script(parsed.script, io)
+          if (!parsed.error) return status
+          io.stderr.write(syntax(parsed.error, 'bash: -c'))
+          return 2
         } finally {
           this.leave()
         }
@@ -3958,14 +4085,19 @@ BUILTINS.readarray = BUILTINS.mapfile
 BUILTINS.sh = BUILTINS.bash
 
 export async function run(runner: Runner, source: string, io: IO): Promise<number> {
-  let status = await guard(runner, io, () => runner.script(parse(source), io))
+  let status = await guard(runner, io, async () => {
+    const parsed = parseLines(source)
+    const status = await runner.script(parsed.script, io)
+    if (parsed.error) throw parsed.error
+    return status
+  })
   if (runner.state.traps.has('EXIT'))
     status = await guard(runner, io, () => runner.exitTrap(io, status))
   await runner.jobs()
   try {
     await runner.cleanup()
   } catch (error) {
-    io.stderr.write('bash: ' + message(error) + '\n')
+    io.stderr.write(runner.prefix() + message(error) + '\n')
   }
   return status
 }
@@ -3980,12 +4112,12 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
     if (error instanceof LoopSignal) return 0
     if (error instanceof ParseError) {
       runner.failure = 'syntax'
-      io.stderr.write('bash: ' + error.message + '\n')
+      io.stderr.write(syntax(error, runner.state.arg0 + ': -c'))
       return 2
     }
     if (error instanceof LimitError) {
       if (!(error instanceof MachineError)) runner.failure = 'limit'
-      io.stderr.write('bash: ' + error.message + '\n')
+      io.stderr.write(runner.prefix() + error.message + '\n')
       return error.status
     }
     if (
@@ -3994,11 +4126,21 @@ async function guard(runner: Runner, io: IO, body: () => Promise<number>): Promi
       error instanceof CommandError
     ) {
       if (!(error instanceof FatalError && error.reported))
-        io.stderr.write('bash: ' + error.message + '\n')
+        io.stderr.write(runner.prefix() + error.message + '\n')
       return error instanceof FatalError || error instanceof CommandError ? error.status : 1
     }
     throw error
   }
+}
+
+function syntax(error: ParseError, label: string, offset = 0): string {
+  const head = label + ': line ' + (error.line + offset) + ': '
+  return (
+    head +
+    error.message +
+    '\n' +
+    (error.context === undefined ? '' : head + '`' + error.context + "'\n")
+  )
 }
 
 const UNSUPPORTED =

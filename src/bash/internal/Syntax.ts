@@ -79,7 +79,17 @@ export type AndOr = {
 
 export type Script = AndOr[]
 
-export class SyntaxError extends Error {}
+export class SyntaxError extends Error {
+  line: number
+  context: string | undefined
+  complete = 0
+
+  constructor(message: string, line = 1, context?: string) {
+    super(message)
+    this.line = line
+    this.context = context
+  }
+}
 
 export type Edit = { start: number; end: number; body?: Script; value?: string }
 
@@ -106,11 +116,24 @@ type Pending = { redirect: Redirect; delimiter: string; strip: boolean; expand: 
 
 export function parse(source: string): Script {
   const parser = new Parser(source)
-  const script = parser.list(new Set())
-  parser.blanks()
-  if (!parser.done())
-    throw new SyntaxError('syntax error near unexpected token `' + parser.peekToken() + "'")
-  return script
+  try {
+    const script = parser.list(new Set())
+    parser.blanks()
+    if (!parser.done()) parser.fail()
+    return script
+  } catch (error) {
+    if (error instanceof SyntaxError) error.complete = parser.complete
+    throw error
+  }
+}
+
+export function parseLines(source: string): { script: Script; error?: SyntaxError } {
+  try {
+    return { script: parse(source) }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
+    return { script: error.complete ? parse(source.slice(0, error.complete)) : [], error }
+  }
 }
 
 export function parseText(source: string): Word {
@@ -122,6 +145,8 @@ class Parser {
   pos = 0
   pending: Pending[] = []
   edits: Edit[] = []
+  complete = 0
+  #depth = 0
   #linePos = 0
   #line = 1
 
@@ -150,12 +175,28 @@ class Parser {
     )
   }
 
-  fail(): never {
+  fail(token?: string): never {
+    if (this.done() && token === undefined)
+      throw new SyntaxError('syntax error: unexpected end of file', this.end())
+    const start = this.src.lastIndexOf('\n', this.pos - 1) + 1
+    const end = this.src.indexOf('\n', this.pos)
     throw new SyntaxError(
-      this.done()
-        ? 'syntax error: unexpected end of file'
-        : 'syntax error near unexpected token `' + this.peekToken() + "'",
+      'syntax error near unexpected token `' + (token ?? this.peekToken()) + "'",
+      this.line(),
+      this.src.slice(start, end < 0 ? undefined : end),
     )
+  }
+
+  end(): number {
+    return this.src.replace(/\n$/, '').split('\n').length + 1
+  }
+
+  unmatched(close: string, line: number): never {
+    throw new SyntaxError('unexpected EOF while looking for matching `' + close + "'", line)
+  }
+
+  lineOf(pos: number): number {
+    return this.src.slice(0, pos).split('\n').length
   }
 
   blanks() {
@@ -221,8 +262,15 @@ class Parser {
     this.pos += word.length
   }
 
+  body(stop: Set<string>): Script {
+    const script = this.list(stop)
+    if (!script.length) this.fail()
+    return script
+  }
+
   list(stop: Set<string>): Script {
     const script: Script = []
+    this.#depth++
     for (;;) {
       this.separators()
       if (this.done() || this.starts(')') || this.starts(';;') || this.starts(';&')) break
@@ -242,8 +290,10 @@ class Parser {
       else if (c === '\n') {
         newlines.add(item)
         this.newline()
+        if (this.#depth === 1) this.complete = this.pos
       } else break
     }
+    this.#depth--
     return script
   }
 
@@ -318,7 +368,7 @@ class Parser {
     else if (word === 'case') command = this.caseCommand()
     else if (word === '{') {
       this.pos++
-      const body = this.list(new Set())
+      const body = this.body(new Set())
       this.eat('}')
       command = { type: 'group', body, subshell: false, redirects: [] }
     } else if (this.starts('((')) {
@@ -328,7 +378,7 @@ class Parser {
       texts.set(command, text)
     } else if (this.starts('(')) {
       this.pos++
-      const body = this.list(new Set())
+      const body = this.body(new Set())
       this.separators()
       if (!this.starts(')')) this.fail()
       this.pos++
@@ -382,9 +432,9 @@ class Parser {
     const clauses: { cond: Script; body: Script }[] = []
     let otherwise: Script | undefined
     for (;;) {
-      const cond = this.list(new Set())
+      const cond = this.body(new Set())
       this.eat('then')
-      const body = this.list(new Set())
+      const body = this.body(new Set())
       clauses.push({ cond, body })
       this.separators()
       const next = this.reserved()
@@ -394,7 +444,7 @@ class Parser {
       }
       if (next === 'else') {
         this.pos += 4
-        otherwise = this.list(new Set())
+        otherwise = this.body(new Set())
       }
       this.eat('fi')
       return { type: 'if', clauses, otherwise, redirects: [] }
@@ -405,7 +455,7 @@ class Parser {
     this.separators()
     if (this.starts(';')) this.pos++
     this.eat('do')
-    const body = this.list(new Set())
+    const body = this.body(new Set())
     this.eat('done')
     return body
   }
@@ -451,7 +501,7 @@ class Parser {
 
   whileCommand(word: string): Command {
     this.pos += word.length
-    const cond = this.list(new Set(['do']))
+    const cond = this.body(new Set(['do']))
     return { type: 'while', until: word === 'until', cond, body: this.doBody(), redirects: [] }
   }
 
@@ -614,7 +664,7 @@ class Parser {
     if (match[2] === '>|') forced.add(redirect)
     if (match[2] === '<<' || match[2] === '<<-') {
       const raw = this.src.slice(this.pos).match(/^[^\s;&|()<>]+/)?.[0]
-      if (!raw) this.fail()
+      if (!raw) this.fail(this.done() ? 'newline' : undefined)
       this.pos += raw.length
       const expand = !/['"\\]/.test(raw)
       this.pending.push({
@@ -625,7 +675,8 @@ class Parser {
       })
     } else {
       const process = this.starts('<(') || this.starts('>(')
-      if (!process && (this.done() || META.includes(this.src[this.pos]))) this.fail()
+      if (!process && (this.done() || META.includes(this.src[this.pos])))
+        this.fail(this.done() ? 'newline' : undefined)
       redirect.target = this.word()
     }
     redirects.push(redirect)
@@ -678,15 +729,14 @@ class Parser {
         }
       } else if (c === "'") {
         const end = this.src.indexOf("'", this.pos + 1)
-        if (end < 0) throw new SyntaxError("unexpected EOF while looking for matching `''")
+        if (end < 0) this.unmatched("'", this.lineOf(this.pos))
         push(parts, this.src.slice(this.pos + 1, end), true)
         this.pos = end + 1
       } else if (c === '"') {
-        this.pos++
+        const start = this.pos++
         push(parts, '', true)
         this.double(parts, '"')
-        if (this.src[this.pos] !== '"')
-          throw new SyntaxError('unexpected EOF while looking for matching `"\'')
+        if (this.src[this.pos] !== '"') this.unmatched('"', this.lineOf(start))
         this.pos++
       } else if (c === '$' && this.src[this.pos + 1] === "'") {
         const start = this.pos
@@ -741,7 +791,7 @@ class Parser {
 
   dollar(quoted: boolean): Part {
     if (this.src[this.pos] === '`') {
-      this.pos++
+      const start = this.pos++
       let inner = ''
       while (!this.done() && this.src[this.pos] !== '`') {
         if (this.src[this.pos] === '\\' && '$`\\'.includes(this.src[this.pos + 1])) {
@@ -749,7 +799,7 @@ class Parser {
           this.pos += 2
         } else inner += this.src[this.pos++]
       }
-      if (this.done()) this.fail()
+      if (this.done()) this.unmatched('`', this.lineOf(start))
       this.pos++
       return { type: 'command', body: parse(inner), quoted }
     }
@@ -771,6 +821,7 @@ class Parser {
       const body = this.list(new Set())
       this.separators()
       this.pending = outer
+      if (this.done()) this.unmatched(')', this.end())
       if (!this.starts(')')) this.fail()
       this.pos++
       this.edits.push({ body, end: this.pos, start })
@@ -783,6 +834,7 @@ class Parser {
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error
         const end = this.closing(start)
+        if (end < 0 && this.done()) this.unmatched('}', this.lineOf(start))
         if (end < 0) throw error
         this.pos = end + 1
         return { type: 'param', name: this.src.slice(start - 1, end + 1), op: 'bad', quoted }
