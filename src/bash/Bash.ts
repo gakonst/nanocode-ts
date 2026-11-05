@@ -138,8 +138,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       ...options.commands,
     }),
   )
-  const python = options.python?.remote ? 'remote' : compiles() ? 'pyodide' : 'none'
-  if (python === 'none')
+  if (!options.python?.remote && !(options.webassembly ?? compiles()))
     for (const name of ['python', 'python3', 'pip', 'pip3'])
       if (!options.commands?.[name]) commands.delete(name)
   let calls = 0
@@ -339,6 +338,7 @@ export declare namespace create {
     observe?: (event: Event) => void
     python?: Python.Options
     wasm?: Wasm.Options
+    webassembly?: boolean
   }
 }
 
