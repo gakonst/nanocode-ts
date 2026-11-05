@@ -203,6 +203,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
           fs: budgeted(fs, limits.maxFileOperations, budget),
           commands,
           fetch: options.fetch,
+          fallback: options.fallback,
           limits: { ...limits, timeoutMs },
         },
         state,
@@ -329,6 +330,7 @@ export declare namespace create {
     commands?: Record<string, Command.Handler>
     cwd?: string
     env?: Record<string, string>
+    fallback?: boolean
     fetch?: typeof fetch
     files?: Record<string, FileSystem.FileInput>
     fs?: FileSystem.FileSystem
