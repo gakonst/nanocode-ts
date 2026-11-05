@@ -16,7 +16,53 @@ export const CLASSES: Record<string, string> = {
   graph: '\\x21-\\x7e',
 }
 
-function bracket(pattern: string, start: number, shell: boolean): [string, number] | undefined {
+const UNICODE: Record<string, string> = {
+  alpha: '(?![0-9])[\\p{Alphabetic}\\p{Nd}]',
+  alnum: '[\\p{Alphabetic}\\p{Nd}]',
+  upper: '[\\p{Uppercase}\\p{Lt}]',
+  lower: '[\\p{Lowercase}\\p{Lt}]',
+  space: '(?![\\u0085\\u00a0\\u2007\\u202f])\\p{White_Space}',
+  blank: '(?![\\u00a0\\u2007\\u202f])[\\t\\p{Zs}]',
+  punct: '(?![\\p{Alphabetic}\\p{Nd}])(?:[^\\p{Cc}\\p{Cs}\\p{Cn}\\p{Z}]|[\\u00a0\\u2007\\u202f])',
+  print: '[^\\p{Cc}\\p{Cs}\\p{Cn}\\p{Zl}\\p{Zp}]',
+  graph: '[^\\p{Cc}\\p{Cs}\\p{Cn}\\p{Z}]|[\\u00a0\\u2007\\u202f]',
+  word: '[\\p{Alphabetic}\\p{Nd}_]',
+  rust: '[\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}\\p{Join_Control}]',
+  decimal: '\\p{Nd}',
+  white: '\\p{White_Space}',
+}
+
+const unicodeClasses = new Map<string, string>()
+
+export function unicodeClass(name: string): string {
+  const known = unicodeClasses.get(name)
+  if (known !== undefined) return known
+  const hex = (code: number) => '\\u' + code.toString(16).padStart(4, '0')
+  let plane = ''
+  for (let code = 0; code < 0x10000; code++)
+    if (code < 0xd800 || code > 0xdfff) plane += String.fromCharCode(code)
+  let out = ''
+  let from = -1
+  let to = -2
+  for (const match of plane.matchAll(new RegExp(UNICODE[name], 'gu'))) {
+    const code = match[0].charCodeAt(0)
+    if (code === to + 1) to = code
+    else {
+      if (from >= 0) out += hex(from) + (to > from ? '-' + hex(to) : '')
+      from = to = code
+    }
+  }
+  if (from >= 0) out += hex(from) + (to > from ? '-' + hex(to) : '')
+  unicodeClasses.set(name, out)
+  return out
+}
+
+function bracket(
+  pattern: string,
+  start: number,
+  shell: boolean,
+  unicode = false,
+): [string, number] | undefined {
   let i = start + 1
   let out = '['
   if (pattern[i] === '!' || pattern[i] === '^') {
@@ -31,7 +77,8 @@ function bracket(pattern: string, start: number, shell: boolean): [string, numbe
     if (c === '[' && pattern[i + 1] === ':') {
       const end = pattern.indexOf(':]', i + 2)
       if (end > 0) {
-        out += CLASSES[pattern.slice(i + 2, end)] ?? ''
+        const name = pattern.slice(i + 2, end)
+        out += (unicode && name in UNICODE ? unicodeClass(name) : CLASSES[name]) ?? ''
         i = end + 2
         continue
       }
@@ -84,6 +131,17 @@ export function hasGlob(pattern: string): boolean {
 
 export function unescapeGlob(pattern: string): string {
   return pattern.replace(/\\([\s\S])/g, '$1')
+}
+
+export function boundary(kind: string, word: string, blocked = word): string {
+  const after = '(?=[' + word + '])'
+  const before = '(?<=[' + word + '])'
+  const start = '(?<![' + blocked + '])' + after
+  const end = before + '(?![' + blocked + '])'
+  if (kind === '<') return start
+  if (kind === '>') return end
+  if (kind === 'b') return '(?:' + start + '|' + end + ')'
+  return '(?:' + before + after + '|(?<![' + blocked + '])(?![' + blocked + ']))'
 }
 
 export function posixRegExp(
@@ -148,7 +206,15 @@ export function posixRegExp(
       i = bounds[1]
     } else if (c === '\\' && i + 1 < pattern.length) {
       const n = pattern[++i]
-      if (n === '<' || n === '>' || n === 'b') emit('\\b', true)
+      if (warnings && 'bB<>'.includes(n))
+        emit(boundary(n, unicodeClass('word'), unicodeClass('word') + '\\udc80-\\udcff'), true)
+      else if (warnings && 'wWsS'.includes(n))
+        emit(
+          (n === 'w' || n === 's' ? '[' : '[^') +
+            unicodeClass(n === 'w' || n === 'W' ? 'word' : 'space') +
+            ']',
+        )
+      else if (n === '<' || n === '>' || n === 'b') emit('\\b', true)
       else if (n === 'B') emit('\\B', true)
       else if (!extended && (n === '(' || n === '|')) alternate(n)
       else if (!extended && n === ')') close()
@@ -156,7 +222,7 @@ export function posixRegExp(
       else if (/[wWsS1-9]/.test(n) || (!warnings && /[dDntrfv]/.test(n))) emit('\\' + n)
       else emit(escapeRegExp(n))
     } else if (c === '[') {
-      const result = bracket(pattern, i, false)
+      const result = bracket(pattern, i, false, !!warnings)
       if (result) {
         emit(result[0])
         i = result[1] - 1

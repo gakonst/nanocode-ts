@@ -20,6 +20,7 @@ import {
   type Pruned,
 } from '../Prune.ts'
 import {
+  boundary,
   CLASSES,
   escapeRegExp,
   escapes,
@@ -28,6 +29,7 @@ import {
   joinLines,
   lines,
   posixRegExp,
+  unicodeClass,
 } from '../Text.ts'
 import {
   allInput,
@@ -706,7 +708,7 @@ export function scan(text: string, options: ScanOptions): number {
   return matches
 }
 
-export function perlSource(pattern: string): { source: string; flags: string } {
+export function perlSource(pattern: string, unicode = false): { source: string; flags: string } {
   let source = pattern
   let flags = ''
   const inline = source.match(/^\(\?([imsx]+)\)/)
@@ -718,14 +720,21 @@ export function perlSource(pattern: string): { source: string; flags: string } {
     .replace(/\(\?P</g, '(?<')
     .replace(/\\A/g, '^')
     .replace(/\\[zZ]/g, '$')
-  return { source: perlClasses(source), flags }
+  return { source: perlClasses(source, unicode), flags }
 }
 
-function perlClasses(source: string): string {
+const RUST: Record<string, string> = { w: 'rust', d: 'decimal', s: 'white' }
+
+function perlClasses(source: string, unicode: boolean): string {
   let out = ''
   for (let i = 0; i < source.length; i++) {
     if (source[i] === '\\') {
-      out += source.slice(i, i + 2)
+      const n = source[i + 1] ?? ''
+      if (unicode && 'bB'.includes(n) && n)
+        out += boundary(n, unicodeClass('rust'), unicodeClass('rust') + '\\udc80-\\udcff')
+      else if (unicode && n && n.toLowerCase() in RUST)
+        out += (n in RUST ? '[' : '[^') + unicodeClass(RUST[n.toLowerCase()]) + ']'
+      else out += source.slice(i, i + 2)
       i++
       continue
     }
@@ -744,7 +753,10 @@ function perlClasses(source: string): string {
         else body += CLASSES[posix[2]]
         j += posix[0].length
       } else if (source[j] === '\\') {
-        body += source.slice(j, j + 2)
+        body +=
+          unicode && (source[j + 1] ?? '') in RUST
+            ? unicodeClass(RUST[source[j + 1]])
+            : source.slice(j, j + 2)
         j += 2
       } else body += (source[j] === ']' || source[j] === '[' ? '\\' : '') + source[j++]
     }
@@ -833,6 +845,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
   }
   let flags = (f.has('i') ? 'i' : '') + (f.has('P') && f.has('z') ? '' : 's') + 'g'
   const warnings: string[] = []
+  const word = f.has('w') ? (f.has('P') ? '\\w' : unicodeClass('word')) : ''
   const sources = patterns.map((pattern) => {
     let source: string
     if (f.has('F')) source = escapeRegExp(pattern)
@@ -851,7 +864,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         )
       }
     }
-    if (f.has('w')) source = '(?<![\\w])(?:' + source + ')(?![\\w])'
+    if (f.has('w')) source = '(?<![' + word + '])(?:' + source + ')(?![' + word + '])'
     if (f.has('x')) source = '^(?:' + source + ')$'
     return source
   })
@@ -970,6 +983,42 @@ const grep: CommandHandler = streaming(async (ctx) => {
   const require = requireRegExp(literals(patterns, syntax), regex)
   const binaries = last(parsed, 'binary-files')
   const textual = f.has('a') || binaries === 'text'
+  const blocks = (source: () => Promise<string | null>, stream: boolean, size: number) => {
+    let consumed = 0
+    let carry = ''
+    let split = textual || f.has('z')
+    let done = false
+    return async () => {
+      for (;;) {
+        if (split || done) {
+          const rest = carry
+          carry = ''
+          return rest || (done ? null : source())
+        }
+        const more = await source()
+        if (more === null) {
+          done = true
+          continue
+        }
+        carry += more
+        const nul = carry.indexOf('\0')
+        if (nul < 0 && !stream) {
+          done = true
+          continue
+        }
+        const bytes = encode(carry)
+        const at = consumed + (nul >= 0 ? byteLength(carry.slice(0, nul)) : bytes.length)
+        const head = bytes.subarray(0, Math.max(0, at - (at % size) - consumed))
+        const end = decode(head.subarray(0, head.lastIndexOf(10) + 1)).length
+        if (nul >= 0) split = true
+        if (!end) continue
+        const text = carry.slice(0, end)
+        carry = carry.slice(end)
+        consumed += byteLength(text)
+        return text
+      }
+    }
+  }
   const search = async (
     source: () => Promise<string | null>,
     name: string,
@@ -978,15 +1027,18 @@ const grep: CommandHandler = streaming(async (ctx) => {
   ): Promise<boolean> => {
     let matches = 0
     let binary = false
+    let unseen = 0
     let base = 0
     state.binary = false
-    for (let text = await source(); text !== null; text = await source()) {
+    const read = blocks(source, stream, stream || piped ? 65536 : 98304)
+    for (let text = await read(); text !== null; text = await read()) {
       if (!binary && !textual && !f.has('z') && text.includes('\0')) {
         if (binaries === 'without-match') {
           matches = 0
           break
         }
         binary = true
+        unseen = matches
       }
       const silent = listing || binary
       let output = ''
@@ -1020,7 +1072,7 @@ const grep: CommandHandler = streaming(async (ctx) => {
         break
       }
     }
-    if ((binary || state.binary) && matches && !listing)
+    if (((binary && matches > unseen) || (state.binary && matches)) && !listing)
       ctx.stderr.write('grep: ' + name + ': binary file matches\n')
     if (f.has('q')) return matches > 0
     if (f.has('c')) ctx.stdout.write((named ? name + nameEnd : '') + matches + '\n')
@@ -1037,8 +1089,9 @@ const grep: CommandHandler = streaming(async (ctx) => {
     }
   }
   const stdin = (): [() => Promise<string | null>, boolean] => {
-    if (!before && !after && !f.has('b') && !(f.has('T') && ctx.stdin.ready))
+    if (!before && !after && !f.has('b') && !(f.has('T') && ctx.stdin.ready)) {
       return [batches(ctx.stdin, separator), true]
+    }
     let done = false
     return [
       async () => {
