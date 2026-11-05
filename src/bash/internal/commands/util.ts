@@ -56,7 +56,12 @@ export async function canonical(
   return '/' + parts.join('/')
 }
 
-export type Parsed = { flags: Set<string>; values: Map<string, string[]>; operands: string[] }
+export type Parsed = {
+  flags: Set<string>
+  values: Map<string, string[]>
+  operands: string[]
+  order: string[]
+}
 
 export type Spec = {
   flags?: string
@@ -69,6 +74,7 @@ export function options(args: string[], spec: Spec): Parsed {
   const flags = new Set<string>()
   const values = new Map<string, string[]>()
   const operands: string[] = []
+  const order: string[] = []
   const add = (key: string, value: string) => values.set(key, [...(values.get(key) ?? []), value])
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
@@ -87,7 +93,10 @@ export function options(args: string[], spec: Spec): Parsed {
         if (value === undefined)
           throw new CommandError("option '" + arg + "' requires an argument", 2)
         add(key, value)
-      } else flags.add(key)
+      } else {
+        flags.add(key)
+        order.push(key)
+      }
       continue
     }
     if (arg.startsWith('-') && arg.length > 1) {
@@ -110,13 +119,14 @@ export function options(args: string[], spec: Spec): Parsed {
           break
         }
         flags.add(flag)
+        order.push(flag)
       }
       if (!valid) throw new CommandError("invalid option -- '" + arg.slice(1) + "'", 2)
       continue
     }
     operands.push(arg)
   }
-  return { flags, values, operands }
+  return { flags, values, operands, order }
 }
 
 export function last(parsed: Parsed, key: string): string | undefined {
