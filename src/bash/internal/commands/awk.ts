@@ -9,7 +9,7 @@ import {
 } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
 import { decode, encode } from '../Fs.ts'
-import { format, formatNumber, posixRegExp, type FormatValue } from '../Text.ts'
+import { CLASSES, format, formatNumber } from '../Text.ts'
 import { strftime } from './text.ts'
 import { batches, pause } from './util.ts'
 
@@ -63,42 +63,28 @@ const BUILTINS = new Set([
   'strftime',
   'mktime',
 ])
-
 const ARITY: Record<string, [number, number]> = {
-  length: [0, 1],
   substr: [2, 3],
   index: [2, 2],
-  split: [2, 3],
-  sub: [2, 3],
-  gsub: [2, 3],
-  match: [2, 2],
-  sprintf: [1, Infinity],
+  sprintf: [1, 255],
   sin: [1, 1],
   cos: [1, 1],
   atan2: [2, 2],
   exp: [1, 1],
   log: [1, 1],
-  sqrt: [1, 1],
   int: [1, 1],
+  sqrt: [1, 1],
   rand: [0, 0],
   srand: [0, 1],
-  tolower: [1, 1],
-  toupper: [1, 1],
-  system: [1, 1],
   close: [1, 1],
+  system: [1, 1],
+  toupper: [1, 1],
+  tolower: [1, 1],
   fflush: [0, 1],
   systime: [0, 0],
-  strftime: [0, 3],
   mktime: [1, 1],
+  strftime: [0, 3],
 }
-
-const GRAMMAR = new Set(['split', 'sub', 'gsub', 'match'])
-
-const USAGE =
-  'Usage: mawk [Options] [Program] [file ...]\n\nProgram:\n    The -f option value is the name of a file containing program text.\n    If no -f option is given, a \"--\" ends option processing; the following\n    parameters are the program text.\n\nOptions:\n    -f program-file  Program  text is read from file instead of from the\n                     command-line.  Multiple -f options are accepted.\n    -F value         sets the field separator, FS, to value.\n    -v var=value     assigns value to program variable var.\n    --               unambiguous end of options.\n\n    Implementation-specific options are prefixed with \"-W\".  They can be\n    abbreviated:\n\n    -W version       show version information and exit.\n    -W compat        pre-POSIX 2001.\n    -W dump          show assembler-like listing of program and exit.\n    -W help          show this message and exit.\n    -W interactive   set unbuffered output, line-buffered input.\n    -W exec file     use file as program as well as last option.\n    -W posix         stricter POSIX checking.\n    -W random=number set initial random seed.\n    -W sprintf=number adjust size of sprintf buffer.\n    -W usage         show this message and exit.\n'
-
-const VERSION =
-  'mawk 1.3.4 20240123\nCopyright 2008-2023,2024, Thomas E. Dickey\nCopyright 1991-1996,2014, Michael D. Brennan\n\nrandom-funcs:       arc4random_stir/arc4random\nregex-funcs:        internal\n\ncompiled limits:\nsprintf buffer      8192\nmaximum-integer     9223372036854775808\n'
 const PUNCT = [
   '+=',
   '-=',
@@ -143,43 +129,39 @@ const PUNCT = [
 
 class AwkError extends Error {}
 
-function binary(text: string): string {
-  return /[^\x00-\x7f]/.test(text) ? latin(encode(text)) : text
-}
+const ASCII = /^[^\u0080-\uffff]*$/
 
-function latin(bytes: Uint8Array): string {
+function binary(data: Uint8Array): string {
   let out = ''
-  for (let i = 0; i < bytes.length; i += 0x8000)
-    out += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  for (let i = 0; i < data.length; i += 8192)
+    out += String.fromCharCode.apply(null, data.subarray(i, i + 8192) as unknown as number[])
   return out
 }
 
+function bytes(text: string): string {
+  return ASCII.test(text) ? text : binary(encode(text))
+}
+
 function raw(text: string): Uint8Array {
-  const bytes = new Uint8Array(text.length)
-  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0xff
-  return bytes
+  const data = new Uint8Array(text.length)
+  for (let i = 0; i < text.length; i++) data[i] = text.charCodeAt(i)
+  return data
 }
 
-function unicode(text: string): string {
-  return /[^\x00-\x7f]/.test(text) ? decode(raw(text)) : text
+function chars(text: string): string {
+  return ASCII.test(text) ? text : decode(raw(text))
 }
 
-function ascii(text: string, upper: boolean): string {
-  return upper
-    ? text.replace(/[a-z]+/g, (run) => run.toUpperCase())
-    : text.replace(/[A-Z]+/g, (run) => run.toLowerCase())
-}
-
-function numberText(n: number): string {
-  if (Number.isInteger(n) && Math.abs(n) <= 2 ** 63)
-    return Math.abs(n) < 1e16 ? String(n) : BigInt(n).toString()
-  return Number.isNaN(n) ? '-nan' : formatNumber(n)
+function runaway(head: string, rest: string): AwkError {
+  const end = rest.indexOf('\n')
+  return new AwkError(head + rest.slice(0, end < 0 ? undefined : end).slice(0, 10) + ' ...')
 }
 
 function lex(source: string): Token[] {
   const tokens: Token[] = []
   let i = 0
   let line = 1
+  let parens = 0
   const operand = () => {
     const last = tokens[tokens.length - 1]
     if (!last) return false
@@ -214,8 +196,11 @@ function lex(source: string): Token[] {
     }
     if (c === '"') {
       let value = ''
-      i++
+      const start = line
+      const from = ++i
       while (i < source.length && source[i] !== '"') {
+        if (source[i] === '\n')
+          throw runaway('line ' + start + ': runaway string constant "', source.slice(from))
         if (source[i] === '\\' && i + 1 < source.length) {
           const n = source[++i]
           const map: Record<string, string> = {
@@ -224,7 +209,6 @@ function lex(source: string): Token[] {
             r: '\r',
             '\\': '\\',
             '"': '"',
-            '/': '/',
             a: '\x07',
             b: '\b',
             f: '\f',
@@ -233,8 +217,12 @@ function lex(source: string): Token[] {
           if (n in map) value += map[n]
           else if (/[0-7]/.test(n)) {
             const oct = source.slice(i).match(/^[0-7]{1,3}/)![0]
-            value += String.fromCharCode(parseInt(oct, 8))
+            value += String.fromCharCode(parseInt(oct, 8) & 0xff)
             i += oct.length - 1
+          } else if (n === 'x' && /[0-9a-fA-F]/.test(source[i + 1] ?? '')) {
+            const hex = source.slice(i + 1).match(/^[0-9a-fA-F]{1,2}/)![0]
+            value += String.fromCharCode(parseInt(hex, 16))
+            i += hex.length
           } else if (n === '\n') line++
           else value += '\\' + n
           i++
@@ -242,32 +230,46 @@ function lex(source: string): Token[] {
         }
         value += source[i++]
       }
-      if (i >= source.length) throw new AwkError('unterminated string')
+      if (i >= source.length)
+        throw runaway('line ' + start + ': runaway string constant "', source.slice(from))
       i++
       tokens.push({ type: 'string', value, line })
       continue
     }
     if (c === '/' && !operand()) {
       let value = ''
-      i++
-      let bracket = false
-      while (i < source.length && (source[i] !== '/' || bracket)) {
-        if (source[i] === '\n') throw new AwkError('unterminated regexp')
+      const from = ++i
+      let boxed = 0
+      let first = -1
+      while (i < source.length && (source[i] !== '/' || boxed)) {
+        if (source[i] === '\n')
+          throw runaway('line ' + line + ': runaway regular expression /', source.slice(from))
         if (source[i] === '\\' && i + 1 < source.length) {
-          value += source[i + 1] === '/' ? '/' : source.slice(i, i + 2)
+          if (source[i + 1] !== '\n') value += source[i + 1] === '/' ? '/' : source.slice(i, i + 2)
           i += 2
           continue
         }
-        if (source[i] === '[') bracket = true
-        else if (source[i] === ']' && bracket && !/\[\^?$/.test(value)) bracket = false
+        if (source[i] === '^' && value.length === first && value[first - 1] === '[')
+          first = value.length + 1
+        else if (source[i] === '[') {
+          if (!boxed++) first = value.length + 1
+          else if (source[i + 1] !== ':') boxed--
+        } else if (source[i] === ']' && boxed && value.length !== first) boxed--
         value += source[i++]
       }
+      if (i >= source.length)
+        throw runaway('line ' + line + ': runaway regular expression /', source.slice(from))
       i++
       tokens.push({ type: 'regex', value, line })
       continue
     }
-    const number = source.slice(i).match(/^(0[xX][0-9a-fA-F]+|(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?)/)
+    const number = source.slice(i).match(/^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/)
     if (number) {
+      const n = Number(number[0])
+      if (!Number.isFinite(n) || (n === 0 ? /[1-9]/.test(number[1]) : n < SMALLEST))
+        throw new AwkError(
+          'line ' + line + ': ' + number[0] + ' : decimal ' + (n === 0 ? 'under' : 'over') + 'flow',
+        )
       tokens.push({ type: 'number', value: number[0], line })
       i += number[0].length
       continue
@@ -283,11 +285,20 @@ function lex(source: string): Token[] {
       continue
     }
     const punct = PUNCT.find((p) => source.startsWith(p, i))
-    if (!punct) throw new AwkError(line + ": unexpected character '" + c + "'")
+    if (!punct) {
+      const code = c.charCodeAt(0)
+      throw new AwkError(
+        line +
+          ': unexpected character ' +
+          (code > 32 && code < 127 ? "'" + c + "'" : '0x' + code.toString(16).padStart(2, '0')),
+      )
+    }
+    if (punct === '(') parens++
+    else if (punct === ')' && !parens--) throw new AwkError('line ' + line + ": extra ')'")
     tokens.push({ type: 'punct', value: punct, line })
     i += punct.length
   }
-  tokens.push({ type: 'eof', value: '', line: source.endsWith('\n') ? line : line + 1 })
+  tokens.push({ type: 'eof', value: '', line: line + 1 })
   return tokens
 }
 
@@ -337,9 +348,12 @@ type Program = {
 class Parser {
   tokens: Token[]
   pos = 0
-  braces = 0
-  inFunction = false
-  calls: string[] = []
+  loops = 0
+  scope = 'main'
+  calls: { name: string; count: number; line: number }[] = []
+  types = new Map<string, string>()
+  params: string[] = []
+  bare = -1
 
   constructor(tokens: Token[]) {
     this.tokens = tokens
@@ -361,18 +375,51 @@ class Parser {
 
   fail(): never {
     const token = this.peek()
-    if (token.type === 'eof' && this.braces)
-      throw new AwkError('line ' + token.line + ': missing } near end of file')
-    throw new AwkError(
-      'line ' +
-        token.line +
-        ': syntax error at or near ' +
-        (token.type === 'eof'
-          ? 'end of file'
-          : token.type === 'newline'
-            ? 'end of line'
-            : token.value),
+    const near =
+      token.type === 'eof'
+        ? 'end of file'
+        : token.type === 'newline'
+          ? 'end of line'
+          : token.type === 'regex'
+            ? '/' + token.value + '/'
+            : token.value
+    let parens = 0
+    let braces = 0
+    for (let i = 0; i < this.pos; i++) {
+      const value = this.tokens[i].type === 'punct' ? this.tokens[i].value : ''
+      if (value === '(') parens++
+      else if (value === ')') parens--
+      else if (value === '{') braces++
+      else if (value === '}') braces--
+    }
+    if (
+      parens > 0 &&
+      (token.type === 'eof' || token.type === 'newline' || this.is(';') || this.is('}'))
     )
+      this.error(token, 'missing ) near ' + near)
+    if (braces > 0 && (token.type === 'eof' || token.type === 'BEGIN' || token.type === 'END'))
+      this.error(token, 'missing } near ' + near)
+    this.error(token, 'syntax error at or near ' + near)
+  }
+
+  error(token: Token, message: string): never {
+    throw new AwkError('line ' + token.line + ': ' + message)
+  }
+
+  use(token: Token, kind: string) {
+    if (this.params.includes(token.value)) return
+    const known = this.types.get(token.value)
+    if (known && known !== kind)
+      this.error(
+        token,
+        'illegal reference to ' + (known === 'array' ? 'array ' : 'variable ') + token.value,
+      )
+    this.types.set(token.value, kind)
+  }
+
+  argument(): Expr {
+    this.bare = this.pos
+    return this.expr()
   }
 
   newlines() {
@@ -389,35 +436,36 @@ class Parser {
     while (this.peek().type !== 'eof') {
       const token = this.peek()
       if (this.is('}')) {
-        this.pos++
-        const next = this.peek()
-        throw new AwkError(
-          'line ' +
-            token.line +
-            ": extra '}'\nawk: line " +
-            token.line +
-            ': syntax error at or near ' +
-            (next.type === 'eof' || next.type === 'newline' ? 'end of line' : next.value),
+        const next = this.peek(1)
+        if (next.type !== 'eof' && next.type !== 'newline') this.error(token, "extra '}'")
+        this.error(
+          token,
+          "extra '}'\nawk: line " + token.line + ': syntax error at or near end of line',
         )
       }
       if (token.type === 'BEGIN') {
         this.pos++
         this.newlines()
+        this.scope = 'begin'
         program.begin.push(this.block())
       } else if (token.type === 'END') {
         this.pos++
         this.newlines()
+        this.scope = 'end'
         program.end.push(this.block())
       } else if (token.type === 'function') {
         this.pos++
         const name = this.peek()
         if (name.type !== 'funcname' && name.type !== 'name') this.fail()
+        if (program.functions.has(name.value)) this.error(name, 'redefinition of ' + name.value)
         this.pos++
         this.take('(')
         const params: string[] = []
         while (!this.is(')')) {
           const param = this.peek()
           if (param.type !== 'name') this.fail()
+          if (params.includes(param.value))
+            this.error(param, param.value + ' is duplicated in argument list')
           params.push(param.value)
           this.pos++
           if (this.is(',')) {
@@ -427,9 +475,10 @@ class Parser {
         }
         this.take(')')
         this.newlines()
-        this.inFunction = true
+        this.scope = 'function'
+        this.params = params
         program.functions.set(name.value, { params, body: this.block() })
-        this.inFunction = false
+        this.params = []
       } else {
         const rule: Rule = { active: false }
         if (!this.is('{')) {
@@ -443,23 +492,26 @@ class Parser {
         if (this.is('{')) rule.action = this.block()
         program.rules.push(rule)
       }
+      this.scope = 'main'
       this.terminators()
     }
     const line = this.peek().line
-    const missing = this.calls.filter((name) => !program.functions.has(name))
-    if (missing.length)
-      throw new AwkError(
-        [...new Set(missing)]
-          .reverse()
-          .map((name) => 'line ' + line + ': function ' + name + ' never defined')
-          .join('\nawk: '),
-      )
+    const errors = [...this.calls]
+      .reverse()
+      .map((call) => {
+        const fn = program.functions.get(call.name)
+        if (!fn) return 'line ' + line + ': function ' + call.name + ' never defined'
+        if (call.count > fn.params.length)
+          return 'line ' + call.line + ': too many arguments in call to ' + call.name
+        return ''
+      })
+      .filter(Boolean)
+    if (errors.length) throw new AwkError(errors.join('\nawk: '))
     return program
   }
 
   block(): Stmt[] {
     this.take('{')
-    this.braces++
     const body: Stmt[] = []
     this.terminators()
     while (!this.is('}')) {
@@ -468,7 +520,6 @@ class Parser {
       this.terminators()
     }
     this.take('}')
-    this.braces--
     return body
   }
 
@@ -488,6 +539,15 @@ class Parser {
       return { k: 'block', body: [] }
     }
     return this.statement()
+  }
+
+  loop(): Stmt {
+    this.loops++
+    try {
+      return this.body()
+    } finally {
+      this.loops--
+    }
   }
 
   statement(): Stmt {
@@ -518,11 +578,11 @@ class Parser {
           this.pos++
           return { k: 'while', test, body: { k: 'block', body: [] } }
         }
-        return { k: 'while', test, body: this.body() }
+        return { k: 'while', test, body: this.loop() }
       }
       case 'do': {
         this.pos++
-        const body = this.body()
+        const body = this.loop()
         this.terminators()
         this.take('while', 'while')
         this.take('(')
@@ -542,8 +602,10 @@ class Parser {
         ) {
           const name = this.peek().value
           const array = this.peek(2).value
+          this.use(this.peek(), 'scalar')
+          this.use(this.peek(2), 'array')
           this.pos += 4
-          return { k: 'forin', name, array, body: this.body() }
+          return { k: 'forin', name, array, body: this.loop() }
         }
         const init = this.is(';') ? undefined : this.simple()
         this.take(';')
@@ -553,19 +615,23 @@ class Parser {
         this.newlines()
         const step = this.is(')') ? undefined : this.simple()
         this.take(')')
-        return { k: 'for', init, test, step, body: this.body() }
+        return { k: 'for', init, test, step, body: this.loop() }
       }
       case 'next':
       case 'nextfile':
       case 'break':
       case 'continue':
+        if ((token.type === 'break' || token.type === 'continue') && !this.loops)
+          this.error(token, token.type + ' statement outside of loop')
+        if ((token.type === 'next' || token.type === 'nextfile') && this.scope !== 'main')
+          this.error(token, 'improper use of ' + token.type)
         this.pos++
         this.end()
         return { k: token.type }
       case 'exit':
       case 'return': {
-        if (token.type === 'return' && !this.inFunction)
-          throw new AwkError('line ' + token.line + ': return outside function body')
+        if (token.type === 'return' && this.scope !== 'function')
+          this.error(token, 'return outside function body')
         this.pos++
         const e =
           this.is(';') ||
@@ -581,6 +647,7 @@ class Parser {
         this.pos++
         const name = this.peek()
         if (name.type !== 'name') this.fail()
+        this.use(name, 'array')
         this.pos++
         let subs: Expr[] | undefined
         if (this.is('[')) {
@@ -636,7 +703,7 @@ class Parser {
         redirect = { op, target: this.concat(true) }
       }
       if (token.type === 'printf' && !args.length)
-        throw new AwkError('line ' + token.line + ': no arguments in call to printf')
+        this.error(token, 'no arguments in call to printf')
       return { k: token.type, args, redirect }
     }
     return { k: 'expr', e: this.expr() }
@@ -652,7 +719,7 @@ class Parser {
       this.pos++
       this.newlines()
     }
-    this.newlines()
+    if (close) this.newlines()
     return list
   }
 
@@ -709,6 +776,7 @@ class Parser {
       this.pos++
       const name = this.peek()
       if (name.type !== 'name') this.fail()
+      this.use(name, 'array')
       this.pos++
       left = { k: 'in', subs: left.k === 'group' ? left.list : [left], name: name.value }
     }
@@ -719,9 +787,20 @@ class Parser {
     let left = this.relation(noGt)
     while (this.is('~') || this.is('!~')) {
       const negate = this.tokens[this.pos++].value === '!~'
-      left = { k: 'match', negate, left, right: this.relation(noGt) }
+      const token = this.peek()
+      left = { k: 'match', negate, left, right: this.pattern(this.relation(noGt), token) }
     }
     return left
+  }
+
+  pattern(e: Expr, token: Token, split = false): Expr {
+    if (e.k !== 'str' || (split && e.v.length < 2)) return e
+    try {
+      return { k: 're', v: regex(e.v) }
+    } catch (error) {
+      if (error instanceof AwkError) this.error(token, error.message)
+      throw error
+    }
   }
 
   relation(noGt: boolean): Expr {
@@ -837,42 +916,81 @@ class Parser {
       case 'string':
         this.pos++
         return { k: 'str', v: token.value }
-      case 'regex':
+      case 'regex': {
         this.pos++
-        return { k: 're', v: regex(token.value) }
+        try {
+          return { k: 're', v: regex(token.value) }
+        } catch (error) {
+          if (error instanceof AwkError) this.error(token, error.message)
+          throw error
+        }
+      }
       case 'name': {
-        this.pos++
+        const start = this.pos++
         if (this.is('[')) {
+          this.use(token, 'array')
           this.pos++
           const subs = this.list(']')
           this.take(']')
           return { k: 'index', name: token.value, subs }
         }
+        if (start !== this.bare || !(this.is(',') || this.is(')'))) this.use(token, 'scalar')
         return { k: 'var', name: token.value }
       }
       case 'funcname': {
         this.pos++
         this.take('(')
-        const args = this.list(')')
+        const args: Expr[] = []
+        this.newlines()
+        while (!this.is(')')) {
+          args.push(this.argument())
+          if (!this.is(',')) break
+          this.pos++
+          this.newlines()
+        }
+        this.newlines()
         this.take(')')
-        this.calls.push(token.value)
+        this.calls.push({ name: token.value, count: args.length, line: token.line })
         return { k: 'call', name: token.value, args }
       }
       case 'builtin': {
         this.pos++
-        if (token.value === 'length' && !this.is('('))
-          return { k: 'builtin', name: 'length', args: [] }
-        this.take('(')
-        const args = this.list(')')
-        const [min, max] = ARITY[token.value] ?? [0, Infinity]
-        if (args.length < min || args.length > max) {
-          if (GRAMMAR.has(token.value)) this.fail()
-          throw new AwkError(
-            'line ' + token.line + ': wrong number of arguments in call to ' + token.value,
-          )
+        const name = token.value
+        if (name === 'length') {
+          if (!this.is('(')) return { k: 'builtin', name, args: [] }
+          this.pos++
+          const args = this.is(')') ? [] : [this.argument()]
+          this.take(')')
+          return { k: 'builtin', name, args }
         }
+        this.take('(')
+        if (name === 'split' || name === 'sub' || name === 'gsub' || name === 'match') {
+          const args = [this.expr()]
+          this.newlines()
+          this.take(',')
+          this.newlines()
+          const target = this.peek()
+          if (name === 'split' && target.type !== 'name') this.fail()
+          args.push(name === 'split' ? this.argument() : this.expr())
+          if (name === 'split') this.use(target, 'array')
+          if (name !== 'match' && this.is(',')) {
+            this.pos++
+            this.newlines()
+            args.push(this.expr())
+          }
+          this.newlines()
+          this.take(')')
+          if (name === 'match') args[1] = this.pattern(args[1], token)
+          else if (name !== 'split') args[0] = this.pattern(args[0], token)
+          else if (args[2]) args[2] = this.pattern(args[2], token, true)
+          return { k: 'builtin', name, args }
+        }
+        const args = this.list(')')
         this.take(')')
-        return { k: 'builtin', name: token.value, args }
+        const [min, max] = ARITY[name] ?? [0, 255]
+        if (args.length < min || args.length > max)
+          this.error(token, 'wrong number of arguments in call to ' + name)
+        return { k: 'builtin', name, args }
       }
       case 'getline': {
         this.pos++
@@ -924,11 +1042,201 @@ class Parser {
   }
 }
 
+const SIMPLE_ESCAPES: Record<string, string> = {
+  n: '\n',
+  t: '\t',
+  f: '\f',
+  b: '\b',
+  r: '\r',
+  a: '\x07',
+  v: '\v',
+}
+
+function unescape(source: string, i: number): [string, number] {
+  const c = source[i]
+  if (c === undefined) return ['\\', i]
+  if (c in SIMPLE_ESCAPES) return [SIMPLE_ESCAPES[c], i + 1]
+  const octal = /^[0-7]{1,3}/.exec(source.slice(i))
+  if (octal) return [String.fromCharCode(parseInt(octal[0], 8) & 0xff), i + octal[0].length]
+  if (c === 'x') {
+    const hex = /^[0-9a-fA-F]{1,2}/.exec(source.slice(i + 1))
+    return hex ? [String.fromCharCode(parseInt(hex[0], 16)), i + 1 + hex[0].length] : ['x', i + 1]
+  }
+  return [c, i + 1]
+}
+
+function literal(c: string, inClass = false): string {
+  return (inClass ? /[\\\][^-]/ : /[\\^$.|?*+()[\]{}/]/).test(c) ? '\\' + c : c
+}
+
+function bracket(source: string, start: number): [string, number] {
+  let p = start + 1
+  if (source[p] === ']' || (source[p] === '[' && source[p + 1] !== ':')) p++
+  else if (
+    source[p] === '^' &&
+    (source[p + 1] === ']' || (source[p + 1] === '[' && source[p + 2] !== ':'))
+  )
+    p += 2
+  let q = p
+  for (let level = 0; ; q++) {
+    if (q >= source.length) throw new AwkError('bad class -- [], [^] or [')
+    if (source[q] === '[' && source[q + 1] === ':') level++
+    else if (source[q] === ']') {
+      if (!level) break
+      level--
+    } else if (source[q] === '\\') q++
+  }
+  p = start + 1
+  let out = '['
+  if (source[p] === '^') {
+    out += '^'
+    p++
+  }
+  let prev = ''
+  while (p < q) {
+    const c = source[p]
+    if (c === '\\') {
+      ;[prev, p] = unescape(source, p + 1)
+      out += literal(prev, true)
+    } else if (c === '[' && source[p + 1] === ':') {
+      const end = source.indexOf(':]', p + 2)
+      out += CLASSES[source.slice(p + 2, end)] ?? ''
+      p = end + 2
+      prev = ''
+    } else if (c === '-' && prev && p + 1 < q) {
+      let [to, next] = [source[p + 1], p + 2]
+      if (to === '\\') [to, next] = unescape(source, p + 2)
+      if (prev <= to) {
+        out += '-' + literal(to, true)
+        prev = ''
+        p = next
+      } else {
+        out += '\\-'
+        prev = '-'
+        p++
+      }
+    } else {
+      prev = c
+      out += literal(c, true)
+      p++
+    }
+  }
+  return [out + ']', q + 1]
+}
+
+function translate(source: string): string {
+  let out = ''
+  let atom = -1
+  let small = false
+  let quantified = false
+  let anchor = false
+  const groups: { start: number; literal: boolean; items: number; ops: boolean }[] = []
+  const operator = () => {
+    const group = groups[groups.length - 1]
+    if (group) group.literal = !(group.ops = true)
+  }
+  const operand = (text: string, plain = false) => {
+    const group = groups[groups.length - 1]
+    if (group) {
+      group.items++
+      if (!plain) group.literal = false
+    }
+    atom = out.length
+    out += text
+    small = true
+    quantified = anchor = false
+  }
+  for (let i = 0; i < source.length; ) {
+    const c = source[i]
+    if (c === '\\') {
+      const [value, next] = unescape(source, i + 1)
+      operand(literal(value), true)
+      i = next
+    } else if (c === '[') {
+      const [text, next] = bracket(source, i)
+      operand(text)
+      i = next
+    } else if (c === '.') {
+      operand('[\\s\\S]')
+      i++
+    } else if (c === '(') {
+      const group = groups[groups.length - 1]
+      if (group) {
+        group.items++
+        group.literal = false
+      }
+      groups.push({ start: out.length, literal: true, items: 0, ops: false })
+      out += '(?:'
+      atom = -1
+      anchor = false
+      i++
+    } else if (c === ')' && groups.length) {
+      const group = groups.pop()!
+      if (atom < 0) throw new AwkError('missing operand')
+      out += ')'
+      atom = group.start
+      small = group.literal || (group.items === 1 && !group.ops)
+      quantified = anchor = false
+      i++
+    } else if (c === '|') {
+      if (atom < 0) throw new AwkError('missing operand')
+      operator()
+      out += '|'
+      atom = -1
+      anchor = false
+      i++
+    } else if (c === '*' || c === '+' || c === '?') {
+      if (anchor && c !== '?') throw new AwkError('syntax error ^* or ^+')
+      if (atom < 0) throw new AwkError('missing operand')
+      if (quantified) out = out.slice(0, atom) + '(?:' + out.slice(atom) + ')'
+      out += c
+      quantified = true
+      small = false
+      operator()
+      i++
+    } else if (c === '{' && atom >= 0 && /^\{(\d*)(,(\d*))?\}/.test(source.slice(i))) {
+      const [whole, low, comma, high] = /^\{(\d*)(,(\d*))?\}/.exec(source.slice(i))!
+      const min = Number(low || 0)
+      const max = comma ? (high ? Number(high) : -1) : min
+      if ((!low && !high) || (max >= 0 && max < min)) throw new AwkError('bad interval expression')
+      if (quantified) out = out.slice(0, atom) + '(?:' + out.slice(atom) + ')'
+      out +=
+        min < 2
+          ? '{' + min + (max === min ? '' : ',' + (max < 0 ? '' : max)) + '}'
+          : small
+            ? '{' + min + '}'
+            : '{1,' + (max < 0 ? '' : max) + '}'
+      quantified = true
+      small = false
+      operator()
+      i += whole.length
+    } else if (c === '^' || c === '$') {
+      operator()
+      atom = out.length
+      out += c
+      quantified = true
+      anchor = c === '^'
+      i++
+    } else {
+      operand(literal(c), true)
+      i++
+    }
+  }
+  if (groups.length) throw new AwkError("missing ')'")
+  if (atom < 0 && out) throw new AwkError('missing operand')
+  return out
+}
+
 function regex(source: string): RegExp {
   try {
-    return posixRegExp(source, true, 's')
-  } catch {
-    throw new AwkError('invalid regular expression /' + source + '/')
+    return new RegExp(translate(source))
+  } catch (error) {
+    throw new AwkError(
+      'regular expression compile failed (' +
+        (error instanceof AwkError ? error.message : 'missing operand') +
+        ')\n' +
+        source,
+    )
   }
 }
 
@@ -1032,9 +1340,38 @@ Object.defineProperty(AwkArray.prototype, 'size', {
 type Cell = Value | Map<string, Value>
 
 const NUMERIC = /^[ \t\n\v\f\r]*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?[ \t\n\v\f\r]*$/
+const STRTOD =
+  /^[ \t\n\v\f\r]*([+-]?)(?:0x(?=\.?[0-9a-f])([0-9a-f]*)(?:\.([0-9a-f]*))?(?:p([+-]?\d+))?|(\d+\.?\d*(?:e[+-]?\d+)?|\.\d+(?:e[+-]?\d+)?)|(inf(?:inity)?|nan(?:\([0-9a-z_]*\))?))/i
+const SMALLEST = 2.2250738585072014e-308
+
+function strtod(text: string): [number, number] {
+  const match = STRTOD.exec(text)
+  if (!match) return [0, 0]
+  const [whole, sign, int, fraction, exponent, decimal, special] = match
+  const value =
+    decimal !== undefined
+      ? Number(decimal)
+      : special !== undefined
+        ? /^i/i.test(special)
+          ? Infinity
+          : NaN
+        : (parseInt(int || '0', 16) +
+            (fraction ? parseInt(fraction, 16) / 16 ** fraction.length : 0)) *
+          2 ** Number(exponent ?? 0)
+  return [sign === '-' ? -value : value, whole.length]
+}
 
 function looksNumeric(text: string): boolean {
-  return NUMERIC.test(text)
+  if (NUMERIC.test(text)) {
+    const n = Number(text.trim())
+    return n === 0
+      ? !/[1-9]/.test(text.split(/[eE]/)[0])
+      : Number.isFinite(n) && Math.abs(n) >= SMALLEST
+  }
+  const body = text.replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, '')
+  if (!/^[0-9+.-]/.test(body) || !/[0-9.]$/.test(body)) return false
+  const [n, length] = strtod(body)
+  return length === body.length && Number.isFinite(n)
 }
 
 function toNum(value: Value): number {
@@ -1050,14 +1387,38 @@ function toNum(value: Value): number {
     const quick = +text
     if (quick === quick) return quick
   }
-  const hex = text.match(/^[ \t\n\v\f\r]*([+-]?)0[xX]([0-9a-fA-F]+)/)
-  if (hex) return (hex[1] === '-' ? -1 : 1) * parseInt(hex[2]!, 16)
-  const match = text.match(/^[ \t\n\v\f\r]*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/)
-  if (match) return Number(match[0])
-  const special = text.match(/^[ \t\n\v\f\r]*([+-]?)(inf|nan)/i)
-  if (special)
-    return special[2]!.toLowerCase() === 'inf' ? (special[1] === '-' ? -Infinity : Infinity) : NaN
-  return 0
+  return strtod(text)[0]
+}
+
+function toInt(n: number): number {
+  return n > -0x80000000 && n < 0x80000000 ? Math.trunc(n) : Number(BigInt.asIntN(32, toLong(n)))
+}
+
+const LONG = 2n ** 63n
+const ULONG = 2n ** 64n - 1n
+
+function toLong(n: number): bigint {
+  if (n >= 2 ** 63) return LONG - 1n
+  if (n < 0) return -n <= 2 ** 63 ? BigInt(Math.trunc(n)) : 1n - LONG
+  return n === n ? BigInt(Math.trunc(n)) : -LONG
+}
+
+function toUlong(n: number): bigint {
+  if (n >= 2 ** 64) return ULONG
+  if (n < 0) return -n <= 2 ** 63 ? ULONG + 1n + BigInt(Math.trunc(n)) : -n < 2 ** 64 ? LONG : 1n
+  return n === n ? BigInt(Math.trunc(n)) : LONG
+}
+
+function upper(text: string): string {
+  return /[\xb5\xdf-\xff]/.test(text)
+    ? text.replace(/[a-z]+/g, (letters) => letters.toUpperCase())
+    : text.toUpperCase()
+}
+
+function lower(text: string): string {
+  return /[\xc0-\xde]/.test(text)
+    ? text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase())
+    : text.toLowerCase()
 }
 
 function isNumberish(value: Value): boolean {
@@ -1098,43 +1459,120 @@ class LoopSignal {
   }
 }
 
-type Piece = string | { spec: string; conv: string; plain: boolean }
+type Conversion = {
+  flags: string
+  minimum: string
+  digits: string | undefined
+  size: string
+  conv: string
+  count: number
+  plain: boolean
+}
 
-const CONVERSION =
-  /%([-+ 0#']*)(\*|\d+)?(?:\.(\*|\d*))?(l{0,2}|h{0,2}|j|z|L)?([diouxXfFeEgGsScbq%])/y
+type Piece = string | Conversion
 
-function compileFormat(spec: string): Piece[] | null {
+const CONVERSION = /%([-+ #0']*)(\*|\d*)(?:\.(\*|\d*))?([lh]*)([\s\S]?)/y
+
+function compileFormat(spec: string): Piece[] {
   const pieces: Piece[] = []
   let literal = ''
+  let count = 0
   for (let i = 0; i < spec.length; i++) {
     const c = spec[i]
     if (c !== '%') {
       literal += c
       continue
     }
-    CONVERSION.lastIndex = i
-    const match = CONVERSION.exec(spec)
-    if (!match) {
-      literal += c
-      continue
-    }
-    i += match[0].length - 1
-    if (match[5] === '%') {
+    count++
+    if (spec[i + 1] === '%') {
       literal += '%'
+      i++
       continue
     }
-    if (match[2] === '*' || match[3] === '*') return null
+    CONVERSION.lastIndex = i
+    const [whole, flags, width, precision, size, conv] = CONVERSION.exec(spec)!
+    i += whole.length - 1
     if (literal) pieces.push(literal)
     literal = ''
-    const conv = match[5] === 'i' ? 'd' : match[5]
     pieces.push({
-      spec: match[0],
+      flags,
+      minimum: width,
+      digits: precision,
+      size,
       conv,
-      plain: match[0].length === 2 || (match[0].length === 3 && match[4] === 'l'),
+      count,
+      plain: whole.length === 2 && (conv === 's' || conv === 'd'),
     })
   }
   if (literal) pieces.push(literal)
   return pieces
+}
+
+type Field = {
+  conv: string
+  flags: string
+  size?: string | undefined
+  width?: number | undefined
+  precision?: number | undefined
+}
+
+function padded(field: Field, body: string, prefix = ''): string {
+  let width = field.width ?? 0
+  let left = field.flags.includes('-')
+  if (width < 0) {
+    left = true
+    width = -width
+  }
+  const fill = width - prefix.length - body.length
+  if (fill <= 0) return prefix + body
+  if (left) return prefix + body + ' '.repeat(fill)
+  if (field.flags.includes('0') && /^[diouxX]$/.test(field.conv) && !((field.precision ?? -1) >= 0))
+    return prefix + '0'.repeat(fill) + body
+  return ' '.repeat(fill) + prefix + body
+}
+
+function formatText(text: string, field: Field): string {
+  const precision = field.precision
+  const body = precision === undefined ? text : precision < 0 ? '' : text.slice(0, precision)
+  return (field.flags.includes(' ') && !body ? ' ' : '') + padded(field, body)
+}
+
+function formatInteger(value: bigint, field: Field): string {
+  const { conv, flags, precision } = field
+  const negative = value < 0n
+  let digits = (negative ? -value : value).toString(
+    conv === 'o' ? 8 : conv === 'x' || conv === 'X' ? 16 : 10,
+  )
+  if (conv === 'X') digits = digits.toUpperCase()
+  if (precision !== undefined && precision >= 0)
+    digits = precision === 0 && value === 0n ? '' : digits.padStart(precision, '0')
+  if (conv === 'o' && flags.includes('#') && !digits.startsWith('0')) digits = '0' + digits
+  const sign =
+    conv === 'd' || conv === 'i'
+      ? negative
+        ? '-'
+        : flags.includes('+')
+          ? '+'
+          : flags.includes(' ')
+            ? ' '
+            : ''
+      : ''
+  const prefix =
+    sign + ((conv === 'x' || conv === 'X') && flags.includes('#') && value ? '0' + conv : '')
+  return padded(field, digits, prefix)
+}
+
+function formatFloat(n: number, field: Field): string {
+  const { conv, flags, width, precision } = field
+  if (Number.isFinite(n)) {
+    let spec = '%' + flags
+    if (width !== undefined) spec += width < 0 ? '-' + -width : width
+    if (precision !== undefined && precision >= 0) spec += '.' + precision
+    return format(spec + conv, [n], false).text
+  }
+  const body = n !== n ? 'nan' : 'inf'
+  const sign = n !== n || n < 0 ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : ''
+  return padded(field, conv === 'E' || conv === 'G' ? body.toUpperCase() : body, sign)
 }
 
 type Fn = () => Value
@@ -1214,19 +1652,17 @@ function stmtKids(s: Stmt): { stmts: Stmt[]; exprs: Expr[] } {
   }
 }
 
-function strlen(text: string): number {
-  return text.length
-}
-
-function substr(text: string, from: number, count: number): string {
-  let start = Number.isNaN(from) ? 1 : Math.trunc(from)
-  let length = Number.isNaN(count) ? 0 : Math.trunc(count)
-  if (start < 1) {
-    length -= start
-    start = 1
+function substr(text: string, from: number, count?: number): string {
+  const length = text.length
+  let n = count === undefined ? length : toInt(count)
+  let i = (toInt(from) - 1) | 0
+  if (i > length) n = 0
+  if (i < 0) {
+    n = (n - i - 1) | 0
+    i = 0
   }
-  if (length <= 0) return ''
-  return text.slice(start - 1, length === Infinity ? undefined : start - 1 + length)
+  if (n > length - i) n = length - i
+  return n <= 0 ? '' : text.slice(i, i + n)
 }
 
 class Interpreter {
@@ -1241,7 +1677,7 @@ class Interpreter {
   offset = 0
   recordFS = ' '
   regexCache = new Map<string, RegExp>()
-  formats = new Map<string, Piece[] | null>()
+  formats = new Map<string, Piece[]>()
   globalCache = new WeakMap<RegExp, RegExp>()
   fastExprs = new Map<Expr, Fn>()
   fastStmts = new Map<Stmt, Run>()
@@ -1251,12 +1687,14 @@ class Interpreter {
   returned: Value = undefined
   rules?: { rule: Rule; pattern: Fn | undefined; end: Fn | undefined; action: Run | undefined }[]
   outputs = new Map<string, { kind: 'file' | 'pipe'; text: string; append: boolean }>()
-  readers = new Map<string, { lines: string[]; pos: number }>()
+  readers = new Map<string, { lines: string[]; pos: number; status?: number }>()
   records: string[] | undefined
   source = ''
   cursor = 0
   buffer = ''
-  preload?: () => Promise<void>
+  advance?: () => Promise<boolean>
+  open = false
+  converting = false
   more?: () => Promise<string | null>
   skipped = false
   recordIndex = 0
@@ -1279,11 +1717,10 @@ class Interpreter {
     set('SUBSEP', '\x1c')
     set('CONVFMT', '%.6g')
     set('OFMT', '%.6g')
-    set('RSTART', 0)
-    set('RLENGTH', -1)
     set('FILENAME', '')
     const environ = new Map<string, Value>()
-    for (const [key, value] of Object.entries(ctx.env)) environ.set(key, new Strnum(binary(value)))
+    for (const [key, value] of Object.entries(ctx.env))
+      environ.set(bytes(key), new Strnum(bytes(value)))
     this.globals.set('ENVIRON', environ)
   }
 
@@ -1298,11 +1735,43 @@ class Interpreter {
     if (typeof value === 'string') return value
     if (value === undefined) return ''
     if (value instanceof Strnum) return value.text
-    if (Number.isInteger(value) && Math.abs(value) <= 2 ** 63) return numberText(value)
-    const spec = this.scalar(output ? 'OFMT' : 'CONVFMT')
-    if (!Number.isFinite(value)) return numberText(value)
-    const fmt = this.str(spec)
-    return fmt === '%.6g' ? formatNumber(value) : format(fmt, [value], false).text
+    if (Number.isInteger(value)) {
+      if (Math.abs(value) < 1e16) return String(value)
+      if (value >= -(2 ** 63) && value <= 2 ** 64) {
+        const big = BigInt(value)
+        return String(big > ULONG ? ULONG : big)
+      }
+    }
+    const fmt = this.str(this.scalar(output ? 'OFMT' : 'CONVFMT'))
+    if (fmt !== '%.6g' && !this.converting) {
+      this.converting = true
+      try {
+        return this.sprintf(fmt, { values: [value] })
+      } finally {
+        this.converting = false
+      }
+    }
+    return Number.isFinite(value)
+      ? formatNumber(value)
+      : value !== value
+        ? '-nan'
+        : value < 0
+          ? '-inf'
+          : 'inf'
+  }
+
+  fatal(message: string): AwkError {
+    const globals = this.globals
+    return new AwkError(
+      'run time error: ' +
+        message +
+        '\n\tFILENAME="' +
+        this.str(globals.get('FILENAME') as Value) +
+        '" FNR=' +
+        Math.trunc(toNum(globals.get('FNR') as Value)) +
+        ' NR=' +
+        Math.trunc(toNum(globals.get('NR') as Value)),
+    )
   }
 
   lookup(name: string): Map<string, Cell> {
@@ -1326,7 +1795,9 @@ class Interpreter {
 
   setScalar(name: string, value: Value) {
     if (name === 'NF') {
-      this.setNF(Math.max(0, Math.trunc(toNum(value))))
+      const n = toInt(toNum(value))
+      if (n < 0) throw this.fatal('negative value assigned to NF')
+      this.setNF(n)
       return
     }
     const scope = this.lookup(name)
@@ -1390,7 +1861,7 @@ class Interpreter {
       }
       return
     }
-    if (fs.length === 1 && fs !== '\\') {
+    if (fs.length === 1) {
       if (length === 0) i = 1
       while (count <= index && i <= length) {
         const end = text.indexOf(fs, i)
@@ -1420,19 +1891,24 @@ class Interpreter {
   splitFields(text: string, fs: string): string[] {
     if (text === '') return []
     if (fs === ' ') {
-      const trimmed = text.replace(/^[ \t\n]+|[ \t\n]+$/g, '')
+      const trimmed = text.trim()
       return trimmed === '' ? [] : trimmed.split(/[ \t\n]+/)
     }
-    if (fs === '') return [...text]
-    if (fs.length === 1 && fs !== '\\') return text.split(fs)
-    return text.split(this.dynamic(fs))
+    if (fs === '') return text.split('')
+    if (fs.length === 1) return text.split(fs)
+    return separate(text, this.global(this.dynamic(fs)))
   }
 
   dynamic(source: string): RegExp {
     let re = this.regexCache.get(source)
     if (!re) {
       if (this.regexCache.size > 512) this.regexCache.clear()
-      re = regex(source)
+      try {
+        re = regex(source)
+      } catch (error) {
+        if (error instanceof AwkError) throw this.fatal(error.message)
+        throw error
+      }
       this.regexCache.set(source, re)
     }
     return re
@@ -1455,7 +1931,7 @@ class Interpreter {
   }
 
   getField(index: number): Value {
-    if (index < 0) throw new AwkError('attempt to access field ' + index)
+    if (index < 0) throw this.fatal('negative field index $' + index)
     return new Strnum(this.fieldText(index))
   }
 
@@ -1472,7 +1948,7 @@ class Interpreter {
   }
 
   setField(index: number, value: Value) {
-    if (index < 0) throw new AwkError('attempt to access field ' + index)
+    if (index < 0) throw this.fatal('negative field index $' + index)
     if (index === 0) {
       this.setRecord(this.str(value))
       return
@@ -1515,7 +1991,7 @@ class Interpreter {
     if (isNumberish(a) && isNumberish(b)) {
       const x = toNum(a)
       const y = toNum(b)
-      result = x < y ? -1 : x > y ? 1 : x === y ? 0 : NaN
+      result = x < y ? -1 : x > y ? 1 : 0
     } else {
       const x = this.str(a)
       const y = this.str(b)
@@ -2083,16 +2559,16 @@ class Interpreter {
     switch (name) {
       case 'length': {
         const arg = args[0]
-        if (!arg) return () => strlen(this.fields[0] ?? '')
+        if (!arg) return () => (this.fields[0] ?? '').length
         const fn = this.expr(arg, scope)
         if (arg.k === 'var') {
           const variable = arg.name
           return () => {
             const cell = this.lookup(variable).get(variable)
-            return cell instanceof Map ? cell.size : strlen(this.str(fn()))
+            return cell instanceof Map ? cell.size : this.str(fn()).length
           }
         }
-        return () => strlen(this.str(fn()))
+        return () => this.str(fn()).length
       }
       case 'split': {
         const target = args[1]
@@ -2153,8 +2629,8 @@ class Interpreter {
     const fns = args.map((arg) => this.expr(arg, scope))
     if (fns.length === 1) {
       const only = fns[0]
-      if (name === 'tolower') return () => ascii(this.str(only()), false)
-      if (name === 'toupper') return () => ascii(this.str(only()), true)
+      if (name === 'tolower') return () => lower(this.str(only()))
+      if (name === 'toupper') return () => upper(this.str(only()))
       if (name === 'int') return () => Math.trunc(toNum(only()))
     }
     return () =>
@@ -2211,51 +2687,26 @@ class Interpreter {
         }
       }
       case 'printf': {
-        if (!s.args.length)
-          return () => {
-            throw new AwkError('printf: no format')
-          }
         const sink = this.sink(s.redirect, scope)
         const first = s.args[0]
-        const pieces = first.k === 'str' ? compileFormat(first.v) : null
-        if (pieces) {
+        const pieces = first.k === 'str' ? compileFormat(first.v) : []
+        const conversions = pieces.filter((piece) => typeof piece !== 'string')
+        if (
+          first.k === 'str' &&
+          conversions.length < s.args.length &&
+          conversions.every((piece) => piece.plain)
+        ) {
           let used = 0
           const parts = pieces.map((piece): (() => string) => {
             if (typeof piece === 'string') return () => piece
             const arg = s.args[1 + used++]
-            if (!arg)
-              return () => {
-                throw this.runtime(
-                  'not enough arguments passed to printf("' +
-                    (first.k === 'str' ? first.v : '') +
-                    '")',
-                )
-              }
-            if (piece.plain && piece.conv === 's') {
-              if (arg.k === 'field' || arg.k === 'str' || arg.k === 'concat')
-                return this.text(arg, scope)
-              const fn = this.expr(arg, scope)
-              return () => {
-                const value = fn()
-                return value === undefined
-                  ? ''
-                  : typeof value === 'number'
-                    ? numberText(value)
-                    : typeof value === 'string'
-                      ? value
-                      : value.text
-              }
-            }
+            if (piece.conv === 's') return this.text(arg, scope)
             const fn = this.expr(arg, scope)
-            if (piece.plain && piece.conv === 'd')
-              return () => {
-                const value = fn()
-                const number = typeof value === 'number' ? value : this.formatArg(value)
-                if (typeof number !== 'number') return format(piece.spec, [number], false).text
-                const int = Math.trunc(Number.isFinite(number) ? number : 0)
-                return (int < 0 || Object.is(int, -0) ? '-' : '') + Math.abs(int).toString()
-              }
-            return () => format(piece.spec, [this.formatArg(fn())], false).text
+            return () => {
+              const value = fn()
+              const int = Math.trunc(toNum(value))
+              return Math.abs(int) < 2 ** 53 ? String(int) : this.convert(value, piece)!
+            }
           })
           return () => {
             this.tick()
@@ -2269,12 +2720,9 @@ class Interpreter {
         const rest = s.args.slice(1).map((arg) => this.expr(arg, scope))
         return () => {
           this.tick()
-          const values: FormatValue[] = []
-          for (let i = 0; i < rest.length; i++) values.push(this.formatArg(rest[i]()))
-          const given = this.str(spec())
-          if (this.needs(given) > values.length)
-            throw this.runtime('not enough arguments passed to printf("' + given + '")')
-          sink(this.sprintf(given, values))
+          const values: Value[] = []
+          for (let i = 0; i < rest.length; i++) values.push(rest[i]())
+          sink(this.sprintf(this.str(spec()), { values, sink }))
           return 0
         }
       }
@@ -2367,7 +2815,7 @@ class Interpreter {
       case 'exit': {
         const code = s.e ? this.expr(s.e, scope) : undefined
         return () => {
-          throw new ExitSignal(code ? Math.trunc(toNum(code())) : 0)
+          throw new ExitSignal(code ? toInt(toNum(code())) & 0xff : 0)
         }
       }
       case 'return': {
@@ -2430,7 +2878,7 @@ class Interpreter {
     if (!this.buffer) return
     const text = this.buffer
     this.buffer = ''
-    this.ctx.stdout.write(unicode(text))
+    this.ctx.stdout.write(chars(text))
   }
 
   scan(): boolean | 'pause' {
@@ -2548,7 +2996,7 @@ class Interpreter {
   ): { text: string; count: number } {
     let count = 0
     const plain = !replacement.includes('&') && !replacement.includes('\\')
-    if (plain && global && !counted) {
+    if (plain && global && !counted && !re.test('')) {
       const pattern = this.global(re)
       pattern.lastIndex = 0
       if (!pattern.test(text)) return { text, count: 0 }
@@ -2560,7 +3008,10 @@ class Interpreter {
         count: 1,
       }
     }
-    const result = text.replace(global ? this.global(re) : re, (match) => {
+    let end = -1
+    const result = text.replace(global ? this.global(re) : re, (match: string, offset: number) => {
+      if (!match && offset === end) return ''
+      end = offset + match.length
       count++
       if (plain) return replacement
       let out = ''
@@ -2570,7 +3021,7 @@ class Interpreter {
           out += '&'
           i++
         } else if (c === '\\' && replacement[i + 1] === '\\') {
-          out += '\\'
+          out += /^[\\&]*&/.test(replacement.slice(i + 2)) ? '\\' : '\\\\'
           i++
         } else if (c === '&') out += match
         else out += c
@@ -2584,12 +3035,12 @@ class Interpreter {
     switch (name) {
       case 'length': {
         const arg = args[0]
-        if (!arg) return strlen(this.fields[0] ?? '')
+        if (!arg) return (this.fields[0] ?? '').length
         if (arg.k === 'var') {
           const cell = this.lookup(arg.name).get(arg.name)
           if (cell instanceof Map) return cell.size
         }
-        return strlen(this.str(await this.eval(arg)))
+        return this.str(await this.eval(arg)).length
       }
       case 'split': {
         const target = args[1]
@@ -2624,15 +3075,16 @@ class Interpreter {
       }
       case 'system': {
         await this.flushAll()
-        const result = await this.ctx.exec(unicode(this.str(await this.eval(args[0]))))
-        this.print(binary(result.stdout))
+        const result = await this.ctx.exec(chars(this.str(await this.eval(args[0]))))
+        this.print(bytes(result.stdout))
         return result.status
       }
       case 'close': {
         const key = this.str(await this.eval(args[0]))
+        const reader = this.readers.get(key)
         this.readers.delete(key)
         const output = this.outputs.get(key)
-        if (!output) return -1
+        if (!output) return reader ? (reader.status ?? 0) : -1
         await this.flush(key, output)
         this.outputs.delete(key)
         return 0
@@ -2648,18 +3100,13 @@ class Interpreter {
     const num = (index: number) => toNum(values[index])
     switch (name) {
       case 'length':
-        return strlen(text(0))
+        return text(0).length
       case 'substr':
-        return substr(text(0), num(1), values.length > 2 ? num(2) : Infinity)
+        return text(0) ? substr(text(0), num(1), values.length > 2 ? num(2) : undefined) : ''
       case 'index':
         return text(0).indexOf(text(1)) + 1
       case 'sprintf':
-        if (this.needs(text(0)) > values.length - 1)
-          throw this.runtime('not enough arguments passed to sprintf("' + text(0) + '")')
-        return this.sprintf(
-          text(0),
-          values.slice(1).map((value) => this.formatArg(value)),
-        )
+        return this.sprintf(text(0), { values: values.slice(1) })
       case 'sin':
         return Math.sin(num(0))
       case 'cos':
@@ -2682,34 +3129,34 @@ class Interpreter {
         return previous
       }
       case 'tolower':
-        return ascii(text(0), false)
+        return lower(text(0))
       case 'toupper':
-        return ascii(text(0), true)
+        return upper(text(0))
       case 'systime':
         return Math.floor(Date.now() / 1000)
-      case 'strftime':
-        return strftime(
-          values.length ? text(0) : '%a %b %e %H:%M:%S %Z %Y',
-          new Date(values.length > 1 ? num(1) * 1000 : Date.now()),
-        )
       case 'mktime': {
-        const parts = text(0)
-          .trim()
-          .split(/[ \t\n]+/)
-          .map(Number)
-        if (parts.length < 6 || parts.some((part) => !Number.isFinite(part))) return -1
-        const [year, month, day, hour, minute, second] = parts as [
-          number,
-          number,
-          number,
-          number,
-          number,
-          number,
-        ]
-        return Date.UTC(year, month - 1, day, hour, minute, second) / 1000
+        const fields = text(0).trim().split(/\s+/)
+        if (fields.length < 6 || !fields.slice(0, 6).every((field) => /^[+-]?\d+$/.test(field)))
+          return -1
+        const [year, month, day, hour, minute, second] = fields.map(Number)
+        const date = new Date(0)
+        date.setUTCFullYear(year, month - 1, day)
+        date.setUTCHours(hour, minute, second)
+        return Math.floor(date.getTime() / 1000)
       }
+      case 'strftime':
+        return bytes(
+          strftime(
+            values.length ? chars(text(0)) : '%c',
+            new Date(values.length > 1 ? num(1) * 1000 : Date.now()),
+          ),
+        )
       case 'fflush':
-        return 0
+        return !values.length ||
+          ['/dev/stdout', '/dev/stderr', '-'].includes(text(0)) ||
+          this.outputs.has(text(0))
+          ? 0
+          : -1
     }
     throw new AwkError('function ' + name + ' never defined')
   }
@@ -2722,7 +3169,7 @@ class Interpreter {
           ? this.words(source)
           : typeof separator === 'string'
             ? this.splitFields(source, separator)
-            : source.split(separator)
+            : separate(source, this.global(separator))
     const n = parts.length
     if (array instanceof AwkArray) {
       array.fill(parts)
@@ -2777,8 +3224,8 @@ class Interpreter {
   match(source: string, re: RegExp, target: Expr | undefined): number {
     re.lastIndex = 0
     const found = re.exec(source)
-    const start = found ? strlen(source.slice(0, found.index)) + 1 : 0
-    const length = found ? strlen(found[0]) : -1
+    const start = found ? found.index + 1 : 0
+    const length = found ? found[0].length : -1
     this.globals.set('RSTART', start)
     this.globals.set('RLENGTH', length)
     if (target?.k === 'var' && found) {
@@ -2798,57 +3245,81 @@ class Interpreter {
     return global
   }
 
-  needs(spec: string): number {
-    const pieces = compileFormat(spec)
-    return pieces ? pieces.filter((piece) => typeof piece !== 'string').length : 0
-  }
-
-  runtime(message: string): AwkError {
-    return new AwkError(
-      'run time error: ' +
-        message +
-        '\n\tFILENAME="' +
-        this.str(this.scalar('FILENAME')) +
-        '" FNR=' +
-        this.str(this.scalar('FNR')) +
-        ' NR=' +
-        this.str(this.scalar('NR')),
-    )
-  }
-
-  sprintf(spec: string, values: FormatValue[]): string {
+  pieces(spec: string): Piece[] {
     let pieces = this.formats.get(spec)
     if (pieces === undefined) {
       pieces = compileFormat(spec)
       if (this.formats.size > 256) this.formats.clear()
       this.formats.set(spec, pieces)
     }
-    if (!pieces) return format(spec, values, false).text
+    return pieces
+  }
+
+  sprintf(spec: string, options: Interpreter.Printf): string {
+    const { values, sink } = options
     let out = ''
     let used = 0
-    for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i]
+    const fail = (message: string): never => {
+      sink?.(out)
+      throw this.fatal(message + (sink ? 'printf' : 'sprintf') + '("' + spec + '")')
+    }
+    for (const piece of this.pieces(spec)) {
       if (typeof piece === 'string') {
         out += piece
         continue
       }
-      const value = used < values.length ? values[used] : undefined
-      used++
-      if (piece.plain && piece.conv === 's')
-        out += value === undefined ? '' : typeof value === 'number' ? numberText(value) : value
-      else if (piece.plain && piece.conv === 'd' && typeof value === 'number') {
-        const int = Math.trunc(Number.isFinite(value) ? value : 0)
-        out += (int < 0 || Object.is(int, -0) ? '-' : '') + Math.abs(int).toString()
-      } else out += format(piece.spec, value === undefined ? [] : [value], false).text
+      const width =
+        piece.minimum === '*'
+          ? toInt(toNum(values[used++]))
+          : piece.minimum
+            ? Number(piece.minimum)
+            : undefined
+      const precision =
+        piece.digits === '*'
+          ? toInt(toNum(values[used++]))
+          : piece.digits === undefined
+            ? undefined
+            : Number(piece.digits || 0)
+      if (used >= values.length) fail('not enough arguments passed to ')
+      const text = this.convert(values[used++], { ...piece, width, precision })
+      if (text === undefined) fail('improper conversion(number ' + piece.count + ') in ')
+      out += text
     }
     return out
   }
 
-  formatArg(value: Value): FormatValue {
-    if (typeof value === 'number') return value
-    if (value === undefined) return ''
-    if (value instanceof Strnum) return looksNumeric(value.text) ? Number(value.text) : value.text
-    return value
+  convert(value: Value, field: Field): string | undefined {
+    const conv = field.conv
+    if (!/^[diouxX]$/.test(conv) && (field.size || !/^[sceEfgG]$/.test(conv))) return undefined
+    switch (conv) {
+      case 's':
+        return formatText(this.str(value), field)
+      case 'c': {
+        const code =
+          typeof value === 'number'
+            ? Number(toLong(value) & 0xffn)
+            : value === undefined
+              ? 0
+              : typeof value === 'string' || !looksNumeric(value.text)
+                ? (typeof value === 'string' ? value : value.text).charCodeAt(0) || 0
+                : toInt(toNum(value)) & 0xff
+        return formatText(String.fromCharCode(code), field)
+      }
+      case 'd': {
+        const n = toNum(value)
+        return n >= 2 ** 63
+          ? formatInteger(toUlong(n), { ...field, conv: 'u' })
+          : formatInteger(toLong(n), field)
+      }
+      case 'i':
+        return formatInteger(toLong(toNum(value)), field)
+      case 'o':
+      case 'x':
+      case 'X':
+      case 'u':
+        return formatInteger(toUlong(toNum(value)), field)
+    }
+    return formatFloat(toNum(value), field)
   }
 
   async getline(e: Expr & { k: 'getline' }): Promise<Value> {
@@ -2858,8 +3329,12 @@ class Interpreter {
       let reader = this.readers.get(command)
       if (!reader) {
         await this.flushAll()
-        const result = await this.ctx.exec(unicode(command))
-        reader = { lines: splitRecords(binary(result.stdout), '\n'), pos: 0 }
+        const result = await this.ctx.exec(chars(command))
+        reader = {
+          lines: splitRecords(bytes(result.stdout), this.str(this.scalar('RS'))),
+          pos: 0,
+          status: result.status,
+        }
         this.readers.set(command, reader)
       }
       line = reader.lines[reader.pos++]
@@ -2871,9 +3346,11 @@ class Interpreter {
         try {
           content =
             file === '-' || file === '/dev/stdin' || file === '/dev/fd/0'
-              ? binary(await this.ctx.stdin.text())
-              : latin(await this.ctx.fs.read(this.ctx.resolve(unicode(file))))
-        } catch {
+              ? bytes(await this.ctx.stdin.text())
+              : binary(await this.ctx.fs.read(this.ctx.resolve(chars(file))))
+        } catch (error) {
+          if (error instanceof FsError && error.code === 'EISDIR')
+            throw new AwkError('read error (Is a directory)')
           return -1
         }
         reader = { lines: splitRecords(content, this.str(this.scalar('RS'))), pos: 0 }
@@ -2881,19 +3358,13 @@ class Interpreter {
       }
       line = reader.lines[reader.pos++]
     } else {
-      if (this.preload && !this.pending()) {
-        const preload = this.preload
-        this.preload = undefined
-        await preload()
-      }
       line = this.next()
-      while (line === undefined && this.more) {
-        const text = await this.more()
-        if (text === null) {
-          this.more = undefined
-          break
-        }
-        this.load(text)
+      while (line === undefined) {
+        if (this.more) {
+          const text = await this.more()
+          if (text === null) this.more = undefined
+          else this.load(text)
+        } else if (!this.advance || !(await this.advance())) break
         line = this.next()
       }
       if (line !== undefined) {
@@ -2903,10 +3374,7 @@ class Interpreter {
     }
     if (line === undefined) return 0
     if (e.target) await this.assignTo(e.target, new Strnum(line))
-    else {
-      this.setRecord(line)
-      if (e.command || e.file) this.globals.set('NR', toNum(this.scalar('NR')) + 1)
-    }
+    else this.setRecord(line)
     return 1
   }
 
@@ -2925,13 +3393,14 @@ class Interpreter {
     }
     if (key === '/dev/stderr') {
       this.flushOut()
-      this.ctx.stderr.write(unicode(text))
+      this.ctx.stderr.write(chars(text))
       return
     }
     let output = this.outputs.get(key)
     if (!output) {
       output = { kind: op === '|' ? 'pipe' : 'file', text: '', append: op === '>>' }
       this.outputs.set(key, output)
+      if (op === '|') this.flushOut()
     }
     output.text += text
     if (output.text.length > this.ctx.limits.maxBufferLength)
@@ -2939,30 +3408,31 @@ class Interpreter {
   }
 
   async flush(key: string, output: { kind: 'file' | 'pipe'; text: string; append: boolean }) {
-    this.flushOut()
     if (output.kind === 'pipe') {
-      const result = await this.ctx.exec(unicode(key), unicode(output.text))
-      this.print(binary(result.stdout))
+      const result = await this.ctx.exec(chars(key), chars(output.text))
+      this.ctx.stdout.write(result.stdout)
     } else {
-      await this.ctx.fs
-        .write(this.ctx.resolve(unicode(key)), raw(output.text), output.append)
-        .catch((error: unknown) => {
-          if (!(error instanceof FsError)) throw error
-          throw new AwkError(
-            'cannot open "' +
-              key +
-              '" for output (' +
-              error.message.slice(error.message.lastIndexOf(': ') + 2) +
-              ')',
-          )
-        })
+      try {
+        await this.ctx.fs.write(this.ctx.resolve(chars(key)), raw(output.text), output.append)
+      } catch (error) {
+        if (!(error instanceof FsError)) throw error
+        throw new AwkError(
+          'cannot open "' +
+            key +
+            '" for output (' +
+            (key
+              ? error.message.slice(error.message.lastIndexOf(': ') + 2)
+              : 'No such file or directory') +
+            ')',
+        )
+      }
       output.append = true
     }
     output.text = ''
   }
 
-  async flushAll() {
-    this.flushOut()
+  async flushAll(last = false) {
+    if (!last) this.flushOut()
     for (const [key, output] of this.outputs)
       if (output.text || output.kind === 'file') await this.flush(key, output)
     this.flushOut()
@@ -2995,13 +3465,13 @@ class Interpreter {
         return
       }
       case 'printf': {
-        if (!s.args.length) throw new AwkError('printf: no format')
-        const values: FormatValue[] = []
+        const values: Value[] = []
+        for (const arg of s.args.slice(1)) values.push(await this.eval(arg))
         const spec = this.str(await this.eval(s.args[0]))
-        for (const arg of s.args.slice(1)) values.push(this.formatArg(await this.eval(arg)))
-        if (this.needs(spec) > values.length)
-          throw this.runtime('not enough arguments passed to printf("' + spec + '")')
-        await this.write(format(spec, values, false).text, s.redirect)
+        const target = s.redirect && this.str(await this.eval(s.redirect.target))
+        const sink: Sink = (text) =>
+          s.redirect ? this.emit(text, s.redirect.op, target!) : this.print(text)
+        sink(this.sprintf(spec, { values, sink }))
         return
       }
       case 'if':
@@ -3050,7 +3520,7 @@ class Interpreter {
       case 'continue':
         throw new LoopSignal(s.k)
       case 'exit':
-        throw new ExitSignal(s.e ? Math.trunc(toNum(await this.eval(s.e))) : 0)
+        throw new ExitSignal(s.e ? toInt(toNum(await this.eval(s.e))) & 0xff : 0)
       case 'return':
         throw new ReturnSignal(s.e ? await this.eval(s.e) : undefined)
       case 'delete': {
@@ -3078,6 +3548,10 @@ class Interpreter {
   }
 }
 
+declare namespace Interpreter {
+  type Printf = { values: Value[]; sink?: Sink | undefined }
+}
+
 function splitRecords(text: string, rs: string): string[] {
   if (rs === '\n') {
     const parts = text.split('\n')
@@ -3090,113 +3564,241 @@ function splitRecords(text: string, rs: string): string[] {
       .split(/\n\n+/)
       .map((part) => part.replace(/\n+$/, ''))
       .filter((part) => part !== '')
-  const parts = text.split(rs.length === 1 ? rs : regex(rs))
-  if (parts[parts.length - 1] === '' || parts[parts.length - 1] === '\n') parts.pop()
+  const parts = rs.length === 1 ? text.split(rs) : separate(text, new RegExp(regex(rs).source, 'g'))
+  if (parts[parts.length - 1] === '') parts.pop()
   return parts
+}
+
+function separate(text: string, pattern: RegExp): string[] {
+  const parts: string[] = []
+  let start = 0
+  pattern.lastIndex = 0
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    if (!match[0]) {
+      pattern.lastIndex++
+      continue
+    }
+    parts.push(text.slice(start, match.index))
+    start = pattern.lastIndex
+  }
+  parts.push(text.slice(start))
+  return parts
+}
+
+const USAGE = [
+  'Usage: mawk [Options] [Program] [file ...]',
+  '',
+  'Program:',
+  '    The -f option value is the name of a file containing program text.',
+  '    If no -f option is given, a "--" ends option processing; the following',
+  '    parameters are the program text.',
+  '',
+  'Options:',
+  '    -f program-file  Program  text is read from file instead of from the',
+  '                     command-line.  Multiple -f options are accepted.',
+  '    -F value         sets the field separator, FS, to value.',
+  '    -v var=value     assigns value to program variable var.',
+  '    --               unambiguous end of options.',
+  '',
+  '    Implementation-specific options are prefixed with "-W".  They can be',
+  '    abbreviated:',
+  '',
+  '    -W version       show version information and exit.',
+  '    -W compat        pre-POSIX 2001.',
+  '    -W dump          show assembler-like listing of program and exit.',
+  '    -W help          show this message and exit.',
+  '    -W interactive   set unbuffered output, line-buffered input.',
+  '    -W exec file     use file as program as well as last option.',
+  '    -W posix         stricter POSIX checking.',
+  '    -W random=number set initial random seed.',
+  '    -W sprintf=number adjust size of sprintf buffer.',
+  '    -W usage         show this message and exit.',
+].join('\n')
+
+const VERSION = [
+  'mawk 1.3.4 20240123',
+  'Copyright 2008-2023,2024, Thomas E. Dickey',
+  'Copyright 1991-1996,2014, Michael D. Brennan',
+  '',
+  'random-funcs:       arc4random_stir/arc4random',
+  'regex-funcs:        internal',
+  '',
+  'compiled limits:',
+  'sprintf buffer      8192',
+  'maximum-integer     9223372036854775808',
+].join('\n')
+
+const OPTIONS = [
+  'version',
+  'dump',
+  'exec',
+  'help',
+  'interactive',
+  'posix',
+  'random',
+  'sprintf',
+  'traditional',
+  'usage',
+]
+
+function rmEscape(text: string): string {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i + 1]
+    if (text[i] !== '\\') out += text[i]
+    else if (c === undefined) out += '\\'
+    else if (c === '"' || c === '\\') {
+      out += c
+      i++
+    } else if (
+      c in SIMPLE_ESCAPES ||
+      /[0-7]/.test(c) ||
+      (c === 'x' && /[0-9a-fA-F]/.test(text[i + 2] ?? ''))
+    ) {
+      const [value, next] = unescape(text, i + 1)
+      out += value
+      i = next - 1
+    } else {
+      out += '\\' + c
+      i++
+    }
+  }
+  return out
 }
 
 export const awk: CommandHandler = streaming(async (ctx) => {
   AwkArray.limits = ctx.limits
   const args = ctx.args
+  if (!args.length) {
+    ctx.stderr.write(USAGE + '\n')
+    return 0
+  }
   let fs: string | undefined
   const assigns: [string, string][] = []
-  let source: string | undefined
+  const files: string[] = []
   let i = 0
-  for (; i < args.length; i++) {
+  for (; i < args.length && args[i].startsWith('-'); i++) {
     const arg = args[i]
+    if (arg === '-') {
+      if (!files.length) return 0
+      break
+    }
     if (arg === '--') {
       i++
       break
     }
-    if (arg.startsWith('-F')) fs = arg.length > 2 ? arg.slice(2) : args[++i]
-    else if (arg.startsWith('-v')) {
-      const assignment = arg.length > 2 ? arg.slice(2) : args[++i]
-      const eq = assignment.indexOf('=')
-      if (eq < 0) throw new CommandError('-v: invalid assignment ' + assignment, 2)
-      assigns.push([assignment.slice(0, eq), assignment.slice(eq + 1)])
-    } else if (arg === '-f') {
-      const file = args[++i] ?? ''
-      const text = await ctx.fs.read(ctx.resolve(file)).then(decode, (error: unknown) => {
-        if (!(error instanceof FsError)) throw error
-        throw new CommandError('cannot open "' + file + '" (No such file or directory)', 2)
-      })
-      source = (source ?? '') + text + '\n'
-    } else if (/^(-W ?|--)(v|version)$/.test(arg) || (arg === '-W' && args[i + 1] === 'version')) {
-      ctx.stdout.write(VERSION)
-      return 0
-    } else if (
-      /^(-W ?|--)(help|usage)$/.test(arg) ||
-      (arg === '-W' && /^(help|usage)$/.test(args[i + 1] ?? ''))
-    ) {
-      ctx.stdout.write(USAGE)
-      return 0
-    } else if (
-      arg.startsWith('--') ||
-      (arg.startsWith('-') && arg.length > 1 && !/^-[Fvf]/.test(arg))
-    ) {
-      if (arg === '-e' || arg === '--source') source = (source ?? '') + args[++i] + '\n'
-      else continue
-    } else break
-  }
-  if (source === undefined) {
-    if (i >= args.length) {
-      ctx.stderr.write(USAGE)
-      return 0
+    if (arg.startsWith('--')) {
+      const name = arg.slice(2).split('=')[0]
+      if (name === 'version') {
+        ctx.stdout.write(VERSION + '\n')
+        return 0
+      }
+      if (name === 'help' || name === 'usage') {
+        ctx.stdout.write(USAGE + '\n')
+        return 0
+      }
+      if (
+        !['posix', 'traditional', 'lint', 'lint-old', 'non-decimal-data', 're-interval'].includes(
+          name,
+        )
+      )
+        throw new CommandError('not an option: ' + arg, 2)
+      continue
     }
-    source = args[i++]
+    const option = arg[1]
+    if (arg.length === 2 && i === args.length - 1) {
+      if ('WFvf'.includes(option)) throw new CommandError('option ' + arg + ' lacks argument', 2)
+      throw new CommandError('not an option: ' + arg, 2)
+    }
+    const value = arg.length > 2 ? arg.slice(2) : args[++i]
+    if (option === 'W') {
+      for (const part of value.split(',')) {
+        const name = part.split('=')[0]
+        if (!name) continue
+        const known = OPTIONS.find((candidate) => candidate.startsWith(name))
+        if (known === 'version') {
+          ctx.stdout.write(VERSION + '\n')
+          return 0
+        }
+        if (known === 'help' || known === 'usage') {
+          ctx.stdout.write(USAGE + '\n')
+          return 0
+        }
+        if (!known) ctx.stderr.write('awk: vacuous option: -W "' + name + '"\n')
+      }
+    } else if (option === 'v') {
+      const eq = value.indexOf('=')
+      if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(value))
+        throw new CommandError('improper assignment: -v ' + value, 2)
+      assigns.push([value.slice(0, eq), value.slice(eq + 1)])
+    } else if (option === 'F') fs = value
+    else if (option === 'f') files.push(value)
+    else if (option !== 'r') throw new CommandError('not an option: ' + arg, 2)
+  }
+  const sources: string[] = []
+  for (const file of files) {
+    try {
+      sources.push(binary(await ctx.fs.read(ctx.resolve(file))))
+    } catch (error) {
+      if (!(error instanceof FsError)) throw error
+      throw new CommandError('cannot open "' + file + '" (No such file or directory)', 2)
+    }
+  }
+  if (!files.length) {
+    if (i >= args.length) return 0
+    sources.push(bytes(args[i++]))
   }
   const operands = args.slice(i)
+  const located = (message: string) => {
+    if (!files.length) return message
+    return message.replace(/(^|\nawk: )line (\d+): /g, (_, head: string, at: string) => {
+      let line = Number(at)
+      for (let index = 0; index < files.length; index++) {
+        const lines = sources[index].split('\n').length
+        if (line <= lines || index === files.length - 1)
+          return head + files[index] + ': line ' + line + ': '
+        line -= lines
+      }
+      return head + 'line ' + at + ': '
+    })
+  }
   let program: Program
   try {
-    program = new Parser(lex(binary(source))).program()
+    program = new Parser(lex(sources.join('\n'))).program()
   } catch (error) {
-    if (error instanceof AwkError) throw new CommandError(unicode(error.message), 2)
+    if (error instanceof AwkError) throw new CommandError(chars(located(error.message)), 2)
     throw error
   }
   const interp = new Interpreter(ctx, program)
   try {
     interp.prepare()
   } catch (error) {
-    if (error instanceof AwkError) throw new CommandError(unicode(error.message), 2)
+    if (error instanceof AwkError) throw new CommandError(chars(error.message), 2)
     throw error
   }
-  const unescape = (value: string) =>
-    value.replace(
-      /\\(.)/g,
-      (_, c: string) => ({ n: '\n', t: '\t', '\\': '\\', r: '\r' })[c] ?? '\\' + c,
-    )
-  if (fs !== undefined) interp.globals.set('FS', fs === 't' ? '\t' : binary(unescape(fs)))
-  for (const [name, value] of assigns) interp.globals.set(name, new Strnum(binary(unescape(value))))
+  if (fs !== undefined) interp.globals.set('FS', rmEscape(bytes(fs)))
+  for (const [name, value] of assigns) interp.globals.set(name, new Strnum(rmEscape(bytes(value))))
   const argv = new Map<string, Value>([['0', 'awk']])
-  operands.forEach((operand, index) => argv.set(String(index + 1), new Strnum(binary(operand))))
+  operands.forEach((operand, index) => argv.set(String(index + 1), new Strnum(bytes(operand))))
   interp.globals.set('ARGV', argv)
   interp.globals.set('ARGC', operands.length + 1)
-  let exitCode = 0
-  let exiting = false
-  let preloaded: string | undefined
-  interp.preload = async () => {
-    const operand = operands.find((operand) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(operand)) ?? '-'
-    let text = ''
+  const read = async (operand: string) => {
     try {
-      text =
-        operand === '-'
-          ? binary(await ctx.stdin.text())
-          : latin(await ctx.fs.read(ctx.resolve(operand)))
+      return binary(await ctx.fs.read(ctx.resolve(chars(operand))))
     } catch (error) {
       if (!(error instanceof FsError)) throw error
+      throw new AwkError(
+        error.code === 'EISDIR'
+          ? 'read error (Is a directory)'
+          : 'cannot open "' + operand + '" (No such file or directory)',
+      )
     }
-    preloaded = operand
-    interp.globals.set(
-      'FILENAME',
-      operand === '-' && !operands.includes('-') ? '' : binary(operand),
-    )
-    interp.load(text)
   }
   const stdin = () => {
-    const chunks = batches(ctx.stdin)
+    const batch = batches(ctx.stdin)
     const next = async () => {
-      const text = await chunks()
-      return text === null ? null : binary(text)
+      const text = await batch()
+      return text === null ? null : bytes(text)
     }
     const more = async (): Promise<string | null> => {
       if (interp.str(interp.scalar('RS')) === '\n') return next()
@@ -3206,7 +3808,36 @@ export const awk: CommandHandler = streaming(async (ctx) => {
     }
     return { first: async () => (await more()) ?? '', more }
   }
+  let index = 0
+  let consumed = false
+  interp.advance = async () => {
+    for (;;) {
+      let operand = '-'
+      if (++index < toNum(interp.globals.get('ARGC') as Value)) {
+        const value = interp.array('ARGV').get(String(index))
+        operand = value === undefined ? '' : interp.str(value)
+      } else if (consumed) return false
+      if (!operand) continue
+      const assignment = operand.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/)
+      if (assignment) {
+        interp.globals.set(assignment[1], new Strnum(rmEscape(assignment[2])))
+        continue
+      }
+      consumed = true
+      interp.globals.set('FILENAME', operand)
+      interp.globals.set('FNR', 0)
+      if (operand === '-') {
+        const input = stdin()
+        interp.load(await input.first())
+        interp.more = input.more
+      } else interp.load(await read(operand))
+      interp.open = true
+      return true
+    }
+  }
+  let exitCode = 0
   try {
+    let exiting = false
     try {
       for (const block of program.begin) await interp.statements(block)
     } catch (error) {
@@ -3214,96 +3845,33 @@ export const awk: CommandHandler = streaming(async (ctx) => {
       exitCode = error.code
       exiting = true
     }
-    if (!exiting && (program.rules.length || program.end.length)) {
-      const inputs = operands.length ? operands : ['-']
-      let consumed = false
-      for (const operand of inputs) {
-        const assignment = operand.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/)
-        if (assignment) {
-          interp.globals.set(assignment[1], new Strnum(binary(unescape(assignment[2]))))
-          continue
-        }
-        consumed = true
-        if (preloaded === operand) {
-          preloaded = undefined
-          if (await runFile(interp, program, undefined, operand)) {
-            exiting = true
-            exitCode = interp.exitCode
-            break
-          }
-          continue
-        }
-        if (operand === '-') {
-          const input = stdin()
-          if (await runFile(interp, program, await input.first(), operand, input.more)) {
-            exiting = true
-            exitCode = interp.exitCode
-            break
-          }
-          continue
-        }
-        let text: string
-        try {
-          text = latin(await ctx.fs.read(ctx.resolve(operand)))
-        } catch (error) {
-          if (!(error instanceof FsError)) throw error
-          await interp.flushAll()
-          ctx.stderr.write('awk: cannot open "' + operand + '" (No such file or directory)\n')
-          return 2
-        }
-        if (await runFile(interp, program, text, operand)) {
-          exiting = true
+    if (!exiting && (program.rules.length || program.end.length))
+      while (interp.open || (await interp.advance()))
+        if (await runFile(interp, program)) {
           exitCode = interp.exitCode
           break
         }
-      }
-      if (!consumed && !exiting) {
-        const input = preloaded === '-' ? undefined : stdin()
-        if (
-          await runFile(interp, program, input ? await input.first() : undefined, '', input?.more)
-        ) {
-          exiting = true
-          exitCode = interp.exitCode
-        }
-      }
-    }
     try {
       for (const block of program.end) await interp.statements(block)
     } catch (error) {
       if (!(error instanceof ExitSignal)) throw error
       exitCode = error.code
     }
+    await interp.flushAll(true)
   } catch (error) {
-    if (error instanceof AwkError) {
-      await interp.flushAll()
-      throw new CommandError(unicode(error.message), 2)
+    if (!(error instanceof AwkError)) {
+      interp.flushOut()
+      throw error
     }
-    interp.flushOut()
-    if (error instanceof NextSignal || error instanceof NextFileSignal)
-      throw new CommandError('next used in BEGIN or END action', 2)
-    throw error
+    await interp.flushAll(true).catch((failure) => {
+      if (!(failure instanceof AwkError)) throw failure
+    })
+    throw new CommandError(chars(error.message), 2)
   }
-  await interp.flushAll().catch((error: unknown) => {
-    if (!(error instanceof AwkError)) throw error
-    throw new CommandError(unicode(error.message), 2)
-  })
   return exitCode
 })
 
-async function runFile(
-  interp: Interpreter,
-  program: Program,
-  text: string | undefined,
-  name: string,
-  more?: () => Promise<string | null>,
-): Promise<boolean> {
-  interp.preload = undefined
-  interp.globals.set('FILENAME', binary(name))
-  if (text !== undefined) {
-    interp.globals.set('FNR', 0)
-    interp.load(text)
-  }
-  interp.more = more
+async function runFile(interp: Interpreter, program: Program): Promise<boolean> {
   try {
     for (;;) {
       interp.skipped = false
@@ -3323,6 +3891,8 @@ async function runFile(
     }
   } finally {
     interp.more = undefined
+    interp.open = false
+    interp.load('')
   }
 }
 

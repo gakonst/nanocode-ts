@@ -48,7 +48,7 @@ function bracket(pattern: string, start: number, shell: boolean): [string, numbe
 }
 
 export function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&')
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 }
 
 export function globSource(pattern: string, path = false): string {
@@ -252,17 +252,35 @@ export function toNumber(value: FormatValue, octal = false): number {
   return parseFloat(text) || 0
 }
 
+function fixed(abs: number, digits: number): string {
+  const text = abs.toFixed(digits)
+  if (digits > 70) return text
+  const long = abs.toFixed(digits + 30)
+  if (!/50{29}$/.test(long)) return text
+  const down = long.slice(0, digits ? -30 : -31)
+  return Number(down[down.length - 1]) % 2 ? text : down
+}
+
+function exponential(abs: number, digits: number): string {
+  const text = abs.toExponential(digits)
+  if (digits > 70) return text
+  const [mantissa, exponent] = abs.toExponential(digits + 30).split('e')
+  if (!/50{29}$/.test(mantissa)) return text
+  const down = mantissa.slice(0, digits ? -30 : -31)
+  return Number(down[down.length - 1]) % 2 ? text : down + 'e' + exponent
+}
+
 function general(n: number, precision: number, alternate: boolean): string {
   const p = precision || 1
   const abs = Math.abs(n)
   const exponent = abs === 0 ? 0 : Math.floor(Math.log10(abs))
   let body: string
   if (exponent < -4 || exponent >= p) {
-    body = abs.toExponential(p - 1)
+    body = exponential(abs, p - 1)
     if (!alternate) body = body.replace(/\.?0+e/, 'e')
     body = body.replace(/e([+-])(\d)$/, 'e$10$2')
   } else {
-    body = abs.toFixed(Math.max(0, p - 1 - exponent))
+    body = fixed(abs, Math.max(0, p - 1 - exponent))
     if (!alternate && body.includes('.')) body = body.replace(/\.?0+$/, '')
   }
   return body
@@ -295,7 +313,7 @@ function shellQuote(text: string): string {
       ) +
       "'"
     )
-  return text.replace(/[^\w@%+=:,.\/~-]|^~/g, '\\$&')
+  return text.replace(/[^\w@%+=:,./~-]|^~/g, '\\$&')
 }
 
 const CONVERSION =
@@ -375,7 +393,7 @@ export function format(
       if (conv === 'q')
         text = shell
           ? shellQuote(text)
-          : /^[\w@%+=:,.\/-]+$/.test(text)
+          : /^[\w@%+=:,./-]+$/.test(text)
             ? text
             : "'" + text.replace(/'/g, "'\\''") + "'"
       if (precision !== undefined) text = text.slice(0, precision)
@@ -423,11 +441,9 @@ export function format(
           digits = (conv === 'o' ? '0' : conv === 'x' ? '0x' : '0X') + digits
         text = digits
       } else if (!Number.isFinite(n)) text = sign(n, Number.isNaN(n) ? 'nan' : 'inf')
-      else if (conv === 'f' || conv === 'F') text = sign(n, Math.abs(n).toFixed(precision ?? 6))
+      else if (conv === 'f' || conv === 'F') text = sign(n, fixed(Math.abs(n), precision ?? 6))
       else if (conv === 'e' || conv === 'E') {
-        const body = Math.abs(n)
-          .toExponential(precision ?? 6)
-          .replace(/e([+-])(\d)$/, 'e$10$2')
+        const body = exponential(Math.abs(n), precision ?? 6).replace(/e([+-])(\d)$/, 'e$10$2')
         text = sign(n, conv === 'E' ? body.toUpperCase() : body)
       } else {
         const body = general(n, precision ?? 6, flags.includes('#'))
