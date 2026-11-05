@@ -122,6 +122,8 @@ struct Configuration {
     #[serde(default)]
     max_resident_subagents: Option<usize>,
     #[serde(default)]
+    subagent_budgets: bool,
+    #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
@@ -453,6 +455,11 @@ enum Command {
         agent_id: Option<u64>,
         question: String,
     },
+    SetBudget {
+        agent_id: u64,
+        #[serde(default)]
+        budget_usd: Option<f64>,
+    },
     CompletionOrigin {
         request_id: String,
     },
@@ -650,10 +657,16 @@ fn ready() -> Result<Rc<Session>, String> {
 async fn subagent(session_id: &str) -> Option<Value> {
     let subagents = current()?.subagents.clone()?;
     let lineage = subagents.lineage(session_id).await;
+    let budgets = subagents.budgets(session_id).await;
     Some(json!({
         "id": lineage.first()?,
         "parent": lineage.get(1),
         "tree": lineage.last()?,
+        "lineage": lineage,
+        "budgets": budgets
+            .iter()
+            .map(|(id, usd)| json!({"id": id, "usd": usd.as_f64()}))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -1025,6 +1038,11 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let subagents = runtime.subagents().cloned();
     if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
         subagents.set_max_resident(limit);
+    }
+    if config.subagent_budgets
+        && let Some(subagents) = &subagents
+    {
+        subagents.update_spawn_policy(|policy| policy.budgets = true);
     }
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
@@ -1687,6 +1705,29 @@ fn execute(command: Command) -> Executed {
                 None => session.inbox.agent().side_question(question).await.map_err(text)?,
             };
             Ok(json!({"text": answer.text(), "usage": answer.usage()}))
+        }),
+        Command::SetBudget {
+            agent_id,
+            budget_usd,
+        } => executed(async move {
+            let budget = match budget_usd {
+                Some(usd) if !usd.is_finite() || usd <= 0.0 => {
+                    return Err("budget_usd must be a positive number of USD or null".into());
+                }
+                Some(usd) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let nano = (usd * 1e9).round() as u64;
+                    Some(nanocode::UsdAmount::from_nano_usd(nano))
+                }
+                None => None,
+            };
+            let session = ready()?;
+            let summary = session
+                .subagents()?
+                .set_budget(session.inbox.session_id(), AgentId::new(agent_id), budget)
+                .await
+                .map_err(text)?;
+            serde_json::to_value(summary).map_err(text)
         }),
         Command::CompletionOrigin { request_id } => executed(async move {
             let origin = match &ready()?.subagents {

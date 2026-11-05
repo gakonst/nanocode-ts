@@ -1282,6 +1282,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 ...(options.maxResidentSubagents === undefined
                   ? {}
                   : { max_resident_subagents: options.maxResidentSubagents }),
+                ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
                 ...withHand(
                   options.instructions,
                   this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -2325,10 +2326,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return !!descriptor.executor_id || this.env.RUNNER_ENABLED === 'true'
     }
 
-    private releaseIdle(warmed = false): void {
+    private releaseIdle(warmed = false, keep?: AgentRuntime.AgentRuntime): void {
       const budget = policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES')
       for (const [scope, runtime] of this.residents) {
-        if (runtime.memoryBytes > budget) this.retire(scope, runtime)
+        if (runtime !== keep && runtime.memoryBytes > budget) this.retire(scope, runtime)
       }
       if (this.linger !== undefined) clearTimeout(this.linger)
       this.linger = undefined
@@ -2625,7 +2626,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'method not allowed' }, 405)
       if (action === 'events') return json({ error: 'method not allowed' }, 405)
       const input = await (async () => {
-        if (action !== 'messages' && action !== 'side_question') return {}
+        if (action !== 'messages' && action !== 'side_question' && action !== 'budget') return {}
         const body = await bodyText(request, valueLimit)
         if (body === undefined) return undefined
         try {
@@ -2637,7 +2638,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (input === undefined) return json({ error: tooLarge }, 413)
       if (input === null || typeof input !== 'object' || Array.isArray(input))
         return json({ error: 'the body must be a JSON object' }, 400)
-      const allowed = action === 'messages' ? ['message', 'priority'] : ['question']
+      const allowed =
+        action === 'messages'
+          ? ['message', 'priority']
+          : action === 'budget'
+            ? ['budget_usd']
+            : ['question']
       const unknown = Object.keys(input).filter((field) => !allowed.includes(field))
       if (unknown.length) return json({ error: `unknown field ${unknown[0]}` }, 400)
       if (
@@ -2657,6 +2663,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         (typeof input['question'] !== 'string' || !input['question'].trim())
       )
         return json({ error: 'question must be a nonempty string' }, 400)
+      const budget = input['budget_usd']
+      if (
+        action === 'budget' &&
+        budget !== null &&
+        (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0)
+      )
+        return json({ error: 'budget_usd must be a positive number of USD or null' }, 400)
       const runtime = await this.subagentRuntime(scope, descriptor)
       if (!runtime) return json({ error: 'subagent not found' }, 404)
       try {
@@ -2672,6 +2685,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json(
             await runtime.subagents.sideQuestion(id, { question: input['question'] as string }),
           )
+        if (action === 'budget')
+          return json({ agent: await runtime.subagents.setBudget(id, budget as number | null) })
         const agents =
           action === 'interrupt'
             ? await runtime.subagents.interrupt(id)
@@ -2735,7 +2750,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           : (JSON.parse(background) as SessionDescriptor),
       )
       if (!this.pumping && this.queueKnownEmpty() && !this.metadata.first('background:'))
-        this.releaseIdle(true)
+        this.releaseIdle(true, runtime)
       return runtime
     }
 
@@ -2834,7 +2849,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const files = /^\/sessions\/([^/]+)\/files(\/.*)?$/.exec(url.pathname)
     const match = files
       ? undefined
-      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents|side_question)(?:\/([^/]+)(?:\/(cancel|close|events|interrupt|messages|side_question))?)?)?$/.exec(
+      : /^\/sessions\/([^/]+)(?:\/(turns|events|metrics|socket|hands|crash|warm|subagents|side_question)(?:\/([^/]+)(?:\/(budget|cancel|close|events|interrupt|messages|side_question))?)?)?$/.exec(
           url.pathname,
         )
     const routed = (() => {
@@ -2966,6 +2981,7 @@ export declare namespace create {
     plans?: Plans.Options<E>
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
     streamToolInput?: boolean
+    subagentBudgets?: boolean
     subagents?: boolean
     subscription?(
       account: string,

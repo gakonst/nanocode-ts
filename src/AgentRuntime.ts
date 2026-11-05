@@ -1498,6 +1498,16 @@ async function create(
           question: options.question,
         })) as Contracts.SideAnswer
       },
+
+      async setBudget(
+        agent_id: number,
+        budget_usd: number | null,
+      ): Promise<Contracts.AgentSummary> {
+        return (await internal.command('set_budget', {
+          agent_id,
+          budget_usd,
+        })) as Contracts.AgentSummary
+      },
     },
 
     async completionOrigin(requestId: string): Promise<string | null> {

@@ -68,6 +68,7 @@ export type AgentConfiguration = {
   cloudflare_account_id?: string
   max_tokens?: number
   max_resident_subagents?: number
+  subagent_budgets?: boolean
   service_tier?: ServiceTier
   subagents?: boolean
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>
@@ -129,7 +130,13 @@ export type ToolCallContext = {
   subagent: Subagent | null
 }
 
-export type Subagent = { id: number; parent: number | null; tree: number }
+export type Subagent = {
+  id: number
+  parent: number | null
+  tree: number
+  lineage: number[]
+  budgets: { id: number; usd: number }[]
+}
 
 export type AgentStatus =
   | { state: 'pending' | 'running' | 'interrupted' | 'closing' | 'closed' }
@@ -145,6 +152,7 @@ export type AgentSummary = {
   model?: string | { backend: string; model: string }
   thinking?: Thinking
   reasoning_mode: 'standard' | 'pro'
+  budget_usd?: number
   last_output?: unknown
   completion_revision?: number
   usage?: Record<string, unknown>
