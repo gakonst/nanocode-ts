@@ -594,7 +594,8 @@ const tar: CommandHandler = async (ctx) => {
         'Refusing to write archive contents to terminal (missing -f option?)',
         2,
       )
-    if (!operands.length) throw new CommandError('Cowardly refusing to create an empty archive', 2)
+    if (!operands.length && !values.has('T'))
+      throw new CommandError('Cowardly refusing to create an empty archive', 2)
     let entries: TarEntry[] = []
     if (mode[0] !== 'c' && file !== '-') {
       const old = await ctx.fs.read(ctx.resolve(file)).catch(() => undefined)
