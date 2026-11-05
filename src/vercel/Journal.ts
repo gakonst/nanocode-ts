@@ -275,6 +275,7 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
 
       if (wrote) stats.transactions++
       else stats.reads++
+      if (!wrote && durability !== 'strict') return Promise.resolve(rows)
 
       const durable = enqueue(wrote ? { kind, operation, statements } : undefined)
       if (durability === 'strict' || queued > batchBytes) return durable.then(() => rows)
