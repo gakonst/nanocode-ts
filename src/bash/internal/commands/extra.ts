@@ -7,9 +7,17 @@ import {
   type CommandHandler,
 } from '../Shell.ts'
 import { FsError } from '../../FileSystem.ts'
-import { baseOf, byte, decode, encode, parentOf } from '../Fs.ts'
-import { escapeRegExp, format, globRegExp, globSource, lines, posixRegExp } from '../Text.ts'
-import { checksum, perlSource, requireRegExp, scan } from './text.ts'
+import { baseOf, byte, byteLength, decode, encode, parentOf } from '../Fs.ts'
+import {
+  escapeRegExp,
+  format,
+  globRegExp,
+  globSource,
+  joinLines,
+  lines,
+  posixRegExp,
+} from '../Text.ts'
+import { checksum, perlSource, requireRegExp, rustMatches, scan } from './text.ts'
 import {
   allInput,
   device,
@@ -1667,31 +1675,54 @@ function ignoredBy(rules: IgnoreRule[], path: string, directory: boolean): boole
 }
 
 const RG_TYPES: Record<string, string[]> = {
-  c: ['*.c', '*.h', '*.H'],
-  cpp: ['*.C', '*.cc', '*.cpp', '*.cxx', '*.h', '*.H', '*.hh', '*.hpp', '*.hxx', '*.inl'],
+  c: ['*.[chH]', '*.[chH].in', '*.cats'],
+  cpp: [
+    '*.[ChH]',
+    '*.[ChH].in',
+    '*.[ch]pp',
+    '*.[ch]pp.in',
+    '*.[ch]xx',
+    '*.[ch]xx.in',
+    '*.cc',
+    '*.cc.in',
+    '*.hh',
+    '*.hh.in',
+    '*.inl',
+  ],
   cs: ['*.cs'],
   css: ['*.css', '*.scss'],
   go: ['*.go'],
   html: ['*.ejs', '*.htm', '*.html'],
   java: ['*.java', '*.jsp', '*.jspx', '*.properties'],
   js: ['*.cjs', '*.js', '*.jsx', '*.mjs', '*.vue'],
-  json: ['*.json', '*.jsonl', '*.sarif', 'composer.lock'],
+  json: ['*.json', '*.sarif', 'composer.lock'],
+  jsonl: ['*.jsonl'],
   kotlin: ['*.kt', '*.kts'],
   lua: ['*.lua'],
-  make: ['*.mak', '*.mk', 'GNUmakefile', 'Makefile', 'makefile'],
+  make: [
+    '*.mak',
+    '*.mk',
+    '[Gg][Nn][Uu]makefile',
+    '[Gg][Nn][Uu]makefile.am',
+    '[Gg][Nn][Uu]makefile.in',
+    '[Mm]akefile',
+    '[Mm]akefile.am',
+    '[Mm]akefile.in',
+  ],
   markdown: ['*.markdown', '*.md', '*.mdown', '*.mdwn', '*.mdx', '*.mkd', '*.mkdn'],
   md: ['*.markdown', '*.md', '*.mdown', '*.mdwn', '*.mdx', '*.mkd', '*.mkdn'],
-  php: ['*.php', '*.php3', '*.php4', '*.php5', '*.phtml'],
+  php: ['*.php', '*.php3', '*.php4', '*.php5', '*.php7', '*.php8', '*.pht', '*.phtml'],
   py: ['*.py', '*.pyi'],
   python: ['*.py', '*.pyi'],
-  rb: ['*.gemspec', '*.rb', '.irbrc', 'Gemfile', 'Rakefile'],
-  ruby: ['*.gemspec', '*.rb', '.irbrc', 'Gemfile', 'Rakefile'],
+  ruby: ['*.gemspec', '*.rb', '*.rbw', '.irbrc', 'Gemfile', 'Rakefile', 'config.ru'],
   rust: ['*.rs'],
   sh: [
     '*.bash',
     '*.bashrc',
     '*.csh',
+    '*.cshrc',
     '*.ksh',
+    '*.kshrc',
     '*.sh',
     '*.tcsh',
     '*.zsh',
@@ -1699,19 +1730,47 @@ const RG_TYPES: Record<string, string[]> = {
     '.bash_logout',
     '.bash_profile',
     '.bashrc',
+    '.cshrc',
+    '.kshrc',
+    '.login',
+    '.logout',
     '.profile',
+    '.tcshrc',
+    '.zlogin',
+    '.zlogout',
+    '.zprofile',
+    '.zshenv',
     '.zshrc',
+    'bash_login',
+    'bash_logout',
+    'bash_profile',
+    'bashrc',
+    'profile',
+    'zlogin',
+    'zlogout',
+    'zprofile',
+    'zshenv',
+    'zshrc',
   ],
-  sol: ['*.sol'],
+  solidity: ['*.sol'],
   sql: ['*.psql', '*.sql'],
-  svelte: ['*.svelte'],
   swift: ['*.swift'],
   toml: ['*.toml', 'Cargo.lock'],
   ts: ['*.cts', '*.mts', '*.ts', '*.tsx'],
-  tsx: ['*.tsx'],
   txt: ['*.txt'],
   typescript: ['*.cts', '*.mts', '*.ts', '*.tsx'],
-  xml: ['*.dtd', '*.xml', '*.xsd', '*.xsl', '*.xslt'],
+  xml: [
+    '*.dtd',
+    '*.rng',
+    '*.sch',
+    '*.xhtml',
+    '*.xjb',
+    '*.xml',
+    '*.xml.dist',
+    '*.xsd',
+    '*.xsl',
+    '*.xslt',
+  ],
   yaml: ['*.yaml', '*.yml'],
   zig: ['*.zig'],
 }
@@ -1722,7 +1781,7 @@ const rg: CommandHandler = async (ctx) => {
   for (const arg of ctx.args) {
     if (/^-u+$/.test(arg)) unrestricted += arg.length - 1
     else if (arg === '--unrestricted') unrestricted++
-    else if (/^-[ilcwFvnNHIUSsoqxaLp0.zP]*r[ilcwFvnNHIUSsoqxaLp0.zP]+$/.test(arg))
+    else if (/^-[ilcwFvnNHIUSsoqxaLp0.zPb]*r[ilcwFvnNHIUSsoqxaLp0.zPb]+$/.test(arg))
       args.push(arg.replace('r', ''))
     else args.push(arg)
   }
@@ -1745,7 +1804,7 @@ const rg: CommandHandler = async (ctx) => {
   )
     args.splice(replaceAt, 1)
   const parsed = options(args, {
-    flags: 'ilcwFvnNHIUSsoqxaLp0.zP',
+    flags: 'ilcwFvnNHIUSsoqxaLp0.zPb+',
     values: 'eAgCBtTmfrdjM',
     long: {
       include: 'g',
@@ -1804,7 +1863,8 @@ const rg: CommandHandler = async (ctx) => {
       'block-buffered': '',
       null: '0',
       pretty: 'p',
-      trim: '',
+      trim: '+',
+      'byte-offset': 'b',
       threads: 'j',
       'max-columns': 'M',
       'max-filesize': '',
@@ -1827,6 +1887,7 @@ const rg: CommandHandler = async (ctx) => {
     files: '1',
     heading: '2',
     vimgrep: '7',
+    trim: '+',
   }
   const has = (key: string) => f.has(longFlags[key] ?? key)
   const listFiles = has('files')
@@ -2087,43 +2148,50 @@ const rg: CommandHandler = async (ctx) => {
   const state = { printed: false }
   let found = false
   let firstHeading = true
+  const columns = Number(last(parsed, 'M') ?? 0) || undefined
+  const counting = f.has('c') || has('count-matches')
+  const silent = f.has('q') || f.has('l') || has('files-without-match') || counting
+  const selected = (line: string) => {
+    regex.lastIndex = 0
+    return regex.test(line) !== f.has('v')
+  }
   const search = (text: string, display: string | undefined, explicit: boolean) => {
-    if (!binaryText && text.includes('\0')) {
-      if (!explicit) return
-      const offset = text.indexOf('\0')
-      const head = text.slice(0, offset)
-      regex.lastIndex = 0
-      const hits = scan(head, {
-        regex,
-        require,
-        invert: f.has('v'),
-        max,
-        before: 0,
-        after: 0,
-        only: false,
-        numbers: false,
-        terminator: '\n',
-        silent: true,
-        state,
-        write: () => {},
-      })
-      if (!hits) return
-      found = true
-      if (f.has('q')) return
-      if (f.has('l')) ctx.stdout.write((display ?? '<stdin>') + '\n')
-      else if (f.has('c'))
-        ctx.stdout.write((named && display !== undefined ? display + ':' : '') + hits + '\n')
-      else
+    let warning = ''
+    const nul = binaryText ? -1 : text.indexOf('\0')
+    if (nul >= 0) {
+      const offset = byteLength(text.slice(0, nul))
+      const label = display !== undefined && named ? display + ': ' : ''
+      if (!explicit && (silent || offset < 65536))
+        return void (found ||= has('files-without-match'))
+      if (explicit && offset < 65536 && !silent) {
+        if (!lines(text).some(selected)) return
+        found = true
         ctx.stdout.write(
-          (display !== undefined && named ? display + ': ' : '') +
-            'binary file matches (found "\\0" byte around offset ' +
-            offset +
-            ')\n',
+          label + 'binary file matches (found "\\0" byte around offset ' + offset + ')\n',
         )
-      return
+        return
+      }
+      if (!explicit) {
+        const bytes = encode(text)
+        let end = 65536
+        let cut = 0
+        while (offset >= end) {
+          const next = bytes.lastIndexOf(10, end - 1) + 1
+          end = next > cut ? next + 65536 : end + end - cut
+          cut = Math.max(cut, next)
+        }
+        text = decode(bytes.subarray(0, cut))
+        warning = label + 'WARNING: stopped searching binary file after match'
+      } else if (!silent) {
+        const all = lines(text)
+        const at = all.findIndex((line) => line.includes('\0') && selected(line))
+        if (at >= 0) {
+          text = joinLines(all.slice(0, at))
+          warning = label + 'binary file matches'
+        }
+      }
+      if (warning) warning += ' (found "\\0" byte around offset ' + offset + ')\n'
     }
-    const counting = f.has('c') || has('count-matches')
-    const silent = f.has('q') || f.has('l') || has('files-without-match') || counting
     let output = ''
     const prefix = named && !heading ? (display ?? '<stdin>') : undefined
     const matches = scan(text, {
@@ -2135,30 +2203,38 @@ const rg: CommandHandler = async (ctx) => {
       after,
       only: f.has('o'),
       numbers,
+      offsets: f.has('b'),
       column: has('column') || has('vimgrep'),
       name: prefix,
       terminator: '\n',
       replace,
+      empty: true,
+      each: has('vimgrep'),
+      trim: has('trim'),
+      columns,
       silent,
       state,
       write: (chunk) => void (output += chunk),
     })
-    if (matches) found = true
+    if (matches && !has('files-without-match')) found = true
     if (f.has('q')) return
     if (f.has('l') && matches) ctx.stdout.write((display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'))
-    if (has('files-without-match') && !matches) ctx.stdout.write((display ?? '<stdin>') + '\n')
+    if (has('files-without-match') && !matches) {
+      found = true
+      ctx.stdout.write((display ?? '<stdin>') + (f.has('0') ? '\0' : '\n'))
+    }
     if (counting && matches) {
       let total = matches
-      if (has('count-matches')) {
+      if (has('count-matches') || f.has('o')) {
         total = 0
-        for (const line of text.split('\n')) {
+        for (const line of lines(text)) {
           if (require && !require.test(line)) continue
-          regex.lastIndex = 0
-          total += [...line.matchAll(regex)].length
+          total += [...rustMatches(line, regex)].length
         }
       }
       ctx.stdout.write((named ? (display ?? '<stdin>') + ':' : '') + total + '\n')
     }
+    if (warning && matches && matches < max) output += warning
     if (!silent && output) {
       if (heading && named) {
         ctx.stdout.write((firstHeading ? '' : '\n') + (display ?? '<stdin>') + '\n')
