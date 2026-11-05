@@ -200,7 +200,15 @@ async function collect(
 const cmp: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
     flags: 'bls',
-    long: { 'print-bytes': 'b', quiet: 's', silent: 's', verbose: 'l' },
+    values: 'in',
+    long: {
+      'print-bytes': 'b',
+      quiet: 's',
+      silent: 's',
+      verbose: 'l',
+      bytes: 'n',
+      'ignore-initial': 'i',
+    },
   })
   const [left, right = '-'] = parsed.operands
   if (left === undefined) throw new CommandError("missing operand after 'cmp'", 2)
@@ -216,9 +224,11 @@ const cmp: CommandHandler = async (ctx) => {
       throw error
     }
   }
-  const a = await read(left)
-  const b = await read(right)
-  const length = Math.min(a.length, b.length)
+  const [skipLeft = '0', skipRight = skipLeft] = (last(parsed, 'i') ?? '0').split(':')
+  const a = (await read(left)).subarray(Number(skipLeft))
+  const b = (await read(right)).subarray(Number(skipRight))
+  const limit = Number(last(parsed, 'n') ?? Infinity)
+  const length = Math.min(a.length, b.length, limit)
   const quiet = parsed.flags.has('s')
   const printed = (byte: number) => {
     const high = byte >= 0x80 ? 'M-' : ''
@@ -287,7 +297,7 @@ const cmp: CommandHandler = async (ctx) => {
     }
     if (x === 10) line++
   }
-  if (a.length !== b.length) {
+  if (a.length !== b.length && Math.min(a.length, b.length) < limit) {
     const shorter = a.length < b.length ? left : right
     if (!quiet)
       ctx.stderr.write(
@@ -889,7 +899,7 @@ const md5sum: CommandHandler = checksum(md5, 'MD5')
 
 const tree: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'adfFsC',
+    flags: 'adfFsCih',
     values: 'LIP',
     long: {
       noreport: 'R',
@@ -913,6 +923,20 @@ const tree: CommandHandler = async (ctx) => {
   let status = 0
   const visible = (name: string) =>
     (f.has('a') || !name.startsWith('.')) && !ignore.some((glob) => glob.test(name))
+  const sized = (size: number) => {
+    if (f.has('h')) {
+      if (size < 1024) return '[' + String(size).padStart(4) + ']  '
+      let value = size
+      let unit = 0
+      while (value >= 1024 && unit < 6) {
+        value /= 1024
+        unit++
+      }
+      const text = value < 9.95 ? value.toFixed(1) : Math.round(value).toString()
+      return '[' + (text + 'KMGTPE'[unit - 1]).padStart(4) + ']  '
+    }
+    return f.has('s') ? '[' + String(size).padStart(11) + ']  ' : ''
+  }
   const matches = (name: string) =>
     !f.has('d') && (!pattern.length || pattern.some((glob) => glob.test(name)))
   const shown = async (path: string, level: number): Promise<boolean> => {
@@ -945,11 +969,8 @@ const tree: CommandHandler = async (ctx) => {
       const label =
         (f.has('f') ? childDisplay : child.name) + (f.has('F') && child.directory ? '/' : '')
       ctx.stdout.write(
-        prefix +
-          (end ? '└── ' : '├── ') +
-          (f.has('s')
-            ? '[' + String(child.directory ? 4096 : child.size).padStart(11) + ']  '
-            : '') +
+        (f.has('i') ? '' : prefix + (end ? '└── ' : '├── ')) +
+          sized(child.directory ? 4096 : child.size) +
           label +
           '\n',
       )
@@ -973,7 +994,9 @@ const tree: CommandHandler = async (ctx) => {
       status = 2
       continue
     }
-    ctx.stdout.write(operand + (f.has('F') && !operand.endsWith('/') ? '/' : '') + '\n')
+    ctx.stdout.write(
+      sized(4096) + operand + (f.has('F') && !operand.endsWith('/') ? '/' : '') + '\n',
+    )
     if (await walk(path, operand, '', 1)) directories++
   }
   if (!f.has('R'))
@@ -1185,9 +1208,18 @@ const strings: CommandHandler = async (ctx) => {
 
 const xxd: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'pr',
-    values: 'lc',
-    long: { plain: 'p', ps: 'p', postscript: 'p', revert: 'r' },
+    flags: 'prubi',
+    values: 'lcgs',
+    long: {
+      plain: 'p',
+      ps: 'p',
+      postscript: 'p',
+      revert: 'r',
+      groupsize: 'g',
+      bits: 'b',
+      include: 'i',
+      seek: 's',
+    },
   })
   const operand = parsed.operands[0] ?? '-'
   const data = operand === '-' ? await bytesOf(ctx, operand) : await readOperand(ctx, operand, 2)
@@ -1217,19 +1249,59 @@ const xxd: CommandHandler = async (ctx) => {
     else ctx.stdout.write(decode(out))
     return
   }
-  const limit = Math.min(data.length, Number(last(parsed, 'l') ?? data.length))
-  if (parsed.flags.has('p')) {
+  const f = parsed.flags
+  const seek = Number(last(parsed, 's') ?? 0)
+  const start = seek < 0 ? Math.max(0, data.length + seek) : Math.min(seek, data.length)
+  const limit = Math.min(data.length, start + Number(last(parsed, 'l') ?? data.length))
+  const digits = (byte: number) => {
+    const text = f.has('b') ? byte.toString(2).padStart(8, '0') : byte.toString(16).padStart(2, '0')
+    return f.has('u') ? text.toUpperCase() : text
+  }
+  if (f.has('p')) {
     let hex = ''
-    for (let i = 0; i < limit; i++) hex += data[i].toString(16).padStart(2, '0')
+    for (let i = start; i < limit; i++) hex += digits(data[i]!)
     ctx.stdout.write((hex.match(/.{1,60}/g) ?? []).join('\n') + (hex ? '\n' : ''))
     return
   }
-  const columns = Number(last(parsed, 'c') ?? 16)
-  for (let offset = 0; offset < limit; offset += columns) {
+  if (f.has('i')) {
+    const per = Number(last(parsed, 'c') ?? 12)
+    const rows: string[] = []
+    for (let offset = start; offset < limit; offset += per)
+      rows.push(
+        '  ' +
+          Array.from(data.subarray(offset, Math.min(offset + per, limit)), (byte) =>
+            f.has('u') ? '0X' + digits(byte) : '0x' + digits(byte),
+          ).join(', '),
+      )
+    const body = rows.length ? rows.join(',\n') + '\n' : ''
+    if (operand === '-') {
+      ctx.stdout.write(body)
+      return
+    }
+    const name = operand.replace(/^\d/, '__$&').replace(/[^A-Za-z0-9]/g, '_')
+    ctx.stdout.write(
+      'unsigned char ' +
+        name +
+        '[] = {\n' +
+        body +
+        '};\nunsigned int ' +
+        name +
+        '_len = ' +
+        (limit - start) +
+        ';\n',
+    )
+    return
+  }
+  const columns = Number(last(parsed, 'c') ?? (f.has('b') ? 6 : 16))
+  const group = Number(last(parsed, 'g') ?? (f.has('b') ? 1 : 2)) || columns
+  const blank = f.has('b') ? '        ' : '  '
+  for (let offset = start; offset < limit; offset += columns) {
     const row = data.slice(offset, Math.min(offset + columns, limit))
     let hex = ''
     for (let i = 0; i < columns; i++)
-      hex += (i < row.length ? row[i].toString(16).padStart(2, '0') : '  ') + (i % 2 ? ' ' : '')
+      hex +=
+        (i < row.length ? digits(row[i]!) : blank) +
+        ((i + 1) % group === 0 || i === columns - 1 ? ' ' : '')
     const ascii = Array.from(row, (byte) =>
       byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.',
     ).join('')
@@ -1239,7 +1311,12 @@ const xxd: CommandHandler = async (ctx) => {
 }
 
 const od: CommandHandler = async (ctx) => {
-  const parsed = options(ctx.args, { flags: 'cxbdosv', values: 'AtNj' })
+  const parsed = options(
+    ctx.args.map((arg) =>
+      arg === '-w' || arg === '--width' ? '-w32' : arg.replace(/^--width=/, '-w'),
+    ),
+    { flags: 'cxbdosv', values: 'AtNjw' },
+  )
   const operand = parsed.operands[0] ?? '-'
   let data = operand === '-' ? await bytesOf(ctx, operand) : await readOperand(ctx, operand, 1)
   const size = (text: string) => (/^0[0-7]+$/.test(text) ? parseInt(text, 8) : Number(text))
@@ -1319,13 +1396,14 @@ const od: CommandHandler = async (ctx) => {
       ? ''
       : (offset + skip).toString(address === 'x' ? 16 : address === 'd' ? 10 : 8).padStart(7, '0')
   let repeated = false
-  for (let offset = 0; offset < data.length; offset += 16) {
-    const end = Math.min(offset + 16, data.length)
+  const bytes = Number(last(parsed, 'w') ?? 16)
+  for (let offset = 0; offset < data.length; offset += bytes) {
+    const end = Math.min(offset + bytes, data.length)
     if (
       !f.has('v') &&
       offset &&
-      end - offset === 16 &&
-      data.subarray(offset - 16, offset).every((byte, i) => byte === data[offset + i])
+      end - offset === bytes &&
+      data.subarray(offset - bytes, offset).every((byte, i) => byte === data[offset + i])
     ) {
       if (!repeated) ctx.stdout.write('*\n')
       repeated = true

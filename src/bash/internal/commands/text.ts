@@ -261,8 +261,18 @@ async function headTail(ctx: CommandContext, tail: boolean): Promise<number> {
 const wc: CommandHandler = streaming(async (ctx) => {
   const parsed = options(ctx.args, {
     flags: 'lwcmL',
-    long: { lines: 'l', words: 'w', bytes: 'c', chars: 'm', 'max-line-length': 'L' },
+    long: {
+      lines: 'l',
+      words: 'w',
+      bytes: 'c',
+      chars: 'm',
+      'max-line-length': 'L',
+      total: 'total',
+    },
   })
+  const when = last(parsed, 'total') ?? 'auto'
+  if (!['auto', 'always', 'only', 'never'].includes(when))
+    throw new CommandError("invalid argument '" + when + "' for '--total'", 1)
   const f = parsed.flags
   const fields = f.size ? ['l', 'w', 'm', 'c', 'L'].filter((flag) => f.has(flag)) : ['l', 'w', 'c']
   const rows: { counts: number[]; name: string; bytes: number }[] = []
@@ -348,12 +358,16 @@ const wc: CommandHandler = streaming(async (ctx) => {
     )
     rows.push(row)
   }
-  if (parsed.operands.length > 1) rows.push({ counts: totals, name: 'total', bytes: 0 })
+  const files = rows.length
+  if (when === 'always' || when === 'only' || (when === 'auto' && parsed.operands.length > 1))
+    rows.push({ counts: totals, name: when === 'only' ? '' : 'total', bytes: 0 })
   const stdin = !parsed.operands.length || parsed.operands.includes('-')
-  const bytes = rows.slice(0, parsed.operands.length || 1).reduce((sum, row) => sum + row.bytes, 0)
+  const bytes = rows.slice(0, files).reduce((sum, row) => sum + row.bytes, 0)
   const width =
-    fields.length === 1 && rows.length === 1 ? 0 : Math.max(stdin ? 7 : 1, String(bytes).length)
-  for (const row of rows)
+    when === 'only' || (fields.length === 1 && rows.length === 1)
+      ? 0
+      : Math.max(stdin ? 7 : 1, String(bytes).length)
+  for (const row of when === 'only' ? rows.slice(files) : rows)
     ctx.stdout.write(
       row.counts.map((value) => String(value).padStart(width)).join(' ') +
         (row.name ? ' ' + row.name : '') +
@@ -1159,7 +1173,7 @@ function versionPrefix(text: string): number {
   return suffix.index === 0 ? text.length : suffix.index!
 }
 
-function versionCompare(a: string, b: string): number {
+export function versionCompare(a: string, b: string): number {
   if (a === b) return 0
   if (!a || !b) return a ? 1 : -1
   if (a[0] === '.' || b[0] === '.') {
@@ -1397,7 +1411,7 @@ async function compactSort(
 
 const sort: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'nrufbsghVMcCRz',
+    flags: 'nrufbsghVMcCRzd',
     values: 'ktoST',
     long: {
       'numeric-sort': 'n',
@@ -1483,6 +1497,7 @@ const sort: CommandHandler = async (ctx) => {
     month: boolean
     fold: boolean
     blanks: boolean
+    dictionary: boolean
     reverse: boolean
   }
   const orderOf = (flags: string): Order => ({
@@ -1492,11 +1507,13 @@ const sort: CommandHandler = async (ctx) => {
     month: flags.includes('M'),
     fold: flags.includes('f'),
     blanks: flags.includes('b'),
+    dictionary: flags.includes('d'),
     reverse: flags.includes('r'),
   })
   const prepare = (text: string, order: Order): string | number => {
     if (order.fold) text = text.toUpperCase()
     if (order.blanks) text = text.trimStart()
+    if (order.dictionary) text = text.replace(/[^A-Za-z0-9 \t]/g, '')
     if (order.numeric) return parseFloat(text.trim()) || 0
     if (order.human) return text
     if (order.month) return MONTHS.indexOf(text.trim().slice(0, 3).toUpperCase())
@@ -1575,8 +1592,17 @@ const sort: CommandHandler = async (ctx) => {
 }
 
 const uniq: CommandHandler = streaming(async (ctx) => {
-  const parsed = options(ctx.args, {
-    flags: 'cdui',
+  let repeated: string | undefined
+  let grouping: string | undefined
+  const args = ctx.args.filter((arg) => {
+    const match = arg.match(/^--(all-repeated|group)(?:=(.*))?$/)
+    if (!match) return true
+    if (match[1] === 'group') grouping = match[2] ?? 'separate'
+    else repeated = match[2] ?? 'none'
+    return false
+  })
+  const parsed = options(args, {
+    flags: 'cduiD',
     values: 'fsw',
     long: {
       count: 'c',
@@ -1589,6 +1615,15 @@ const uniq: CommandHandler = streaming(async (ctx) => {
     },
   })
   const f = parsed.flags
+  if (f.has('D')) repeated ??= 'none'
+  if (grouping !== undefined && (f.has('c') || f.has('d') || f.has('u') || repeated))
+    throw new CommandError(
+      "--group is mutually exclusive with -c/-d/-D/-u\nTry 'uniq --help' for more information.",
+    )
+  if (repeated && f.has('c'))
+    throw new CommandError(
+      "printing all duplicated lines and repeat counts is meaningless\nTry 'uniq --help' for more information.",
+    )
   const skipFields = Number(last(parsed, 'f') ?? 0)
   const skipChars = Number(last(parsed, 's') ?? 0)
   const width = last(parsed, 'w') === undefined ? undefined : Number(last(parsed, 'w'))
@@ -1599,20 +1634,37 @@ const uniq: CommandHandler = streaming(async (ctx) => {
     if (width !== undefined) value = value.slice(0, width)
     return f.has('i') ? value.toLowerCase() : value
   }
-  let current: { line: string; key: string; count: number } | undefined
+  let current: { line: string; key: string; count: number; lines: string[] } | undefined
   let out = ''
+  let groups = 0
   const target = parsed.operands[1]
-  const flush = (group: { line: string; count: number }) => {
+  const flush = (group: { line: string; count: number; lines: string[] }) => {
+    if (grouping !== undefined) {
+      if (groups++ ? grouping !== 'append' : grouping === 'prepend' || grouping === 'both')
+        out += '\n'
+      out += group.lines.join('\n') + '\n'
+      if (grouping === 'append') out += '\n'
+      return
+    }
+    if (repeated) {
+      if (group.count < 2) return
+      if (repeated === 'prepend' || (repeated === 'separate' && groups)) out += '\n'
+      groups++
+      out += group.lines.join('\n') + '\n'
+      return
+    }
     if ((f.has('d') && group.count < 2) || (f.has('u') && group.count !== 1)) return
     out += (f.has('c') ? String(group.count).padStart(7) + ' ' : '') + group.line + '\n'
   }
   const status = await eachBatch(ctx, parsed.operands.slice(0, 1), async (text) => {
     for (const line of lines(text)) {
       const value = key(line)
-      if (current && current.key === value) current.count++
-      else {
+      if (current && current.key === value) {
+        current.count++
+        if (repeated || grouping !== undefined) current.lines.push(line)
+      } else {
         if (current) flush(current)
-        current = { line, key: value, count: 1 }
+        current = { line, key: value, count: 1, lines: [line] }
       }
     }
     if (target === undefined && out.length > 65536) {
@@ -1621,6 +1673,7 @@ const uniq: CommandHandler = streaming(async (ctx) => {
     }
   })
   if (current) flush(current)
+  if (grouping === 'both' && groups) out += '\n'
   if (target !== undefined) await ctx.fs.write(ctx.resolve(target), encode(out))
   else await put(ctx, out)
   return status
@@ -3009,19 +3062,28 @@ function columns(text: string): number {
 
 const column: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'tnxeL',
-    values: 'soc',
+    flags: 'tdxeLJ',
+    values: 'socNnl',
     long: {
       table: 't',
       separator: 's',
       'output-separator': 'o',
       fillrows: 'x',
       'output-width': 'c',
+      'table-columns': 'N',
+      'table-name': 'n',
+      'table-noheadings': 'd',
+      'table-columns-limit': 'l',
+      'keep-empty-lines': 'L',
+      json: 'J',
     },
   })
+  const names = last(parsed, 'N')?.split(',')
+  if (parsed.flags.has('J') && !names)
+    throw new CommandError('option --table-columns or --table-column required for --json', 1)
   const { text, status } = await allInput(ctx, parsed.operands)
   const rows = lines(text)
-  if (!parsed.flags.has('t')) {
+  if (!parsed.flags.has('t') && !parsed.flags.has('J')) {
     const entries = rows.filter((row) => row !== '')
     if (!entries.length) return status
     const width = Number(last(parsed, 'c') ?? ctx.env['COLUMNS'] ?? 80)
@@ -3052,21 +3114,72 @@ const column: CommandHandler = async (ctx) => {
     return status
   }
   const separator = last(parsed, 's')
+  const delimiter = separator
+    ? new RegExp('[' + separator.replace(/[\]\\^-]/g, '\\$&') + ']', 'g')
+    : /[ \t]+/g
+  const limit = Number(last(parsed, 'l') ?? 0)
+  const split = (row: string): string[] => {
+    const cells = separator
+      ? row === ''
+        ? []
+        : row.split(delimiter)
+      : row.split(delimiter).filter((cell) => cell !== '')
+    if (!limit || cells.length <= limit) return cells
+    const starts = separator
+      ? [0, ...[...row.matchAll(delimiter)].map((match) => match.index + match[0].length)]
+      : [...row.matchAll(/[^ \t]+/g)].map((match) => match.index)
+    return [...cells.slice(0, limit - 1), row.slice(starts[limit - 1])]
+  }
   const cells = rows
     .map((row) => row.split('\0', 1)[0]!)
-    .map((row) =>
-      separator
-        ? row === ''
-          ? []
-          : row.split(new RegExp('[' + separator.replace(/[\]\\^-]/g, '\\$&') + ']'))
-        : row.split(/[ \t]+/).filter((cell) => cell !== ''),
-    )
+    .map(split)
     .filter((row) => row.length || parsed.flags.has('L'))
     .map((row) =>
       row.map((cell) =>
         cell.replace(/[\udc80-\udcff]/g, (c) => '\\x' + (c.charCodeAt(0) - 0xdc00).toString(16)),
       ),
     )
+  if (parsed.flags.has('J')) {
+    const keys = names!
+    const wide = cells.findIndex((row) => row.length > keys.length)
+    if (wide >= 0)
+      throw new CommandError(
+        'line ' +
+          (wide + 2) +
+          ': for JSON the name of the column ' +
+          (keys.length + 1) +
+          ' is required',
+        1,
+      )
+    const body = cells
+      .map(
+        (row) =>
+          '{\n' +
+          keys
+            .map(
+              (key, index) =>
+                '         ' +
+                JSON.stringify(key.toLowerCase()) +
+                ': ' +
+                (row[index] === undefined ? 'null' : JSON.stringify(row[index])),
+            )
+            .join(',\n') +
+          '\n      }',
+      )
+      .join(',')
+    if (!body) return status
+    ctx.stdout.write(
+      '{\n   ' +
+        JSON.stringify((last(parsed, 'n') ?? 'table').toLowerCase()) +
+        ': [\n' +
+        '      ' +
+        body +
+        '\n' +
+        '   ]\n}\n',
+    )
+    return status
+  }
+  if (names && !parsed.flags.has('d')) cells.unshift(names)
   const widths: number[] = []
   for (const row of cells)
     row.forEach((cell, index) => (widths[index] = Math.max(widths[index] ?? 0, columns(cell))))

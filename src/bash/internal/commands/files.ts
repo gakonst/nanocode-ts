@@ -9,7 +9,7 @@ import {
 import { baseOf, encode, parentOf } from '../Fs.ts'
 import { globRegExp, posixRegExp } from '../Text.ts'
 import { listings } from '../Prune.ts'
-import { parseDate, strftime } from './text.ts'
+import { parseDate, strftime, versionCompare } from './text.ts'
 import {
   canonical,
   eachBatch,
@@ -207,10 +207,87 @@ const cat: CommandHandler = streaming(async (ctx) => {
   return status
 })
 
+function spread(names: string[], layout: 'm' | 'x' | 'C', width: number): string {
+  const lengths = names.map((name) => [...name].length)
+  if (layout === 'm') {
+    let out = ''
+    let position = 0
+    names.forEach((name, index) => {
+      if (index) {
+        if (!width || position + lengths[index]! + 2 < width) {
+          out += ', '
+          position += 2
+        } else {
+          out += ',\n'
+          position = 0
+        }
+      }
+      out += name
+      position += lengths[index]!
+    })
+    return out + '\n'
+  }
+  const across = layout === 'x'
+  const fit = (columns: number) => {
+    const rows = Math.ceil(names.length / columns)
+    const widths: number[] = []
+    names.forEach((_, index) => {
+      const column = across ? index % columns : Math.floor(index / rows)
+      widths[column] = Math.max(
+        widths[column] ?? 0,
+        lengths[index]! + (column === columns - 1 ? 0 : 2),
+      )
+    })
+    return { rows, widths }
+  }
+  let chosen = fit(1)
+  const most = Math.min(names.length, width ? Math.floor(width / 3) : names.length)
+  for (let columns = most; columns > 1; columns--) {
+    const candidate = fit(columns)
+    if (!width || candidate.widths.reduce((sum, value) => sum + value, 0) < width) {
+      chosen = candidate
+      break
+    }
+  }
+  const { rows, widths } = chosen
+  const pad = (from: number, to: number) => {
+    let out = ''
+    while (from < to) {
+      if (Math.floor(to / 8) > Math.floor((from + 1) / 8)) {
+        out += '\t'
+        from += 8 - (from % 8)
+      } else {
+        out += ' '
+        from++
+      }
+    }
+    return out
+  }
+  let out = ''
+  for (let row = 0; row < rows; row++) {
+    let position = 0
+    for (let column = 0; column < widths.length; column++) {
+      const index = across ? row * widths.length + column : column * rows + row
+      if (index >= names.length) break
+      out += names[index]
+      const next = across ? index + 1 : index + rows
+      if (next >= names.length || (across && column === widths.length - 1)) break
+      out += pad(position + lengths[index]!, position + widths[column]!)
+      position += widths[column]!
+    }
+    out += '\n'
+  }
+  return out
+}
+
 const ls: CommandHandler = async (ctx) => {
   const parsed = options(ctx.args, {
-    flags: 'laA1RdhtSrFpL',
+    flags: 'laA1RdhtSrFpLnQvXmCx',
+    values: 'w',
     long: {
+      'quote-name': 'Q',
+      width: 'w',
+      'numeric-uid-gid': 'n',
       dereference: 'L',
       all: 'a',
       'almost-all': 'A',
@@ -220,14 +297,15 @@ const ls: CommandHandler = async (ctx) => {
       reverse: 'r',
       classify: 'F',
       color: '',
-      'group-directories-first': '',
+      'group-directories-first': 'D',
     },
   })
   const f = parsed.flags
+  if (f.has('n')) f.add('l')
   const operands = parsed.operands.length ? parsed.operands : ['.']
   let status = 0
   const files: { name: string; path: string; stat: LinkStat }[] = []
-  const dirs: { name: string; path: string }[] = []
+  const dirs: { name: string; path: string; stat: LinkStat }[] = []
   const look = (path: string): Promise<LinkStat | null> =>
     f.has('L') ? ctx.fs.stat(path) : lstatOf(ctx, path)
   for (const operand of operands) {
@@ -247,13 +325,28 @@ const ls: CommandHandler = async (ctx) => {
       continue
     }
     if (stat.kind === 'file' || f.has('d')) files.push({ name: operand, path, stat })
-    else dirs.push({ name: operand, path })
+    else dirs.push({ name: operand, path, stat })
   }
-  const order = (entries: { name: string; stat: LinkStat }[]) => {
+  const order = <Entry extends { name: string; stat: LinkStat }>(entries: Entry[]) => {
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    if (f.has('v')) entries.sort((a, b) => versionCompare(a.name, b.name))
+    if (f.has('X')) {
+      const extension = (name: string) => {
+        const dot = name.lastIndexOf('.')
+        return dot < 0 ? '' : name.slice(dot + 1)
+      }
+      entries.sort((a, b) => {
+        const [x, y] = [extension(a.name), extension(b.name)]
+        return x < y ? -1 : x > y ? 1 : 0
+      })
+    }
     if (f.has('t')) entries.sort((a, b) => b.stat.mtime - a.stat.mtime)
     if (f.has('S')) entries.sort((a, b) => b.stat.size - a.stat.size)
     if (f.has('r')) entries.reverse()
+    if (f.has('D'))
+      entries.sort(
+        (a, b) => Number(b.stat.kind === 'directory') - Number(a.stat.kind === 'directory'),
+      )
     return entries
   }
   const render = (entries: { name: string; stat: LinkStat }[], total: boolean) => {
@@ -265,8 +358,16 @@ const ls: CommandHandler = async (ctx) => {
           : f.has('F') && entry.stat.kind === 'file' && entry.stat.mode & 0o111
             ? '*'
             : ''
+    const named = (entry: { name: string; stat: LinkStat }) =>
+      (f.has('Q') ? '"' + entry.name.replace(/["\\]/g, '\\$&') + '"' : entry.name) + suffix(entry)
     if (!f.has('l')) {
-      for (const entry of entries) ctx.stdout.write(entry.name + suffix(entry) + '\n')
+      const names = entries.map(named)
+      const layout = f.has('m') ? 'm' : f.has('x') ? 'x' : f.has('C') ? 'C' : '1'
+      if (layout === '1' || !names.length) {
+        for (const name of names) ctx.stdout.write(name + '\n')
+        return
+      }
+      ctx.stdout.write(spread(names, layout, Number(last(parsed, 'w') ?? ctx.env['COLUMNS'] ?? 80)))
       return
     }
     const sizes = entries.map((entry) =>
@@ -286,13 +387,12 @@ const ls: CommandHandler = async (ctx) => {
     entries.forEach((entry, index) => {
       ctx.stdout.write(
         mode(entry.stat) +
-          ' 1 user user ' +
+          (f.has('n') ? ' 1 1000 1000 ' : ' 1 user user ') +
           sizes[index].padStart(width) +
           ' ' +
           when(entry.stat.mtime) +
           ' ' +
-          entry.name +
-          suffix(entry) +
+          named(entry) +
           (entry.stat.kind === 'symlink' ? ' -> ' + entry.stat.target : '') +
           '\n',
       )
@@ -329,6 +429,7 @@ const ls: CommandHandler = async (ctx) => {
       }
     }
   }
+  order(dirs)
   for (let i = 0; i < dirs.length; i++) {
     if (i > 0 || files.length) ctx.stdout.write('\n')
     await visit(dirs[i], operands.length > 1 || f.has('R'))
