@@ -9,7 +9,7 @@ import {
 import { baseOf, encode, parentOf } from '../Fs.ts'
 import { globRegExp, posixRegExp } from '../Text.ts'
 import { listings } from '../Prune.ts'
-import { parseDate, strftime, versionCompare } from './text.ts'
+import { displayWidth, parseDate, strftime, versionCompare } from './text.ts'
 import {
   canonical,
   eachBatch,
@@ -207,8 +207,32 @@ const cat: CommandHandler = streaming(async (ctx) => {
   return status
 })
 
+function codePointOrder(a: string, b: string): number {
+  const length = Math.min(a.length, b.length)
+  let at = 0
+  while (at < length && a.charCodeAt(at) === b.charCodeAt(at)) at++
+  if (at === length) return a.length - b.length
+  return a.codePointAt(at)! - b.codePointAt(at)!
+}
+
+const escapes: Record<string, string> = {
+  '\x07': 'a',
+  '\b': 'b',
+  '\t': 't',
+  '\n': 'n',
+  '\v': 'v',
+  '\f': 'f',
+  '\r': 'r',
+  '"': '"',
+  '\\': '\\',
+}
+
+function quoted(c: string): string {
+  return '\\' + (escapes[c] ?? c.charCodeAt(0).toString(8).padStart(3, '0'))
+}
+
 function spread(names: string[], layout: 'm' | 'x' | 'C', width: number): string {
-  const lengths = names.map((name) => [...name].length)
+  const lengths = names.map((name) => displayWidth(name.replace(/[\udc80-\udcff]/g, '?')))
   if (layout === 'm') {
     let out = ''
     let position = 0
@@ -227,24 +251,21 @@ function spread(names: string[], layout: 'm' | 'x' | 'C', width: number): string
     })
     return out + '\n'
   }
+  if (!width) return names.join('  ') + '\n'
   const across = layout === 'x'
   const fit = (columns: number) => {
     const rows = Math.ceil(names.length / columns)
-    const widths: number[] = []
+    const widths: number[] = Array(columns).fill(3)
     names.forEach((_, index) => {
       const column = across ? index % columns : Math.floor(index / rows)
-      widths[column] = Math.max(
-        widths[column] ?? 0,
-        lengths[index]! + (column === columns - 1 ? 0 : 2),
-      )
+      widths[column] = Math.max(widths[column]!, lengths[index]! + (column === columns - 1 ? 0 : 2))
     })
     return { rows, widths }
   }
   let chosen = fit(1)
-  const most = Math.min(names.length, width ? Math.floor(width / 3) : names.length)
-  for (let columns = most; columns > 1; columns--) {
+  for (let columns = Math.min(names.length, Math.ceil(width / 3)); columns > 1; columns--) {
     const candidate = fit(columns)
-    if (!width || candidate.widths.reduce((sum, value) => sum + value, 0) < width) {
+    if (candidate.widths.reduce((sum, value) => sum + value, 0) < width) {
       chosen = candidate
       break
     }
@@ -328,7 +349,7 @@ const ls: CommandHandler = async (ctx) => {
     else dirs.push({ name: operand, path, stat })
   }
   const order = <Entry extends { name: string; stat: LinkStat }>(entries: Entry[]) => {
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    entries.sort((a, b) => codePointOrder(a.name, b.name))
     if (f.has('v')) entries.sort((a, b) => versionCompare(a.name, b.name))
     if (f.has('X')) {
       const extension = (name: string) => {
@@ -359,7 +380,8 @@ const ls: CommandHandler = async (ctx) => {
             ? '*'
             : ''
     const named = (entry: { name: string; stat: LinkStat }) =>
-      (f.has('Q') ? '"' + entry.name.replace(/["\\]/g, '\\$&') + '"' : entry.name) + suffix(entry)
+      (f.has('Q') ? '"' + entry.name.replace(/["\\\x00-\x1f\x7f]/g, quoted) + '"' : entry.name) +
+      suffix(entry)
     if (!f.has('l')) {
       const names = entries.map(named)
       const layout = f.has('m') ? 'm' : f.has('x') ? 'x' : f.has('C') ? 'C' : '1'

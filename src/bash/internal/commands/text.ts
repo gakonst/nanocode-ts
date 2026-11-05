@@ -3106,7 +3106,7 @@ function charWidth(c: string): number {
   return wide.test(c) ? 2 : 1
 }
 
-function columns(text: string): number {
+export function displayWidth(text: string): number {
   if (/^[\x20-\x7e]*$/.test(text)) return text.length
   let n = 0
   for (const c of text) n += charWidth(c)
@@ -3153,7 +3153,7 @@ const column: CommandHandler = async (ctx) => {
     if (!entries.length) return status
     const given = last(parsed, 'c')
     const width = given === 'unlimited' ? 0 : Number(given ?? ctx.env['COLUMNS'] ?? 80)
-    const widths = entries.map(columns)
+    const widths = entries.map(displayWidth)
     const longest = Math.max(...widths)
     if (longest >= width) {
       ctx.stdout.write(entries.map((entry) => entry + '\n').join(''))
@@ -3271,7 +3271,7 @@ const column: CommandHandler = async (ctx) => {
   if (names && !parsed.flags.has('d')) cells.unshift(names)
   const widths: number[] = []
   for (const row of cells)
-    row.forEach((cell, index) => (widths[index] = Math.max(widths[index] ?? 0, columns(cell))))
+    row.forEach((cell, index) => (widths[index] = Math.max(widths[index] ?? 0, displayWidth(cell))))
   const gap = last(parsed, 'o') ?? '  '
   ctx.stdout.write(
     joinLines(
@@ -3279,7 +3279,9 @@ const column: CommandHandler = async (ctx) => {
         widths
           .map((width, index) => {
             const cell = row[index] ?? ''
-            return index === widths.length - 1 ? cell : cell + ' '.repeat(width - columns(cell))
+            return index === widths.length - 1
+              ? cell
+              : cell + ' '.repeat(width - displayWidth(cell))
           })
           .join(gap),
       ),
