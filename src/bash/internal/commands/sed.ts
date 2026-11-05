@@ -533,8 +533,11 @@ export const sed: CommandHandler = streaming(async (ctx) => {
         }
     const isLast = () => index >= input.length
     const chunks: string[] = []
+    let missing = false
     const emit = (value: string) => {
-      out += value + separator
+      out += (missing ? separator : '') + value
+      missing = isLast() && !trailing
+      if (!missing) out += separator
       if (out.length > 65536) {
         chunks.push(out)
         out = ''
@@ -790,7 +793,7 @@ export const sed: CommandHandler = streaming(async (ctx) => {
         }
       }
       if (!deleted && !restart && !quiet)
-        out += space + (isLast() && !trailing && !appended ? '' : separator)
+        out += (missing ? separator : '') + space + (isLast() && !trailing && !appended ? '' : separator)
       out += appended
       if (out.length > 65536) {
         chunks.push(out)

@@ -180,13 +180,15 @@ const cat: CommandHandler = streaming(async (ctx) => {
     const trailing = parts[parts.length - 1] === ''
     if (trailing) parts.pop()
     const out: string[] = []
-    for (const part of parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
       if (parsed.flags.has('s') && part === '' && blank) continue
       blank = part === ''
       const numbered = parsed.flags.has('b') ? part !== '' : parsed.flags.has('n')
-      out.push((numbered ? String(++line).padStart(6) + '\t' : '') + part + (ends ? '$' : ''))
+      const ended = ends && (trailing || i < parts.length - 1)
+      out.push((numbered ? String(++line).padStart(6) + '\t' : '') + part + (ended ? '$' : ''))
     }
-    return out.join('\n') + (trailing ? '\n' : '')
+    return out.join('\n') + (trailing && out.length ? '\n' : '')
   }
   let status = 0
   for (const operand of parsed.operands.length ? parsed.operands : ['-']) {
