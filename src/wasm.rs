@@ -522,7 +522,7 @@ struct Session {
     executors: CodeModeExecutors,
     hand_tools: Option<Arc<remote::ToolSelections>>,
     hands: RefCell<HashMap<String, Hand>>,
-    inbox: TurnInbox<store::WorkerStore>,
+    inbox: TurnInbox<Log>,
     model: ModelSelection,
     scope: String,
     subagents: Option<SubagentControl>,

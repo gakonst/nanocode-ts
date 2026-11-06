@@ -2675,7 +2675,7 @@ dependencies = [
  "nanocode-durability",
  "nanocode-home",
  "nanocode-http",
- "nanocode-media",
+ "nanocode-image",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
@@ -2760,7 +2760,7 @@ dependencies = [
  "nanocode-durability",
  "nanocode-home",
  "nanocode-http",
- "nanocode-media",
+ "nanocode-image",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
@@ -2826,8 +2826,9 @@ dependencies = [
  "blake3",
  "futures-util",
  "imbl",
+ "nanocode-audio",
  "nanocode-code-mode-engine",
- "nanocode-media",
+ "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tool-contracts",
@@ -2925,8 +2926,10 @@ dependencies = [
 name = "nanocode-home"
 version = "0.6.7"
 dependencies = [
+ "libc",
  "nix 0.31.3",
  "serde",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
 ]
 
@@ -3025,14 +3028,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "nanocode-media"
-version = "0.6.7"
-dependencies = [
- "nanocode-audio",
- "nanocode-image",
 ]
 
 [[package]]
@@ -3166,7 +3161,7 @@ dependencies = [
  "futures-util",
  "nanocode-code-mode",
  "nanocode-home",
- "nanocode-media",
+ "nanocode-image",
  "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-provider",
@@ -3204,7 +3199,6 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-home",
  "nanocode-mcp-tools",
- "nanocode-media",
  "nanocode-process",
  "nanocode-sync",
  "nanocode-tls",
@@ -3268,7 +3262,7 @@ dependencies = [
 name = "nanocode-types-core"
 version = "0.6.7"
 dependencies = [
- "nanocode-sync",
+ "arc-swap",
  "serde",
  "serde_json",
  "smallvec",
