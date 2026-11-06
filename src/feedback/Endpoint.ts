@@ -18,7 +18,7 @@ export function create(options: create.Options = {}): Feedback.Target {
         throw new Error(text(body) ?? `${url} answered ${response.status}.`)
 
       return {
-        label: `Filed as ${body.id}.`,
+        label: `Filed as ${/^[0-9]+$/.test(body.id) ? '#' + body.id : body.id}.`,
         link:
           typeof body.link === 'string'
             ? { href: new URL(body.link, location.href).href, text: 'Track it' }

@@ -7,6 +7,7 @@ type Env = {
   TEMPO_APP: string
   TEMPO_GATEWAY?: string | undefined
   TEMPO_KEY?: string | undefined
+  TEMPO_REPO?: string | undefined
 }
 
 let feedback: Handler.Handler | undefined
@@ -24,6 +25,7 @@ export default {
       app: env.TEMPO_APP,
       gateway: env.TEMPO_GATEWAY,
       key: env.TEMPO_KEY,
+      repo: env.TEMPO_REPO,
     })
     return feedback.fetch(request)
   },

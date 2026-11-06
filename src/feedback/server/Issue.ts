@@ -16,17 +16,22 @@ export type Status = 'accepted' | 'closed' | 'open'
 
 export type Summary = Pick<Issue, 'at' | 'id' | 'resolution' | 'status'>
 
-export const prefix = 'issues/'
+export const handle = /^(?:iss_[0-9a-z]+|[1-9][0-9]{0,15})$/
+
+export const repository = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+export function board(repo?: string): string {
+  return repo === undefined ? 'issues/' : `git/${repo}/issues/`
+}
+
+export function counter(repo: string): string {
+  return `git/${repo}/issues`
+}
 
 export function create(options: create.Options): Issue {
-  const random = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
-    byte.toString(16).padStart(2, '0'),
-  ).join('')
-  const at = options.at ?? Date.now()
-
   return {
-    at,
-    id: 'iss_' + at.toString(36).padStart(9, '0') + random,
+    at: options.at,
+    id: options.id,
     report: options.report,
     reporter: options.reporter ?? null,
     resolution: null,
@@ -37,14 +42,22 @@ export function create(options: create.Options): Issue {
 
 export declare namespace create {
   type Options = {
-    at?: number | undefined
+    at: number
+    id: string
     report: Report.Report
     reporter?: string | undefined
   }
 }
 
-export function key(id: string): string {
-  return prefix + id
+export function id(at: number): string {
+  const random = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+  return 'iss_' + at.toString(36).padStart(9, '0') + random
+}
+
+export function label(id: string): string {
+  return /^[0-9]+$/.test(id) ? '#' + id : id
 }
 
 export function parse(value: unknown): Parsed {
@@ -98,12 +111,16 @@ export function parse(value: unknown): Parsed {
   }
 }
 
-export function prompt(issue: Issue): string {
+export function prompt(issue: Issue, options: prompt.Options): string {
   return [
-    `Issue ${issue.id}${issue.reporter ? ` from ${issue.reporter}` : ''}. ${Report.prompt(issue.report)}`,
+    `Issue ${label(issue.id)}${issue.reporter ? ` from ${issue.reporter}` : ''}. ${Report.prompt(issue.report)}`,
     '',
-    `The issue is the kv value ${key(issue.id)} in this app. When it is resolved, set its status to "accepted" or "closed" and its resolution to what changed.`,
+    `The issue is the kv value ${options.key} in this app. When it is resolved, set its status to "accepted" or "closed" and its resolution to what changed.`,
   ].join('\n')
+}
+
+export declare namespace prompt {
+  type Options = { key: string }
 }
 
 export function summary(issue: Issue): Summary {

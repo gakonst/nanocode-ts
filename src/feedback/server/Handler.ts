@@ -11,6 +11,7 @@ export function feedback(options: feedback.Options): Handler {
   const base = (options.path ?? '/feedback').replace(/\/+$/, '')
   const gateway = new URL(options.gateway ?? 'https://gateway.tempo-dev.workers.dev').origin
   const help = { href: gateway + '/key', text: 'Get a Tempo Key' }
+  const prefix = Issue.board(options.repo)
   let checked: Promise<Readiness> | undefined
 
   const call = (path: string, body?: unknown) =>
@@ -35,6 +36,13 @@ export function feedback(options: feedback.Options): Handler {
       }
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(options.app))
       return { help, ready: false, reason: 'The app must match [a-z0-9][a-z0-9-]{0,62}.' }
+    if (options.repo !== undefined && !Issue.repository.test(options.repo))
+      return {
+        help,
+        ready: false,
+        reason:
+          'The repo is 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit.',
+      }
 
     const response = await call('/api/keys/me').catch((error: unknown) => error as Error)
     if (response instanceof Error)
@@ -66,21 +74,30 @@ export function feedback(options: feedback.Options): Handler {
     if (options.accept && !(await options.accept({ report: parsed.report, request })))
       return problem(403, 'This report was not accepted.')
 
-    const issue = Issue.create({
-      report: parsed.report,
-      reporter: (await options.identify?.(request)) ?? undefined,
-    })
-    const stored = await call('/v1/kv/set', {
-      ifVersion: null,
-      key: Issue.key(issue.id),
-      public: options.public ?? false,
-      value: issue,
-    })
-    if (!stored.ok) return problem(stored.status, await detail(stored))
+    const reporter = (await options.identify?.(request)) ?? undefined
+    const at = Date.now()
+    const issue = await (async (): Promise<Issue.Issue | Response> => {
+      for (;;) {
+        const id = options.repo === undefined ? Issue.id(at) : await take(options.repo)
+        if (id instanceof Response) return id
+
+        const made = Issue.create({ at, id, report: parsed.report, reporter })
+        const stored = await call('/v1/kv/set', {
+          ifVersion: null,
+          key: prefix + id,
+          public: options.public ?? false,
+          value: made,
+        })
+        if (stored.ok) return made
+        if (stored.status !== 409 || options.repo === undefined)
+          return problem(stored.status, await detail(stored))
+      }
+    })()
+    if (issue instanceof Response) return issue
 
     const agent = options.agent
       ? await call(`/v1/agents/${encodeURIComponent(options.agent)}/turns`, {
-          prompt: Issue.prompt(issue),
+          prompt: Issue.prompt(issue, { key: prefix + issue.id }),
         }).then(
           async (response) => (response.ok ? 'started' : await detail(response)),
           (error: unknown) => (error instanceof Error ? error.message : String(error)),
@@ -90,11 +107,28 @@ export function feedback(options: feedback.Options): Handler {
     return Response.json({ agent, id: issue.id, link: `${base}/${issue.id}` }, { status: 201 })
   }
 
+  const take = async (repo: string): Promise<string | Response> => {
+    for (;;) {
+      const read = await call('/v1/kv/get', { key: Issue.counter(repo) })
+      if (!read.ok) return problem(read.status, await detail(read))
+
+      const entry = (await read.json()) as { value: { next?: unknown }; version: number } | null
+      const next = typeof entry?.value.next === 'number' ? entry.value.next : 1
+      const claimed = await call('/v1/kv/set', {
+        ifVersion: entry ? entry.version : null,
+        key: Issue.counter(repo),
+        value: { next: next + 1 },
+      })
+      if (claimed.ok) return String(next)
+      if (claimed.status !== 409) return problem(claimed.status, await detail(claimed))
+    }
+  }
+
   const read = async (id: string) => {
     const readiness = await check()
     if (!readiness.ready) return Response.json(readiness, { status: 503 })
 
-    const response = await call('/v1/kv/get', { key: Issue.key(id) })
+    const response = await call('/v1/kv/get', { key: prefix + id })
     if (!response.ok) return problem(response.status, await detail(response))
     const entry = (await response.json()) as { value: Issue.Issue } | null
     if (!entry) return problem(404, `No issue ${id}.`)
@@ -109,7 +143,7 @@ export function feedback(options: feedback.Options): Handler {
     const cursor = new URL(request.url).searchParams.get('cursor')
     const response = await call('/v1/kv/list', {
       ...(cursor ? { cursor } : {}),
-      prefix: Issue.prefix,
+      prefix,
     })
     if (!response.ok) return problem(response.status, await detail(response))
     const page = (await response.json()) as {
@@ -135,7 +169,7 @@ export function feedback(options: feedback.Options): Handler {
       }
       if (rest === '' && request.method === 'POST') return file(request)
       if (rest === 'issues' && request.method === 'GET') return list(request)
-      if (/^iss_[0-9a-z]+$/.test(rest) && request.method === 'GET') return read(rest)
+      if (Issue.handle.test(rest) && request.method === 'GET') return read(rest)
       return problem(404, 'Not found.')
     },
   }
@@ -152,6 +186,7 @@ export declare namespace feedback {
     key: string | undefined
     path?: string | undefined
     public?: boolean | undefined
+    repo?: string | undefined
   }
   type Context = { report: Report.Report; request: Request }
 }
