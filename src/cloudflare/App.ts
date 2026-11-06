@@ -209,6 +209,11 @@ const interruptedNote = 'Agent execution interrupted; recovery scheduled'
 
 const cellInterruptChecks = 2_000
 
+const pumpResets = 4
+
+const resetNote =
+  'The session was reset while driving this turn four times in a row, so it stopped recovering it.'
+
 function requestedYield(operation: unknown): number {
   const body = operation as { source?: unknown; input?: unknown } | undefined
   const requested = (() => {
@@ -858,6 +863,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let waiting = false
       let active: string | undefined
       let retryAt: number | undefined
+      let tripwire: string | undefined
       try {
         if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
         else await nextTask()
@@ -894,6 +900,18 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (next) {
           active = next.report.request_id
           if (next.report.status === 'running') this.counts.recoveries++
+          const key = `resets:${active}`
+          const resets = Number(this.metadata.get(key) ?? '0')
+          if (resets >= pumpResets) {
+            this.metadata.delete(key)
+            await reader.finish(scope, active, 'failed', { error: resetNote, kind: 'recovery' })
+            this.queue = 'unknown'
+            immediate = true
+            return
+          }
+          this.metadata.set(key, String(resets + 1))
+          await this.ctx.storage.sync()
+          tripwire = key
         }
         const prepared = performance.now()
         let timing: TurnTiming | undefined
@@ -1027,6 +1045,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             await reader?.interrupted(scope ?? ownerScope, active, interruptedNote).catch(() => {})
         }
       } finally {
+        if (tripwire) this.metadata.delete(tripwire)
         if (this.deleted) {
           this.pumping = false
           return
