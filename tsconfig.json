@@ -23,6 +23,7 @@
     "src/cloudflare/Sql.ts",
     "src/cloudflare/Transport.ts",
     "src/feedback/*.ts",
+    "src/feedback/server/*.ts",
     "src/internal/*.ts",
     "src/machines/*.ts",
     "src/react/*.ts",

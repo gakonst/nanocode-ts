@@ -1,13 +1,20 @@
 import * as Styles from './Feedback.styles.ts'
 import * as Report from './Report.ts'
 
+export type Link = { href: string; text: string }
+
 export type Prompt = { code: string; expiresAt: number; url: string }
 
-export type Sent = { label: string; link?: { href: string; text: string } | undefined }
+export type Sent = { label: string; link?: Link | undefined }
+
+export type Status = { ready: true } | Unready
 
 export type Target = {
   send(report: Report.Report, events: Target.Events): Promise<Sent>
+  status?: (() => Promise<Status>) | undefined
 }
+
+export type Unready = { help?: Link | undefined; ready: false; reason: string }
 
 export declare namespace Target {
   type Events = { prompt(prompt: Prompt): void; signal: AbortSignal }
@@ -23,6 +30,7 @@ export function mount(options: mount.Options): mount.ReturnType {
   let hovered: Element | undefined
   let parts: Parts | undefined
   let state: State = { at: 'closed' }
+  let unready: Unready | undefined
 
   const beneath = (x: number, y: number) =>
     document
@@ -64,6 +72,8 @@ export function mount(options: mount.Options): mount.ReturnType {
   }
 
   const launch = () => {
+    if (unready)
+      return go(state.at === 'setup' ? { at: 'closed' } : { at: 'setup', status: unready })
     if (state.at === 'closed') return go(notes.length ? { at: 'reviewing' } : { at: 'picking' })
     if (state.at === 'sending') return
     controller?.abort()
@@ -72,6 +82,7 @@ export function mount(options: mount.Options): mount.ReturnType {
 
   const key = (event: KeyboardEvent) => {
     if (event.key !== 'Escape' || state.at === 'closed' || state.at === 'sending') return
+    if (state.at === 'setup') return go({ at: 'closed' })
     event.stopPropagation()
     if (state.at === 'picking' || state.at === 'writing') return settle()
     go({ at: 'closed' })
@@ -206,6 +217,21 @@ export function mount(options: mount.Options): mount.ReturnType {
   }
 
   const panel = (): readonly Node[] => {
+    if (state.at === 'setup')
+      return [
+        element('h2', { text: 'Feedback is not set up' }),
+        element('p', { attributes: { role: 'status' }, text: state.status.reason }),
+        element('div', {
+          children: [
+            button('Close', { on: () => go({ at: 'closed' }) }),
+            ...(state.status.help
+              ? [link(state.status.help.text, { href: state.status.help.href, primary: true })]
+              : []),
+          ],
+          className: 'row',
+        }),
+      ]
+
     if (state.at === 'picking')
       return [
         element('p', { text: 'Click anything on the page to comment on it.' }),
@@ -341,6 +367,17 @@ export function mount(options: mount.Options): mount.ReturnType {
     addEventListener('resize', schedule, { passive: true })
     addEventListener('scroll', schedule, { capture: true, passive: true })
     render()
+    void options.target
+      .status?.()
+      .catch((error: unknown) => ({
+        ready: false as const,
+        reason: error instanceof Error ? error.message : String(error),
+      }))
+      .then((status) => {
+        if (!status || status.ready || !parts) return
+        unready = status
+        go({ at: 'setup', status })
+      })
   }
 
   const unmount = () => {
@@ -390,6 +427,7 @@ type State =
   | { at: 'reviewing' }
   | { at: 'sending'; prompt?: Prompt | undefined }
   | { at: 'sent'; sent: Sent }
+  | { at: 'setup'; status: Unready }
   | { at: 'writing'; element: Element }
 
 function button(text: string, options: button.Options = {}) {

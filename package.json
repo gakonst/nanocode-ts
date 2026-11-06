@@ -52,6 +52,10 @@
       "types": "./dist/feedback/index.d.ts",
       "default": "./dist/feedback/index.js"
     },
+    "./feedback/server": {
+      "types": "./dist/feedback/server/index.d.ts",
+      "default": "./dist/feedback/server/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"

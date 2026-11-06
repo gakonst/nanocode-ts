@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme</title>
+    <style>
+      body {
+        font:
+          17px/1.55 Georgia,
+          serif;
+        margin: 48px auto;
+        max-width: 720px;
+        padding: 0 20px;
+      }
+      section {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      .plan {
+        border: 1px solid #ccc;
+        flex: 1;
+        min-width: 200px;
+        padding: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="hero">Acme pricing</h1>
+    <p class="lede">
+      Plans for every team. Open this page with <code>?feedback</code> to comment on it.
+    </p>
+    <section>
+      <div class="plan">
+        <h2>Starter</h2>
+        <p>$9 a month</p>
+        <button>Buy</button>
+      </div>
+      <div class="plan">
+        <h2>Pro</h2>
+        <p>$29 a month</p>
+        <button>Buy</button>
+      </div>
+    </section>
+    <script async src="https://gateway.tempo-dev.workers.dev/feedback.js"></script>
+  </body>
+</html>
