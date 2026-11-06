@@ -392,10 +392,21 @@ export function mount(options: mount.Options): mount.ReturnType {
     state = { at: 'closed' }
   }
 
-  if (new URL(location.href).searchParams.has(parameter) || storage?.getItem(remembered) === '1')
-    show()
+  const start = () => {
+    if (new URL(location.href).searchParams.has(parameter) || storage?.getItem(remembered) === '1')
+      show()
+  }
 
-  return { show, unmount }
+  if (document.body) start()
+  else document.addEventListener('DOMContentLoaded', start, { once: true })
+
+  return {
+    show: () => {
+      if (document.body) show()
+      else document.addEventListener('DOMContentLoaded', show, { once: true })
+    },
+    unmount,
+  }
 }
 
 export declare namespace mount {
