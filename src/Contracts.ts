@@ -322,7 +322,7 @@ export type RemoteRequest = {
   frames?: string[]
   durable?: boolean
   dispatches?: boolean
-  origins?: { index: number; origin: string | null }[]
+  origins?: { index: number; origin: string | null; subagent?: Subagent | null }[]
   refused?: number[]
   reason?: string
 }

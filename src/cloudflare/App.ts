@@ -251,6 +251,18 @@ function handRequestKey(hand: string, runtime: string, id: number): string {
   return `${hand}\u0000${runtime}\u0000${id}`
 }
 
+function attributed(request: Contracts.RemoteRequest): Contracts.RemoteRequest {
+  if (!request.frames || !request.origins?.some((entry) => entry.subagent)) return request
+
+  const frames = [...request.frames]
+  for (const entry of request.origins) {
+    const frame = frames[entry.index]
+    if (!entry.subagent || frame === undefined || !frame.endsWith('}')) continue
+    frames[entry.index] = `${frame.slice(0, -1)},"subagent":${JSON.stringify(entry.subagent)}}`
+  }
+  return { ...request, frames }
+}
+
 function executorFailure(error: unknown): Contracts.HostFailureError {
   const message = error instanceof Error ? error.message : String(error)
   if (!(error instanceof Executor.RejectedError))
@@ -1419,7 +1431,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                       request.connection != null
                     )
                       this.recordHandRequests(scope, request.connection, request)
-                    return executor.execute(request, id)
+                    return executor.execute(
+                      request.op === 'remote_send' && request.connection != null
+                        ? attributed(request)
+                        : request,
+                      id,
+                    )
                   },
                   cancel: (id) => {
                     remote?.cancel(id)

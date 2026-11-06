@@ -64,7 +64,7 @@ impl HandToolSelection for ToolSelections {
     }
 }
 
-fn origin(frame: &Frame) -> Option<&str> {
+fn context(frame: &Frame) -> Option<&RemoteContext> {
     match frame {
         Frame::Request {
             operation:
@@ -72,7 +72,7 @@ fn origin(frame: &Frame) -> Option<&str> {
                 | RemoteOperation::Wait { context, .. }
                 | RemoteOperation::Call { context, .. },
             ..
-        } => context.host_context.as_deref(),
+        } => Some(context),
         _ => None,
     }
 }
@@ -102,12 +102,18 @@ impl RemoteLink for WorkerLink {
     ) -> HostFuture<'_, Result<(), CodeModeHostError>> {
         Box::pin(async move {
             let dispatches = frames.iter().any(Frame::dispatches);
-            let origins: Vec<Value> = frames
-                .iter()
-                .enumerate()
-                .filter(|(_, frame)| frame.dispatches())
-                .map(|(index, frame)| json!({"index": index, "origin": origin(frame)}))
-                .collect();
+            let mut origins = Vec::new();
+            for (index, frame) in frames.iter().enumerate() {
+                if !frame.dispatches() {
+                    continue;
+                }
+                let context = context(frame);
+                let subagent = match context {
+                    Some(context) => super::subagent(&context.session_id).await,
+                    None => None,
+                };
+                origins.push(json!({"index": index, "origin": context.and_then(|context| context.host_context.as_deref()), "subagent": subagent}));
+            }
             let encoded = frames
                 .iter()
                 .map(|frame| frame.encode(self.max_frame_bytes))
