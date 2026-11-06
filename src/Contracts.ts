@@ -293,12 +293,15 @@ export type Statement = [string, ...SqlValue[]]
 
 export type SqlKind = 'store' | 'log'
 
+export type SqlAccess = 'read' | 'write' | 'schema'
+
 export type SqlHost = {
   readonly value_limit?: number
   transaction(
     kind: SqlKind,
     operation: string,
     statements: Statement[],
+    access?: SqlAccess,
   ): SqlValue[][][] | Promise<SqlValue[][][]>
 }
 

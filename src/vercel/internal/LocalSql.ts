@@ -5,7 +5,7 @@ import type * as Journal from '../Journal.ts'
 
 export type LocalSql = {
   close(): void
-  run(statements: Contracts.Statement[]): Contracts.SqlValue[][][]
+  run(statements: Contracts.Statement[], access?: Contracts.SqlAccess): Contracts.SqlValue[][][]
   version(): string
 }
 
@@ -23,15 +23,20 @@ export function create(batches: Journal.Transaction[][]): LocalSql {
     return statement
   }
 
-  const run = (list: Contracts.Statement[]) => {
-    db.exec('BEGIN IMMEDIATE')
-    try {
-      const rows = list.map((statement) => {
+  const run = (list: Contracts.Statement[], access: Contracts.SqlAccess = 'write') => {
+    const all = () =>
+      list.map((statement) => {
         const [query, ...values] = statement
-        return prepare(query).all(
+        const prepared = access === 'schema' ? db.prepare(query) : prepare(query)
+        if (access === 'schema') prepared.setReturnArrays(true)
+        return prepared.all(
           ...values.map((value) => (value instanceof ArrayBuffer ? new Uint8Array(value) : value)),
         ) as unknown as Contracts.SqlValue[][]
       })
+    if (access === 'read') return all()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const rows = all()
       db.exec('COMMIT')
       return rows
     } catch (error) {
@@ -43,7 +48,7 @@ export function create(batches: Journal.Transaction[][]): LocalSql {
   batches.forEach((transactions, n) => {
     for (const transaction of transactions) {
       try {
-        run(transaction.statements)
+        run(transaction.statements, transaction.access)
       } catch (error) {
         throw new Fatal(
           `nanocode: SQL batch ${n} of the session's log does not replay: ${error instanceof Error ? error.message : String(error)}`,

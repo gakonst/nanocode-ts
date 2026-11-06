@@ -131,14 +131,25 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
     statements: Contracts.Statement[],
   ): Promise<Contracts.SqlValue[][][]> {
     ready ??= Promise.resolve(
-      sql.transaction('store', 'files.schema', [[filesSchema], [parentIndex], [chunksSchema]]),
+      sql.transaction(
+        'store',
+        'files.schema',
+        [[filesSchema], [parentIndex], [chunksSchema]],
+        'schema',
+      ),
     ).then(() => undefined)
     await ready
-    if (!reads.has(operation)) {
+    const read = reads.has(operation)
+    if (!read) {
       version++
       listed.clear()
     }
-    const results = await sql.transaction('store', `files.${operation}`, statements)
+    const results = await sql.transaction(
+      'store',
+      `files.${operation}`,
+      statements,
+      read ? 'read' : 'write',
+    )
     await breathe(statements, results)
     return results
   }

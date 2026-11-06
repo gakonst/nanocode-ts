@@ -314,7 +314,7 @@ export function create(options: create.Options) {
     try {
       return await Files.response(
         SqlFileSystem.create(
-          { transaction: (_kind, _operation, statements) => sql.run(statements) },
+          { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
           { scope: Harness.scope },
         ),
         params.get('file') ?? '',
@@ -333,7 +333,7 @@ export function create(options: create.Options) {
     const sql = LocalSql.create(Journal.committed(state))
     const runtime = await AgentRuntime.instantiate(
       await Wasm.load(),
-      { transaction: (_kind, _operation, statements) => sql.run(statements) },
+      { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
       { published: () => {} },
     )
     try {

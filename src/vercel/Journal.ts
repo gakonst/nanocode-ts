@@ -7,6 +7,7 @@ export const sqlStep = 'nanocode.sql'
 
 export type Transaction = {
   kind: Contracts.SqlKind
+  access?: Contracts.SqlAccess | undefined
   operation: string
   statements: Contracts.Statement[]
 }
@@ -260,15 +261,20 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
     },
     durable: () => enqueue(undefined),
     stats,
-    transaction(kind, operation, statements) {
+    transaction(kind, operation, statements, access = 'write') {
       if (failure) return Promise.reject(failure.error)
 
       let rows: Contracts.SqlValue[][][]
       let wrote: boolean
       try {
-        const before = sql.version()
-        rows = sql.run(statements)
-        wrote = sql.version() !== before
+        if (access === 'read') {
+          rows = sql.run(statements, access)
+          wrote = false
+        } else {
+          const before = sql.version()
+          rows = sql.run(statements, access)
+          wrote = sql.version() !== before
+        }
       } catch (error) {
         return Promise.reject(error)
       }
@@ -277,7 +283,11 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
       else stats.reads++
       if (!wrote && durability !== 'strict') return Promise.resolve(rows)
 
-      const durable = enqueue(wrote ? { kind, operation, statements } : undefined)
+      const durable = enqueue(
+        wrote
+          ? { kind, ...(access === 'write' ? {} : { access }), operation, statements }
+          : undefined,
+      )
       if (durability === 'strict' || queued > batchBytes) return durable.then(() => rows)
       durable.catch(() => undefined)
       return Promise.resolve(rows)

@@ -17,7 +17,7 @@ export async function open(state: SessionState, options: open.Options = {}): Pro
   const sql = LocalSql.create(Journal.committed(state))
   const runtime = await AgentRuntime.instantiate(
     await module(),
-    { transaction: (_kind, _operation, statements) => sql.run(statements) },
+    { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
     { published: () => undefined },
   )
 

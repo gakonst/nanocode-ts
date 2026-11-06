@@ -768,6 +768,7 @@ async function create(
                 'store',
                 request.operation,
                 internal.statements(request.statements),
+                request.access,
               ),
             )
           } finally {
@@ -787,6 +788,7 @@ async function create(
               'log',
               request.operation,
               internal.statements(request.statements),
+              request.access,
             ),
           )
         }

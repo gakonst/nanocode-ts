@@ -13,6 +13,7 @@ export type Storage = {
 
 export type Observation = {
   kind: Contracts.SqlKind
+  access: Contracts.SqlAccess
   operation: string
   statements: number
   rows_read: number
@@ -27,6 +28,7 @@ export type Host = Contracts.SqlHost & {
     kind: Contracts.SqlKind,
     operation: string,
     statements: Contracts.Statement[],
+    access?: Contracts.SqlAccess,
   ): Contracts.SqlValue[][][]
 }
 
@@ -39,7 +41,7 @@ export function create(storage: Storage, options: create.Options = {}): Host {
 
   return {
     storage,
-    transaction(kind, operation, statements) {
+    transaction(kind, operation, statements, access = 'write') {
       for (const [query, ...values] of statements) {
         for (const value of values) {
           const bytes =
@@ -60,19 +62,20 @@ export function create(storage: Storage, options: create.Options = {}): Host {
       const started = performance.now()
       let rows_read = 0
       let rows_written = 0
+      const run = () =>
+        statements.map(([query, ...values]) => {
+          const cursor = storage.sql.exec(query, ...values)
+          const rows = [...cursor.raw()]
+          rows_read += cursor.rowsRead
+          rows_written += cursor.rowsWritten
+          return rows
+        })
       try {
-        return storage.transactionSync(() =>
-          statements.map(([query, ...values]) => {
-            const cursor = storage.sql.exec(query, ...values)
-            const rows = [...cursor.raw()]
-            rows_read += cursor.rowsRead
-            rows_written += cursor.rowsWritten
-            return rows
-          }),
-        )
+        return access === 'read' ? run() : storage.transactionSync(run)
       } finally {
         options.observe?.({
           kind,
+          access,
           operation,
           statements: statements.length,
           rows_read,

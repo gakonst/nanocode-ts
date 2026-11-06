@@ -1,5 +1,5 @@
 use nanocode::durability::{
-    BlobKey, BlobStore, Sql, SqlRow, SqlStatement, StoreError, StoreFuture,
+    BlobKey, BlobStore, Sql, SqlAccess, SqlRow, SqlStatement, StoreError, StoreFuture,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -23,6 +23,7 @@ impl WorkerStore {
 #[derive(Serialize)]
 struct Transaction<'a> {
     op: &'static str,
+    access: &'static str,
     operation: &'static str,
     statements: Interned<'a>,
 }
@@ -135,9 +136,23 @@ impl Sql for WorkerStore {
         operation: &'static str,
         statements: &'a [SqlStatement<'a>],
     ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
+        self.run(SqlAccess::Write, operation, statements)
+    }
+
+    fn run<'a>(
+        &'a self,
+        access: SqlAccess,
+        operation: &'static str,
+        statements: &'a [SqlStatement<'a>],
+    ) -> StoreFuture<'a, Result<Vec<Vec<SqlRow>>, StoreError>> {
         Box::pin(async move {
             let bytes = call_bytes_with(&Transaction {
                 op: self.0,
+                access: match access {
+                    SqlAccess::Read => "read",
+                    SqlAccess::Write => "write",
+                    SqlAccess::Schema => "schema",
+                },
                 operation,
                 statements: Interned(statements),
             })
