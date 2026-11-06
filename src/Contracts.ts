@@ -69,6 +69,7 @@ export type AgentConfiguration = {
   max_tokens?: number
   max_resident_subagents?: number
   subagent_budgets?: boolean
+  cell_interrupt_checks?: number
   service_tier?: ServiceTier
   subagents?: boolean
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>

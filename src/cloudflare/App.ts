@@ -207,6 +207,8 @@ const ownerScope = 'owner'
 const unfinishedStatuses = new Set(['queued', 'running'])
 const interruptedNote = 'Agent execution interrupted; recovery scheduled'
 
+const cellInterruptChecks = 2_000
+
 function requestedYield(operation: unknown): number {
   const body = operation as { source?: unknown; input?: unknown } | undefined
   const requested = (() => {
@@ -1283,6 +1285,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   ? {}
                   : { max_resident_subagents: options.maxResidentSubagents }),
                 ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
+                cell_interrupt_checks: options.cellInterruptChecks ?? cellInterruptChecks,
                 ...withHand(
                   options.instructions,
                   this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -2982,6 +2985,7 @@ export declare namespace create {
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
     streamToolInput?: boolean
     subagentBudgets?: boolean
+    cellInterruptChecks?: number
     subagents?: boolean
     subscription?(
       account: string,

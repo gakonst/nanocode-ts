@@ -124,6 +124,8 @@ struct Configuration {
     #[serde(default)]
     subagent_budgets: bool,
     #[serde(default)]
+    cell_interrupt_checks: Option<u64>,
+    #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
@@ -1038,6 +1040,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let subagents = runtime.subagents().cloned();
     if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
         subagents.set_max_resident(limit);
+    }
+    if let Some(checks) = config.cell_interrupt_checks {
+        nanocode_code_mode::code_mode::set_interrupt_checks(checks);
     }
     if config.subagent_budgets
         && let Some(subagents) = &subagents
