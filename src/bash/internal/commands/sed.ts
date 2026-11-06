@@ -315,6 +315,10 @@ class Parser {
         case 'z':
         case 'F':
           break
+        case 'e':
+        case 'v':
+          this.pos--
+          this.fail('the ' + name + ' command is not supported')
         default:
           this.pos--
           this.fail('unknown command: `' + name + "'")
@@ -528,10 +532,17 @@ export const sed: CommandHandler = streaming(async (ctx) => {
       !labels.has(command.label)
     )
       throw new CommandError("can't find label for jump to `" + command.label + "'")
+  if (inPlace && !operands.length) throw new CommandError('no input files', 4)
   const quiet = parsed.flags.has('n')
   const separator = parsed.flags.has('z') ? '\0' : '\n'
   const lineLength = Number(last(parsed, 'l') ?? 70)
   const writes = new Map<string, string>()
+  for (const command of commands)
+    if (command.file !== undefined && command.name !== 'r' && command.name !== 'R')
+      writes.set(command.file, '')
+  for (const file of writes.keys())
+    if (file !== '/dev/stdout' && file !== '/dev/stderr')
+      await ctx.fs.write(ctx.resolve(file), new Uint8Array(0))
   let lastRegex: RegExp | null = null
   let exitCode = 0
   let quit = false

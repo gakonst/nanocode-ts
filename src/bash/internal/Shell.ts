@@ -366,6 +366,18 @@ export class Input {
     return input
   }
 
+  static machine(): Input {
+    const input = new Input()
+    input.#machine = true
+    return input
+  }
+
+  #machine = false
+
+  #check() {
+    if (this.#machine) throw new MachineError(unanswered('standard input'))
+  }
+
   get ready(): boolean {
     return this.#done
   }
@@ -407,6 +419,7 @@ export class Input {
   }
 
   async fill() {
+    this.#check()
     if (this.#done || !this.#pipe) return
     const pipe = this.#pipe
     const cap = Math.min(pipe.limit * WHOLE_INPUT, pipe.memory)
@@ -423,11 +436,13 @@ export class Input {
   }
 
   async text(): Promise<string> {
+    this.#check()
     await this.fill()
     return this.read()
   }
 
   async chunk(): Promise<string | null> {
+    this.#check()
     if (this.#pos >= this.#text.length && !(await this.#more())) return null
     const text = this.#pos ? this.#text.slice(this.#pos) : this.#text
     this.#text = ''
@@ -436,6 +451,7 @@ export class Input {
   }
 
   async readLine(delimiter = '\n'): Promise<{ text: string; complete: boolean } | null> {
+    this.#check()
     const mark = delimiter === '' ? '\0' : delimiter
     for (;;) {
       const end = this.#text.indexOf(mark, Math.max(this.#pos, this.#scan))
@@ -455,6 +471,7 @@ export class Input {
   }
 
   async readChars(count: number): Promise<string> {
+    this.#check()
     while (this.#text.length - this.#pos < count && (await this.#more()));
     return this.chars(count)
   }
@@ -469,6 +486,7 @@ export class Input {
   }
 
   read(): string {
+    this.#check()
     if (!this.#done) this.#pending()
     const rest = this.#text.slice(this.#pos)
     this.#pos = this.#text.length
@@ -476,6 +494,7 @@ export class Input {
   }
 
   line(delimiter = '\n'): { text: string; complete: boolean } | null {
+    this.#check()
     if (!this.#done) this.#pending()
     if (this.#pos >= this.#text.length) return null
     const end =
@@ -489,6 +508,7 @@ export class Input {
   }
 
   chars(count: number): string {
+    this.#check()
     if (!this.#done && this.#text.length - this.#pos < count) this.#pending()
     const text = this.#text.slice(this.#pos, this.#pos + count)
     this.#pos += text.length
@@ -588,6 +608,7 @@ export type ShellHost = {
   fetch?: typeof fetch
   fallback?: boolean
   limits: Limits
+  machine?: ReadonlySet<string>
 }
 
 type Frame = Map<
@@ -604,8 +625,71 @@ type Frame = Map<
 
 class ExpansionError extends Error {}
 
+export function unanswered(what: string): string {
+  return what + ": (this simulated shell has no answer for this machine's " + what + ')'
+}
+
+const assumedUnset = new Set([
+  '!',
+  'BASH_ARGC',
+  'BASH_ARGV',
+  'BASH_COMPAT',
+  'BASH_ENV',
+  'BASH_LINENO',
+  'BASH_REMATCH',
+  'BASH_SOURCE',
+  'BASH_XTRACEFD',
+  'CDPATH',
+  'ENV',
+  'FUNCNAME',
+  'GLOBIGNORE',
+  'LINENO',
+  'MAPFILE',
+  'OLDPWD',
+  'OPTARG',
+  'PIPESTATUS',
+  'POSIXLY_CORRECT',
+  'REPLY',
+  'TIMEFORMAT',
+  '_',
+])
+
+export class Vars extends Map<string, string[]> {
+  known: Set<string> | undefined
+  readonly #state: State
+
+  constructor(state: State) {
+    super()
+    this.#state = state
+  }
+
+  override delete(name: string): boolean {
+    this.known?.add(name)
+    return super.delete(name)
+  }
+
+  override get(name: string): string[] | undefined {
+    const value = super.get(name)
+    if (
+      value === undefined &&
+      this.known &&
+      !this.known.has(name) &&
+      !assumedUnset.has(name) &&
+      !this.#state.maps.has(name) &&
+      !this.#state.refs.has(name)
+    )
+      throw new MachineError(unanswered('$' + name))
+    return value
+  }
+
+  override set(name: string, value: string[]): this {
+    this.known?.add(name)
+    return super.set(name, value)
+  }
+}
+
 export class State {
-  vars = new Map<string, string[]>()
+  vars = new Vars(this)
   exported = new Set<string>()
   integers = new Set<string>()
   functions = new Map<string, Command>()
@@ -638,6 +722,7 @@ export class State {
 
   clone(): State {
     const state = new State()
+    if (this.vars.known) state.vars.known = new Set(this.vars.known)
     for (const [name, value] of this.vars) state.vars.set(name, value.slice())
     for (const [name, map] of this.maps) state.maps.set(name, new Map(map))
     state.refs = new Map(this.refs)
@@ -944,7 +1029,7 @@ export class Runner {
   }
 
   async jobs() {
-    while (this.#shared.running.size) await Promise.allSettled([...this.#shared.running])
+    while (this.#shared.running.size) await Promise.allSettled(this.#shared.running)
   }
 
   background(item: AndOr, io: IO) {
@@ -1071,6 +1156,7 @@ export class Runner {
     let status = this.state.status
     for (const item of script) {
       if (item.background) {
+        if (this.host.machine) throw new MachineError(unanswered('background job'))
         this.background(item, io)
         status = this.state.status = 0
       } else status = await this.andOr(item, io)
@@ -1143,6 +1229,7 @@ export class Runner {
   }
 
   async pipeline(pipeline: Pipeline, io: IO): Promise<number> {
+    if (pipeline.timed && this.host.machine) throw new MachineError(unanswered('time'))
     if (pipeline.timed) {
       const start = Date.now()
       try {
@@ -1401,6 +1488,7 @@ export class Runner {
         return status
       }
       case 'coproc': {
+        if (this.host.machine) throw new MachineError(unanswered('coproc'))
         const body = command.body
         return this.coproc(command.name, (runner, stdio) => runner.command(body, stdio), io)
       }
@@ -1474,7 +1562,7 @@ export class Runner {
           this.host.fs.lstat ? this.host.fs.lstat(this.resolve(path)) : Promise.resolve(null),
         isSet: (name) => {
           const element = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\[(.*)\]$/)
-          if (!element) return this.state.vars.has(name) || this.state.maps.has(name)
+          if (!element) return this.state.vars.get(name) !== undefined || this.state.maps.has(name)
           const map = this.state.maps.get(element[1])
           if (map) return map.has(element[2])
           return this.state.vars.get(element[1])?.[Number(element[2])] !== undefined
@@ -1692,6 +1780,13 @@ export class Runner {
       ((builtin === 'declare' || builtin === 'typeset') &&
         !flags.has('g') &&
         this.state.frames.length > 0)
+    if (
+      this.host.machine &&
+      (!targets.length || flags.has('p')) &&
+      !flags.has('f') &&
+      !flags.has('F')
+    )
+      throw new MachineError(unanswered(builtin))
     if (!targets.length || flags.has('p')) {
       if (flags.has('f') || flags.has('F')) {
         for (const name of [...this.state.functions.keys()].sort())
@@ -1844,6 +1939,7 @@ export class Runner {
     if (fn) return this.call(fn, args, io, name)
     const builtin = BUILTINS[name]
     if (builtin) {
+      if (this.host.machine && machineBuiltin(name, args)) throw new MachineError(unanswered(name))
       try {
         const status = await builtin.call(this, args, io)
         if (io.stdout.backlog) await io.stdout.settle()
@@ -1867,6 +1963,7 @@ export class Runner {
       return status
     }
     if (name.includes('/')) {
+      if (this.host.machine) throw new MachineError(unanswered(name))
       const path = this.resolve(name)
       const stat = await this.host.fs.stat(path)
       if (stat?.kind === 'file') {
@@ -1893,6 +1990,7 @@ export class Runner {
   }
 
   async external(name: string, handler: CommandHandler, args: string[], io: IO): Promise<number> {
+    if (this.host.machine && !this.host.machine.has(name)) throw new MachineError(unanswered(name))
     if (this.host.fallback && !this.host.fetch && (name === 'curl' || name === 'wget'))
       throw new MachineError(name + ': network access is not available in this shell')
     if (this.host.fallback && name === 'file')
@@ -2349,6 +2447,8 @@ export class Runner {
 
   special(name: string): string[] | undefined {
     const state = this.state
+    if (this.host.machine && machineParameters.has(name))
+      throw new MachineError(unanswered('$' + name))
     switch (name) {
       case '?':
         return [String(state.status)]
@@ -3035,6 +3135,61 @@ const SHELL_BUILTINS = new Set([
   'history',
   'times',
 ])
+
+const machineBuiltins = new Set([
+  'alias',
+  'bg',
+  'dirs',
+  'disown',
+  'fg',
+  'hash',
+  'help',
+  'history',
+  'jobs',
+  'kill',
+  'popd',
+  'printenv',
+  'pushd',
+  'time',
+  'times',
+  'type',
+  'ulimit',
+  'umask',
+  'unalias',
+  'which',
+])
+
+const machineParameters = new Set([
+  '$',
+  'BASHPID',
+  'EPOCHREALTIME',
+  'EPOCHSECONDS',
+  'RANDOM',
+  'SECONDS',
+  'SRANDOM',
+])
+
+function machineBuiltin(name: string, args: string[]): boolean {
+  if (machineBuiltins.has(name)) return true
+  switch (name) {
+    case 'command':
+      return args[0]?.startsWith('-') ?? false
+    case 'env': {
+      let i = 0
+      while (
+        i < args.length &&
+        (args[i].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[i]))
+      )
+        i += args[i] === '-u' ? 2 : 1
+      return i >= args.length
+    }
+    case 'set':
+      return !args.length || args[args.length - 1] === '-o' || args[args.length - 1] === '+o'
+    case 'shopt':
+      return !args.some((arg) => /^-[a-z]*[qsu]/.test(arg))
+  }
+  return false
+}
 
 const KEYWORDS = new Set([
   'if',
@@ -3913,6 +4068,8 @@ export const BUILTINS: Record<string, Builtin> = {
   async builtin(args, io) {
     const builtin = args.length ? BUILTINS[args[0]] : undefined
     if (!builtin) throw new CommandError((args[0] ?? '') + ': not a shell builtin')
+    if (this.host.machine && machineBuiltin(args[0], args.slice(1)))
+      throw new MachineError(unanswered(args[0]))
     return builtin.call(this, args.slice(1), io)
   },
   async which(args, io) {

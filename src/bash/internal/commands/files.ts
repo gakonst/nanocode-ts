@@ -1579,22 +1579,23 @@ const basename: CommandHandler = async (ctx) => {
     const trimmed = name.replace(/\/+$/, '') || '/'
     let base = trimmed === '/' ? '/' : trimmed.slice(trimmed.lastIndexOf('/') + 1)
     if (strip && base.endsWith(strip) && base !== strip) base = base.slice(0, -strip.length)
-    ctx.stdout.write(base + '\n')
+    ctx.stdout.write(base + (parsed.flags.has('z') ? '\0' : '\n'))
   }
   return 0
 }
 
 const dirname: CommandHandler = async (ctx) => {
-  const parsed = options(ctx.args, { flags: 'z' })
+  const parsed = options(ctx.args, { flags: 'z', long: { zero: 'z' } })
   if (!parsed.operands.length) throw new CommandError('missing operand')
+  const end = parsed.flags.has('z') ? '\0' : '\n'
   for (const name of parsed.operands) {
     const trimmed = name.replace(/\/+$/, '')
-    if (!trimmed) ctx.stdout.write((name ? '/' : '.') + '\n')
+    if (!trimmed) ctx.stdout.write((name ? '/' : '.') + end)
     else {
       const index = trimmed.lastIndexOf('/')
       ctx.stdout.write(
         (index < 0 ? '.' : index === 0 ? '/' : trimmed.slice(0, index).replace(/\/+$/, '') || '/') +
-          '\n',
+          end,
       )
     }
   }

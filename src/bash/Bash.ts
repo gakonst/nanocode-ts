@@ -66,6 +66,10 @@ export type Event =
       status: 'success' | 'error'
     }
 
+export type Machine = {
+  commands: readonly string[]
+}
+
 export type ExecOptions = {
   cwd?: string
   env?: Record<string, string>
@@ -122,15 +126,18 @@ export async function create(options: create.Options = {}): Promise<Bash> {
   if (options.codec) useCodec(options.codec)
   const fs = options.fs ?? MemoryFileSystem.create({ files: options.files })
   const cwd = FileSystem.resolvePath('/', options.cwd ?? '/home/user')
-  const env = {
-    HOME: '/home/user',
-    USER: 'user',
-    PATH: '/usr/local/bin:/usr/bin:/bin',
-    SHELL: '/bin/bash',
-    LANG: 'C.UTF-8',
-    TMPDIR: '/tmp',
-    ...options.env,
-  }
+  const machine = options.machine && new Set(options.machine.commands)
+  const env = machine
+    ? { ...options.env }
+    : {
+        HOME: '/home/user',
+        USER: 'user',
+        PATH: '/usr/local/bin:/usr/bin:/bin',
+        SHELL: '/bin/bash',
+        LANG: 'C.UTF-8',
+        TMPDIR: '/tmp',
+        ...options.env,
+      }
   const limits = { ...defaultLimits, ...options.limits }
   const commands = new Map(
     Object.entries({
@@ -189,33 +196,39 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       for (const [name, value] of Object.entries({
         BASH: '/bin/bash',
         BASH_VERSION: '5.2.21(1)-release',
-        HOSTNAME: 'localhost',
-        HOSTTYPE: 'x86_64',
-        MACHTYPE: 'x86_64-pc-linux-gnu',
         BASH_EXECUTION_STRING: script,
-        BASH_LOADABLES_PATH:
-          '/usr/local/lib/bash:/usr/lib/bash:/opt/local/lib/bash:/usr/pkg/lib/bash:/opt/pkg/lib/bash:.',
         OPTERR: '1',
         PS4: '+ ',
-        SHLVL: '1',
         IFS: ' \t\n',
         OPTIND: '1',
         OSTYPE: 'linux-gnu',
-        PPID: '1',
-        UID: '1000',
-        EUID: '1000',
+        ...(machine
+          ? {}
+          : {
+              HOSTNAME: 'localhost',
+              HOSTTYPE: 'x86_64',
+              MACHTYPE: 'x86_64-pc-linux-gnu',
+              BASH_LOADABLES_PATH:
+                '/usr/local/lib/bash:/usr/lib/bash:/opt/local/lib/bash:/usr/pkg/lib/bash:/opt/pkg/lib/bash:.',
+              SHLVL: '1',
+              PPID: '1',
+              UID: '1000',
+              EUID: '1000',
+            }),
       }))
         if (!state.vars.has(name)) state.vars.set(name, [value])
-      if (!state.vars.has('BASH_VERSINFO'))
+      if (!machine && !state.vars.has('BASH_VERSINFO'))
         state.vars.set('BASH_VERSINFO', ['5', '2', '21', '1', 'release', 'x86_64-pc-linux-gnu'])
+      if (machine) state.vars.known = new Set(state.vars.keys())
       const budget = { used: 0, refused: false }
       const runner = new Shell.Runner(
         {
           fs: budgeted(fs, limits.maxFileOperations, budget),
           commands,
           fetch: options.fetch,
-          fallback: options.fallback,
+          fallback: options.fallback || machine !== undefined,
           limits: { ...limits, timeoutMs },
+          ...(machine ? { machine } : {}),
         },
         state,
         controller.signal,
@@ -226,7 +239,10 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       let category: Category | undefined
       try {
         exitCode = await Shell.run(runner, script, {
-          stdin: new Shell.Input(execOptions.stdin),
+          stdin:
+            machine && execOptions.stdin === undefined
+              ? Shell.Input.machine()
+              : new Shell.Input(execOptions.stdin),
           stdout,
           stderr,
         })
@@ -331,7 +347,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
   if (options.fs && options.files)
     for (const [path, content] of Object.entries(options.files))
       await shell.writeFile(path, content)
-  for (const dir of [cwd, env.HOME, '/tmp']) await mkdirs(fs, dir)
+  if (!machine) for (const dir of [cwd, env.HOME, '/tmp']) await mkdirs(fs, dir)
   return shell
 }
 
@@ -347,6 +363,7 @@ export declare namespace create {
     fs?: FileSystem.FileSystem
     github?: GitHub.Options
     limits?: Partial<Shell.Limits>
+    machine?: Machine
     observe?: (event: Event) => void
     python?: Python.Options
     wasm?: Wasm.Options

@@ -379,7 +379,7 @@ function shellQuote(text: string): string {
       ) +
       "'"
     )
-  return text.replace(/[^\w@%+=:,./~-]|^~/g, '\\$&')
+  return text.replace(/[^\w@%+=:,./~\p{L}\p{M}\p{N}-]|^~/gu, '\\$&')
 }
 
 const CONVERSION =
