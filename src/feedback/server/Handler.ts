@@ -14,17 +14,20 @@ export function feedback(options: feedback.Options): Handler {
   const prefix = Issue.board(options.repo)
   let checked: Promise<Readiness> | undefined
 
+  const send = options.fetch ?? ((request: Request) => fetch(request))
   const call = (path: string, body?: unknown) =>
-    fetch(gateway + path, {
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      headers: {
-        accept: 'application/json',
-        authorization: 'Bearer ' + options.key,
-        'content-type': 'application/json',
-        'gateway-app': options.app,
-      },
-      method: body === undefined ? 'GET' : 'POST',
-    })
+    send(
+      new Request(gateway + path, {
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        headers: {
+          accept: 'application/json',
+          authorization: 'Bearer ' + options.key,
+          'content-type': 'application/json',
+          'gateway-app': options.app,
+        },
+        method: body === undefined ? 'GET' : 'POST',
+      }),
+    )
 
   const probe = async (): Promise<Readiness> => {
     if (!options.key)
@@ -181,6 +184,7 @@ export declare namespace feedback {
     admin?: ((request: Request) => boolean | Promise<boolean>) | undefined
     agent?: string | undefined
     app: string
+    fetch?: ((request: Request) => Promise<Response>) | undefined
     gateway?: string | undefined
     identify?: ((request: Request) => string | undefined | Promise<string | undefined>) | undefined
     key: string | undefined
