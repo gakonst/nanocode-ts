@@ -69,6 +69,7 @@ export type AgentConfiguration = {
   max_tokens?: number
   max_resident_subagents?: number
   subagent_budgets?: boolean
+  subagent_models?: readonly SubagentModel[]
   cell_interrupt_checks?: number
   service_tier?: ServiceTier
   subagents?: boolean
@@ -89,6 +90,8 @@ export type AgentConfiguration = {
   mcp_servers?: McpServer[]
   hand_tools?: Partial<Record<ModelProvider, HandToolSelection>>
 }
+
+export type SubagentModel = { harness: ModelProvider; model: string }
 
 export type WorkspaceTools = 'all' | 'files' | 'none'
 

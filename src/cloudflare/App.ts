@@ -1311,9 +1311,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const other = provider === 'codex' ? 'claude' : 'codex'
         const both = options.harnesses === 'both'
         try {
-          const limits = await options.limits?.({ provider, model }, this.env)
+          const limits = await options.limits?.({ authority, provider, model }, this.env)
           const otherLimits = both
-            ? await options.limits?.({ provider: other, model: undefined }, this.env)
+            ? await options.limits?.({ authority, provider: other, model: undefined }, this.env)
             : undefined
           const created = await this.instance(scope, true)
           await created.open(
@@ -3144,9 +3144,16 @@ export declare namespace create {
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   }
 
-  type Limits = Pick<Contracts.AgentConfiguration, 'auto_compact_window_tokens' | 'max_tokens'>
+  type Limits = Pick<
+    Contracts.AgentConfiguration,
+    'auto_compact_window_tokens' | 'max_tokens' | 'subagent_models'
+  >
 
-  type Session = { provider: Contracts.ModelProvider; model: string | undefined }
+  type Session = {
+    authority: SessionAuthority
+    provider: Contracts.ModelProvider
+    model: string | undefined
+  }
 
   type ReturnType<E extends Env> = {
     AgentSession: new (

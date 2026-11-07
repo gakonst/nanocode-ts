@@ -69,6 +69,30 @@ impl Provider {
             Self::Codex => ModelSelection::Codex(Model::Sol),
         }
     }
+
+    fn select(self, model: &str) -> Result<ModelSelection, String> {
+        let selection = match self {
+            Self::Claude => model.parse::<ClaudeModel>().map_or_else(
+                |_| ModelSelection::new(HarnessFamily::Claude, model),
+                ModelSelection::Claude,
+            ),
+            Self::Codex => model
+                .parse::<Model>()
+                .map(ModelSelection::Codex)
+                .map_err(|error| format!("model {model}: {error}"))?,
+        };
+        selection
+            .validate()
+            .map_err(|error| format!("model {model}: {error}"))?;
+        Ok(selection)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubagentModel {
+    harness: Provider,
+    model: String,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +147,8 @@ struct Configuration {
     max_resident_subagents: Option<usize>,
     #[serde(default)]
     subagent_budgets: bool,
+    #[serde(default)]
+    subagent_models: Option<Vec<SubagentModel>>,
     #[serde(default)]
     cell_interrupt_checks: Option<u64>,
     #[serde(default)]
@@ -233,20 +259,19 @@ impl Configuration {
         let Some(model) = &self.model else {
             return Ok(self.provider.model());
         };
-        let selection = match self.provider {
-            Provider::Claude => model.parse::<ClaudeModel>().map_or_else(
-                |_| ModelSelection::new(HarnessFamily::Claude, model.as_str()),
-                ModelSelection::Claude,
-            ),
-            Provider::Codex => model
-                .parse::<Model>()
-                .map(ModelSelection::Codex)
-                .map_err(|error| format!("model {model}: {error}"))?,
-        };
-        selection
-            .validate()
-            .map_err(|error| format!("model {model}: {error}"))?;
-        Ok(selection)
+        self.provider.select(model)
+    }
+
+    fn subagent_models(&self) -> Result<Option<Vec<ModelSelection>>, String> {
+        self.subagent_models
+            .as_ref()
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|entry| entry.harness.select(&entry.model))
+                    .collect()
+            })
+            .transpose()
     }
 
     fn thinking(&self) -> Result<Option<Thinking>, String> {
@@ -795,6 +820,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .map_err(text)?
         .with_logged_prompts();
     let model = config.model().map_err(configuration)?;
+    let subagent_models = config.subagent_models().map_err(configuration)?;
     let thinking = config.thinking().map_err(configuration)?;
     if config.code_mode && config.remote {
         return Err(configuration(
@@ -1057,6 +1083,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         && let Some(subagents) = &subagents
     {
         subagents.update_spawn_policy(|policy| policy.budgets = true);
+    }
+    if let (Some(models), Some(subagents)) = (subagent_models, &subagents) {
+        subagents.update_spawn_policy(|policy| policy.models = Some(models.clone()));
     }
     let host = Arc::new(events::WorkerInbox::new(
         config.runtime_id,
