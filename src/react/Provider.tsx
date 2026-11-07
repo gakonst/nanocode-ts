@@ -229,15 +229,6 @@ export function NanocodeProvider(props: NanocodeProvider.Props) {
       active = false
     }
   }, [highlight, wanted])
-  useEffect(() => {
-    const start = () => void preloadMarkdown().catch(() => {})
-    if (typeof requestIdleCallback !== 'function') {
-      const timer = setTimeout(start, 200)
-      return () => clearTimeout(timer)
-    }
-    const id = requestIdleCallback(start, { timeout: 1500 })
-    return () => cancelIdleCallback(id)
-  }, [])
   return (
     <ConfigContext.Provider value={props.config}>
       <SkinContext.Provider value={props.skin ?? emptySkin}>
@@ -300,8 +291,15 @@ export function useSend(): {
   const config = useConfig()
   const status = useChatState((state) => state.status)
   const error = useChatState((state) => state.error)
+  const send = useCallback(
+    (prompt: string, attachments?: readonly Transport.Attachment[]) => {
+      void preloadMarkdown().catch(() => {})
+      return config.send(prompt, attachments)
+    },
+    [config],
+  )
   return {
-    send: config.send,
+    send,
     cancel: config.cancel,
     canCancel: status === 'pending' && config.cancellable,
     isPending: status === 'pending',
