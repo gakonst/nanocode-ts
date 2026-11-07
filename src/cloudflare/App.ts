@@ -1014,7 +1014,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.blocked.add(active)
         if (active && next?.report.status === 'running') await this.awaitRecoveredHands(scope)
         if (active) this.driving.set(scope, active)
-        const epoch = this.changed(scope)
+        const epoch = ++this.directoryEpoch
         const driven = await runtime.drive(active)
         this.driving.delete(scope)
         if (active) this.blocked.delete(active)
@@ -2860,7 +2860,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         'SELECT body FROM subagent_directories WHERE scope = ?',
         scope,
       )?.body
-      if (typeof stored === 'string') return JSON.parse(stored) as Contracts.AgentDirectoryEntry[]
+      if (typeof stored === 'string' && !this.metadata.first('background:'))
+        return JSON.parse(stored) as Contracts.AgentDirectoryEntry[]
       const epoch = this.directoryEpoch
       const runtime = await this.subagentRuntime(scope, descriptor)
       if (!runtime) return []
@@ -2885,7 +2886,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     ): void {
       if (!entries || epoch !== this.directoryEpoch || this.metadata.first('background:')) return
       this.ctx.storage.sql.exec(
-        'INSERT INTO subagent_directories (scope, body) VALUES (?, ?) ON CONFLICT (scope) DO UPDATE SET body = excluded.body',
+        'INSERT INTO subagent_directories (scope, body) VALUES (?, ?) ON CONFLICT (scope) DO UPDATE SET body = excluded.body WHERE body IS NOT excluded.body',
         scope,
         JSON.stringify(entries),
       )
