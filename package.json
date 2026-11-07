@@ -133,7 +133,9 @@
     }
   },
   "bundleDependencies": [
-    "nanocode-egress"
+    "@cloudflare/containers",
+    "nanocode-egress",
+    "undici"
   ],
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
