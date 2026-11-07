@@ -971,12 +971,14 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             _ => Tools::builder().without_defaults().build(),
         }
         .map_err(configuration)?;
-        let tools = shared
-            .iter()
-            .cloned()
-            .chain(search(family))
-            .chain(image(family))
-            .try_fold(base, |tools, tool| tools.add_shared_tool(tool))
+        let tools = base
+            .add_shared_tools(
+                shared
+                    .iter()
+                    .cloned()
+                    .chain(search(family))
+                    .chain(image(family)),
+            )
             .map_err(configuration)?;
         if !(placement || local) {
             return Ok(tools);

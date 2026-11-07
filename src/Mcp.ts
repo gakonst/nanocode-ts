@@ -18,8 +18,8 @@ type Tool = { name: string; [key: string]: unknown }
 
 type Listing = {
   at: number
-  init?: Promise<unknown>
-  tools?: Promise<Tool[] | undefined>
+  init?: unknown
+  tools?: Tool[]
   stateful?: boolean
 }
 
@@ -104,6 +104,7 @@ export function defer<R extends Request, A extends unknown[]>(
   if (!servers?.length) return send
   const urls = new Set(servers.map((server) => key(server.url)))
   const ttl = policy.cacheMs ?? DEFAULT_CACHE_MS
+  const pending = new Map<string, Promise<Tool[] | undefined>>()
   return async (request, signal, ...rest) => {
     if (
       request.provider != null ||
@@ -133,6 +134,8 @@ export function defer<R extends Request, A extends unknown[]>(
     }
     if (listing?.stateful) return send(request, signal, ...rest)
     const list = () => {
+      const existing = pending.get(url)
+      if (existing) return existing
       const fetched = send(
         {
           ...request,
@@ -159,29 +162,29 @@ export function defer<R extends Request, A extends unknown[]>(
             : undefined
         })
         .catch(() => undefined)
-      void fetched.then((tools) => {
-        if (!tools && listings.get(url)?.tools === fetched) listings.delete(url)
-      })
+        .then((tools) => {
+          pending.delete(url)
+          const current = listings.get(url)
+          if (current && !current.stateful && current.tools === undefined) {
+            if (tools) current.tools = tools
+            else listings.delete(url)
+          }
+          return tools
+        })
+      pending.set(url, fetched)
       return fetched
     }
     switch (body?.method) {
       case 'initialize': {
-        if (listing?.init) {
-          const result = await listing.init.catch(() => undefined)
-          if (result) return reply(body.id, result)
-        }
+        if (listing?.init) return reply(body.id, listing.init)
 
         const shared = !listing && policy.store ? await stored(policy.store, url, ttl) : undefined
         if (shared) {
-          listings.set(url, {
-            at: shared.at,
-            init: Promise.resolve(shared.init),
-            tools: Promise.resolve(shared.tools),
-          })
+          listings.set(url, { at: shared.at, init: shared.init, tools: shared.tools })
           return reply(body.id, shared.init)
         }
 
-        const fresh: Listing = { at: Date.now() }
+        const at = Date.now()
         const response = await send(request, signal, ...rest)
         if (!response.ok || response.headers.has('mcp-session-id')) {
           if (response.headers.has('mcp-session-id'))
@@ -194,27 +197,31 @@ export function defer<R extends Request, A extends unknown[]>(
             status: response.status,
             headers: { 'content-type': 'application/json' },
           })
-        fresh.init = Promise.resolve(parsed.result)
-        fresh.tools = listing?.tools ?? list()
+        const fresh: Listing = { at, init: parsed.result }
+        if (listing?.tools) fresh.tools = listing.tools
         listings.set(url, fresh)
+        const tools = fresh.tools ? Promise.resolve(fresh.tools) : list()
 
         const store = policy.store
         if (store)
-          void fresh.tools
-            .then(async (tools) => {
-              if (!tools) return
-              const value: Stored = { at: fresh.at, init: parsed.result, tools }
-              await store.put(await digest(url), JSON.stringify(value), ttl)
+          void tools
+            .then(async (value) => {
+              if (!value) return
+              const entry: Stored = { at, init: parsed.result, tools: value }
+              await store.put(await digest(url), JSON.stringify(entry), ttl)
             })
             .catch(() => undefined)
         return reply(body.id, parsed.result)
       }
       case 'notifications/initialized':
-        return listing ? new Response(null, { status: 202 }) : send(request, signal, ...rest)
+        return listing || pending.has(url)
+          ? new Response(null, { status: 202 })
+          : send(request, signal, ...rest)
       case 'tools/list': {
-        const tools = await (listing?.tools ??
-          (listings.set(url, (listing = { at: Date.now(), tools: list() })), listing.tools))
+        if (listing?.tools) return reply(body.id, { tools: listing.tools })
+        const tools = await list()
         if (!tools) return send(request, signal, ...rest)
+        if (!listings.has(url)) listings.set(url, { at: Date.now(), tools })
         return reply(body.id, { tools })
       }
       default:

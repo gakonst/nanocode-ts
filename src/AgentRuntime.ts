@@ -103,23 +103,8 @@ export async function localEngine(
       entry = at
       return room(want)
     },
-    calendar_date: (pointer: number, length: number) => {
-      try {
-        const parts = Object.fromEntries(
-          new Intl.DateTimeFormat('en-US', {
-            timeZone: new TextDecoder().decode(bytes(pointer, length)),
-            year: 'numeric',
-            month: 'numeric',
-            day: 'numeric',
-          })
-            .formatToParts(Date.now())
-            .map((part) => [part.type, Number(part.value)]),
-        )
-        return parts.year * 10_000 + parts.month * 100 + parts.day
-      } catch {
-        return 0
-      }
-    },
+    calendar_date: (pointer: number, length: number) =>
+      calendarDate(new TextDecoder().decode(bytes(pointer, length))),
     random: (pointer: number, length: number) => {
       crypto.getRandomValues(bytes(pointer, length))
     },
@@ -1603,6 +1588,53 @@ function isFramed(value: unknown): value is Framed {
 
 function cellPath(cwd: string, path: string): string {
   return path.startsWith('/') ? path : cwd.replace(/\/+$/, '') + '/' + path
+}
+
+const universal = new Set([
+  'UTC',
+  'Etc/UTC',
+  'UCT',
+  'Etc/UCT',
+  'GMT',
+  'Etc/GMT',
+  'GMT0',
+  'Etc/GMT0',
+  'GMT+0',
+  'Etc/GMT+0',
+  'GMT-0',
+  'Etc/GMT-0',
+  'Greenwich',
+  'Etc/Greenwich',
+  'Universal',
+  'Etc/Universal',
+  'Zulu',
+  'Etc/Zulu',
+])
+const calendars = new Map<string, Intl.DateTimeFormat>()
+
+function calendarDate(timeZone: string): number {
+  if (universal.has(timeZone)) {
+    const now = new Date()
+    return now.getUTCFullYear() * 10_000 + (now.getUTCMonth() + 1) * 100 + now.getUTCDate()
+  }
+  try {
+    let format = calendars.get(timeZone)
+    if (!format) {
+      format = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+      })
+      calendars.set(timeZone, format)
+    }
+    const parts = Object.fromEntries(
+      format.formatToParts(Date.now()).map((part) => [part.type, Number(part.value)]),
+    )
+    return parts.year * 10_000 + parts.month * 100 + parts.day
+  } catch {
+    return 0
+  }
 }
 
 function shellQuote(text: string): string {
