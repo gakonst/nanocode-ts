@@ -914,8 +914,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           if (next.report.status === 'running') this.counts.recoveries++
           const key = `resets:${active}`
           const progress = this.progress()
-          const [counted, marked] = (this.metadata.get(key) ?? '0').split(' ')
-          const resets = marked === progress ? Number(counted) : 0
+          const version = options.version?.(this.env) ?? ''
+          const [counted, marked, stamped = ''] = (this.metadata.get(key) ?? '0').split(' ')
+          const resets = marked === progress && stamped === version ? Number(counted) : 0
           if (resets >= pumpResets) {
             this.metadata.delete(key)
             await reader.finish(scope, active, 'failed', { error: resetNote, kind: 'recovery' })
@@ -923,7 +924,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             immediate = true
             return
           }
-          this.metadata.set(key, `${resets + 1} ${progress}`)
+          this.metadata.set(key, `${resets + 1} ${progress} ${version}`)
           await this.ctx.storage.sync()
           tripwire = key
         }
@@ -3046,6 +3047,7 @@ export declare namespace create {
       call(call: HostToolCall, env: E, signal: AbortSignal): Promise<unknown>
     }
     valueLimit?: number
+    version?(env: E): string | undefined
     workspace?:
       | false
       | {
