@@ -203,6 +203,17 @@ const watchTag = 'watch'
 type Watch = { watch: string; cursor: number; live?: boolean }
 type Watcher = { state: Watch; scope: string; descriptor: SessionDescriptor }
 type HandExecutor = Remote.Executor<WebSocket>
+type Opened = {
+  opening: string
+  runtime: Promise<AgentRuntime.AgentRuntime>
+  resident?: AgentRuntime.AgentRuntime
+}
+type Lifecycle = {
+  instance?: Promise<AgentRuntime.AgentRuntime>
+  opened?: Opened
+  prewarmed?: { session: string; provider: string; model: string; executor: string }
+}
+type Connection = { executor: HandExecutor; hand: string; runtime: string | null }
 const ownerScope = 'owner'
 const unfinishedStatuses = new Set(['queued', 'running'])
 const interruptedNote = 'Agent execution interrupted; recovery scheduled'
@@ -303,15 +314,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly store: Checkpoints.Checkpoints
     private readonly blobs: Contracts.BlobHost
     private readonly metadata: Metadata.Metadata
-    private readonly instances = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
-    private readonly runtimes = new Map<string, Promise<AgentRuntime.AgentRuntime>>()
-    private readonly residents = new Map<string, AgentRuntime.AgentRuntime>()
+    private readonly lifecycles = new Map<string, Lifecycle>()
     private readonly efforts = new WeakMap<AgentRuntime.AgentRuntime, Thinking>()
-    private readonly openedWith = new WeakMap<Promise<AgentRuntime.AgentRuntime>, string>()
-    private readonly prewarmed = new Map<
-      string,
-      { session: string; provider: string; model: string; executor: string }
-    >()
     private readonly blocked = new Set<string>()
     private readonly driving = new Map<string, string>()
     private binding?: Promise<void>
@@ -323,12 +327,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       string,
       Map<string, { connection: string; executor: HandExecutor; ready: boolean }>
     >()
-    private readonly connections = new Map<string, HandExecutor>()
+    private readonly connections = new Map<string, Connection>()
     private readonly handSockets = new Map<WebSocket, HandExecutor>()
     private readonly handAuthority = new Map<string, SessionDescriptor>()
     private readonly rechecks = new Set<WebSocket>()
     private readonly handFrames = new Map<WebSocket, Promise<void>>()
-    private readonly handIdentities = new Map<string, { hand: string; runtime: string | null }>()
     private readonly handReplies = new Map<string, Set<(frame: string) => void>>()
     private handRequestsPruned = 0
     private linger?: ReturnType<typeof setTimeout>
@@ -533,11 +536,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             timing: this.timings.get(scope)?.snapshot() ?? {},
             checkpoints: {
               ...this.store.metrics,
-              timing: this.residents.get(scope)?.metrics.timing.checkpoints ?? {},
+              timing: this.opened(scope)?.resident?.metrics.timing.checkpoints ?? {},
             },
             log: this.store.log,
-            resident_runtimes: this.runtimes.size,
-            runtime: this.residents.get(scope)?.metrics,
+            resident_runtimes: [...this.lifecycles.values()].filter((found) => found.opened).length,
+            runtime: this.opened(scope)?.resident?.metrics,
             persisted: this.store.persisted(scope),
           })
         if (request.method === 'GET' && parts[2] === 'events') {
@@ -692,7 +695,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         )
           return json({ error: 'images must be at most 8 workspace paths' }, 400)
         if (input.steer) {
-          const resident = this.residents.get(scope)
+          const resident = this.opened(scope)?.resident
           if (
             resident &&
             this.driving.has(scope) &&
@@ -937,7 +940,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             this.turnTimings.set(active, timing)
           }
           timing.pump_wait_ms = prepared - (timing.admitted_at ?? prepared)
-          timing.runtime_reused = this.runtimes.has(scope)
+          timing.runtime_reused = this.opened(scope) !== undefined
         }
         const hand = next && !next.cancel_requested ? descriptor.hand : undefined
         if (hand !== undefined && !this.hands.get(scope)?.get(hand)?.ready) {
@@ -1037,9 +1040,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (scope) this.driving.delete(scope)
         if (active) this.blocked.delete(active)
         if (scope && runtime) {
-          if (this.residents.get(scope) === runtime) {
-            this.runtimes.delete(scope)
-            this.residents.delete(scope)
+          const opened = this.opened(scope)
+          if (opened?.resident === runtime) {
+            this.forget(scope, opened)
             this.releaseHands(scope)
           }
           await runtime.dispose().catch(() => {})
@@ -1164,7 +1167,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       sessionId: string,
       descriptor: SessionDescriptor,
     ): Promise<AgentRuntime.AgentRuntime> {
-      let resident = this.runtimes.get(scope)
+      const current = this.opened(scope)
       const opening = JSON.stringify([
         sessionId,
         descriptor.provider ?? 'claude',
@@ -1172,412 +1175,419 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         descriptor.executor_id ?? null,
         descriptor.web_search ?? null,
       ])
-      if (resident)
-        return resident.then(async (runtime) => {
+      if (current)
+        return current.runtime.then(async (runtime) => {
           if (
             runtime.reusable &&
             runtime.hands === this.handsMode(scope, descriptor) &&
             runtime.subscription === descriptor.subscription &&
-            this.openedWith.get(resident!) === opening
+            current.opening === opening
           )
             return runtime
-          if (this.runtimes.get(scope) === resident) {
-            this.runtimes.delete(scope)
-            this.residents.delete(scope)
-          }
+          this.forget(scope, current)
           this.releaseHands(scope)
           await runtime.dispose().catch(() => {})
           return this.runtime(scope, sessionId, descriptor)
         })
-      if (!resident) {
-        this.counts.runtime_initializations++
-        resident = (async () => {
-          await this.ctx.storage.sync()
-          await nextTask()
-          const authority = {
-            account_id: descriptor.account_id,
-            session_id: sessionId,
-            executor_id: descriptor.executor_id,
-            session_name: descriptor.session_name,
-          }
-          const enabled = this.executorEnabled(descriptor)
-          let remote: HandExecutor | undefined
-          let remoteFailed = false
-          let remoteError: unknown
-          const owner = {}
-          const connectStarted = performance.now()
-          const connecting = enabled
-            ? Executor.connect(egress(this.env), { authority, policy: this.handLimits() })
-                .then(
-                  (value) => (remote = value),
-                  (error) => {
-                    remoteFailed = true
-                    remoteError = error
-                    throw error
-                  },
-                )
-                .finally(() =>
-                  this.scopeTimings(scope).record(
-                    'remote.connect',
-                    performance.now() - connectStarted,
-                  ),
-                )
-            : undefined
-          void connecting?.catch(() => {})
-          const githubToken = options.github?.token
-          const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
-          const guarded = (subagent?: Contracts.Subagent) => {
-            const hostFetch = options.codeMode?.fetch?.(authority, this.env, subagent)
-            return Egress.guard(
-              hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
-            )
-          }
-          const cellFetch = guarded()
-          const pythonRemote = options.workspace
-            ? options.workspace.python?.(authority, this.env)
-            : undefined
-          const mcpServers =
-            typeof options.mcp?.servers === 'function'
-              ? options.mcp.servers(authority, this.env)
-              : (options.mcp?.servers ?? [])
-          const mcpFetch = (subagent?: Contracts.Subagent) =>
-            options.mcp?.fetch?.(authority, this.env, subagent) ??
-            ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init))
-          const sessionMcpFetch = mcpFetch()
-          const mcpStore = mcpServers.length ? options.mcp?.store?.(this.env) : undefined
-          const shell =
-            options.workspace === false || enabled
-              ? undefined
-              : await Bash.create({
-                  fs: Mount.create(
-                    SqlFileSystem.create(this.store, {
-                      maxFileBytes: options.workspace?.maxFileBytes ?? workspaceFileBytes,
-                      scope,
-                    }),
-                    {
-                      mounts: options.workspace
-                        ? (options.workspace.mounts?.(authority, this.env) ?? {})
-                        : {},
-                    },
-                  ),
-                  cwd: options.workspace?.cwd ?? '/workspace',
-                  ...(options.workspace?.files ? { files: options.workspace.files } : {}),
-                  fetch: cellFetch,
-                  wasm: { interpreter },
-                  ...(pythonRemote
-                    ? {
-                        python: {
-                          remote: pythonRemote,
-                          maxBytes: pythonRemoteBytes,
-                          mirror: sessionId + ':' + scope,
-                        },
-                      }
-                    : {}),
-                  limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
-                })
-          const codexEndpoint = descriptor.subscription
-            ? 'https://chatgpt.com/backend-api/codex'
-            : 'https://api.openai.com/v1'
-          const provider = descriptor.provider ?? 'claude'
-          const model =
-            descriptor.model ?? (provider === 'codex' ? undefined : this.env.CLAUDE_MODEL)
-          const other = provider === 'codex' ? 'claude' : 'codex'
-          const both = options.harnesses === 'both'
-          try {
-            const limits = await options.limits?.({ provider, model }, this.env)
-            const otherLimits = both
-              ? await options.limits?.({ provider: other, model: undefined }, this.env)
-              : undefined
-            const created = await this.instance(scope, true)
-            await created.open(
-              {
-                scope,
-                session_id: sessionId,
-                provider,
-                model,
-                ...limits,
-                subscription: descriptor.subscription,
-                endpoint:
-                  descriptor.provider === 'codex'
-                    ? codexEndpoint
-                    : `https://api.anthropic.com/v1/messages${descriptor.subscription ? '?beta=true' : ''}`,
-                ...(descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? '')
-                  ? {
-                      gateway: 'workers_ai' as const,
-                      cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID,
-                    }
-                  : {}),
-                ...(both
-                  ? {
-                      providers: {
-                        [other]: {
-                          endpoint:
-                            other === 'codex'
-                              ? 'https://api.openai.com/v1'
-                              : 'https://api.anthropic.com/v1/messages',
-                          ...(otherLimits?.max_tokens === undefined
-                            ? {}
-                            : { max_tokens: otherLimits.max_tokens }),
-                          ...(options.instructions ? { instructions: options.instructions } : {}),
-                        },
-                      },
-                    }
-                  : {}),
-                remote: enabled,
-                executor: descriptor.executor_id,
-                ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
-                ...(options.maxResidentSubagents === undefined
-                  ? {}
-                  : { max_resident_subagents: options.maxResidentSubagents }),
-                ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
-                cell_interrupt_checks: options.cellInterruptChecks ?? cellInterruptChecks,
-                ...withHand(
-                  options.instructions,
-                  this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
+      this.counts.runtime_initializations++
+      const resident = (async () => {
+        await this.ctx.storage.sync()
+        await nextTask()
+        const authority = {
+          account_id: descriptor.account_id,
+          session_id: sessionId,
+          executor_id: descriptor.executor_id,
+          session_name: descriptor.session_name,
+        }
+        const enabled = this.executorEnabled(descriptor)
+        let remote: HandExecutor | undefined
+        let remoteFailed = false
+        let remoteError: unknown
+        const owner = {}
+        const connectStarted = performance.now()
+        const connecting = enabled
+          ? Executor.connect(egress(this.env), { authority, policy: this.handLimits() })
+              .then(
+                (value) => (remote = value),
+                (error) => {
+                  remoteFailed = true
+                  remoteError = error
+                  throw error
+                },
+              )
+              .finally(() =>
+                this.scopeTimings(scope).record(
+                  'remote.connect',
+                  performance.now() - connectStarted,
                 ),
-                hands: this.handsMode(scope, descriptor),
-                event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, 'EVENT_COALESCE_MS'),
-                live_deltas: options.liveDeltas ?? true,
-                ...(descriptor.web_search === undefined
-                  ? {}
-                  : { web_search: descriptor.web_search }),
-                stream_tool_input: options.streamToolInput ?? true,
-                tools: options.tools?.definitions,
-                ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
-                ...(shell ? { workspace: shell.cwd } : {}),
-                ...(shell && options.workspaceTools
-                  ? { workspace_tools: options.workspaceTools }
-                  : {}),
-                ...((descriptor.provider === 'codex' || both) && options.workspace !== false
-                  ? { environment: { cwd: options.workspace?.cwd ?? '/workspace' } }
-                  : {}),
-              },
-              {
-                ...(shell ? { workspace: shell.workspace() } : {}),
-                ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
-                fetch: (input, init, subagent) =>
-                  subagent ? guarded(subagent)(input, init) : cellFetch(input, init),
-                tools: options.tools && {
-                  call: async (name, input, signal, context) => {
-                    if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
-                    await this.durable(scope)
-                    this.counts.host_tool_calls++
-                    const crash = this.crash
-                    this.crash = undefined
-                    if (crash !== undefined)
-                      setTimeout(
-                        () => this.ctx.abort(`chaos: the session object was reset during ${name}`),
-                        crash,
-                      )
-                    return options.tools!.call(
-                      {
-                        authority: {
-                          account_id: authority.account_id,
-                          session_id: authority.session_id,
-                          session_name: authority.session_name,
-                        },
-                        name,
-                        input,
-                        context,
-                        grant: this.turnGrant(scope, descriptor),
+              )
+          : undefined
+        void connecting?.catch(() => {})
+        const githubToken = options.github?.token
+        const github = { token: githubToken ? () => githubToken(this.env, authority) : undefined }
+        const guarded = (subagent?: Contracts.Subagent) => {
+          const hostFetch = options.codeMode?.fetch?.(authority, this.env, subagent)
+          return Egress.guard(
+            hostFetch ? GitHub.wrap(hostFetch, github) : GitHub.archives(undefined, github),
+          )
+        }
+        const cellFetch = guarded()
+        const pythonRemote = options.workspace
+          ? options.workspace.python?.(authority, this.env)
+          : undefined
+        const mcpServers =
+          typeof options.mcp?.servers === 'function'
+            ? options.mcp.servers(authority, this.env)
+            : (options.mcp?.servers ?? [])
+        const mcpFetch = (subagent?: Contracts.Subagent) =>
+          options.mcp?.fetch?.(authority, this.env, subagent) ??
+          ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init))
+        const sessionMcpFetch = mcpFetch()
+        const mcpStore = mcpServers.length ? options.mcp?.store?.(this.env) : undefined
+        const shell =
+          options.workspace === false || enabled
+            ? undefined
+            : await Bash.create({
+                fs: Mount.create(
+                  SqlFileSystem.create(this.store, {
+                    maxFileBytes: options.workspace?.maxFileBytes ?? workspaceFileBytes,
+                    scope,
+                  }),
+                  {
+                    mounts: options.workspace
+                      ? (options.workspace.mounts?.(authority, this.env) ?? {})
+                      : {},
+                  },
+                ),
+                cwd: options.workspace?.cwd ?? '/workspace',
+                ...(options.workspace?.files ? { files: options.workspace.files } : {}),
+                fetch: cellFetch,
+                wasm: { interpreter },
+                ...(pythonRemote
+                  ? {
+                      python: {
+                        remote: pythonRemote,
+                        maxBytes: pythonRemoteBytes,
+                        mirror: sessionId + ':' + scope,
                       },
-                      this.env,
-                      signal,
-                    )
-                  },
-                },
-                remote: {
-                  failed: () => remoteFailed || remote?.failure !== undefined,
-                  execute: async (request: any, id: number) => {
-                    if (request.op === 'remote_recover')
-                      return this.recoverHandRequest(scope, request)
-                    const executor =
-                      request.connection != null
-                        ? this.connections.get(request.connection)
-                        : await connecting
-                    if (!executor)
-                      throw new Contracts.RemoteRefusalError(
-                        request.connection != null
-                          ? 'hand is not connected'
-                          : 'remote executor is not configured',
-                      )
-                    if (request.connection != null && request.op === 'remote_catalog')
-                      executor.claim(owner)
-                    else if (request.connection != null && !executor.owns(owner)) {
-                      if (request.op === 'remote_send')
-                        throw new Contracts.RemoteRefusalError(
-                          'hand connection moved to a newer runtime',
-                        )
-                      return request.op === 'remote_poll'
-                        ? { closed: 'connection moved to a newer runtime' }
-                        : null
                     }
-                    if (request.op === 'remote_send' && request.durable !== false) {
-                      try {
-                        await this.durable(scope)
-                      } catch (error) {
-                        throw new Contracts.RemoteRefusalError(
-                          error instanceof Error ? error.message : String(error),
-                        )
-                      }
-                    }
-                    if (
-                      request.op === 'remote_send' &&
-                      request.dispatches &&
-                      this.dispatchBlocked(scope)
-                    ) {
-                      setTimeout(() => void executor.dispose(), 0)
-                      throw new Contracts.RemoteRefusalError('request authority stopped')
-                    }
-                    if (
-                      request.op === 'remote_send' &&
-                      request.connection != null &&
-                      !(await this.handAllowed(request.connection))
-                    ) {
-                      setTimeout(() => void executor.dispose(), 0)
-                      throw new Contracts.RemoteRefusalError(
-                        "the hand's access token expired or was revoked",
-                      )
-                    }
-                    if (
-                      request.op === 'remote_send' &&
-                      request.dispatches &&
-                      request.connection != null
-                    )
-                      this.recordHandRequests(scope, request.connection, request)
-                    return executor.execute(
-                      request.op === 'remote_send' && request.connection != null
-                        ? attributed(request)
-                        : request,
-                      id,
-                    )
-                  },
-                  cancel: (id) => {
-                    remote?.cancel(id)
-                    for (const executor of this.connections.values()) executor.cancel(id)
-                  },
-                  dispose: async () => {
-                    await connecting?.then(
-                      (value) => value.dispose(),
-                      () => {},
-                    )
-                  },
-                },
-                dispatch: async (request, signal, timing) => {
-                  if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
-                  this.counts.model_dispatches++
-                  if (request.provider == null && mcpServers.length)
-                    return (request.subagent ? mcpFetch(request.subagent) : sessionMcpFetch)(
-                      request.endpoint,
-                      {
-                        method: request.method,
-                        headers: request.headers,
-                        body:
-                          request.method === 'GET' || request.method === 'HEAD'
-                            ? undefined
-                            : (request.body as Uint8Array<ArrayBuffer>),
-                        signal,
-                      },
-                    )
-                  const dispatch: ModelDispatch = {
-                    endpoint: request.endpoint,
-                    headers: request.headers,
-                    authority,
-                    origin: request.origin,
-                    provider: request.provider ?? descriptor.provider ?? 'claude',
-                    subagent: request.subagent,
-                    subscription: descriptor.subscription,
+                  : {}),
+                limits: { maxMemoryBytes: workspaceMemoryBytes, ...options.workspace?.limits },
+              })
+        const codexEndpoint = descriptor.subscription
+          ? 'https://chatgpt.com/backend-api/codex'
+          : 'https://api.openai.com/v1'
+        const provider = descriptor.provider ?? 'claude'
+        const model = descriptor.model ?? (provider === 'codex' ? undefined : this.env.CLAUDE_MODEL)
+        const other = provider === 'codex' ? 'claude' : 'codex'
+        const both = options.harnesses === 'both'
+        try {
+          const limits = await options.limits?.({ provider, model }, this.env)
+          const otherLimits = both
+            ? await options.limits?.({ provider: other, model: undefined }, this.env)
+            : undefined
+          const created = await this.instance(scope, true)
+          await created.open(
+            {
+              scope,
+              session_id: sessionId,
+              provider,
+              model,
+              ...limits,
+              subscription: descriptor.subscription,
+              endpoint:
+                descriptor.provider === 'codex'
+                  ? codexEndpoint
+                  : `https://api.anthropic.com/v1/messages${descriptor.subscription ? '?beta=true' : ''}`,
+              ...(descriptor.provider === 'codex' && workersAiModels.has(descriptor.model ?? '')
+                ? {
+                    gateway: 'workers_ai' as const,
+                    cloudflare_account_id: this.env.WORKERS_AI_ACCOUNT_ID,
                   }
+                : {}),
+              ...(both
+                ? {
+                    providers: {
+                      [other]: {
+                        endpoint:
+                          other === 'codex'
+                            ? 'https://api.openai.com/v1'
+                            : 'https://api.anthropic.com/v1/messages',
+                        ...(otherLimits?.max_tokens === undefined
+                          ? {}
+                          : { max_tokens: otherLimits.max_tokens }),
+                        ...(options.instructions ? { instructions: options.instructions } : {}),
+                      },
+                    },
+                  }
+                : {}),
+              remote: enabled,
+              executor: descriptor.executor_id,
+              ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
+              ...(options.maxResidentSubagents === undefined
+                ? {}
+                : { max_resident_subagents: options.maxResidentSubagents }),
+              ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
+              cell_interrupt_checks: options.cellInterruptChecks ?? cellInterruptChecks,
+              ...withHand(
+                options.instructions,
+                this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
+              ),
+              hands: this.handsMode(scope, descriptor),
+              event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, 'EVENT_COALESCE_MS'),
+              live_deltas: options.liveDeltas ?? true,
+              ...(descriptor.web_search === undefined ? {} : { web_search: descriptor.web_search }),
+              stream_tool_input: options.streamToolInput ?? true,
+              tools: options.tools?.definitions,
+              ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
+              ...(shell ? { workspace: shell.cwd } : {}),
+              ...(shell && options.workspaceTools
+                ? { workspace_tools: options.workspaceTools }
+                : {}),
+              ...((descriptor.provider === 'codex' || both) && options.workspace !== false
+                ? { environment: { cwd: options.workspace?.cwd ?? '/workspace' } }
+                : {}),
+            },
+            {
+              ...(shell ? { workspace: shell.workspace() } : {}),
+              ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
+              fetch: (input, init, subagent) =>
+                subagent ? guarded(subagent)(input, init) : cellFetch(input, init),
+              tools: options.tools && {
+                call: async (name, input, signal, context) => {
+                  if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
+                  await this.durable(scope)
+                  this.counts.host_tool_calls++
+                  const crash = this.crash
+                  this.crash = undefined
+                  if (crash !== undefined)
+                    setTimeout(
+                      () => this.ctx.abort(`chaos: the session object was reset during ${name}`),
+                      crash,
+                    )
+                  return options.tools!.call(
+                    {
+                      authority: {
+                        account_id: authority.account_id,
+                        session_id: authority.session_id,
+                        session_name: authority.session_name,
+                      },
+                      name,
+                      input,
+                      context,
+                      grant: this.turnGrant(scope, descriptor),
+                    },
+                    this.env,
+                    signal,
+                  )
+                },
+              },
+              remote: {
+                failed: () => remoteFailed || remote?.failure !== undefined,
+                execute: async (request: any, id: number) => {
+                  if (request.op === 'remote_recover')
+                    return this.recoverHandRequest(scope, request)
+                  const executor =
+                    request.connection != null
+                      ? this.connections.get(request.connection)?.executor
+                      : await connecting
+                  if (!executor)
+                    throw new Contracts.RemoteRefusalError(
+                      request.connection != null
+                        ? 'hand is not connected'
+                        : 'remote executor is not configured',
+                    )
+                  if (request.connection != null && request.op === 'remote_catalog')
+                    executor.claim(owner)
+                  else if (request.connection != null && !executor.owns(owner)) {
+                    if (request.op === 'remote_send')
+                      throw new Contracts.RemoteRefusalError(
+                        'hand connection moved to a newer runtime',
+                      )
+                    return request.op === 'remote_poll'
+                      ? { closed: 'connection moved to a newer runtime' }
+                      : null
+                  }
+                  if (request.op === 'remote_send' && request.durable !== false) {
+                    try {
+                      await this.durable(scope)
+                    } catch (error) {
+                      throw new Contracts.RemoteRefusalError(
+                        error instanceof Error ? error.message : String(error),
+                      )
+                    }
+                  }
+                  if (
+                    request.op === 'remote_send' &&
+                    request.dispatches &&
+                    this.dispatchBlocked(scope)
+                  ) {
+                    setTimeout(() => void executor.dispose(), 0)
+                    throw new Contracts.RemoteRefusalError('request authority stopped')
+                  }
+                  if (
+                    request.op === 'remote_send' &&
+                    request.connection != null &&
+                    !(await this.handAllowed(request.connection))
+                  ) {
+                    setTimeout(() => void executor.dispose(), 0)
+                    throw new Contracts.RemoteRefusalError(
+                      "the hand's access token expired or was revoked",
+                    )
+                  }
+                  if (
+                    request.op === 'remote_send' &&
+                    request.dispatches &&
+                    request.connection != null
+                  )
+                    this.recordHandRequests(scope, request.connection, request)
+                  return executor.execute(
+                    request.op === 'remote_send' && request.connection != null
+                      ? attributed(request)
+                      : request,
+                    id,
+                  )
+                },
+                cancel: (id) => {
+                  remote?.cancel(id)
+                  for (const { executor } of this.connections.values()) executor.cancel(id)
+                },
+                dispose: async () => {
+                  await connecting?.then(
+                    (value) => value.dispose(),
+                    () => {},
+                  )
+                },
+              },
+              dispatch: async (request, signal, timing) => {
+                if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
+                this.counts.model_dispatches++
+                if (request.provider == null && mcpServers.length)
+                  return (request.subagent ? mcpFetch(request.subagent) : sessionMcpFetch)(
+                    request.endpoint,
+                    {
+                      method: request.method,
+                      headers: request.headers,
+                      body:
+                        request.method === 'GET' || request.method === 'HEAD'
+                          ? undefined
+                          : (request.body as Uint8Array<ArrayBuffer>),
+                      signal,
+                    },
+                  )
+                const dispatch: ModelDispatch = {
+                  endpoint: request.endpoint,
+                  headers: request.headers,
+                  authority,
+                  origin: request.origin,
+                  provider: request.provider ?? descriptor.provider ?? 'claude',
+                  subagent: request.subagent,
+                  subscription: descriptor.subscription,
+                }
+                const response = await egress(this.env).fetch(
+                  new Request('https://egress.internal/model', {
+                    method: 'POST',
+                    signal,
+                    headers: {
+                      'content-type': 'application/octet-stream',
+                      'x-nanocode-model': headerJson(dispatch),
+                    },
+                    body: request.body,
+                  }),
+                )
+                const diagnostic = response.headers.get('x-nanocode-model-diagnostic')
+                if (diagnostic) {
+                  this.diagnostic(scope, diagnostic, timing)
+                  const headers = new Headers(response.headers)
+                  headers.delete('x-nanocode-model-diagnostic')
+                  return new Response(response.body, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers,
+                  })
+                }
+                return response
+              },
+              finishing: (id) => this.finishing(id, created),
+              socket: {
+                open: async (request, signal, timing) => {
+                  if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
                   const response = await egress(this.env).fetch(
-                    new Request('https://egress.internal/model', {
-                      method: 'POST',
+                    new Request('https://egress.internal/socket', {
                       signal,
                       headers: {
-                        'content-type': 'application/octet-stream',
-                        'x-nanocode-model': headerJson(dispatch),
+                        upgrade: 'websocket',
+                        'x-nanocode-socket': headerJson({
+                          authority,
+                          provider: request.provider,
+                          endpoint: codexEndpoint + '/responses',
+                          headers: request.headers,
+                          origin: request.origin,
+                          subagent: request.subagent,
+                          subscription: descriptor.subscription,
+                        } satisfies SocketDispatch),
                       },
-                      body: request.body,
                     }),
                   )
-                  const diagnostic = response.headers.get('x-nanocode-model-diagnostic')
-                  if (diagnostic) {
-                    this.diagnostic(scope, diagnostic, timing)
-                    const headers = new Headers(response.headers)
-                    headers.delete('x-nanocode-model-diagnostic')
-                    return new Response(response.body, {
-                      status: response.status,
-                      statusText: response.statusText,
-                      headers,
-                    })
+                  this.diagnostic(
+                    scope,
+                    response.headers.get('x-nanocode-model-diagnostic'),
+                    timing,
+                  )
+                  const socket =
+                    response.status === 101 ? (response.webSocket ?? undefined) : undefined
+                  socket?.accept()
+                  return {
+                    status: response.status,
+                    headers: response.headers,
+                    socket,
+                    idle_ms: Number(response.headers.get('x-nanocode-stream-idle-ms')),
+                    text: () => response.text(),
                   }
-                  return response
                 },
-                finishing: (id) => this.finishing(id, created),
-                socket: {
-                  open: async (request, signal, timing) => {
-                    if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
-                    const response = await egress(this.env).fetch(
-                      new Request('https://egress.internal/socket', {
-                        signal,
-                        headers: {
-                          upgrade: 'websocket',
-                          'x-nanocode-socket': headerJson({
-                            authority,
-                            provider: request.provider,
-                            endpoint: codexEndpoint + '/responses',
-                            headers: request.headers,
-                            origin: request.origin,
-                            subagent: request.subagent,
-                            subscription: descriptor.subscription,
-                          } satisfies SocketDispatch),
-                        },
-                      }),
-                    )
-                    this.diagnostic(
-                      scope,
-                      response.headers.get('x-nanocode-model-diagnostic'),
-                      timing,
-                    )
-                    const socket =
-                      response.status === 101 ? (response.webSocket ?? undefined) : undefined
-                    socket?.accept()
-                    return {
-                      status: response.status,
-                      headers: response.headers,
-                      socket,
-                      idle_ms: Number(response.headers.get('x-nanocode-stream-idle-ms')),
-                      text: () => response.text(),
-                    }
-                  },
-                  admit: () => this.socketEffect(scope),
-                },
+                admit: () => this.socketEffect(scope),
               },
-            )
-            for (const [hand, entry] of this.hands.get(scope) ?? [])
-              await created.attach(hand, entry.connection).catch(() => {})
-            return created
-          } catch (error) {
-            const failed = remoteFailed
-            await connecting?.then(
-              (value) => value.dispose(),
-              () => {},
-            )
-            throw failed ? executorFailure(remoteError) : error
-          }
-        })().then((runtime) => {
-          if (this.runtimes.get(scope) === resident) this.residents.set(scope, runtime)
-          return runtime
-        })
-        this.runtimes.set(scope, resident)
-        this.openedWith.set(resident, opening)
-        void resident.catch(() => {
-          if (this.runtimes.get(scope) === resident) {
-            this.runtimes.delete(scope)
-            this.residents.delete(scope)
-          }
-        })
-      }
+            },
+          )
+          for (const [hand, entry] of this.hands.get(scope) ?? [])
+            await created.attach(hand, entry.connection).catch(() => {})
+          return created
+        } catch (error) {
+          const failed = remoteFailed
+          await connecting?.then(
+            (value) => value.dispose(),
+            () => {},
+          )
+          throw failed ? executorFailure(remoteError) : error
+        }
+      })().then((runtime) => {
+        if (this.opened(scope) === opened) opened.resident = runtime
+        return runtime
+      })
+      const opened: Opened = { opening, runtime: resident }
+      this.lifecycle(scope).opened = opened
+      void resident.catch(() => this.forget(scope, opened))
       return resident
+    }
+
+    private lifecycle(scope: string): Lifecycle {
+      let found = this.lifecycles.get(scope)
+      if (!found) this.lifecycles.set(scope, (found = {}))
+      return found
+    }
+
+    private opened(scope: string): Opened | undefined {
+      return this.lifecycles.get(scope)?.opened
+    }
+
+    private forget(scope: string, opened: Opened): void {
+      const found = this.lifecycles.get(scope)
+      if (found?.opened === opened) found.opened = undefined
+    }
+
+    private *residents(): Generator<[string, AgentRuntime.AgentRuntime]> {
+      for (const [scope, found] of this.lifecycles)
+        if (found.opened?.resident) yield [scope, found.opened.resident]
     }
 
     private attachHand(
@@ -1700,7 +1710,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       )
         previous.executor.refuse(handReplaced)
       else if (previous) await previous.executor.dispose()
-      const resident = this.runtimes.get(scope)
+      const resident = this.opened(scope)?.runtime
       const runtime = resident && (await resident.catch(() => undefined))
       if (runtime && hands.get(hand)?.connection === connection)
         await runtime.attach(hand, connection).catch(() => {})
@@ -1723,8 +1733,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let hands = this.hands.get(scope)
       if (!hands) this.hands.set(scope, (hands = new Map()))
       hands.set(hand, { connection, executor, ready })
-      this.connections.set(connection, executor)
-      this.handIdentities.set(connection, { hand, runtime: runtimeOf(executor.catalog) })
+      this.connections.set(connection, { executor, hand, runtime: runtimeOf(executor.catalog) })
       void executor.closed.then(() => this.detachHand(scope, hand, connection))
     }
 
@@ -1733,7 +1742,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       connection: string,
       request: Contracts.RemoteRequest,
     ) {
-      const identity = this.handIdentities.get(connection)
+      const identity = this.connections.get(connection)
       if (!identity?.runtime) return
       const refused = new Set(request.refused ?? [])
       const now = Date.now()
@@ -1780,7 +1789,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private recordHandReply(connection: string | undefined, message: string | ArrayBuffer) {
       if (connection === undefined || typeof message !== 'string') return
       if (!message.includes('"type":"reply"')) return
-      const identity = this.handIdentities.get(connection)
+      const identity = this.connections.get(connection)
       const id = /"id":(\d+)/.exec(message)?.[1]
       if (!identity?.runtime || id === undefined) return
       this.ctx.storage.sql.exec(
@@ -2308,7 +2317,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const sessionId = this.metadata.get(this.sessionKey(scope))
       if (!sessionId) return false
       const descriptor = this.bound(scope, base)
-      const resident = this.runtimes.get(scope)
+      const resident = this.opened(scope)?.runtime
       const busy = this.pumping || !this.queueKnownEmpty() || !!this.metadata.first('background:')
       const current = resident && busy ? await resident.catch(() => undefined) : undefined
       const runtime = current?.reusable ? current : await this.runtime(scope, sessionId, descriptor)
@@ -2334,7 +2343,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return await this.warm(scope, base)
       if (this.pumping || this.metadata.first('background:')) return false
       const executor = this.legacyExecutor()
-      let entry = this.prewarmed.get(scope)
+      const found = this.lifecycle(scope)
+      let entry = found.prewarmed
       if (
         !entry ||
         entry.provider !== provider ||
@@ -2342,7 +2352,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         entry.executor !== executor
       ) {
         entry = { session: Contracts.sessionUuid(), provider, model, executor }
-        this.prewarmed.set(scope, entry)
+        found.prewarmed = entry
       }
       const descriptor: SessionDescriptor = {
         ...base,
@@ -2363,8 +2373,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     private claimPrewarmed(scope: string, descriptor: SessionDescriptor): string | undefined {
-      const entry = this.prewarmed.get(scope)
-      this.prewarmed.delete(scope)
+      const found = this.lifecycles.get(scope)
+      const entry = found?.prewarmed
+      if (found) found.prewarmed = undefined
       if (
         !entry ||
         entry.provider !== descriptor.provider ||
@@ -2381,14 +2392,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private releaseIdle(warmed = false, keep?: AgentRuntime.AgentRuntime): void {
       const budget = policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES')
-      for (const [scope, runtime] of this.residents) {
+      for (const [scope, runtime] of this.residents()) {
         if (runtime !== keep && runtime.memoryBytes > budget) this.retire(scope, runtime)
       }
       if (this.linger !== undefined) clearTimeout(this.linger)
       this.linger = undefined
       if (
         !warmed &&
-        ![...this.residents.values()].some((runtime) => runtime.remote || runtime.connected)
+        ![...this.residents()].some(([, runtime]) => runtime.remote || runtime.connected)
       )
         return
       this.linger = setTimeout(
@@ -2402,7 +2413,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     private releaseConnections(): void {
-      for (const [scope, runtime] of this.residents) {
+      for (const [scope, runtime] of this.residents()) {
         if (runtime.remote) this.retire(scope, runtime)
         else runtime.releaseConnections()
       }
@@ -2410,14 +2421,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private retire(scope: string, runtime: AgentRuntime.AgentRuntime): void {
       this.counts.runtime_retirements++
-      this.runtimes.delete(scope)
-      this.residents.delete(scope)
+      const found = this.lifecycles.get(scope)
+      if (found) found.opened = undefined
       this.releaseHands(scope)
-      const instance = this.instances.get(scope)
+      const instance = found?.instance
       void instance?.then(
         (current) => {
-          if (current === runtime && this.instances.get(scope) === instance)
-            this.instances.delete(scope)
+          if (current === runtime) this.dropInstance(scope, instance)
         },
         () => {},
       )
@@ -2443,17 +2453,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private detachHand(scope: string, hand: string, connection: string): void {
       if (this.deleted) return
-      const executor = this.connections.get(connection)
+      const executor = this.connections.get(connection)?.executor
       if (executor) this.handSockets.delete(executor.socket)
       this.ctx.storage.sql.exec('DELETE FROM hand_sockets WHERE connection = ?', connection)
       this.connections.delete(connection)
       this.handAuthority.delete(connection)
-      this.handIdentities.delete(connection)
       const hands = this.hands.get(scope)
       if (hands?.get(hand)?.connection === connection) hands.delete(hand)
-      void this.residents
-        .get(scope)
-        ?.detach(connection)
+      void this.opened(scope)
+        ?.resident?.detach(connection)
         .catch(() => {})
     }
 
@@ -2466,10 +2474,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           socket.close(1000, 'session deleted')
         } catch {}
       }
-      const runtimes = [...this.runtimes.values(), ...this.instances.values()]
-      this.runtimes.clear()
-      this.residents.clear()
-      this.instances.clear()
+      const runtimes = [...this.lifecycles.values()].flatMap((found) =>
+        [found.opened?.runtime, found.instance].filter((runtime) => runtime !== undefined),
+      )
+      this.lifecycles.clear()
       this.eventHub.notify()
       await Promise.all(
         runtimes.map((resident) => resident.then((runtime) => runtime.dispose()).catch(() => {})),
@@ -2559,7 +2567,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private instance(scope: string, unopened = false): Promise<AgentRuntime.AgentRuntime> {
       if (this.deleted) return Promise.reject(new Error('session deleted'))
-      let current = this.instances.get(scope)
+      const found = this.lifecycle(scope)
+      let current = found.instance
       if (!current) {
         current = AgentRuntime.instantiate(wasm, this.store, {
           log_logical_limit: valueLimit,
@@ -2569,18 +2578,21 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           wake: () => this.eventHub.notify(),
         })
         const created = current
-        this.instances.set(scope, created)
-        void created.catch(() => {
-          if (this.instances.get(scope) === created) this.instances.delete(scope)
-        })
+        found.instance = created
+        void created.catch(() => this.dropInstance(scope, created))
       }
       const instance = current
       return instance.then((runtime) => {
         if (!runtime.closed && !(unopened && runtime.opened)) return runtime
-        if (this.instances.get(scope) === instance) this.instances.delete(scope)
+        this.dropInstance(scope, instance)
         if (!runtime.closed) void runtime.dispose().catch(() => {})
         return this.instance(scope, unopened)
       })
+    }
+
+    private dropInstance(scope: string, instance: Promise<AgentRuntime.AgentRuntime>): void {
+      const found = this.lifecycles.get(scope)
+      if (found?.instance === instance) found.instance = undefined
     }
 
     private cursor(
@@ -2789,7 +2801,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       scope: string,
       base: SessionDescriptor,
     ): Promise<AgentRuntime.AgentRuntime | undefined> {
-      const resident = this.runtimes.get(scope)
+      const resident = this.opened(scope)?.runtime
       const current = resident ? await resident.catch(() => undefined) : undefined
       if (current?.reusable) return current
       const sessionId = this.metadata.get(this.sessionKey(scope))
