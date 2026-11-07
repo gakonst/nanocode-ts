@@ -1,13 +1,25 @@
 'use client'
 
-import { isValidElement, type JSX, type ReactNode, useMemo, useRef } from 'react'
+import { type Components, toJsxRuntime } from 'hast-util-to-jsx-runtime'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
 import {
-  type Components,
-  defaultRehypePlugins,
-  Streamdown,
-  type StreamdownProps,
-  useIsCodeFenceIncomplete,
-} from 'streamdown'
+  createContext,
+  isValidElement,
+  type JSX,
+  memo,
+  type ReactNode,
+  useContext,
+  useMemo,
+  useRef,
+} from 'react'
+import { Fragment, jsx, jsxs } from 'react/jsx-runtime'
+import { harden } from 'rehype-harden'
+import sanitize, { defaultSchema } from 'rehype-sanitize'
+import remarkParse from 'remark-parse'
+import remarkRehype from 'remark-rehype'
+import { type Processor, unified } from 'unified'
+import * as Source from '../client/Markdown.ts'
 import { Code } from './Code.tsx'
 import { Image } from './Image.tsx'
 import type { Markdown } from './Markdown.tsx'
@@ -15,11 +27,9 @@ import { useLinks, usePart } from './Provider.tsx'
 
 type PartOf = ReturnType<typeof usePart>
 
-type PluggableList = NonNullable<StreamdownProps['rehypePlugins']>
-
-type Pluggable = PluggableList[number]
-
 type Hast = { type: string; tagName?: string; value?: string; children?: Hast[] }
+
+type Mdast = { type: string; value?: string; children?: Mdast[] }
 
 const blockTags = new Set([
   'blockquote',
@@ -46,26 +56,59 @@ function trim() {
   return (tree: Hast) => visit(tree, true)
 }
 
-const [sanitize, schema] = defaultRehypePlugins.sanitize as [
-  Extract<Pluggable, (...args: never[]) => unknown>,
-  { protocols?: Record<string, string[]> },
-]
+const flowParents = new Set(['blockquote', 'footnoteDefinition', 'listItem', 'root'])
 
-const rehype: PluggableList = [
-  defaultRehypePlugins.raw!,
-  [
-    sanitize,
-    {
-      ...schema,
-      protocols: {
-        ...schema.protocols,
-        src: [...(schema.protocols?.src ?? []), 'data', 'workspace', 'sandbox'],
-      },
+const breakTag = /^<br\s*\/?>$/i
+
+function literal() {
+  const phrase = (value: string): Mdast[] =>
+    value
+      .split(/(<br\s*\/?>)/i)
+      .filter(Boolean)
+      .map((piece) => (breakTag.test(piece) ? { type: 'break' } : { type: 'text', value: piece }))
+  const visit = (node: Mdast) => {
+    if (!node.children) return
+    node.children = node.children.flatMap((child) => {
+      if (child.type !== 'html') {
+        visit(child)
+        return [child]
+      }
+      const children = phrase(child.value ?? '')
+      return flowParents.has(node.type) ? [{ type: 'paragraph', children }] : children
+    })
+  }
+  return (tree: Mdast) => visit(tree)
+}
+
+function flavored(this: Processor) {
+  const data = this.data()
+  data.micromarkExtensions = [...(data.micromarkExtensions ?? []), gfm()]
+  data.fromMarkdownExtensions = [...(data.fromMarkdownExtensions ?? []), gfmFromMarkdown()]
+}
+
+const processor = unified()
+  .use(remarkParse)
+  .use(flavored)
+  .use(literal)
+  .use(remarkRehype)
+  .use(sanitize, {
+    ...defaultSchema,
+    protocols: {
+      ...defaultSchema.protocols,
+      href: [...(defaultSchema.protocols?.href ?? []), 'nanocode'],
+      src: [...(defaultSchema.protocols?.src ?? []), 'data', 'nanocode', 'workspace', 'sandbox'],
     },
-  ],
-  defaultRehypePlugins.harden!,
-  trim,
-]
+  })
+  .use(harden, {
+    allowDataImages: true,
+    allowedImagePrefixes: ['*'],
+    allowedLinkPrefixes: ['*'],
+    allowedProtocols: ['*'],
+  })
+  .use(trim)
+  .freeze()
+
+const Open = createContext(false)
 
 const linkPattern = /^(https?:|mailto:)/i
 
@@ -81,7 +124,7 @@ function text(children: ReactNode): string {
 }
 
 function Fence(props: Fence.Props) {
-  const incomplete = useIsCodeFenceIncomplete()
+  const incomplete = useContext(Open)
   return (
     <>
       {props.render.current?.(props.language, props.code) ?? (
@@ -156,13 +199,7 @@ function components(
     blockquote: (props: Props<'blockquote'>) => (
       <blockquote {...part('quote')}>{props.children}</blockquote>
     ),
-    code: (props: Props<'code'> & { 'data-block'?: string }) => {
-      if (!('data-block' in props)) return <code {...part('inline')}>{props.children}</code>
-      const language = /language-(\S+)/.exec(props.className ?? '')?.[1] ?? 'text'
-      return (
-        <Fence code={text(props.children).replace(/\n$/, '')} language={language} render={render} />
-      )
-    },
+    code: (props: Props<'code'>) => <code {...part('inline')}>{props.children}</code>,
     del: (props: Props<'del'>) => <del {...part('strike')}>{props.children}</del>,
     em: (props: Props<'em'>) => <em {...part('em')}>{props.children}</em>,
     h1: heading(1),
@@ -179,7 +216,6 @@ function components(
         title={props.title}
       />
     ),
-    inlineCode: (props: Props<'code'>) => <code {...part('inline')}>{props.children}</code>,
     li: (props: Props<'li'>) => <li {...part('item')}>{props.children}</li>,
     ol: (props: Props<'ol'>) => (
       <ol start={props.start} {...part('list', { ordered: true })}>
@@ -187,6 +223,15 @@ function components(
       </ol>
     ),
     p: (props: Props<'p'>) => <p {...part('paragraph')}>{props.children}</p>,
+    pre: (props: Props<'pre'>) => {
+      const code = isValidElement<{ className?: string; children?: ReactNode }>(props.children)
+        ? props.children.props
+        : undefined
+      const language = /language-(\S+)/.exec(code?.className ?? '')?.[1] ?? 'text'
+      return (
+        <Fence code={text(code?.children).replace(/\n$/, '')} language={language} render={render} />
+      )
+    },
     strong: (props: Props<'strong'>) => <strong {...part('strong')}>{props.children}</strong>,
     table: (props: Props<'table'>) => <table {...part('table')}>{props.children}</table>,
     td: (props: Props<'td'>) => (
@@ -197,49 +242,6 @@ function components(
     ),
     ul: (props: Props<'ul'>) => <ul {...part('list', { ordered: false })}>{props.children}</ul>,
   }
-}
-
-const off = { enabled: false }
-
-const tableRow = /^ {0,3}\|.*\|/
-
-function cells(row: string): string[] {
-  return row
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim())
-}
-
-function table(text: string): string {
-  const lines = text.split('\n')
-  const last =
-    lines.length > 1 && lines[lines.length - 1] === '' ? lines.length - 2 : lines.length - 1
-  const typed = lines[last] ?? ''
-  if (
-    /^ {0,3}\|[ :|-]*$/.test(typed) &&
-    tableRow.test(lines[last - 1] ?? '') &&
-    !tableRow.test(lines[last - 2] ?? '')
-  ) {
-    const written = cells(typed)
-    lines[last] =
-      '|' +
-      cells(lines[last - 1]!)
-        .map((_, column) => (/^:?-+:?$/.test(written[column] ?? '') ? written[column] : '---'))
-        .join('|') +
-      '|'
-  } else if (/^ {0,3}\|[^|]+\|/.test(typed) && !tableRow.test(lines[last - 1] ?? '')) {
-    const header = typed.trimEnd().endsWith('|') ? typed : typed + '|'
-    lines[last] =
-      header +
-      '\n|' +
-      cells(header)
-        .map(() => '---')
-        .join('|') +
-      '|'
-  }
-  return lines.join('\n')
 }
 
 const spacedLink = /(!?\[[^\]\n]*\]\()((?:workspace|sandbox):[^()<>\n]*?)(\s+"[^"\n]*")?\)/g
@@ -254,6 +256,26 @@ function spaced(text: string): string {
     : text
 }
 
+const Block = memo(function Block(props: Block.Props) {
+  const tree = processor.runSync(processor.parse(props.text), props.text)
+  return (
+    <Open.Provider value={props.open}>
+      {toJsxRuntime(tree, {
+        components: props.components,
+        Fragment,
+        jsx,
+        jsxs,
+        passKeys: true,
+        passNode: true,
+      })}
+    </Open.Provider>
+  )
+})
+
+declare namespace Block {
+  type Props = { components: Components; open: boolean; text: string }
+}
+
 export default function Streamed(props: Markdown.Props) {
   const part = usePart()
   const render = useRef(props.code)
@@ -261,20 +283,19 @@ export default function Streamed(props: Markdown.Props) {
   const links = useLinks()
   const popups = useMemo(() => new Set<string>(), [])
   const parts = useMemo(() => components(part, render, popups), [part, popups])
-  const { className, ...attributes } = part('markdown', { live: props.live })
+  const source = mapped(spaced(props.text), links, popups)
+  const blocks = Source.blocks(props.live === false ? source : Source.complete(source))
+  const last = blocks.length - 1
   return (
-    <Streamdown
-      {...attributes}
-      className={typeof className === 'string' ? className : undefined}
-      components={parts}
-      controls={false}
-      isAnimating={props.live ?? false}
-      linkSafety={off}
-      mode="streaming"
-      parseIncompleteMarkdown
-      rehypePlugins={rehype}
-    >
-      {mapped(spaced(props.live === false ? props.text : table(props.text)), links, popups)}
-    </Streamdown>
+    <div {...part('markdown', { live: props.live })}>
+      {blocks.map((block, index) => (
+        <Block
+          components={parts}
+          key={index}
+          open={props.live !== false && index === last && Source.fenced(block)}
+          text={block}
+        />
+      ))}
+    </div>
   )
 }

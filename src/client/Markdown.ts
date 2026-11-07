@@ -284,6 +284,10 @@ export function separateLists(text: string): string {
     .join('\n')
 }
 
+export function fenced(text: string): boolean {
+  return fences(text.split('\n')).open
+}
+
 export function blocks(text: string): readonly string[] {
   const lines = text.split('\n')
   if (lines.some((line) => /^ {0,3}\[[^\]]+\]:/.test(line))) return [text]
