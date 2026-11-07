@@ -1,5 +1,5 @@
 import * as zlib from 'node:zlib'
-import { type DriveContext, Restart, type SessionState } from 'durable-harness'
+import { type DriveContext, Fatal, Restart, type SessionState } from 'durable-harness'
 import type * as Contracts from '../Contracts.ts'
 import * as LocalSql from './internal/LocalSql.ts'
 
@@ -271,6 +271,15 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
         rows = sql.run(statements, access)
         wrote = sql.version() !== before
       } catch (error) {
+        return Promise.reject(error)
+      }
+
+      if (wrote && access === 'read') {
+        const error = new Fatal(
+          `nanocode: the ${kind} ${operation} transaction is marked read but changed the database`,
+        )
+        failure = { error }
+        ctx.halt?.(error)
         return Promise.reject(error)
       }
 
