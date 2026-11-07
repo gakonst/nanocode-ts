@@ -32,6 +32,7 @@ export type Env = {
   CLAUDE_MODEL?: string
   WORKERS_AI_ACCOUNT_ID?: string
   RECOVERY_DELAY_MS: string
+  RECOVERY_BACKOFF_MS?: string
   EVENT_STREAM_KEEPALIVE_MS: string
   EVENT_PAGE_SIZE: string
   EVENT_TAIL_BYTES: string
@@ -336,6 +337,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private handRequestsPruned = 0
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
+    private directoryEpoch = 0
     private recorded = false
     private deleted = false
     private readonly liveSockets = new WeakMap<WebSocket, EventHub.Cursor>()
@@ -375,6 +377,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         CREATE TABLE IF NOT EXISTS watch_sockets (id TEXT PRIMARY KEY, scope TEXT NOT NULL, descriptor TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS hand_requests (hand TEXT NOT NULL, runtime TEXT NOT NULL, id INTEGER NOT NULL, scope TEXT NOT NULL, session_id TEXT NOT NULL, call_id TEXT NOT NULL, deadline INTEGER NOT NULL, replied INTEGER, reply TEXT, PRIMARY KEY (hand, runtime, id)) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
+        CREATE TABLE IF NOT EXISTS subagent_directories (scope TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
       `)
       if (
         !this.store
@@ -877,7 +880,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let immediate = false
       let waiting = false
       let active: string | undefined
-      let retryAt: number | undefined
+      let retryAt: number | null | undefined
       let tripwire: string | undefined
       try {
         if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
@@ -1010,6 +1013,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.blocked.add(active)
         if (active && next?.report.status === 'running') await this.awaitRecoveredHands(scope)
         if (active) this.driving.set(scope, active)
+        const epoch = this.changed(scope)
         const driven = await runtime.drive(active)
         this.driving.delete(scope)
         if (active) this.blocked.delete(active)
@@ -1027,6 +1031,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const version = this.eventHub.version
         if (await runtime.settle()) {
           this.metadata.delete(`background:${scope}`)
+          if (this.queueKnownEmpty())
+            this.remember(scope, epoch, await runtime.subagents.agents().catch(() => undefined))
         } else if (waiting || this.queueKnownEmpty()) {
           await this.eventHub.wait(delay, version)
         }
@@ -1072,7 +1078,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const background = this.metadata.first('background:')
         if (!unfinished && !background) this.releaseIdle()
         this.pumping = false
-        if (unfinished || background) await this.ctx.storage.setAlarm(retryAt ?? Date.now() + delay)
+        if ((unfinished && retryAt !== null) || background)
+          await this.ctx.storage.setAlarm(retryAt ?? Date.now() + delay)
         else await this.ctx.storage.deleteAlarm()
         if (immediate && unfinished) this.ctx.waitUntil(this.pump(true))
       }
@@ -1102,7 +1109,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       next: Contracts.TurnView | undefined,
       failure: Contracts.HostFailureError,
       delay: number,
-    ): Promise<number | undefined> {
+    ): Promise<number | null | undefined> {
       if (!next) {
         if (!failure.permanent) return Date.now() + delay
         this.metadata.delete(`background:${scope}`)
@@ -1112,7 +1119,20 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const reader = await this.instance(scope)
       let turn: Contracts.TurnView | null = next
       if (!next.cancel_requested && !failure.permanent) {
-        const retryAt = Date.now() + delay
+        const attempts = Number(next.report.attempts ?? 0)
+        const bound =
+          this.env.RECOVERY_BACKOFF_MS === undefined
+            ? delay
+            : policy(this.env.RECOVERY_BACKOFF_MS, 'RECOVERY_BACKOFF_MS')
+        const waited = Math.min(delay * 2 ** Math.max(attempts - 1, 0), bound)
+        if (
+          failure.kind === 'detached' &&
+          bound > delay &&
+          waited >= bound &&
+          next.report.kind === 'detached'
+        )
+          return null
+        const retryAt = Date.now() + Math.min(delay * 2 ** attempts, bound)
         turn = await reader.retry(scope, id, failure.message, failure.kind, retryAt)
         if (turn && unfinishedStatuses.has(turn.report.status) && !turn.cancel_requested)
           return retryAt
@@ -2679,8 +2699,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (id !== undefined && (!Number.isSafeInteger(id) || id <= 0))
         return json({ error: 'subagent ids are positive integers' }, 400)
       if (request.method === 'GET' && action === undefined) {
-        const runtime = await this.subagentRuntime(scope, descriptor)
-        const entries = runtime ? await runtime.subagents.agents() : []
+        const entries = await this.directory(scope, descriptor)
         if (id === undefined) return json({ agents: entries })
         const entry = entries.find((candidate) => candidate.agent_id === id)
         return entry ? json(entry) : json({ error: 'subagent not found' }, 404)
@@ -2737,6 +2756,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'budget_usd must be a positive number of USD or null' }, 400)
       const runtime = await this.subagentRuntime(scope, descriptor)
       if (!runtime) return json({ error: 'subagent not found' }, 404)
+      this.changed(scope)
       try {
         if (action === 'messages') {
           const receipt = await runtime.subagents.sendUserMessage(id, {
@@ -2790,6 +2810,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'question must be a nonempty string' }, 400)
       const runtime = await this.subagentRuntime(scope, descriptor)
       if (!runtime) return json({ error: 'the session has no conversation to ask about yet' }, 409)
+      this.changed(scope)
       try {
         return json(await runtime.sideQuestion({ question }))
       } catch (error) {
@@ -2819,6 +2840,48 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return runtime
     }
 
+    private async directory(
+      scope: string,
+      descriptor: SessionDescriptor,
+    ): Promise<Contracts.AgentDirectoryEntry[]> {
+      const resident = this.opened(scope)?.runtime
+      const current = resident ? await resident.catch(() => undefined) : undefined
+      if (current?.reusable) return await current.subagents.agents()
+      const stored = this.store.row(
+        'SELECT body FROM subagent_directories WHERE scope = ?',
+        scope,
+      )?.body
+      if (typeof stored === 'string') return JSON.parse(stored) as Contracts.AgentDirectoryEntry[]
+      const epoch = this.directoryEpoch
+      const runtime = await this.subagentRuntime(scope, descriptor)
+      if (!runtime) return []
+      const entries = await runtime.subagents.agents()
+      const quiet =
+        this.queueKnownEmpty() ||
+        (this.queueUnknown() &&
+          (await (await this.instance(scope)).pending(scope).catch(() => [undefined])).length === 0)
+      if (quiet && !this.pumping) this.remember(scope, epoch, entries)
+      return entries
+    }
+
+    private changed(scope: string): number {
+      this.ctx.storage.sql.exec('DELETE FROM subagent_directories WHERE scope = ?', scope)
+      return ++this.directoryEpoch
+    }
+
+    private remember(
+      scope: string,
+      epoch: number,
+      entries: Contracts.AgentDirectoryEntry[] | undefined,
+    ): void {
+      if (!entries || epoch !== this.directoryEpoch || this.metadata.first('background:')) return
+      this.ctx.storage.sql.exec(
+        'INSERT INTO subagent_directories (scope, body) VALUES (?, ?) ON CONFLICT (scope) DO UPDATE SET body = excluded.body',
+        scope,
+        JSON.stringify(entries),
+      )
+    }
+
     private attend(scope: string, descriptor: SessionDescriptor): void {
       if (!this.metadata.first('background:'))
         this.metadata.set(`background:${scope}`, JSON.stringify(this.bound(scope, descriptor)))
@@ -2840,8 +2903,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           },
           400,
         )
-      const runtime = await this.subagentRuntime(scope, descriptor)
-      const entries = runtime ? await runtime.subagents.agents() : []
+      const entries = await this.directory(scope, descriptor)
       if (!entries.some((entry) => entry.agent_id === id))
         return json({ error: 'subagent not found' }, 404)
       const subtree = url.searchParams.get('subtree') === '1'
