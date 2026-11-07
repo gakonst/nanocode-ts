@@ -1,6 +1,6 @@
 import { CommandError, budget, type CommandContext, type Input, type Limits } from '../Shell.ts'
 import { FsError, type FileSystem, type LinkStat } from '../../FileSystem.ts'
-import { byte, decode } from '../Fs.ts'
+import { decode } from '../Fs.ts'
 
 export type LinkFileSystem = FileSystem & {
   chmod?(path: string, mode: number): Promise<void>

@@ -129,10 +129,6 @@ export function hasGlob(pattern: string): boolean {
   return false
 }
 
-export function unescapeGlob(pattern: string): string {
-  return pattern.replace(/\\([\s\S])/g, '$1')
-}
-
 export function boundary(kind: string, word: string, blocked = word): string {
   const after = '(?=[' + word + '])'
   const before = '(?<=[' + word + '])'

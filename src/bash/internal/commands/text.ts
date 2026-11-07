@@ -39,7 +39,6 @@ import {
   eachInput,
   last,
   options,
-  pause,
   put,
   readFailure,
   readInput,

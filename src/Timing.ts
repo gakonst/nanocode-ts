@@ -6,7 +6,6 @@ export function create() {
   const state: { values: Snapshot } = {
     values: {},
   }
-  const internal = {}
   const self = {
     record(name: string, milliseconds: number): void {
       const value = (state.values[name] ??= { count: 0, total_ms: 0, max_ms: 0 })

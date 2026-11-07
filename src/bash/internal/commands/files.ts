@@ -13,7 +13,6 @@ import { displayWidth, parseDate, strftime, versionCompare } from './text.ts'
 import {
   canonical,
   eachBatch,
-  eachInput,
   last,
   linked,
   linkOf,

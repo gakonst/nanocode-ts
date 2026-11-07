@@ -1,4 +1,4 @@
-import { CommandError, budget, type CommandContext, type CommandHandler } from '../Shell.ts'
+import { CommandError, budget, type CommandHandler } from '../Shell.ts'
 import { decode, encode } from '../Fs.ts'
 import { device, options, put } from './util.ts'
 import { mkdirs } from './files.ts'

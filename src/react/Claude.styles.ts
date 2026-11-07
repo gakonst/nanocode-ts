@@ -1,4 +1,4 @@
-import { flicker, pulse, spin, style, variants } from './Theme.ts'
+import { flicker, spin, style, variants } from './Theme.ts'
 
 const sans =
   '"Styrene B", "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !custom'

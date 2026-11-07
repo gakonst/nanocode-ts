@@ -1,4 +1,4 @@
-import { flicker, pulse, spin, style, variants } from './Theme.ts'
+import { flicker, pulse, style, variants } from './Theme.ts'
 
 const sans =
   '"Google Sans Text", "Google Sans", Roboto, "Helvetica Neue", Arial, sans-serif !custom'

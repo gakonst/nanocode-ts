@@ -1,6 +1,6 @@
 'use client'
 
-import { useContext, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import * as Format from '../client/internal/Format.ts'
 import type * as Tool from '../client/Tool.ts'
 import { Tokens } from './Code.tsx'

@@ -136,10 +136,6 @@ export function parseLines(source: string): { script: Script; error?: SyntaxErro
   }
 }
 
-export function parseText(source: string): Word {
-  return new Parser(source).text()
-}
-
 class Parser {
   src: string
   pos = 0

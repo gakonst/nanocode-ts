@@ -22,7 +22,6 @@ import {
   themes as defaults,
   themeStyle,
   type Tokens,
-  tokens,
 } from './Themes.ts'
 
 export { styles }
