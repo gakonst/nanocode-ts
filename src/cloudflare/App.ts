@@ -212,7 +212,7 @@ const cellInterruptChecks = 2_000
 const pumpResets = 4
 
 const resetNote =
-  'The session was reset while driving this turn four times in a row, so it stopped recovering it.'
+  'The session was reset while driving this turn four times in a row without the turn making progress, so it stopped recovering it.'
 
 function requestedYield(operation: unknown): number {
   const body = operation as { source?: unknown; input?: unknown } | undefined
@@ -913,7 +913,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           active = next.report.request_id
           if (next.report.status === 'running') this.counts.recoveries++
           const key = `resets:${active}`
-          const resets = Number(this.metadata.get(key) ?? '0')
+          const progress = this.progress()
+          const [counted, marked] = (this.metadata.get(key) ?? '0').split(' ')
+          const resets = marked === progress ? Number(counted) : 0
           if (resets >= pumpResets) {
             this.metadata.delete(key)
             await reader.finish(scope, active, 'failed', { error: resetNote, kind: 'recovery' })
@@ -921,7 +923,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             immediate = true
             return
           }
-          this.metadata.set(key, String(resets + 1))
+          this.metadata.set(key, `${resets + 1} ${progress}`)
           await this.ctx.storage.sync()
           tripwire = key
         }
@@ -1070,6 +1072,17 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         else await this.ctx.storage.deleteAlarm()
         if (immediate && unfinished) this.ctx.waitUntil(this.pump(true))
       }
+    }
+
+    private progress(): string {
+      const read = (query: string) => {
+        try {
+          return String(this.ctx.storage.sql.exec<{ value: string }>(query).one().value)
+        } catch {
+          return ''
+        }
+      }
+      return `${read('SELECT total(revision) AS value FROM state_rows')}:${read("SELECT count(*) || ':' || total(seq) AS value FROM nanocode_cell_journal_batches")}`
     }
 
     private queueUnknown(): boolean {

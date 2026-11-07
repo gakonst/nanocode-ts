@@ -267,14 +267,9 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
       let rows: Contracts.SqlValue[][][]
       let wrote: boolean
       try {
-        if (access === 'read') {
-          rows = sql.run(statements, access)
-          wrote = false
-        } else {
-          const before = sql.version()
-          rows = sql.run(statements, access)
-          wrote = sql.version() !== before
-        }
+        const before = sql.version()
+        rows = sql.run(statements, access)
+        wrote = sql.version() !== before
       } catch (error) {
         return Promise.reject(error)
       }
