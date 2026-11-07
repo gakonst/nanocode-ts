@@ -2566,9 +2566,7 @@ dependencies = [
  "nanocode-agent-config",
  "nanocode-agent-core",
  "nanocode-durability",
- "nanocode-home",
  "nanocode-platform",
- "nanocode-process-contracts",
  "nanocode-subagents",
  "nanocode-sync",
  "nanocode-tool-contracts",
@@ -2606,7 +2604,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2620,7 +2617,6 @@ dependencies = [
  "nanocode-computer",
  "nanocode-durability",
  "nanocode-home",
- "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-store-jsonl",
@@ -2729,6 +2725,7 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "nanocode-home",
+ "nanocode-platform",
  "nanocode-sync",
  "nanocode-tools",
  "nix 0.31.3",
@@ -2766,7 +2763,6 @@ dependencies = [
  "nanocode-process-contracts",
  "nanocode-sync",
  "nanocode-tls",
- "nanocode-tool-contracts",
  "nanocode-tool-host",
  "nanocode-tools",
  "nanocode-types",
@@ -2774,9 +2770,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
- "sha1 0.11.0",
  "sha2 0.11.1",
- "smallvec",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -2902,7 +2896,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3050,7 +3043,6 @@ dependencies = [
  "nix 0.31.3",
  "portable-pty",
  "rustix",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -3162,6 +3154,7 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-home",
  "nanocode-image",
+ "nanocode-platform",
  "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-provider",
@@ -3172,7 +3165,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
 ]
 
@@ -3205,9 +3197,7 @@ dependencies = [
  "nanocode-tool-host",
  "nanocode-tool-provider",
  "nanocode-tools",
- "nanocode-types",
  "nix 0.31.3",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3253,7 +3243,6 @@ dependencies = [
  "nanocode-types-core",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
