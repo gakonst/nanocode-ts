@@ -2,6 +2,7 @@ import { CommandError, type CommandContext, type CommandHandler } from '../Shell
 import { FsError } from '../../FileSystem.ts'
 import { decode, encode, parentOf } from '../Fs.ts'
 import { globRegExp } from '../Text.ts'
+import { transform } from './archive.ts'
 import { mkdirs } from './files.ts'
 import { lstatOf, pause } from './util.ts'
 
@@ -32,14 +33,6 @@ export function crc32(data: Uint8Array): number {
   let crc = 0xffffffff
   for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8)
   return (crc ^ 0xffffffff) >>> 0
-}
-
-async function transform(
-  data: Uint8Array,
-  stream: CompressionStream | DecompressionStream,
-): Promise<Uint8Array> {
-  const output = new Blob([data.slice()]).stream().pipeThrough(stream)
-  return new Uint8Array(await new Response(output).arrayBuffer())
 }
 
 const inflate = (data: Uint8Array) => transform(data, new DecompressionStream('deflate-raw'))

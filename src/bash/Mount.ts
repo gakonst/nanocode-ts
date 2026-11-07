@@ -1,11 +1,8 @@
 import { FsError, normalize, type FileStat, type FileSystem, type NewFile } from './FileSystem.ts'
 import { writeMany } from './internal/Fs.ts'
+import { inside } from './internal/Prune.ts'
 
 type Mount = { point: string; fs: FileSystem }
-
-function inside(path: string, point: string): boolean {
-  return path === point || path.startsWith(point + '/')
-}
 
 export function create(base: FileSystem, options: create.Options): FileSystem {
   const table: Mount[] = Object.entries(options.mounts)

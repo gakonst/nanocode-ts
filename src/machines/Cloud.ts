@@ -1,3 +1,4 @@
+import * as Pause from '../client/internal/Pause.ts'
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
 import type * as Contracts from '../Contracts.ts'
@@ -143,15 +144,7 @@ async function follow(
 }
 
 function pause(signal?: AbortSignal) {
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(done, reconnectMs)
-    function done() {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', done)
-      resolve()
-    }
-    signal?.addEventListener('abort', done)
-  })
+  return Pause.pause(signal, reconnectMs)
 }
 
 async function reconnect(

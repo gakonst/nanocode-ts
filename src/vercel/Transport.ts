@@ -1,4 +1,5 @@
 import type * as LiveEvent from '../client/LiveEvent.ts'
+import * as Pause from '../client/internal/Pause.ts'
 import * as Relay from '../client/Relay.ts'
 import * as ServerEvents from '../client/ServerEvents.ts'
 import * as ClientTransport from '../client/Transport.ts'
@@ -56,16 +57,7 @@ export function create(options: create.Options): Transport {
       ...(selection.effort ? { effort: selection.effort } : {}),
     }
   }
-  const pause = (signal: AbortSignal | undefined, ms = reconnectMs) =>
-    new Promise<void>((resolve) => {
-      const timer = setTimeout(done, ms)
-      function done() {
-        clearTimeout(timer)
-        signal?.removeEventListener('abort', done)
-        resolve()
-      }
-      signal?.addEventListener('abort', done)
-    })
+  const pause = (signal: AbortSignal | undefined, ms = reconnectMs) => Pause.pause(signal, ms)
 
   const follow = async (
     response: Response,

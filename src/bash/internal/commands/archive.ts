@@ -10,7 +10,7 @@ export type TarEntry = {
   omitted?: number
 }
 
-async function transform(
+export async function transform(
   data: Uint8Array,
   stream: CompressionStream | DecompressionStream,
 ): Promise<Uint8Array> {

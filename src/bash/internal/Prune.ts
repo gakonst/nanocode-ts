@@ -1,6 +1,6 @@
 import type { Conjunction, FileStat, FileSystem } from '../FileSystem.ts'
 
-function inside(path: string, point: string): boolean {
+export function inside(path: string, point: string): boolean {
   return path === point || path.startsWith(point + '/')
 }
 

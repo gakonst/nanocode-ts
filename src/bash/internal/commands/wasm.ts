@@ -1,6 +1,6 @@
 import { CommandError, LimitError, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError, normalize, type FileSystem } from '../../FileSystem.ts'
-import { decode, encode, parentOf } from '../Fs.ts'
+import { decode, encode, fromBase64, parentOf, toBase64 } from '../Fs.ts'
 import { mkdirs } from './files.ts'
 import { load, Refused, Trap, type HostFunction, type Live, type Loaded } from './engine.ts'
 import type * as Wasm from '../../Wasm.ts'
@@ -1187,20 +1187,6 @@ type CellRequest = {
 }
 
 const CELL_INSTANCES = 16
-
-function fromBase64(text: string): Uint8Array {
-  const binary = atob(text)
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
-  return bytes
-}
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let index = 0; index < bytes.length; index += 0x8000)
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
-  return btoa(binary)
-}
 
 function shellQuote(text: string): string {
   return /^[\w@%+=:,./-]+$/.test(text) ? text : "'" + text.replace(/'/g, "'\\''") + "'"
