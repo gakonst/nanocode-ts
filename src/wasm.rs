@@ -725,6 +725,7 @@ fn codex_harness(
     endpoint: Endpoint,
     model: Model,
     stream_tool_input: bool,
+    auto_compact_window_tokens: Option<u64>,
     environment: Option<ExecutionEnvironment>,
     instructions: &dyn Fn(Option<&str>) -> String,
 ) -> Result<CodexHarness, Opening> {
@@ -765,12 +766,17 @@ fn codex_harness(
         Some(Gateway::WorkersAi) => openai,
         _ => openai.api_base_url(endpoint.endpoint),
     };
-    let client = openai
+    let openai = openai
         .model(model)
         .tool_input_deltas(stream_tool_input)
-        .host_transport(transport::WorkerTransport::CODEX)
-        .build()
-        .map_err(configuration)?;
+        .host_transport(transport::WorkerTransport::CODEX);
+    let openai = match auto_compact_window_tokens {
+        Some(window) => openai
+            .context_window_tokens(window)
+            .auto_compact_token_limit(window.saturating_mul(9) / 10),
+        None => openai,
+    };
+    let client = openai.build().map_err(configuration)?;
     let harness = CodexHarness::new(client).configure(move |codex| {
         Ok(match &environment {
             Some(environment) => codex.execution_environment(environment.clone()),
@@ -859,6 +865,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 endpoint,
                 default,
                 config.stream_tool_input,
+                config.auto_compact_window_tokens,
                 environment.as_ref().map(Environment::codex),
                 &instructions,
             )?)
