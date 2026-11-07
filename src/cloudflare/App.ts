@@ -977,6 +977,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           immediate = retryAt === undefined
           return
         }
+        this.metadata.delete(`retries:${scope}`)
         const thinking = next && !next.cancel_requested ? descriptor.thinking : undefined
         if (thinking && this.efforts.get(runtime) !== thinking) {
           try {
@@ -1078,7 +1079,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const background = this.metadata.first('background:')
         if (!unfinished && !background) this.releaseIdle()
         this.pumping = false
-        if ((unfinished && retryAt !== null) || background)
+        if (retryAt !== null && (unfinished || background))
           await this.ctx.storage.setAlarm(retryAt ?? Date.now() + delay)
         else await this.ctx.storage.deleteAlarm()
         if (immediate && unfinished) this.ctx.waitUntil(this.pump(true))
@@ -1110,20 +1111,28 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       failure: Contracts.HostFailureError,
       delay: number,
     ): Promise<number | null | undefined> {
+      const bound =
+        this.env.RECOVERY_BACKOFF_MS === undefined
+          ? delay
+          : policy(this.env.RECOVERY_BACKOFF_MS, 'RECOVERY_BACKOFF_MS')
       if (!next) {
-        if (!failure.permanent) return Date.now() + delay
-        this.metadata.delete(`background:${scope}`)
-        return undefined
+        const key = `retries:${scope}`
+        if (failure.permanent) {
+          this.metadata.transaction(() => {
+            this.metadata.delete(`background:${scope}`)
+            this.metadata.delete(key)
+          })
+          return undefined
+        }
+        const attempts = Number(this.metadata.get(key) ?? 0)
+        this.metadata.set(key, String(attempts + 1))
+        return Date.now() + Math.min(delay * 2 ** attempts, bound)
       }
       const id = next.report.request_id
       const reader = await this.instance(scope)
       let turn: Contracts.TurnView | null = next
       if (!next.cancel_requested && !failure.permanent) {
         const attempts = Number(next.report.attempts ?? 0)
-        const bound =
-          this.env.RECOVERY_BACKOFF_MS === undefined
-            ? delay
-            : policy(this.env.RECOVERY_BACKOFF_MS, 'RECOVERY_BACKOFF_MS')
         const waited = Math.min(delay * 2 ** Math.max(attempts - 1, 0), bound)
         if (
           failure.kind === 'detached' &&
