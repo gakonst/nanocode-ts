@@ -3090,17 +3090,23 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const target = new URL(request.url)
     target.pathname = path
     const dispatched = performance.now()
-    const response = await env.SESSIONS.get(
-      env.SESSIONS.idFromName(JSON.stringify([account, name])),
-      { locationHint: env.SESSION_LOCATION_HINT },
-    ).fetch(
-      new Request(target, {
-        method: head ? 'GET' : request.method,
-        headers,
-        body: head ? null : request.body,
-        redirect: 'manual',
-      }),
-    )
+    let response: Response
+    try {
+      response = await env.SESSIONS.get(
+        env.SESSIONS.idFromName(JSON.stringify([account, name])),
+        { locationHint: env.SESSION_LOCATION_HINT },
+      ).fetch(
+        new Request(target, {
+          method: head ? 'GET' : request.method,
+          headers,
+          body: head ? null : request.body,
+          redirect: 'manual',
+        }),
+      )
+    } catch (error) {
+      if (path === '/internal/delete' && resetAfterDelete(error)) return json({ deleted: true })
+      throw error
+    }
     if (response.webSocket) return response
     const responseHeaders = new Headers(response.headers)
     responseHeaders.set(
@@ -3115,6 +3121,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     })
   }
 
+  function resetAfterDelete(error: unknown): boolean {
+    return error instanceof Error && error.message === 'session deleted'
+  }
+
   async function deleteSession(env: E, input: { account: string; name: string }): Promise<boolean> {
     const { account, name } = input
     const descriptor: SessionDescriptor = {
@@ -3123,15 +3133,21 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       session_name: name,
       subscription: false,
     }
-    const response = await env.SESSIONS.get(
-      env.SESSIONS.idFromName(JSON.stringify([account, name])),
-      { locationHint: env.SESSION_LOCATION_HINT },
-    ).fetch(
-      new Request('https://session.internal/internal/delete', {
-        method: 'POST',
-        headers: { 'x-nanocode-descriptor': headerJson(descriptor) },
-      }),
-    )
+    let response: Response
+    try {
+      response = await env.SESSIONS.get(
+        env.SESSIONS.idFromName(JSON.stringify([account, name])),
+        { locationHint: env.SESSION_LOCATION_HINT },
+      ).fetch(
+        new Request('https://session.internal/internal/delete', {
+          method: 'POST',
+          headers: { 'x-nanocode-descriptor': headerJson(descriptor) },
+        }),
+      )
+    } catch (error) {
+      if (resetAfterDelete(error)) return true
+      throw error
+    }
     await response.body?.cancel()
     return response.ok || response.status === 410
   }
