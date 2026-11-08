@@ -22,19 +22,40 @@ export type Cursor = { sent: Map<string, number>; cursor: number }
 
 const STREAM_BYTES = 4_194_304
 
-function streamed(event: Contracts.LoggedEvent): Streamed | undefined {
+type Inner = {
+  type?: string
+  payload?: {
+    item_id?: unknown
+    call_id?: unknown
+    model_call_index?: unknown
+    text?: unknown
+    offset?: unknown
+  }
+}
+
+function inner(event: Contracts.LoggedEvent): { scope: string; event: Inner } | undefined {
   const body = event.event as {
     source?: string
-    type?: string
-    event?: {
-      type?: string
-      payload?: { item_id?: unknown; call_id?: unknown; text?: unknown; offset?: unknown }
-    }
+    root_session_id?: unknown
+    event?: Inner
+    update?: { type?: string; id?: unknown; event?: Inner }
   }
+  if (body.source === 'agent' && body.event) return { scope: '', event: body.event }
+  if (body.source === 'subagent' && body.update?.type === 'event' && body.update.event)
+    return {
+      scope: 's:' + String(body.root_session_id ?? '') + ':' + String(body.update.id) + ':',
+      event: body.update.event,
+    }
+  return undefined
+}
+
+function streamed(event: Contracts.LoggedEvent): Streamed | undefined {
+  const body = event.event as { source?: string; type?: string }
   if (body.source === undefined && body.type === 'result')
     return { key: '', text: '', offset: undefined, final: false, ends: true }
-  if (body.source !== 'agent' || !body.event) return undefined
-  const { type, payload = {} } = body.event
+  const found = inner(event)
+  if (!found) return undefined
+  const { type, payload = {} } = found.event
   if (type === 'run.completed' || type === 'run.failed')
     return { key: '', text: '', offset: undefined, final: false, ends: true }
   const id =
@@ -42,9 +63,17 @@ function streamed(event: Contracts.LoggedEvent): Streamed | undefined {
       ? payload.item_id
       : type === 'tool.input.delta' || type === 'tool.call'
         ? payload.call_id
-        : undefined
+        : type === 'reasoning.summary.delta'
+          ? (payload.item_id ??
+            (typeof payload.model_call_index === 'number'
+              ? 'model-call-' + payload.model_call_index
+              : undefined))
+          : undefined
   if (typeof id !== 'string' || type === undefined) return undefined
-  const key = (type.startsWith('assistant') ? 'a:' : 't:') + id
+  const key =
+    found.scope +
+    (type.startsWith('assistant') ? 'a:' : type.startsWith('reasoning') ? 'r:' : 't:') +
+    id
   const final = type === 'assistant.message' || type === 'tool.call'
   return {
     key,
@@ -56,14 +85,20 @@ function streamed(event: Contracts.LoggedEvent): Streamed | undefined {
 }
 
 function chunk(stream: Stream, from: number): Contracts.LoggedEvent {
-  const body = stream.event.event as { event: { payload: Record<string, unknown> } }
+  const body = stream.event.event as {
+    event?: { payload: Record<string, unknown> }
+    update?: { event: { payload: Record<string, unknown> } }
+  }
   const text = stream.text.slice(from - stream.base)
+  const rewrite = (event: { payload: Record<string, unknown> }) => ({
+    ...event,
+    payload: { ...event.payload, text, offset: from },
+  })
   return {
     ...stream.event,
-    event: {
-      ...body,
-      event: { ...body.event, payload: { ...body.event.payload, text, offset: from } },
-    },
+    event: body.update
+      ? { ...body, update: { ...body.update, event: rewrite(body.update.event) } }
+      : { ...body, event: rewrite(body.event!) },
   }
 }
 
