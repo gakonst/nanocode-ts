@@ -82,7 +82,13 @@ export type AgentConfiguration = {
   live_deltas?: boolean
   stream_tool_input?: boolean
   auto_compact_window_tokens?: number
-  environment?: { cwd?: string; shell?: string; timezone?: string; project_instructions?: string }
+  environment?: {
+    cwd?: string
+    date?: string
+    shell?: string
+    timezone?: string
+    project_instructions?: string
+  }
   tools?: HostTool[]
   web_search?: boolean | Partial<Record<ModelProvider, boolean>>
   workspace?: string

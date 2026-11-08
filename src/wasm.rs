@@ -195,6 +195,8 @@ struct Environment {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
     shell: Option<String>,
     #[serde(default)]
     timezone: Option<String>,
@@ -243,6 +245,9 @@ impl Environment {
         let mut environment = ClaudeEnvironment::new();
         if let Some(cwd) = &self.cwd {
             environment = environment.working_directory(cwd.as_str());
+        }
+        if let Some(date) = &self.date {
+            environment = environment.date(date.as_str());
         }
         if let Some(shell) = &self.shell {
             environment = environment.shell(shell.as_str());

@@ -1176,6 +1176,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return scope === ownerScope ? 'session_id' : `session_id:${scope}`
     }
 
+    private sessionDate(scope: string): string {
+      const key = scope === ownerScope ? 'session_date' : `session_date:${scope}`
+      const known = this.metadata.get(key)
+      if (known) return known
+      const date = new Date().toISOString().slice(0, 10)
+      this.metadata.insert(key, date)
+      return date
+    }
+
     private legacyExecutor(): string {
       return this.env.RUNNER_ENABLED === 'true' ? Executor.defaultId : ''
     }
@@ -1374,7 +1383,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 ? { workspace_tools: options.workspaceTools }
                 : {}),
               ...((descriptor.provider === 'codex' || both) && options.workspace !== false
-                ? { environment: { cwd: options.workspace?.cwd ?? '/workspace' } }
+                ? {
+                    environment: {
+                      cwd: options.workspace?.cwd ?? '/workspace',
+                      date: this.sessionDate(scope),
+                    },
+                  }
                 : {}),
             },
             {
