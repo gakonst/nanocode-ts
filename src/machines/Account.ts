@@ -15,6 +15,7 @@ const opening = '200000'
 const topUp = '0.2'
 const maxDeposit = '2'
 const fileLimit = 1_000_000
+const approveSelector = '0x095ea7b3'
 const tokenPattern = /^(0x[0-9a-f]{40})\.[0-9a-f]{64}$/
 const visitorPattern = /^[0-9a-f]{64}$/
 
@@ -60,6 +61,43 @@ export type Holder = {
 
 type Payer = {
   fetch: (input: string, init: RequestInit & { context?: unknown }) => Promise<Response>
+}
+
+function chainClient(endpoint: string) {
+  return createClient({ chain: tempo, transport: http(endpoint) })
+}
+
+async function land(
+  client: ReturnType<typeof chainClient>,
+  signer: ReturnType<typeof Account.fromSecp256k1> | ReturnType<typeof Account.fromP256>,
+  current: KeyRecord,
+  authorization: KeyAuthorization.KeyAuthorization,
+): Promise<void> {
+  const metadata = await Actions.accessKey.getMetadata(client, {
+    account: current.address,
+    accessKey: current.keyAddress,
+  })
+  if (isAddressEqual(metadata.address, current.keyAddress)) return
+  const scope = authorization.scopes?.find(
+    (entry) => entry.selector?.toLowerCase() === approveSelector,
+  )
+  if (authorization.scopes?.length && !scope)
+    throw new Error(
+      'the access key is not on Tempo yet and none of its call scopes can carry its authorization: connect Tempo Wallet again',
+    )
+  try {
+    await Actions.token.approveSync(client, {
+      account: signer,
+      token: scope?.address ?? mach,
+      spender: scope?.recipients?.[0] ?? current.address,
+      amount: 0n,
+      feeToken: mach,
+    })
+  } catch (error) {
+    throw new Error(
+      `the access key is not on Tempo yet, and authorizing it with a self-paid transaction failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
 }
 
 export function hex(bytes: ArrayBuffer | Uint8Array): string {
@@ -298,16 +336,20 @@ export function create(options: create.Options) {
         'no access key is registered for this account, or it expired: connect Tempo Wallet again',
       )
     const keyAuthorizationManager = KeyAuthorizationManager.memory()
-    if (current.authorization)
+    const authorization = current.authorization
+      ? KeyAuthorization.fromRpc(current.authorization)
+      : undefined
+    if (authorization)
       await keyAuthorizationManager.set(
         { accessKey: current.keyAddress, address: current.address, chainId: tempo.id },
-        KeyAuthorization.fromRpc(current.authorization),
+        authorization,
       )
     const signer =
       current.keyType === 'p256'
         ? Account.fromP256(current.key, { access: current.address, keyAuthorizationManager })
         : Account.fromSecp256k1(current.key, { access: current.address, keyAuthorizationManager })
-    const client = createClient({ chain: tempo, transport: http(endpoint) })
+    const client = chainClient(endpoint)
+    if (authorization) await land(client, signer, current, authorization)
     const prefix = `channel:${current.keyAddress.toLowerCase()}:`
     const mppx = Mppx.create({
       fetch: async (input, init) => {
