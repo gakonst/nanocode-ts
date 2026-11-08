@@ -223,6 +223,8 @@ const cellInterruptChecks = 2_000
 
 const pumpResets = 4
 
+const subagentScanPages = 32
+
 const resetNote =
   'The session was reset while driving this turn four times in a row without the turn making progress, so it stopped recovering it.'
 
@@ -337,6 +339,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private handRequestsPruned = 0
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
+
+    private readonly tripwires = new Map<string, string>()
     private directoryEpoch = 0
     private recorded = false
     private deleted = false
@@ -915,24 +919,34 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             preparationRequired = true
           })
         })
-        if (next) {
-          active = next.report.request_id
-          if (next.report.status === 'running') this.counts.recoveries++
-          const key = `resets:${active}`
-          const progress = this.progress()
+        if (next) active = next.report.request_id
+        if (next?.report.status === 'running') this.counts.recoveries++
+        {
+          const key = next ? `resets:${active}` : `resets:background:${scope}`
           const version = options.version?.(this.env) ?? ''
-          const [counted, marked, stamped = ''] = (this.metadata.get(key) ?? '0').split(' ')
-          const resets = marked === progress && stamped === version ? Number(counted) : 0
+          const [counted, marked, stamped = '', dispatched = ''] = (
+            this.metadata.get(key) ?? '0'
+          ).split(' ')
+          const resets =
+            stamped === version && (dispatched !== 'dispatched' || marked === this.progress())
+              ? Number(counted)
+              : 0
           if (resets >= pumpResets) {
             this.metadata.delete(key)
-            await reader.finish(scope, active, 'failed', { error: resetNote, kind: 'recovery' })
-            this.queue = 'unknown'
-            immediate = true
+            if (next) {
+              await reader.finish(scope, active!, 'failed', { error: resetNote, kind: 'recovery' })
+              this.queue = 'unknown'
+              immediate = true
+            } else {
+              this.metadata.delete(`background:${scope}`)
+              console.error('Session background work reset without progress', { scope })
+            }
             return
           }
-          this.metadata.set(key, `${resets + 1} ${progress} ${version}`)
+          this.metadata.set(key, `${resets + 1} ${this.progress()} ${version}`)
           await this.ctx.storage.sync()
           tripwire = key
+          this.tripwires.set(scope, key)
         }
         const prepared = performance.now()
         let timing: TurnTiming | undefined
@@ -1070,7 +1084,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             await reader?.interrupted(scope ?? ownerScope, active, interruptedNote).catch(() => {})
         }
       } finally {
-        if (tripwire) this.metadata.delete(tripwire)
+        if (tripwire) {
+          this.metadata.delete(tripwire)
+          if (this.tripwires.get(scope!) === tripwire) this.tripwires.delete(scope!)
+        }
         if (this.deleted) {
           this.pumping = false
           return
@@ -1084,6 +1101,20 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         else await this.ctx.storage.deleteAlarm()
         if (immediate && unfinished) this.ctx.waitUntil(this.pump(true))
       }
+    }
+
+    protected async completionOrigin(turn: string): Promise<string | undefined> {
+      const runtime = this.opened(ownerScope)?.resident
+      if (!runtime?.reusable) return undefined
+      return (await runtime.completionOrigin(turn).catch(() => null)) ?? undefined
+    }
+
+    private dispatched(scope: string): void {
+      const key = this.tripwires.get(scope)
+      if (key === undefined) return
+      this.tripwires.delete(scope)
+      const [counted = '0', , stamped = ''] = (this.metadata.get(key) ?? '').split(' ')
+      this.metadata.set(key, `${counted} ${this.progress()} ${stamped} dispatched`)
     }
 
     private progress(): string {
@@ -1504,6 +1535,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               },
               dispatch: async (request, signal, timing) => {
                 if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
+                this.dispatched(scope)
                 this.counts.model_dispatches++
                 if (request.provider == null && mcpServers.length)
                   return (request.subagent ? mcpFetch(request.subagent) : sessionMcpFetch)(
@@ -1555,6 +1587,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               socket: {
                 open: async (request, signal, timing) => {
                   if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
+                  this.dispatched(scope)
                   const response = await egress(this.env).fetch(
                     new Request('https://egress.internal/socket', {
                       signal,
@@ -2932,18 +2965,27 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         return json({ error: 'subagent not found' }, 404)
       const subtree = url.searchParams.get('subtree') === '1'
       const members = Subagents.members(entries, { id, subtree })
+      const size = policy(this.env.EVENT_PAGE_SIZE, 'EVENT_PAGE_SIZE')
       const read = async (after: number): Promise<Contracts.LogPage> => {
         const events: Contracts.LoggedEvent[] = []
-        for (let next = after; ; ) {
-          if (!(await this.allowed(descriptor))) throw new Error('access token expired or revoked')
+        if (!(await this.allowed(descriptor))) throw new Error('access token expired or revoked')
+        for (let next = after, pages = 0; ; pages++) {
           const page =
             this.eventHub.recent(next) ??
-            (await (await this.instance(scope)).page(scope, next, cursor.limit))
+            (await (await this.instance(scope)).page(scope, next, size))
           for (const event of page.events) {
             const update = Subagents.update(event)
-            if (update && Subagents.belongs(update, { members, subtree })) events.push(event)
+            if (!update || !Subagents.belongs(update, { members, subtree })) continue
+            events.push(event)
+            if (events.length === cursor.limit)
+              return { events, next_cursor: event.seq, has_more: true }
           }
-          if (events.length || !page.has_more || page.next_cursor <= next)
+          if (
+            events.length ||
+            !page.has_more ||
+            page.next_cursor <= next ||
+            pages + 1 >= subagentScanPages
+          )
             return { events, next_cursor: page.next_cursor, has_more: page.has_more }
           next = page.next_cursor
         }
