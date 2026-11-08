@@ -108,6 +108,7 @@ export type McpServer = {
   url: string
   headers?: Record<string, string>
   bearer_token?: string
+  tool_timeout_ms?: number
 }
 
 export type McpStore = {

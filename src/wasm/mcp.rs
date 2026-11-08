@@ -17,6 +17,8 @@ pub struct Server {
     headers: BTreeMap<String, String>,
     #[serde(default)]
     bearer_token: Option<String>,
+    #[serde(default)]
+    tool_timeout_ms: Option<u64>,
 }
 
 struct McpTransport;
@@ -56,6 +58,9 @@ pub async fn tools(servers: Vec<Server>) -> Result<Vec<PreparedMcpTool>, Failure
         }
         for (name, value) in server.headers {
             config = config.header(name, value);
+        }
+        if let Some(milliseconds) = server.tool_timeout_ms {
+            config = config.tool_timeout(Duration::from_millis(milliseconds));
         }
         builder = builder.server(server.name, config);
     }
