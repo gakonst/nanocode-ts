@@ -174,7 +174,11 @@ async function create(
     inflight: Map<number, () => void>
     bodies: Map<
       number,
-      { reader: ReadableStreamDefaultReader<Uint8Array>; timing: Contracts.ModelTiming }
+      {
+        reader: ReadableStreamDefaultReader<Uint8Array>
+        timing: Contracts.ModelTiming
+        controller: AbortController | null
+      }
     >
     sockets: Map<number, Socket>
     commands: Map<number, Pending>
@@ -213,7 +217,11 @@ async function create(
     inflight: new Map<number, () => void>(),
     bodies: new Map<
       number,
-      { reader: ReadableStreamDefaultReader<Uint8Array>; timing: Contracts.ModelTiming }
+      {
+        reader: ReadableStreamDefaultReader<Uint8Array>
+        timing: Contracts.ModelTiming
+        controller: AbortController | null
+      }
     >(),
     sockets: new Map<number, Socket>(),
     commands: new Map<number, Pending>(),
@@ -443,11 +451,13 @@ async function create(
             response.body ??
             new ReadableStream<Uint8Array>({ start: (controller) => controller.close() })
           ).getReader()
-          state.bodies.set(body, { reader, timing })
+          const held = request.provider == null ? controller : null
+          state.bodies.set(body, { reader, timing, controller: held })
           internal.onCancel(id, () => {
             if (!state.bodies.delete(body)) return
             internal.finishModel(timing, 'cancelled')
             void reader.cancel().catch(() => undefined)
+            held?.abort()
           })
           return { id: body, status: response.status, headers: [...response.headers] }
         }
@@ -460,6 +470,7 @@ async function create(
             state.bodies.delete(request.id)
             internal.finishModel(timing, 'cancelled')
             void reader.cancel().catch(() => undefined)
+            body.controller?.abort()
           })
           const readStarted = performance.now()
           let chunk: ReadableStreamReadResult<Uint8Array>
@@ -491,6 +502,7 @@ async function create(
           if (body) {
             state.bodies.delete(request.id)
             internal.finishModel(body.timing, 'closed')
+            body.controller?.abort()
             await body.reader.cancel().catch(() => undefined)
           }
           return null
@@ -947,9 +959,10 @@ async function create(
       state.counters.host_cancellations += cancellations.length
       state.inflight.clear()
       for (const cancel of cancellations) cancel()
-      for (const { reader, timing } of state.bodies.values()) {
+      for (const { reader, timing, controller } of state.bodies.values()) {
         internal.finishModel(timing, 'cancelled')
         void reader.cancel().catch(() => undefined)
+        controller?.abort()
       }
       state.bodies.clear()
       internal.closeSockets('agent runtime disposed', 'cancelled')
