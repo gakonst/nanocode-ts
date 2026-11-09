@@ -14,7 +14,7 @@ export const sections: readonly Link[] = [
   { href: `${origin}/docs/introduction/getting-started`, label: 'Docs' },
   { href: `${origin}/playground`, label: 'Playground' },
   { href: `${origin}/prompts`, label: 'Prompts' },
-  { href: 'https://github.com/gakonst/nanocode', label: 'GitHub' },
+  { href: 'https://github.com/nanocodexyz/nanocode', label: 'GitHub' },
 ]
 
 export const experiments: readonly Link[] = [
