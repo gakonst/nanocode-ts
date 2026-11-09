@@ -366,7 +366,23 @@ export function create(options: create.Options) {
         ? Account.fromP256(current.key, { access: current.address, keyAuthorizationManager })
         : Account.fromSecp256k1(current.key, { access: current.address, keyAuthorizationManager })
     const client = chainClient(endpoint)
-    if (authorization) await land(client, signer, current, authorization)
+    let landed: Promise<void> | undefined
+    const landing = () => {
+      if (!authorization) return Promise.resolve()
+      landed ??= land(client, signer, current, authorization).catch((error: unknown) => {
+        landed = undefined
+        throw error
+      })
+      return landed
+    }
+    const lands = <method extends { createCredential: (options: never) => Promise<string> }>(method: method): method => {
+      const create = method.createCredential
+      method.createCredential = (async (options: never) => {
+        await landing()
+        return create.call(method, options)
+      }) as method['createCredential']
+      return method
+    }
     const prefix = `channel:${current.keyAddress.toLowerCase()}:`
     const mppx = Mppx.create({
       fetch: async (input, init) => {
@@ -400,7 +416,7 @@ export function create(options: create.Options) {
         })
       },
       methods: [
-        payments.session({
+        lands(payments.session({
           account: signer,
           allowedChainIds: [tempo.id],
           channelStore: createJsonChannelStore({
@@ -413,8 +429,8 @@ export function create(options: create.Options) {
           getClient: () => client,
           maxDeposit,
           topUpAmount: topUp,
-        }),
-        payments.charge({ account: signer, allowedChainIds: [tempo.id], getClient: () => client }),
+        })),
+        lands(payments.charge({ account: signer, allowedChainIds: [tempo.id], getClient: () => client })),
       ],
       orderChallenges: (candidates) => {
         const rank = (candidate: (typeof candidates)[number]) => {
