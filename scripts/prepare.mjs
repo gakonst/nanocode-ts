@@ -110,7 +110,6 @@ function typescript() {
   const paths = [
     'package.json',
     'package-lock.json',
-    'scripts/zyzz.mjs',
     'scripts/pyodide.mjs',
     ...readdirSync(root).filter((name) => /^tsconfig.*\.json$/.test(name)),
   ]

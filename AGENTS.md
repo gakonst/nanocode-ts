@@ -21,7 +21,8 @@ These principles come from nanocodexyz/nanocode's `AGENTS.md` and apply to every
 - Generic agent, durability, turn, and event logic belongs in the SDK. Host-agnostic bridge glue belongs in the root modules, each platform's runtime and wiring in its adapter folder, and an application's own tools, models, authorization policy, pages, and commands in the host repository.
 - Send models only the SDK's native prompts and tool text. nanocode-ts defines no system or developer instructions, workspace instructions, or tool description overrides. `instructions` stays an option for hosts.
 - Host-agnostic modules use only the standard web platform types: no Node APIs, no `@cloudflare/workers-types`, no Durable Object types. Hosts supply platform capabilities through the contracts in `Contracts.ts` or take an adapter's.
-- Every runtime is its own package subpath, and `package.json` marks only `*.css` as side effects. A page that imports a browser transport bundles no Worker, Node, or WebAssembly code.
+- Every runtime is its own package subpath, and `package.json` marks no module as a side effect. A page that imports a browser transport bundles no Worker, Node, or WebAssembly code.
+- The React components are headless: they render `data-nc` elements, take a `Skin`, and carry no styles. Skins, themes, tokens, page chrome and every other Zyzz definition belong in nanocodexyz/nds.
 - Limits come from host policy passed in, never from constants in this package.
 - The Rust side is single-threaded and keeps its state in `thread_local` cells, with no `Mutex` or `RwLock`.
 - TypeScript uses only erasable syntax (`erasableSyntaxOnly`, `verbatimModuleSyntax`), so Node 22.18 or newer runs the sources directly with type stripping from a checkout or a `file:` link.
@@ -130,7 +131,7 @@ The SDK host glue is written in Rust and reaches JavaScript through a `wasm32-un
 - Name the returned public shape after its role (`Runtime`, `Client`, `Session`, `Store`) when that role is meaningful. Use `create.ReturnType` for a factory-specific shape that has no independent domain name.
 - Keep one authoritative instance value. Derive related helpers and views from that instance instead of duplicating configuration or state.
 - Keep mutable caches and registries private to the instance. Expose explicit operations, and provide reset or disposal only when the lifecycle requires it.
-- Avoid side-effect registration. `sideEffects` lists only `*.css`, so an import used only to install global behavior can disappear from a bundle.
+- Avoid side-effect registration. `sideEffects` is `false`, so an import used only to install global behavior can disappear from a bundle.
 - Keep default implementations directly reachable from the factory or resolver that selects them so bundlers can tree-shake unused paths.
 - Pass an existing receiver first to stateless operations (`Bash.exec(bash, options)`). Create a factory only when several operations genuinely share dependencies, state, or lifecycle.
 - Keep transport-independent planning, parsing, and normalization pure. Put filesystem, network, and Worker behavior in thin adapters around that core.
@@ -200,8 +201,7 @@ Applies to this file, interface copy, and commit messages.
 
 ## UI Conventions
 
-- Style with Zyzz. Keep a component's styles in a sibling `*.styles.ts` module of named `style` definitions, and separate adjacent definitions with one blank line. `erasableSyntaxOnly` rejects a `namespace styles` that holds values.
-- Keep headless components free of styles. Skins and themes are separate entrypoints.
+- Keep the components free of styles: no Zyzz, no stylesheets, no class names of their own. A look is a `Skin`, and the nanocode looks live in nanocodexyz/nds.
 - Use accessible native controls with labels, visible focus, and `aria-live` for asynchronous status. Use an accessible primitive library only when a component needs coordinated behavior, such as a popup.
 - Respect reduced-motion preferences. Animate `transform` and `opacity`.
 - Keep components in the file that uses them until a second module needs them.
