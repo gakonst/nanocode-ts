@@ -1,5 +1,5 @@
 import type { Vars } from 'zyzz'
-import { flicker, style, variants } from './Theme.ts'
+import { flicker, style, variants, vars } from './Theme.ts'
 
 export const body = style({
   backgroundColor: 'bg',
@@ -224,10 +224,20 @@ export const blockLabel = style({
 })
 
 export const diagram = style({
-  overflowX: 'auto',
+  '--ondine-bg': 'transparent',
+  '--ondine-fg': 'currentColor !custom',
+  '--ondine-line': `${vars.color.middle} !custom`,
+  display: 'flex',
+  justifyContent: 'center',
   paddingBlock: 'md',
   paddingInline: 'indent',
-  selectors: { ':where(&) :where(pre)': { margin: '0', whiteSpace: 'pre' } },
+  selectors: {
+    ':where(&) :where(svg)': {
+      display: 'block',
+      height: 'auto !custom',
+      maxWidth: '100% !custom',
+    },
+  },
 })
 
 export const cards = style({

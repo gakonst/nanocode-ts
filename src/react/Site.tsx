@@ -181,16 +181,14 @@ export declare namespace Block {
 export function Diagram(props: Diagram.Props) {
   return (
     <div {...styles.block()}>
-      <div {...styles.diagram()}>
-        <pre>{props.children}</pre>
-      </div>
+      <div data-ondine="" dangerouslySetInnerHTML={{ __html: props.svg }} {...styles.diagram()} />
     </div>
   )
 }
 
 export declare namespace Diagram {
   type Props = {
-    children: string
+    svg: string
   }
 }
 
