@@ -16,6 +16,11 @@ const topUp = '0.2'
 const maxDeposit = '2'
 const fileLimit = 1_000_000
 const approveSelector = '0x095ea7b3'
+const feeTokens: Address[] = [
+  '0x20c0000000000000000000000000000000000000',
+  '0x20c000000000000000000000b9537d11c60e8b50',
+  mach,
+]
 const tokenPattern = /^(0x[0-9a-f]{40})\.[0-9a-f]{64}$/
 const visitorPattern = /^[0-9a-f]{64}$/
 
@@ -85,25 +90,31 @@ async function land(
     throw new Error(
       'the access key is not on Tempo yet and none of its call scopes can carry its authorization: connect Tempo Wallet again',
     )
-  try {
-    await Actions.token.approveSync(client, {
-      account: signer,
-      token: scope?.address ?? mach,
-      spender: scope?.recipients?.[0] ?? current.address,
-      amount: 0n,
-      feeToken: mach,
-    })
-  } catch (error) {
-    const reason =
-      error instanceof BaseError
-        ? [error.shortMessage, error.details].filter(Boolean).join(': ')
-        : error instanceof Error
-          ? error.message
-          : String(error)
-    throw new Error(
-      `the access key is not on Tempo yet, and authorizing it with a self-paid transaction failed: ${reason}`,
-    )
+  const reasons: string[] = []
+  for (const feeToken of feeTokens) {
+    const balance = await Actions.token
+      .getBalance(client, { account: current.address, token: feeToken })
+      .then((found) => found.amount)
+      .catch(() => 0n)
+    if (balance === 0n) continue
+    try {
+      await Actions.token.approveSync(client, {
+        account: signer,
+        token: scope?.address ?? mach,
+        spender: scope?.recipients?.[0] ?? current.address,
+        amount: 0n,
+        feeToken,
+      })
+      return
+    } catch (error) {
+      reasons.push(
+        `fee in ${feeToken}: ${error instanceof BaseError ? (error.details ?? error.shortMessage) : error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
+  throw new Error(
+    `the access key is not on Tempo yet, and authorizing it with a self-paid transaction failed: ${reasons.join('; ') || 'the account holds none of the fee tokens (pathUSD, USDC.e, MACH)'}`,
+  )
 }
 
 export function hex(bytes: ArrayBuffer | Uint8Array): string {
