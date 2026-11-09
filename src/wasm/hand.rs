@@ -307,10 +307,8 @@ pub async fn open_hand(opening: Opening) -> Result<Value, String> {
     own.extend(tools::tools(host_tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
     own.extend(
         mcp::tools(mcp_servers)
-            .await
-            .map_err(|failure| match failure {
-                mcp::Failure::Configuration(error) | mcp::Failure::Unavailable(error) => error,
-            })?
+            .await?
+            .tools
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );

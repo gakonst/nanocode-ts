@@ -27,11 +27,15 @@ export type Policy = NonNullable<Contracts.RuntimeOptions['mcp']>
 
 const DEFAULT_CACHE_MS = 600_000
 
+const DEFAULT_STALE_MS = 86_400_000
+
 const encoder = new TextEncoder()
 
 const decoder = new TextDecoder()
 
 const listings = new Map<string, Listing>()
+
+const refreshing = new Set<string>()
 
 function key(endpoint: string) {
   const url = new URL(endpoint)
@@ -75,7 +79,7 @@ async function digest(url: string) {
   )
 }
 
-async function stored(store: Contracts.McpStore, url: string, ttl: number) {
+async function stored(store: Contracts.McpStore, url: string, stale: number) {
   const value = await store.get(await digest(url)).catch(() => undefined)
   if (!value) return undefined
 
@@ -86,8 +90,31 @@ async function stored(store: Contracts.McpStore, url: string, ttl: number) {
       return undefined
     }
   })()
-  if (!parsed || !Array.isArray(parsed.tools) || Date.now() - parsed.at > ttl) return undefined
+  if (!parsed || !Array.isArray(parsed.tools) || Date.now() - parsed.at > stale) return undefined
   return parsed
+}
+
+async function fetchTools<R extends Request, A extends unknown[]>(
+  send: Send<R, A>,
+  request: R,
+  rest: A,
+): Promise<Tool[] | undefined> {
+  const response = await send(
+    {
+      ...request,
+      body: encoder.encode(
+        JSON.stringify({ jsonrpc: '2.0', id: 'nanocode-tools', method: 'tools/list', params: {} }),
+      ),
+    },
+    new AbortController().signal,
+    ...rest,
+  )
+  const parsed = response.ok
+    ? ((await payload(response)) as
+        | { result?: { tools?: Tool[]; nextCursor?: unknown } }
+        | undefined)
+    : await response.body?.cancel()
+  return parsed?.result?.tools && !parsed.result.nextCursor ? parsed.result.tools : undefined
 }
 
 function reply(id: unknown, result: unknown) {
@@ -104,6 +131,7 @@ export function defer<R extends Request, A extends unknown[]>(
   if (!servers?.length) return send
   const urls = new Set(servers.map((server) => key(server.url)))
   const ttl = policy.cacheMs ?? DEFAULT_CACHE_MS
+  const keep = ttl + (policy.staleMs ?? DEFAULT_STALE_MS)
   const pending = new Map<string, Promise<Tool[] | undefined>>()
   return async (request, signal, ...rest) => {
     if (
@@ -128,7 +156,7 @@ export function defer<R extends Request, A extends unknown[]>(
       )
     const body = message(request.body)
     let listing = listings.get(url)
-    if (listing && Date.now() - listing.at > ttl) {
+    if (listing && Date.now() - listing.at > keep) {
       listings.delete(url)
       listing = undefined
     }
@@ -136,31 +164,7 @@ export function defer<R extends Request, A extends unknown[]>(
     const list = () => {
       const existing = pending.get(url)
       if (existing) return existing
-      const fetched = send(
-        {
-          ...request,
-          body: encoder.encode(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: 'nanocode-tools',
-              method: 'tools/list',
-              params: {},
-            }),
-          ),
-        },
-        new AbortController().signal,
-        ...rest,
-      )
-        .then(async (response) => {
-          const parsed = response.ok
-            ? ((await payload(response)) as
-                | { result?: { tools?: Tool[]; nextCursor?: unknown } }
-                | undefined)
-            : undefined
-          return parsed?.result?.tools && !parsed.result.nextCursor
-            ? parsed.result.tools
-            : undefined
-        })
+      const fetched = fetchTools(send, request, rest)
         .catch(() => undefined)
         .then((tools) => {
           pending.delete(url)
@@ -174,13 +178,48 @@ export function defer<R extends Request, A extends unknown[]>(
       pending.set(url, fetched)
       return fetched
     }
+    const revalidate = (at: number) => {
+      if (Date.now() - at <= ttl || refreshing.has(url)) return
+      refreshing.add(url)
+      const started = Date.now()
+      void (async () => {
+        const response = await send(request, new AbortController().signal, ...rest)
+        if (response.ok && response.headers.has('mcp-session-id')) {
+          await response.body?.cancel()
+          listings.set(url, { at: started, stateful: true })
+          return
+        }
+        if (!response.ok) {
+          await response.body?.cancel()
+          throw new Error(`initialize answered ${response.status}`)
+        }
+        const parsed = await payload(response)
+        if (!parsed || parsed.result === undefined) throw new Error('initialize returned no result')
+        const tools = await fetchTools(send, request, rest)
+        if (!tools) throw new Error('tools/list returned no complete list')
+        const entry: Stored = { at: started, init: parsed.result, tools }
+        listings.set(url, entry)
+        await policy.store?.put(await digest(url), JSON.stringify(entry), keep)
+      })()
+        .catch((error: unknown) =>
+          console.warn('MCP listing revalidation failed', {
+            server: key(request.endpoint),
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        )
+        .finally(() => refreshing.delete(url))
+    }
     switch (body?.method) {
       case 'initialize': {
-        if (listing?.init) return reply(body.id, listing.init)
+        if (listing?.init) {
+          revalidate(listing.at)
+          return reply(body.id, listing.init)
+        }
 
-        const shared = !listing && policy.store ? await stored(policy.store, url, ttl) : undefined
+        const shared = !listing && policy.store ? await stored(policy.store, url, keep) : undefined
         if (shared) {
           listings.set(url, { at: shared.at, init: shared.init, tools: shared.tools })
+          revalidate(shared.at)
           return reply(body.id, shared.init)
         }
 
@@ -208,7 +247,7 @@ export function defer<R extends Request, A extends unknown[]>(
             .then(async (value) => {
               if (!value) return
               const entry: Stored = { at, init: parsed.result, tools: value }
-              await store.put(await digest(url), JSON.stringify(entry), ttl)
+              await store.put(await digest(url), JSON.stringify(entry), keep)
             })
             .catch(() => undefined)
         return reply(body.id, parsed.result)

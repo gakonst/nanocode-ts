@@ -553,6 +553,7 @@ struct Session {
     hand_tools: Option<Arc<remote::ToolSelections>>,
     hands: RefCell<HashMap<String, Hand>>,
     inbox: TurnInbox<Log>,
+    mcp_unavailable: Vec<String>,
     model: ModelSelection,
     scope: String,
     subagents: Option<SubagentControl>,
@@ -912,13 +913,11 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     if placement {
         shared.push(Arc::new(executors.tool()));
     }
+    let mcp = mcp::tools(config.mcp_servers)
+        .await
+        .map_err(configuration)?;
     shared.extend(
-        mcp::tools(config.mcp_servers)
-            .await
-            .map_err(|failure| match failure {
-                mcp::Failure::Configuration(error) => configuration(error),
-                mcp::Failure::Unavailable(error) => Opening::Failed(error),
-            })?
+        mcp.tools
             .into_iter()
             .map(|tool| Arc::new(tool) as Arc<dyn Tool>),
     );
@@ -1126,6 +1125,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 hand_tools,
                 hands: RefCell::default(),
                 inbox,
+                mcp_unavailable: mcp.unavailable,
                 model,
                 scope: config.scope,
                 subagents,
@@ -1180,6 +1180,7 @@ async fn init(config: Value) -> Result<Value, String> {
             let summary = json!({
                 "session_id": session.inbox.session_id(),
                 "model": session.inbox.model(),
+                "mcp_unavailable": session.mcp_unavailable,
             });
             let session = Rc::new(session);
             PHASE.set(Phase::Ready(Rc::clone(&session)));

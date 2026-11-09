@@ -200,6 +200,7 @@ async function create(
       }
     sql: Contracts.SqlHost
     hands: boolean
+    mcpUnavailable: readonly string[]
     remote: boolean
     subscription: boolean
     opened: boolean
@@ -270,6 +271,7 @@ async function create(
       },
     sql: undefined as unknown as Contracts.SqlHost,
     hands: false,
+    mcpUnavailable: [],
     remote: false,
     subscription: false,
     opened: false,
@@ -1163,9 +1165,10 @@ async function create(
             event_coalesce_ms: config.event_coalesce_ms ?? 0,
             tools: config.tools ?? [],
           },
-        })) as { rejected?: { error: string; kind: string } }
+        })) as { mcp_unavailable?: string[]; rejected?: { error: string; kind: string } }
         if (opened.rejected)
           throw new Contracts.HostFailureError(opened.rejected.error, opened.rejected.kind, true)
+        state.mcpUnavailable = opened.mcp_unavailable ?? []
         state.timings.record('sdk.open', performance.now() - initStarted)
       } catch (error) {
         internal.terminate(error)
@@ -1195,6 +1198,10 @@ async function create(
 
     get reusable(): boolean {
       return !self.closed && !state.options.remote?.failed?.()
+    },
+
+    get mcpUnavailable(): readonly string[] {
+      return state.mcpUnavailable
     },
 
     get memoryBytes(): number {

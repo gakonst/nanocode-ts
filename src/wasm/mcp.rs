@@ -41,14 +41,16 @@ fn caller(body: &[u8]) -> Option<Arc<str>> {
         .map(Arc::from)
 }
 
-pub enum Failure {
-    Configuration(String),
-    Unavailable(String),
+#[derive(Default)]
+pub struct Prepared {
+    pub tools: Vec<PreparedMcpTool>,
+    pub unavailable: Vec<String>,
 }
 
-pub async fn tools(servers: Vec<Server>) -> Result<Vec<PreparedMcpTool>, Failure> {
+pub async fn tools(servers: Vec<Server>) -> Result<Prepared, String> {
+    let mut prepared = Prepared::default();
     if servers.is_empty() {
-        return Ok(Vec::new());
+        return Ok(prepared);
     }
     let mut builder = Mcp::builder().http_sender(Arc::new(McpTransport));
     for server in servers {
@@ -64,15 +66,16 @@ pub async fn tools(servers: Vec<Server>) -> Result<Vec<PreparedMcpTool>, Failure
         }
         builder = builder.server(server.name, config);
     }
-    let mcp = builder
-        .build()
-        .map_err(|error| Failure::Configuration(error.to_string()))?;
-    let mut tools = Vec::new();
-    for (server, prepared) in mcp.prepared_servers(Duration::MAX).await {
-        tools.extend(
-            prepared
-                .map_err(|error| Failure::Unavailable(format!("MCP server {server}: {error}")))?,
-        );
+    let mcp = builder.build().map_err(|error| error.to_string())?;
+    for (server, result) in mcp.prepared_servers(Duration::MAX).await {
+        match result {
+            Ok(tools) => prepared.tools.extend(tools),
+            Err(error) => {
+                let message = format!("MCP server {server}: {error}");
+                tracing::warn!(%message, "MCP server is unavailable; its tools are left out");
+                prepared.unavailable.push(message);
+            }
+        }
     }
-    Ok(tools)
+    Ok(prepared)
 }

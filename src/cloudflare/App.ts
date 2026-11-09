@@ -1627,6 +1627,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           )
           for (const [hand, entry] of this.hands.get(scope) ?? [])
             await created.attach(hand, entry.connection).catch(() => {})
+          if (created.mcpUnavailable.length)
+            console.warn('Session runtime opened without unavailable MCP servers', {
+              session: descriptor.session_name ?? sessionId,
+              unavailable: created.mcpUnavailable,
+            })
           return created
         } catch (error) {
           const failed = remoteFailed
@@ -2469,7 +2474,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private releaseIdle(warmed = false, keep?: AgentRuntime.AgentRuntime): void {
       const budget = policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES')
       for (const [scope, runtime] of this.residents()) {
-        if (runtime !== keep && runtime.memoryBytes > budget) this.retire(scope, runtime)
+        if (runtime !== keep && (runtime.memoryBytes > budget || runtime.mcpUnavailable.length))
+          this.retire(scope, runtime)
       }
       if (this.linger !== undefined) clearTimeout(this.linger)
       this.linger = undefined
