@@ -128,7 +128,7 @@ export const probes = [
     id: 'curl',
     tools: 'bash curl+jq',
     prompt:
-      'Use curl in bash to download https://raw.githubusercontent.com/nanocodexyz/nanocode-ts/main/package.json and use jq to print its license field. Tell me the license.',
+      'Use curl in bash to download https://raw.githubusercontent.com/nanocodexyz/nanocode-ts/master/package.json and use jq to print its license field. Tell me the license.',
     ok: (t) => /MIT/.test(t),
   },
   {
