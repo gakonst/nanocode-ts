@@ -17,6 +17,7 @@ import { useState } from 'react'
 import { css } from './Claude.css.ts'
 import {
   ArrowUp,
+  Attach,
   type Block,
   Check,
   Chevron,
@@ -192,20 +193,7 @@ function Composer(props: Composer.Props) {
         {...composer.textarea}
       />
       <div className="cl-composer-row">
-        {composer.attachments.enabled && (
-          <>
-            <input {...composer.attachments.input} />
-            <button
-              aria-label="Attach files"
-              className="cl-attach"
-              onClick={composer.attachments.open}
-              title="Attach files"
-              type="button"
-            >
-              <Plus />
-            </button>
-          </>
-        )}
+        <Attach attachments={composer.attachments} items={props.menu} prefix="cl" />
         {props.picker ? <ModelMenu picker={props.picker} /> : <span className="cl-model" />}
         {composer.canCancel && composer.empty ? (
           <button
@@ -257,6 +245,7 @@ function App(props: CloneProps) {
   }
   const footer = props.footer && <p className="cl-foot">{props.footer}</p>
   const composer = <Composer {...props} onSend={log.pin} />
+  const panel = props.panel && <div className="cl-panel">{props.panel}</div>
   const input = props.input ? props.input(composer) : composer
 
   return (
@@ -337,6 +326,7 @@ function App(props: CloneProps) {
               </span>
               {props.heading ?? greeting}
             </h1>
+            {panel}
             {input}
             {props.suggestions ?? (
               <Prompts
@@ -386,6 +376,7 @@ function App(props: CloneProps) {
               </div>
             </div>
             <div className="cl-bottom">
+              {panel}
               {input}
               {footer}
             </div>

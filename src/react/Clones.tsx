@@ -1,6 +1,7 @@
 export { ChatGpt } from './clones/ChatGpt.tsx'
 export { Claude } from './clones/Claude.tsx'
 export {
+  type CloneMenuItem,
   type CloneModel,
   type ClonePicker,
   type CloneProps,

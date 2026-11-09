@@ -17,6 +17,7 @@ import { useState } from 'react'
 import { css } from './ChatGpt.css.ts'
 import {
   ArrowUp,
+  Attach,
   type Block,
   Check,
   Chevron,
@@ -24,7 +25,6 @@ import {
   Compose,
   CopyCode,
   grouped,
-  Plus,
   Prompts,
   seconds,
   Sidebar,
@@ -233,23 +233,7 @@ function Composer(props: Composer.Props) {
       {...composer.attachments.drop}
     >
       <AttachmentList items={composer.attachments.items} onRemove={composer.attachments.remove} />
-      {composer.attachments.enabled && (
-        <>
-          <input {...composer.attachments.input} />
-          <button
-            aria-label="Attach files"
-            className="gpt-attach"
-            onClick={(event) => {
-              event.stopPropagation()
-              composer.attachments.open()
-            }}
-            title="Attach files"
-            type="button"
-          >
-            <Plus />
-          </button>
-        </>
-      )}
+      <Attach attachments={composer.attachments} items={props.menu} prefix="gpt" />
       <textarea
         placeholder={composer.busy ? 'Steer the response' : 'Ask anything'}
         {...composer.textarea}
@@ -306,6 +290,7 @@ function App(props: CloneProps) {
   }
   const footer = props.footer && <p className="gpt-foot">{props.footer}</p>
   const composer = <Composer {...props} onSend={log.pin} />
+  const panel = props.panel && <div className="gpt-panel">{props.panel}</div>
   const input = props.input ? props.input(composer) : composer
 
   return (
@@ -391,6 +376,7 @@ function App(props: CloneProps) {
         {thread.length === 0 ? (
           <div className="gpt-hero">
             <h1>{props.heading ?? 'What can I help with?'}</h1>
+            {panel}
             {input}
             {props.suggestions ?? (
               <Prompts
@@ -430,6 +416,7 @@ function App(props: CloneProps) {
               </div>
             </div>
             <div className="gpt-bottom">
+              {panel}
               {input}
               {footer}
             </div>

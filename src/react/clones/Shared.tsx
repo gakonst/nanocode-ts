@@ -16,6 +16,8 @@ export type Block = Transcript.TurnBlock | { kind: 'tools'; cells: Tool.Cell[]; 
 
 export type CloneModel = { id: string; label: string; detail?: string }
 
+export type CloneMenuItem = { label: string; detail?: string; onClick(): void }
+
 export type ClonePicker = {
   models: readonly CloneModel[]
   current: string
@@ -29,6 +31,8 @@ export type CloneProps = {
   busy?: boolean
   heading?: string
   input?(composer: ReactNode): ReactNode
+  menu?: readonly CloneMenuItem[]
+  panel?: ReactNode
   parts?: Skin['parts']
   send?(text: string): void
   suggestions?: ReactNode
@@ -170,6 +174,85 @@ export declare namespace CopyCode {
   type Props = {
     code: string
     language: string
+  }
+}
+
+export function Attach(props: Attach.Props) {
+  const [open, setOpen] = useState(false)
+  const ref = useDismiss(open, () => setOpen(false))
+  const { attachments, prefix } = props
+  const items = [
+    ...(attachments.enabled ? [{ label: 'Add files', onClick: attachments.open }] : []),
+    ...(props.items ?? []),
+  ]
+  if (!props.items?.length) {
+    if (!attachments.enabled) return null
+    return (
+      <>
+        <input {...attachments.input} />
+        <button
+          aria-label="Attach files"
+          className={prefix + '-attach'}
+          onClick={(event) => {
+            event.stopPropagation()
+            attachments.open()
+          }}
+          title="Attach files"
+          type="button"
+        >
+          <Plus />
+        </button>
+      </>
+    )
+  }
+  return (
+    <div className={prefix + '-plus'} ref={ref}>
+      {attachments.enabled && <input {...attachments.input} />}
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label="Add"
+        className={prefix + '-attach'}
+        onClick={(event) => {
+          event.stopPropagation()
+          setOpen((value) => !value)
+        }}
+        title="Add"
+        type="button"
+      >
+        <Plus />
+      </button>
+      {open && (
+        <div className={prefix + '-menu ' + prefix + '-plus-menu'} role="menu">
+          {items.map((item) => (
+            <button
+              className={prefix + '-menu-item'}
+              key={item.label}
+              onClick={(event) => {
+                event.stopPropagation()
+                setOpen(false)
+                item.onClick()
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <span>
+                <strong>{item.label}</strong>
+                {item.detail && <small>{item.detail}</small>}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export declare namespace Attach {
+  type Props = {
+    attachments: ReturnType<typeof useAttachments>
+    items?: readonly CloneMenuItem[] | undefined
+    prefix: 'cl' | 'gpt'
   }
 }
 
