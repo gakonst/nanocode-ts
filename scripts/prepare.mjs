@@ -98,9 +98,9 @@ if (current(dist, print)) {
         print +
         ' (' +
         source +
-        ' not found) and no Rust toolchain with ../nanocodex to build it. The release workflow publishes ' +
+        ' not found) and no Rust toolchain with ../nanocodex to build it. node scripts/release.mjs publishes ' +
         tag(print) +
-        " when this commit's Rust inputs reach main; pin a commit whose release exists, or set NANOCODE_TS_WASM_URL to a nanocode-wasm tarball.",
+        " from a commit with these Rust inputs; pin a commit whose release exists, or set NANOCODE_TS_WASM_URL to a nanocode-wasm tarball.",
     )
     process.exit(1)
   }

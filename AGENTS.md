@@ -114,8 +114,8 @@ The SDK host glue is written in Rust and reaches JavaScript through a `wasm32-un
 
 - Alphabetize imports, named import/export specifiers, public exports, type properties, object properties, union members, unordered lists, configuration maps, scripts, and dependencies. Use case-insensitive lexical order consistently.
 - Keep function overloads and their namespace together. Order local declarations alphabetically within dependency-compatible groups. Do not introduce use-before-initialization or reorder execution.
-- Preserve order with observable semantics: SQL statements and columns, event sequences, shell builtins that shadow each other, CSS declarations, tuples, package file inclusions followed by exclusions, and workflow steps. The order-sensitive and durable values that are not obvious from the code are listed under Durable Values in the Project Reference.
-- Keep `name` and `on` first in GitHub workflows, and alphabetize the remaining top-level keys. Do not alphabetize prose sections or sequential implementation phases mechanically.
+- Preserve order with observable semantics: SQL statements and columns, event sequences, shell builtins that shadow each other, CSS declarations, tuples, and package file inclusions followed by exclusions. The order-sensitive and durable values that are not obvious from the code are listed under Durable Values in the Project Reference.
+- Do not alphabetize prose sections or sequential implementation phases mechanically.
 
 ## Module and Instance Conventions
 
@@ -224,6 +224,7 @@ Applies to this file, interface copy, and commit messages.
 - `npm run build` builds the WebAssembly module from source, then the TypeScript with `npm run build:ts`.
 - `npm run check` runs `vp check --fix` for formatting and lint. `npm run check:types` runs `tsc` for every platform tsconfig.
 - `node scripts/wasm.mjs` prints the WebAssembly fingerprint. `node scripts/publish-wasm.mjs` writes or uploads its release asset.
+- `node scripts/release.mjs` publishes the pushed `HEAD` as the release `build-<short commit>`: it builds and uploads the WebAssembly release first when its fingerprint has none, then checks the types and packs the package.
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` check Rust.
 
 # Project Reference
