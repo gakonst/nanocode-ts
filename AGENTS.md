@@ -2,18 +2,18 @@
 
 ## Development
 
-These rules come from nanocodexyz/nanocode's `AGENTS.md` and apply to every change here.
+These principles come from nanocodexyz/nanocode's `AGENTS.md` and apply to every change here.
 
-- Do not add code comments, doc comments, or comment headers: no TSDoc, no `@module` blocks, no `///` or `//!`, and no section dividers. Names, types, and this file carry what a reader needs. Only comments that a tool reads stay, such as `@ts-expect-error`.
-- Do not add tests, type-test fixtures, or test-only dependencies. Validate a change with `npm run check:types`, `npm run build`, the measurement scripts in `scripts/` and `bench/`, and runs against the demos, and record the commands and results here.
-- Do not create or edit README files. Development guidance belongs in this file.
-- Keep logs, traces, reports, benchmark output, and scratch files in ignored `output/`. Never commit credentials or personal test data.
-- Record what a change establishes in the Project Reference: the behavior, the reason the code cannot show, and the commands, inputs, dates, and before and after measurements. Correct or remove the entries that the change makes stale, so this file stays a description of the current code.
-- Prefer simple code and small changes. Preserve unrelated work.
-- Take every limit from a real protocol constraint, a measured requirement, or host policy, and record its source here. Surface invalid states instead of hiding them with silent truncation, clamping, or fallback values.
-- Benchmark performance changes with reproducible commands and inputs, and report before and after results. Keep cold builds, incremental builds, and runtime performance separate.
-- Keep the development loop fast: build only what changed, reuse caches, and skip redundant checks. Honor requests to skip builds or CI.
-- Work in the main checkout on `main` and push each completed change to `main`. Do not create worktrees or feature branches. Commit only your own changes, leave other dirty or untracked files alone, and rebase onto `origin/main` when a push is rejected.
+- Keep code simple and changes small. Match the surrounding code and preserve unrelated work.
+- No code comments, doc comments (TSDoc, `@module` blocks, `///`, `//!`) or section dividers, README edits, tests, type-test fixtures or test-only dependencies. Only comments that a tool reads stay, such as `@ts-expect-error`.
+- No magic constants or arbitrary caps: a limit comes from a protocol, a measurement or host policy. Surface invalid states; never hide them with silent truncation, clamping or fallbacks.
+- Make invalid states unrepresentable: model a lifecycle as one discriminated union whose variants carry only what that phase has.
+- Preserve public APIs.
+- Inference, subagents and durability live in the brain; Code Mode runs on the user's machine. Never silently replay dispatched work: report uncertain outcomes.
+- Validate with focused checks (`npm run check:types`, `npm run build`) and back performance changes with reproducible before/after measurements, keeping cold builds, incremental builds and runtime performance separate.
+- Check behavior with harnesses in ignored `output/` and the measurement scripts in `scripts/` and `bench/`, run against local mocks or the demos, with builds compared by interleaved runs. Keep every artifact in `output/`; never commit them, credentials or personal data.
+- Work on `main` in the main checkout, commit only your own changes and push each one; no pull requests. There is no CI: build, release and deploy by hand. Use subagents only when asked.
+- This file holds principles only; history belongs in commit messages.
 
 ## Project Principles
 
