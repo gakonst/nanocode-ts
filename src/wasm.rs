@@ -881,6 +881,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 matches!(endpoint.gateway, Some(Gateway::Vercel))
                     .then(|| ResponsesGateway::vercel().model_id_prefix())
                     .flatten(),
+                endpoint.subscription,
             )
         });
     let codex = match codex {
@@ -949,13 +950,16 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                     claude_search_tokens.flatten(),
                 )) as Arc<dyn Tool>
             }),
-            Provider::Codex => codex_search.as_ref().map(|(endpoint, prefix)| {
-                Arc::new(nanocode::codex_tools::web_search_tool(
-                    endpoint,
-                    *prefix,
-                    Arc::new(transport::WorkerTransport::CODEX),
-                )) as Arc<dyn Tool>
-            }),
+            Provider::Codex => codex_search
+                .as_ref()
+                .map(|(endpoint, prefix, subscription)| {
+                    let transport = Arc::new(transport::WorkerTransport::CODEX);
+                    Arc::new(if *subscription {
+                        nanocode::codex_tools::chatgpt_web_search_tool(endpoint, transport)
+                    } else {
+                        nanocode::codex_tools::web_search_tool(endpoint, *prefix, transport)
+                    }) as Arc<dyn Tool>
+                }),
         }
     };
     let image_root = config.workspace.clone();
@@ -964,7 +968,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             return None;
         }
         let root = image_root.as_deref()?;
-        codex_search.as_ref().map(|(endpoint, _)| {
+        codex_search.as_ref().map(|(endpoint, _, _)| {
             let images = if BLOB_THRESHOLD.get().is_some() {
                 nanocode::ImageHistory::default().with_blob_store(Arc::new(store::WorkerBlobs))
             } else {
