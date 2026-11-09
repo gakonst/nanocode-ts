@@ -14,6 +14,7 @@ export type Session = {
 
 export type Model = {
   model: string
+  payer?: string
   provider: string
   thinking?: string
   web_search?: boolean
@@ -156,6 +157,7 @@ export function create(options: create.Options): create.ReturnType {
           model: model.model,
           ...(model.thinking ? { thinking: model.thinking } : {}),
           ...(model.web_search !== undefined ? { web_search: model.web_search } : {}),
+          ...(model.payer ? { payer: model.payer } : {}),
           ...(hand ? { hand } : {}),
         }),
         signal,
@@ -346,7 +348,11 @@ export function create(options: create.Options): create.ReturnType {
       void fetch(`${base}sessions/${encodeURIComponent(id)}/warm`, {
         method: 'POST',
         headers: headers({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ provider: model.provider, model: model.model }),
+        body: JSON.stringify({
+          provider: model.provider,
+          model: model.model,
+          ...(model.payer ? { payer: model.payer } : {}),
+        }),
       }).catch(() => undefined)
     },
     crash(afterMs = 1500) {

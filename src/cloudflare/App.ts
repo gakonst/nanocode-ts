@@ -71,6 +71,7 @@ export type SessionDescriptor = SessionAuthority & {
   session_name: string
   subscription: boolean
   codex_subscription?: boolean
+  payer?: Contracts.Payer
   hand?: string
   read_only?: boolean
   recorded?: boolean
@@ -87,11 +88,19 @@ export type ModelDispatch = {
   origin: string | null
   subagent: Contracts.Subagent | null
   subscription: boolean
+  payer?: Contracts.Payer
 }
 
 export type SocketDispatch = Pick<
   ModelDispatch,
-  'provider' | 'authority' | 'endpoint' | 'headers' | 'origin' | 'subagent' | 'subscription'
+  | 'provider'
+  | 'authority'
+  | 'endpoint'
+  | 'headers'
+  | 'origin'
+  | 'subagent'
+  | 'subscription'
+  | 'payer'
 >
 
 export type PrivateBinding = {
@@ -312,7 +321,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     provider: Contracts.ModelProvider,
     model: string | undefined,
     subscribed: boolean,
-  ) => subscribed && (!plans || PlanModels.serves(provider, model))
+    payer?: Contracts.Payer,
+  ) =>
+    payer !== 'deployment' &&
+    payer !== 'wallet' &&
+    subscribed &&
+    (!plans || PlanModels.serves(provider, model))
+  const offered: readonly Contracts.Payer[] =
+    options.payers ?? (plans || options.subscription ? ['deployment', 'plan'] : ['deployment'])
   const valueLimit = options.valueLimit ?? Sql.valueLimitBytes
   const tooLarge = `request bodies are limited to ${valueLimit} bytes`
   class AgentSession extends DurableObject<E> {
@@ -605,6 +621,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           const input = (await request.json().catch(() => null)) as {
             provider?: unknown
             model?: unknown
+            payer?: unknown
             web_search?: unknown
           } | null
           const provider =
@@ -615,6 +632,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           if (webSearch !== undefined && typeof webSearch !== 'boolean')
             return json({ error: 'web_search must be a boolean' }, 400)
           if (webSearch !== undefined) descriptor.web_search = webSearch
+          const payer = this.metadata.get(`payer:${scope}`) ?? input?.payer
+          if (payer !== undefined && !offered.includes(payer as Contracts.Payer))
+            return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
+          descriptor.payer = payer as Contracts.Payer | undefined
           const model =
             this.metadata.get(`model:${scope}`) ??
             (typeof input?.model === 'string' && input.model
@@ -697,6 +718,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ error: 'steer must be a boolean' }, 400)
         if (input.web_search !== undefined && typeof input.web_search !== 'boolean')
           return json({ error: 'web_search must be a boolean' }, 400)
+        if (input.payer !== undefined && !offered.includes(input.payer))
+          return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
         if (
           input.images !== undefined &&
           (!Array.isArray(input.images) ||
@@ -723,6 +746,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const executorKey = `executor:${scope}`
         const providerKey = `model_provider:${scope}`
         const modelKey = `model:${scope}`
+        const payerKey = `payer:${scope}`
         const sessionKey = this.sessionKey(scope)
         const unbound = () =>
           this.metadata.get(executorKey) === undefined &&
@@ -767,15 +791,30 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           if (boundModel !== undefined && input.model !== undefined && input.model !== boundModel)
             return json({ error: 'session model is immutable; create a new session' }, 409)
           descriptor.model = input.model ?? (boundModel === null ? undefined : boundModel)
+          const boundPayer = this.metadata.get(payerKey) as Contracts.Payer | undefined
+          if (boundPayer !== undefined && input.payer !== undefined && input.payer !== boundPayer)
+            return json({ error: 'session payer is immutable; create a new session' }, 409)
+          descriptor.payer = input.payer ?? boundPayer
           descriptor.thinking = input.thinking
           descriptor.web_search = input.web_search
           if (descriptor.provider === 'codex')
             descriptor.subscription = descriptor.codex_subscription ?? true
+          const subscribed = descriptor.subscription
           descriptor.subscription = served(
             descriptor.provider ?? 'claude',
             descriptor.model,
             descriptor.subscription,
+            descriptor.payer,
           )
+          if (descriptor.payer === 'plan' && !descriptor.subscription)
+            return json(
+              {
+                error: subscribed
+                  ? `${descriptor.model ?? 'this model'} is not on your ${descriptor.provider === 'codex' ? 'ChatGPT' : 'Claude'} plan`
+                  : `sign in to your ${descriptor.provider === 'codex' ? 'ChatGPT' : 'Claude'} plan first, or choose another payer`,
+              },
+              403,
+            )
           policy(this.env.RECOVERY_DELAY_MS, 'RECOVERY_DELAY_MS')
           const current = this.metadata.get('authority')
           if (current && current !== identity) throw new Error('session authority mismatch')
@@ -818,6 +857,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert('authority', identity)
               this.metadata.insert(providerKey, descriptor.provider!)
               if (descriptor.model !== undefined) this.metadata.insert(modelKey, descriptor.model)
+              if (descriptor.payer !== undefined) this.metadata.insert(payerKey, descriptor.payer)
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
@@ -1260,6 +1300,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         descriptor.model ?? null,
         descriptor.executor_id ?? null,
         descriptor.web_search ?? null,
+        descriptor.payer ?? null,
       ])
       if (current)
         return current.runtime.then(async (runtime) => {
@@ -1575,6 +1616,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   provider: request.provider ?? descriptor.provider ?? 'claude',
                   subagent: request.subagent,
                   subscription: descriptor.subscription,
+                  ...(descriptor.payer ? { payer: descriptor.payer } : {}),
                 }
                 const response = await egress(this.env).fetch(
                   new Request('https://egress.internal/model', {
@@ -1618,6 +1660,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                           origin: request.origin,
                           subagent: request.subagent,
                           subscription: descriptor.subscription,
+                          ...(descriptor.payer ? { payer: descriptor.payer } : {}),
                         } satisfies SocketDispatch),
                       },
                     }),
@@ -2397,16 +2440,21 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         'claude') as Contracts.ModelProvider
       const executor = this.metadata.get(`executor:${scope}`) ?? this.legacyExecutor()
       const model = this.metadata.get('model:' + scope)
+      const payer = (this.metadata.get('payer:' + scope) ?? base.payer) as
+        | Contracts.Payer
+        | undefined
       return {
         ...base,
         executor_id: executor || undefined,
         hand: undefined,
         provider,
         ...(model === undefined ? {} : { model }),
+        ...(payer === undefined ? {} : { payer }),
         subscription: served(
           provider,
           model,
           provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+          payer,
         ),
       }
     }
@@ -2469,6 +2517,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           provider,
           model,
           provider === 'codex' ? (base.codex_subscription ?? true) : base.subscription,
+          base.payer,
         ),
       }
       const runtime = await this.runtime(scope, entry.session, descriptor)
@@ -3122,10 +3171,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     const dispatched = performance.now()
     let response: Response
     try {
-      response = await env.SESSIONS.get(
-        env.SESSIONS.idFromName(JSON.stringify([account, name])),
-        { locationHint: env.SESSION_LOCATION_HINT },
-      ).fetch(
+      response = await env.SESSIONS.get(env.SESSIONS.idFromName(JSON.stringify([account, name])), {
+        locationHint: env.SESSION_LOCATION_HINT,
+      }).fetch(
         new Request(target, {
           method: head ? 'GET' : request.method,
           headers,
@@ -3165,10 +3213,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
     let response: Response
     try {
-      response = await env.SESSIONS.get(
-        env.SESSIONS.idFromName(JSON.stringify([account, name])),
-        { locationHint: env.SESSION_LOCATION_HINT },
-      ).fetch(
+      response = await env.SESSIONS.get(env.SESSIONS.idFromName(JSON.stringify([account, name])), {
+        locationHint: env.SESSION_LOCATION_HINT,
+      }).fetch(
         new Request('https://session.internal/internal/delete', {
           method: 'POST',
           headers: { 'x-nanocode-descriptor': headerJson(descriptor) },
@@ -3217,6 +3264,7 @@ export declare namespace create {
       fetch?(authority: SessionAuthority, env: E, subagent?: Contracts.Subagent): typeof fetch
       store?(env: E): Contracts.McpStore | undefined
     }
+    payers?: readonly Contracts.Payer[]
     plans?: Plans.Options<E>
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
     streamToolInput?: boolean

@@ -88,6 +88,7 @@ type Body = {
   kind?: unknown
   message?: unknown
   model?: unknown
+  payer?: unknown
   priority?: unknown
   question?: unknown
   sessionId?: unknown
@@ -155,11 +156,18 @@ export function create(options: create.Options) {
     defaultSelection: chosenDefault,
     hands: chosenHands,
     plans: planOptions,
+    payers: chosenPayers,
+    payerHarnesses,
     ...rest
   } = options
   const hands = chosenHands ?? {}
   const plans = planOptions ? Plans.create(planOptions, account) : undefined
   const harness = { ...rest, hands, subscription: rest.subscription ?? plans?.subscription }
+  const payers: readonly Contracts.Payer[] = chosenPayers ?? [
+    'deployment',
+    ...(harness.subscription ? (['plan'] as const) : []),
+    ...(harness.wallet ? (['wallet'] as const) : []),
+  ]
   const first = harnesses[0]!.models[0]!
   const defaultSelection = chosenDefault ?? {
     provider: harnesses[0]!.id,
@@ -271,13 +279,17 @@ export function create(options: create.Options) {
     request: Request,
     body: Body,
   ): Promise<{ sessionId: string; hand?: string } | Response> => {
+    if (body.payer !== undefined && !payers.includes(body.payer as Contracts.Payer))
+      return new Response(`payer must be one of ${payers.join(', ')}`, { status: 400 })
+    const payer = body.payer as Contracts.Payer | undefined
+    const offered = (payer && payerHarnesses?.[payer]) || harnesses
     const selection =
       body.harness === undefined && body.model === undefined
         ? defaultSelection
-        : select(harnesses, { effort: body.effort, harness: body.harness, model: body.model })
+        : select(offered, { effort: body.effort, harness: body.harness, model: body.model })
     if (!selection)
       return new Response(
-        `harness, model and effort must name one of ${harnesses.map((entry) => `${entry.id} (${entry.models.map((model) => `${model.id}: ${model.efforts.join('|')}`).join(', ')})`).join(' or ')}`,
+        `harness, model and effort must name one of ${offered.map((entry) => `${entry.id} (${entry.models.map((model) => `${model.id}: ${model.efforts.join('|')}`).join(', ')})`).join(' or ')}`,
         { status: 400 },
       )
     const refused = await admit(request)
@@ -290,11 +302,22 @@ export function create(options: create.Options) {
           ? { hand: body.hand }
           : {}
     const owner = account ? await account(request) : undefined
+    if (
+      payer === 'plan' &&
+      !(owner && (await harness.subscription?.({ account: owner, ...selection })))
+    )
+      return new Response(
+        `sign in to your ${selection.provider === 'codex' ? 'ChatGPT' : 'Claude'} plan first, or choose another payer`,
+        { status: 403 },
+      )
     const config = {
       ...hand,
       ...(owner ? { account: owner } : {}),
       durability: kernel === 'on' ? 'run-ahead' : 'strict',
-      nanocode: selection satisfies Omit<Harness.Session, 'session_id'>,
+      nanocode: { ...selection, ...(payer ? { payer } : {}) } satisfies Omit<
+        Harness.Session,
+        'session_id'
+      >,
       traceAudience: traceAudience ?? (authorize === 'public' ? 'public' : 'unknown'),
     }
     const { sessionId } = await agent.sessions.start({ config })
@@ -539,6 +562,8 @@ export declare namespace create {
     durability?: 'on' | 'strict'
     harnesses: SelectionHarness[]
     marks?: boolean
+    payerHarnesses?: Partial<Record<Contracts.Payer, SelectionHarness[]>>
+    payers?: readonly Contracts.Payer[]
     plans?: Plans.Options
     maxPromptCharacters?: number
     runAhead?: boolean

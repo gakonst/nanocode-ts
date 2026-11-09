@@ -100,6 +100,7 @@ export type Session = {
   thinking?: Contracts.Thinking
   max_tokens?: number
   service_tier?: Contracts.ServiceTier
+  payer?: Contracts.Payer
 }
 
 export type Thinking = Contracts.Thinking
@@ -203,13 +204,23 @@ export function create(options: create.Options = {}): Harness {
     const connection = executor ? handName + '#' + Contracts.sessionUuid() : undefined
     const account = (ctx.config as { account?: unknown } | undefined)?.account
     const plan =
-      typeof account === 'string' && options.subscription
+      session.payer !== 'deployment' &&
+      session.payer !== 'wallet' &&
+      typeof account === 'string' &&
+      options.subscription
         ? await options.subscription({
             account,
             provider: session.provider,
             ...(session.model ? { model: session.model } : {}),
           })
         : undefined
+    if (session.payer === 'plan' && !plan)
+      throw new Error(
+        `the ${session.provider === 'codex' ? 'ChatGPT' : 'Claude'} plan that pays for this session is signed out; sign in again or start a new session`,
+      )
+    const wallet = session.payer === 'wallet' ? options.wallet?.(ctx.runId) : undefined
+    if (session.payer === 'wallet' && !wallet)
+      throw new Error('this deployment has no Tempo Wallet to pay for models')
     const configuredFetch = options.sessionFetch?.(ctx.runId) ?? options.fetch
     const githubToken = options.github?.token
     const cellFetch = GitHub.wrap(Egress.guard(configuredFetch), {
@@ -252,8 +263,10 @@ export function create(options: create.Options = {}): Harness {
             subscription: plan !== undefined,
             endpoint: plan
               ? Gateway.planEndpoint(session.provider)
-              : (options.endpoint ?? Gateway.endpoint(session.provider)),
-            gateway: plan ? undefined : gateway,
+              : wallet
+                ? Gateway.walletEndpoint(session.provider)
+                : (options.endpoint ?? Gateway.endpoint(session.provider)),
+            gateway: plan || wallet ? undefined : gateway,
             event_coalesce_ms: options.eventCoalesceMs ?? defaultEventCoalesceMs,
             stream_tool_input: options.streamToolInput,
             ...(executor ? { hands: true } : {}),
@@ -292,7 +305,11 @@ export function create(options: create.Options = {}): Harness {
                   signal,
                 })
               counts.model_requests++
-              return plan ? plan.dispatch(request, signal) : dispatch(request, signal)
+              return plan
+                ? plan.dispatch(request, signal)
+                : wallet
+                  ? wallet(request, signal)
+                  : dispatch(request, signal)
             },
             ...(plan?.socket ? { socket: plan.socket } : {}),
             tools: {
@@ -409,6 +426,7 @@ export function create(options: create.Options = {}): Harness {
                   thinking?: Contracts.Thinking
                   max_tokens?: number
                   service_tier?: Contracts.ServiceTier
+                  payer?: Contracts.Payer
                 }
               }
             | undefined
@@ -418,6 +436,7 @@ export function create(options: create.Options = {}): Harness {
         const thinking = chosen?.provider ? chosen.thinking : options.thinking
         const max_tokens = chosen?.provider ? chosen.max_tokens : undefined
         const service_tier = chosen?.provider ? chosen.service_tier : undefined
+        const payer = chosen?.provider ? chosen.payer : undefined
         const derived = ctx.isMemoized(sessionKey) ? undefined : runSessionUuid(ctx.runId)
         const chosenSession: Session = {
           session_id: derived ?? Contracts.sessionUuid(),
@@ -426,6 +445,7 @@ export function create(options: create.Options = {}): Harness {
           ...(thinking ? { thinking } : {}),
           ...(max_tokens ? { max_tokens } : {}),
           ...(service_tier ? { service_tier } : {}),
+          ...(payer ? { payer } : {}),
         }
         const recording = ctx.effect(
           sessionKey,
@@ -438,6 +458,7 @@ export function create(options: create.Options = {}): Harness {
               thinking,
               ...(max_tokens ? { max_tokens } : {}),
               ...(service_tier ? { service_tier } : {}),
+              ...(payer ? { payer } : {}),
             },
           },
           async (): Promise<Session> => chosenSession,
@@ -530,6 +551,7 @@ export declare namespace create {
     subagents?: boolean
     thinking?: Contracts.AgentConfiguration['thinking']
     tools?: HostTool[]
+    wallet?(sessionId: string): Gateway.Dispatch
     workspace?: false | { cwd?: string; files?: Record<string, string> }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
     webSearch?: false

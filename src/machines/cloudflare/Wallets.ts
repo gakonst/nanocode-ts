@@ -11,6 +11,7 @@ import {
 } from '../Account.ts'
 import * as Mcp from '../Mcp.ts'
 import * as Payment from '../Payment.ts'
+import * as Egress from './Egress.ts'
 import * as Env from './Env.ts'
 import * as Keys from './internal/Keys.ts'
 
@@ -132,7 +133,14 @@ export function create<E extends Env.Env>(options: create.Options<E>) {
     return Keys.relay(request, pathname) ?? Keys.routes(handlers, request, env, pathname)
   }
 
-  return { Wallet: subclass({ scripts, servers }), fetch, nanocode, servers, scripts }
+  function egress(fallback: (env: E) => App.PrivateBinding): (env: E) => App.PrivateBinding {
+    return (env) => ({
+      fetch: (request) =>
+        Egress.paid(request) ? Egress.create(env).fetch(request) : fallback(env).fetch(request),
+    })
+  }
+
+  return { Wallet: subclass({ scripts, servers }), egress, fetch, nanocode, servers, scripts }
 }
 
 export declare namespace create {

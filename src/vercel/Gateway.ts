@@ -58,6 +58,12 @@ export function planEndpoint(provider: Contracts.ModelProvider): string {
     : 'https://api.anthropic.com/v1/messages?beta=true'
 }
 
+export function walletEndpoint(provider: Contracts.ModelProvider): string {
+  return provider === 'codex'
+    ? 'https://openai.mpp.tempo.xyz/v1'
+    : 'https://anthropic.mpp.tempo.xyz/v1/messages'
+}
+
 export function url(): string {
   return process.env.AI_GATEWAY_BASE_URL ?? 'https://ai-gateway.vercel.sh'
 }

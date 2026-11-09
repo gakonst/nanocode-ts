@@ -49,6 +49,15 @@ async function model(env: Env.Env, request: Request): Promise<Response> {
   )
 }
 
+export function paid(request: Request): boolean {
+  const header = request.headers.get('x-nanocode-model') ?? request.headers.get('x-nanocode-socket')
+  try {
+    return (JSON.parse(header ?? 'null') as { payer?: unknown } | null)?.payer === 'wallet'
+  } catch {
+    return false
+  }
+}
+
 export function create(env: Env.Env): App.PrivateBinding {
   return {
     async fetch(request: Request): Promise<Response> {

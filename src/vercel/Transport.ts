@@ -14,6 +14,7 @@ export type Selection = {
   effort?: string
   harness: string
   model: string
+  payer?: string
 }
 
 export type Session = {
@@ -47,7 +48,7 @@ export function create(options: create.Options): Transport {
   const headers = (extra: Record<string, string> = {}) => ({ ...extra, ...options.headers?.() })
   const key = () => {
     const selection = options.selection()
-    return `${selection.harness}/${selection.model}/${selection.effort ?? ''}`
+    return `${selection.harness}/${selection.model}/${selection.effort ?? ''}/${selection.payer ?? ''}`
   }
   const chosen = () => {
     const selection = options.selection()
@@ -55,6 +56,7 @@ export function create(options: create.Options): Transport {
       harness: selection.harness,
       model: selection.model,
       ...(selection.effort ? { effort: selection.effort } : {}),
+      ...(selection.payer ? { payer: selection.payer } : {}),
     }
   }
   const pause = (signal: AbortSignal | undefined, ms = reconnectMs) => Pause.pause(signal, ms)

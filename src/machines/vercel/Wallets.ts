@@ -1,4 +1,5 @@
 import { defineDoc, type DurableSessions } from 'durable-harness'
+import type * as Gateway from '../../vercel/Gateway.ts'
 import * as Egress from '../../vercel/internal/Egress.ts'
 import * as Payment from '../Payment.ts'
 import {
@@ -10,6 +11,10 @@ import {
   paying,
   type Store,
 } from '../Account.ts'
+
+const proxies = new Set(['https://openai.mpp.tempo.xyz', 'https://anthropic.mpp.tempo.xyz'])
+
+const forwardedHeaders = /^(accept|content-type|anthropic-version|anthropic-beta)$/
 
 const walletDoc = defineDoc<{ entries: Record<string, string | number> }>({
   kind: 'nanocode.wallet',
@@ -65,6 +70,18 @@ export function create(options: create.Options) {
       guarded(request, (request) => handlers.register(request, undefined)),
     device,
     fetch: (sessionId: string) => paying(() => holder(sessionId), servers),
+    model:
+      (sessionId: string): Gateway.Dispatch =>
+      async (request, signal) => {
+        if (!proxies.has(new URL(request.endpoint).origin))
+          throw new Error(`model request to ${request.endpoint} is not for an MPP model proxy`)
+        return holder(sessionId).send('model', request.endpoint, {
+          method: 'POST',
+          headers: request.headers.filter(([name]) => forwardedHeaders.test(name.toLowerCase())),
+          body: request.body as Uint8Array<ArrayBuffer>,
+          signal,
+        })
+      },
     mcp: {
       servers: [...servers],
       fetch: (sessionId: string) => paying(() => holder(sessionId), servers),

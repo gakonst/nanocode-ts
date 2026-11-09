@@ -1,5 +1,9 @@
 export type ModelProvider = 'claude' | 'codex'
 
+export type Payer = 'deployment' | 'wallet' | 'plan'
+
+export const payers: readonly Payer[] = ['deployment', 'wallet', 'plan']
+
 export function sessionUuid(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   let time = BigInt(Date.now())
