@@ -76,10 +76,6 @@
       "types": "./dist/react/Themes.d.ts",
       "default": "./dist/react/Themes.js"
     },
-    "./react/playground": {
-      "types": "./dist/react/Playground.d.ts",
-      "default": "./dist/react/Playground.js"
-    },
     "./react/agent": {
       "types": "./dist/react/Agent.d.ts",
       "default": "./dist/react/Agent.js"

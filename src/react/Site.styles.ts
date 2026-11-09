@@ -100,25 +100,6 @@ export const link = variants({
   defaultVariants: { current: false },
 })
 
-export const menu = style({ position: 'relative' })
-
-export const menuList = style({
-  backgroundColor: 'bg',
-  border: '1px solid',
-  borderColor: 'rule',
-  display: 'none',
-  flexDirection: 'column',
-  gap: 'xs',
-  marginLeft: 'calc(-1ch - 1px) !custom',
-  paddingBlock: 'sm',
-  paddingInline: 'cell',
-  position: 'fixed',
-  selectors: {
-    [`${menu}:hover > &`]: { display: 'flex' },
-    [`${menu}:focus-within > &`]: { display: 'flex' },
-  },
-})
-
 export const main = style({
   paddingBottom: '10rem !custom',
   paddingInline: 'gutter',
