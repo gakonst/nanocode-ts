@@ -1,6 +1,6 @@
 import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
 import { KeyAuthorization } from 'ox/tempo'
-import { type Address, BaseError, type Hex, isAddressEqual, isHex } from 'viem'
+import { type Address, BaseError, type Hex, isAddressEqual, isHex, parseUnits } from 'viem'
 import { Account, Actions, createClient, http, KeyAuthorizationManager } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
 import * as Egress from '../internal/Egress.ts'
@@ -14,6 +14,7 @@ export const visitorHeader = 'x-nanocode-visitor'
 const opening = '200000'
 const topUp = '0.2'
 const maxDeposit = '2'
+const tokenDecimals = 6
 const fileLimit = 1_000_000
 const approveSelector = '0x095ea7b3'
 const feeTokens: Address[] = [
@@ -70,6 +71,43 @@ type Payer = {
 
 function chainClient(endpoint: string) {
   return createClient({ chain: tempo, transport: http(endpoint) })
+}
+
+type Channel = {
+  channelId?: string
+  cumulativeAmount?: string
+  descriptor?: { payee?: string; token?: string }
+}
+
+type Session = {
+  amount?: string
+  currency?: string
+  methodDetails?: { sessionSnapshot?: { channelId?: string; requiredCumulative?: string } }
+  recipient?: string
+}
+
+function exhausted(channel: Channel, options: { cap: bigint; request: Session }): boolean {
+  const { cap, request } = options
+  if (
+    channel.cumulativeAmount === undefined ||
+    !channel.descriptor?.payee ||
+    !channel.descriptor.token ||
+    !request.amount ||
+    !request.currency ||
+    !request.recipient ||
+    !isAddressEqual(channel.descriptor.payee as Address, request.recipient as Address) ||
+    !isAddressEqual(channel.descriptor.token as Address, request.currency as Address)
+  )
+    return false
+  const next = BigInt(channel.cumulativeAmount) + BigInt(request.amount)
+  const snapshot = request.methodDetails?.sessionSnapshot
+  const required =
+    snapshot?.requiredCumulative !== undefined &&
+    snapshot.channelId?.toLowerCase() === channel.channelId?.toLowerCase() &&
+    BigInt(snapshot.requiredCumulative) > next
+      ? BigInt(snapshot.requiredCumulative)
+      : next
+  return required > cap
 }
 
 async function land(
@@ -384,7 +422,23 @@ export function create(options: create.Options) {
       return method
     }
     const prefix = `channel:${current.keyAddress.toLowerCase()}:`
+    const cap = parseUnits(maxDeposit, tokenDecimals)
     const mppx = Mppx.create({
+      onChallenge: async (challenge) => {
+        if (challenge.intent !== 'session') return undefined
+        for (const [key, value] of await store.list<string>(`${prefix}chan:`)) {
+          const channel = (() => {
+            try {
+              return JSON.parse(value) as Channel
+            } catch {
+              return undefined
+            }
+          })()
+          if (channel && exhausted(channel, { cap, request: challenge.request as Session }))
+            await store.delete(key)
+        }
+        return undefined
+      },
       fetch: async (input, init) => {
         const url = String(input instanceof Request ? input.url : input)
         if (Mcp.server(url, servers)) {
