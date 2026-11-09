@@ -225,6 +225,8 @@ const pumpResets = 4
 
 const subagentScanPages = 32
 
+const waitingKey = 'retry_waiting'
+
 const resetNote =
   'The session was reset while driving this turn four times in a row without the turn making progress, so it stopped recovering it.'
 
@@ -404,6 +406,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
       this.restoreHands()
       this.restoreWatchers()
+      this.retryWaiting()
       if (this.store.row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'jobs'"))
         void ctx.blockConcurrencyWhile(() => this.migrate())
     }
@@ -896,6 +899,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         this.queue = next ? 'pending' : admissions === this.admissions ? 'empty' : 'unknown'
         const background = this.metadata.first('background:')
         if (!next && !background) {
+          if (this.metadata.get(waitingKey) !== undefined) this.metadata.delete(waitingKey)
           immediate = admissions !== this.admissions
           return
         }
@@ -991,7 +995,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           immediate = retryAt === undefined
           return
         }
-        this.metadata.delete(`retries:${scope}`)
+        this.metadata.transaction(() => {
+          this.metadata.delete(`retries:${scope}`)
+          this.metadata.delete(waitingKey)
+        })
         const thinking = next && !next.cancel_requested ? descriptor.thinking : undefined
         if (thinking && this.efforts.get(runtime) !== thinking) {
           try {
@@ -1128,6 +1135,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return `${read('SELECT total(revision) AS value FROM state_rows')}:${read("SELECT count(*) || ':' || total(seq) AS value FROM nanocode_cell_journal_batches")}`
     }
 
+    private retryWaiting(): void {
+      const waiting = Number(this.metadata.get(waitingKey) ?? 0)
+      const delay = Number(this.env.RECOVERY_DELAY_MS)
+      if (!Number.isSafeInteger(delay) || delay <= 0 || waiting <= Date.now() + delay) return
+      this.metadata.delete(waitingKey)
+      void this.ctx.storage.setAlarm(Date.now() + delay)
+    }
+
     private queueUnknown(): boolean {
       return this.queue === 'unknown'
     }
@@ -1174,8 +1189,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return null
         const retryAt = Date.now() + Math.min(delay * 2 ** attempts, bound)
         turn = await reader.retry(scope, id, failure.message, failure.kind, retryAt)
-        if (turn && unfinishedStatuses.has(turn.report.status) && !turn.cancel_requested)
+        if (turn && unfinishedStatuses.has(turn.report.status) && !turn.cancel_requested) {
+          if (failure.kind !== 'detached') this.metadata.set(waitingKey, String(retryAt))
           return retryAt
+        }
       }
       if (turn && unfinishedStatuses.has(turn.report.status)) {
         const fields = turn.cancel_requested
@@ -2408,6 +2425,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const pending = await runtime.pending(scope)
         if (this.queueUnknown() && admissions === this.admissions)
           this.queue = pending.length > 0 ? 'pending' : 'empty'
+      }
+      if (!this.pumping && this.queue !== 'empty' && this.metadata.get(waitingKey) !== undefined) {
+        this.metadata.delete(waitingKey)
+        await this.ctx.storage.setAlarm(
+          Date.now() + policy(this.env.RECOVERY_DELAY_MS, 'RECOVERY_DELAY_MS'),
+        )
+        this.ctx.waitUntil(this.pump(true))
       }
       if (!this.pumping && this.queue !== 'pending' && !this.metadata.first('background:'))
         this.releaseIdle(true)
