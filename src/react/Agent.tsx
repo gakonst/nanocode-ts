@@ -296,6 +296,19 @@ function View(props: Agent.Props & { agent: Instance }) {
   }, [])
 
   useEffect(() => {
+    const events = ['keydown', 'pointerdown', 'pointermove', 'touchstart'] as const
+    const stop = () => {
+      for (const event of events) window.removeEventListener(event, warm)
+    }
+    function warm() {
+      stop()
+      transport.warm()
+    }
+    for (const event of events) window.addEventListener(event, warm, { passive: true })
+    return stop
+  }, [])
+
+  useEffect(() => {
     if (opened.current && opened.current !== session) hand.reset()
     opened.current = session
   }, [session])
