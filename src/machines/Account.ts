@@ -1,6 +1,6 @@
 import { createJsonChannelStore, Mppx, tempo as payments } from 'mppx/client'
 import { KeyAuthorization } from 'ox/tempo'
-import { type Address, type Hex, isAddressEqual, isHex } from 'viem'
+import { type Address, BaseError, type Hex, isAddressEqual, isHex } from 'viem'
 import { Account, Actions, createClient, http, KeyAuthorizationManager } from 'viem/tempo'
 import { tempo } from 'viem/tempo/chains'
 import * as Egress from '../internal/Egress.ts'
@@ -94,8 +94,14 @@ async function land(
       feeToken: mach,
     })
   } catch (error) {
+    const reason =
+      error instanceof BaseError
+        ? [error.shortMessage, error.details].filter(Boolean).join(': ')
+        : error instanceof Error
+          ? error.message
+          : String(error)
     throw new Error(
-      `the access key is not on Tempo yet, and authorizing it with a self-paid transaction failed: ${error instanceof Error ? error.message : String(error)}`,
+      `the access key is not on Tempo yet, and authorizing it with a self-paid transaction failed: ${reason}`,
     )
   }
 }
