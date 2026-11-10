@@ -20,6 +20,7 @@ import * as Wasm from './Wasm.ts'
 import * as Bash from '../bash/Bash.ts'
 import type * as FileSystem from '../bash/FileSystem.ts'
 import * as GitHub from '../bash/GitHub.ts'
+import * as Sources from '../bash/Sources.ts'
 import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import * as HandStreams from './Hands.ts'
@@ -226,7 +227,16 @@ export function create(options: create.Options = {}): Harness {
     const cellFetch = GitHub.wrap(Egress.guard(configuredFetch), {
       token: githubToken ? () => githubToken(ctx.runId) : undefined,
     })
-    const files = options.workspace === false ? undefined : SqlFileSystem.create(journal, { scope })
+    const files =
+      options.workspace === false
+        ? undefined
+        : SqlFileSystem.create(journal, {
+            scope,
+            sources: Sources.create({
+              fetch: Egress.guard(),
+              ...(githubToken ? { token: () => githubToken(ctx.runId) } : {}),
+            }),
+          })
     const shell =
       !files || options.workspace === false
         ? undefined

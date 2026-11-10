@@ -3,10 +3,7 @@ import { FsError, normalize, type FileSystem, type NewFile } from '../../FileSys
 import { breathe, decode, encode, parentOf, writeMany } from '../Fs.ts'
 import { TarReader } from './archive.ts'
 import * as GitHub from '../../GitHub.ts'
-
-const MAX_BYTES = 200 * 1024 * 1024
-
-const MAX_FILE_BYTES = 8 * 1024 * 1024
+import * as Sources from '../../Sources.ts'
 
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -305,7 +302,7 @@ async function removeTree(fs: FileSystem, path: string) {
 
 async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]): Promise<number> {
   const options = parseClone(args)
-  const name = options.repository.split('/')[1]
+  const [owner, name] = options.repository.split('/') as [string, string]
   const directory = options.directory ?? name
   const target = ctx.resolve(directory)
   const existing = await ctx.fs.stat(target)
@@ -328,9 +325,9 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     else if (stat.kind !== 'directory') throw new FsError('ENOTDIR', path)
     known.add(path)
   }
-  const maxBytes = github.maxBytes ?? MAX_BYTES
+  const maxBytes = github.maxBytes ?? GitHub.maxBytes
   const maxFiles = github.maxFiles ?? MAX_FILES
-  const maxFileBytes = github.maxFileBytes ?? MAX_FILE_BYTES
+  const maxFileBytes = github.maxFileBytes ?? GitHub.maxFileBytes
   const maxDownload = github.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES
   const created = !existing
   let files: Record<string, Entry> = {}
@@ -453,7 +450,18 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
           count++
           written += entry.data.length
           folder(parentOf(path))
-          queued.push({ relative, file: { path, data: entry.data, mtime: Date.now() } })
+          const pinned = reader.global['comment']
+          queued.push({
+            relative,
+            file: {
+              path,
+              data: entry.data,
+              mtime: Date.now(),
+              ...(pinned && /^[0-9a-f]{40}$/.test(pinned)
+                ? { source: Sources.github(owner, name, pinned, relative) }
+                : {}),
+            },
+          })
           queuedBytes += entry.data.length + 512
           if (queuedBytes >= BATCH_BYTES) await flush()
         }

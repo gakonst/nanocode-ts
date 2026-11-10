@@ -12,10 +12,12 @@ import * as Subagents from '../client/Subagents.ts'
 import * as Hands from './Hands.ts'
 import * as Harness from './Harness.ts'
 import * as Journal from './Journal.ts'
+import * as Sources from '../bash/Sources.ts'
 import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
 import * as Tempo from '../machines/Tempo.ts'
 import * as Attachments from './internal/Attachments.ts'
+import * as Egress from './internal/Egress.ts'
 import * as LocalSql from './internal/LocalSql.ts'
 import * as Plans from './Plans.ts'
 import * as Transport from './Transport.ts'
@@ -362,7 +364,13 @@ export function create(options: create.Options) {
       return await Files.response(
         SqlFileSystem.create(
           { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
-          { scope: Harness.scope },
+          {
+            scope: Harness.scope,
+            sources: Sources.create({
+              fetch: Egress.guard(),
+              ...(harness.github?.token ? { token: () => harness.github!.token!(sessionId) } : {}),
+            }),
+          },
         ),
         params.get('file') ?? '',
         { root: harness.workspace?.cwd ?? '/workspace' },

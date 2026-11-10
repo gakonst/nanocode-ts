@@ -9,16 +9,23 @@ import {
   type NewFile,
 } from './FileSystem.ts'
 import { baseOf, decode, encode, parentOf, writeEach } from './internal/Fs.ts'
+import type * as Sources from './Sources.ts'
 
 const filesTable = 'nanocode_files'
 
 const chunksTable = 'nanocode_file_chunks'
+
+const sourcesTable = 'nanocode_file_sources'
 
 const filesSchema = `CREATE TABLE IF NOT EXISTS ${filesTable} (scope TEXT NOT NULL, path TEXT NOT NULL, parent TEXT NOT NULL, kind TEXT NOT NULL, data BLOB, mtime INTEGER NOT NULL, mode INTEGER NOT NULL, PRIMARY KEY (scope, path))`
 
 const parentIndex = `CREATE INDEX IF NOT EXISTS ${filesTable}_parent ON ${filesTable} (scope, parent)`
 
 const chunksSchema = `CREATE TABLE IF NOT EXISTS ${chunksTable} (scope TEXT NOT NULL, path TEXT NOT NULL, seq INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (scope, path, seq))`
+
+const sourcesSchema = `CREATE TABLE IF NOT EXISTS ${sourcesTable} (scope TEXT NOT NULL, path TEXT NOT NULL, source TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (scope, path))`
+
+const sized = `CASE WHEN data IS NULL AND kind = 'file' THEN COALESCE((SELECT s.size FROM ${sourcesTable} s WHERE s.scope = f.scope AND s.path = f.path), (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${chunksTable} c WHERE c.scope = f.scope AND c.path = f.path)) ELSE length(data) END`
 
 const defaultChunkBytes = 1 << 20
 
@@ -53,6 +60,7 @@ type Meta = {
   mtime: number
   mode: number
   inline?: Uint8Array
+  source?: string
 }
 
 type Row = Meta & { data: Uint8Array }
@@ -134,7 +142,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       sql.transaction(
         'store',
         'files.schema',
-        [[filesSchema], [parentIndex], [chunksSchema]],
+        [[filesSchema], [parentIndex], [chunksSchema], [sourcesSchema]],
         'schema',
       ),
     ).then(() => undefined)
@@ -164,7 +172,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
     }
     const [rows] = await run('stat', [
       [
-        `SELECT kind, CASE WHEN data IS NULL AND kind = 'file' THEN (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${chunksTable} c WHERE c.scope = f.scope AND c.path = f.path) ELSE length(data) END, data IS NULL, mtime, mode, CASE WHEN ? THEN data END FROM ${filesTable} f WHERE scope = ? AND path = ?`,
+        `SELECT kind, ${sized}, data IS NULL, mtime, mode, CASE WHEN ? THEN data END, (SELECT s.source FROM ${sourcesTable} s WHERE s.scope = f.scope AND s.path = f.path) FROM ${filesTable} f WHERE scope = ? AND path = ?`,
         inline ? 1 : 0,
         scope,
         path,
@@ -181,6 +189,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       mtime: Number(row[3]),
       mode: Number(row[4]),
       ...(inline && !chunked ? { inline: bytes(row[5] ?? null) } : {}),
+      ...(typeof row[6] === 'string' ? { source: row[6] } : {}),
     }
   }
 
@@ -194,17 +203,30 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
         mtime: 0,
         mode: 0o755,
       }
-    const [rows, chunks] = await run('get', [
+    const [rows, chunks, remote] = await run('get', [
       [
         `SELECT kind, data, mtime, mode FROM ${filesTable} WHERE scope = ? AND path = ?`,
         scope,
         path,
       ],
       [`SELECT data FROM ${chunksTable} WHERE scope = ? AND path = ? ORDER BY seq`, scope, path],
+      [`SELECT source, size FROM ${sourcesTable} WHERE scope = ? AND path = ?`, scope, path],
     ])
     const row = rows?.[0]
     if (!row) return undefined
     const kind = kindOf(row[0] ?? null)
+    const source = remote?.[0]
+    if (kind === 'file' && source) {
+      const data = await fetched(path, String(source[0]), Number(source[1]))
+      return {
+        kind,
+        size: data.length,
+        chunked: false,
+        data,
+        mtime: Number(row[2]),
+        mode: Number(row[3]),
+      }
+    }
     const chunked = kind === 'file' && row[1] === null && Boolean(chunks?.length)
     const parts = chunked
       ? chunks!.map((chunk) => bytes(chunk[0] ?? null))
@@ -286,8 +308,19 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
     ]
   }
 
-  function drop(path: string): Contracts.Statement {
-    return [`DELETE FROM ${chunksTable} WHERE scope = ? AND path = ?`, scope, path]
+  function drop(path: string): Contracts.Statement[] {
+    return [
+      [`DELETE FROM ${chunksTable} WHERE scope = ? AND path = ?`, scope, path],
+      [`DELETE FROM ${sourcesTable} WHERE scope = ? AND path = ?`, scope, path],
+    ]
+  }
+
+  async function fetched(path: string, source: string, size: number): Promise<Uint8Array> {
+    if (!options.sources)
+      throw new Error(
+        path + ': its contents are at ' + source + ', which this filesystem cannot read',
+      )
+    return options.sources.read(source, size)
   }
 
   function chunkStatements(path: string, data: Uint8Array, first: number): Contracts.Statement[] {
@@ -305,7 +338,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
 
   async function staged(target: string, data: Uint8Array, mode: number): Promise<void> {
     const staging = stagingPrefix + target
-    await run('write.stage', [drop(staging)])
+    await run('write.stage', drop(staging))
     try {
       const step = Math.max(1, Math.floor(stagedBytes / chunkBytes)) * chunkBytes
       for (let offset = 0; offset < data.length; offset += step)
@@ -314,12 +347,12 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
           chunkStatements(staging, data.subarray(offset, offset + step), offset / chunkBytes),
         )
       await run('write', [
-        drop(target),
+        ...drop(target),
         insert(target, 'file', null, mode),
         [`UPDATE ${chunksTable} SET path = ? WHERE scope = ? AND path = ?`, target, scope, staging],
       ])
     } catch (error) {
-      await run('write.unstage', [drop(staging)]).catch(() => {})
+      await run('write.unstage', drop(staging)).catch(() => {})
       throw error
     }
   }
@@ -358,10 +391,10 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       if (!append || !existing) {
         if (data.length > maxFileBytes) throw new FsError('EFBIG', path)
         if (data.length <= chunkBytes)
-          await run('write', [drop(target), insert(target, 'file', data, mode)])
+          await run('write', [...drop(target), insert(target, 'file', data, mode)])
         else if (data.length <= stagedBytes)
           await run('write', [
-            drop(target),
+            ...drop(target),
             insert(target, 'file', null, mode),
             ...chunkStatements(target, data, 0),
           ])
@@ -370,6 +403,10 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       }
       if (!data.length) return
       if (existing.size + data.length > maxFileBytes) throw new FsError('EFBIG', path)
+      if (existing.source) {
+        const current = await fetched(target, existing.source, existing.size)
+        return fs.write(target, joined([current, data], current.length + data.length))
+      }
       if (!existing.chunked) {
         const current = existing.inline ?? new Uint8Array()
         const content = joined([current, data], current.length + data.length)
@@ -434,6 +471,17 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
           refused.push(file.path)
           continue
         }
+        if (options.sources && file.source) {
+          options.sources.prime(file.source, file.data)
+          batch.push(...drop(file.path), insert(file.path, 'file', null, 0o644, file.mtime), [
+            `INSERT INTO ${sourcesTable} (scope, path, source, size) VALUES (?, ?, ?, ?)`,
+            scope,
+            file.path,
+            file.source,
+            file.data.length,
+          ])
+          continue
+        }
         if (file.data.length > stagedBytes) {
           await flush()
           await staged(file.path, file.data, 0o644)
@@ -448,7 +496,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
           continue
         }
         if (bytes + file.data.length > stagedBytes) await flush()
-        batch.push(drop(file.path))
+        batch.push(...drop(file.path))
         if (file.data.length <= chunkBytes)
           batch.push(insert(file.path, 'file', file.data, 0o644, file.mtime))
         else
@@ -468,7 +516,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       const generation = version
       const [rows] = await run('list', [
         [
-          `SELECT path, kind, CASE WHEN data IS NULL AND kind = 'file' THEN (SELECT COALESCE(SUM(length(c.data)), 0) FROM ${chunksTable} c WHERE c.scope = f.scope AND c.path = f.path) ELSE length(data) END, data IS NULL, mtime, mode FROM ${filesTable} f WHERE scope = ? AND parent = ?`,
+          `SELECT path, kind, ${sized}, data IS NULL, mtime, mode FROM ${filesTable} f WHERE scope = ? AND parent = ?`,
           scope,
           target,
         ],
@@ -512,7 +560,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       }
       await run('remove', [
         [`DELETE FROM ${filesTable} WHERE scope = ? AND path = ?`, scope, target],
-        drop(target),
+        ...drop(target),
       ])
     },
 
@@ -596,7 +644,7 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
       const tail = source.length + 1
       await run('rename', [
         [`DELETE FROM ${filesTable} WHERE scope = ? AND path = ?`, scope, target],
-        drop(target),
+        ...drop(target),
         [
           `UPDATE ${filesTable} SET parent = CASE WHEN path = ? THEN ? ELSE ? || substr(parent, ?) END, path = ? || substr(path, ?) WHERE scope = ? AND ${within}`,
           source,
@@ -615,6 +663,13 @@ export function create(sql: Contracts.SqlHost, options: create.Options = {}): Sq
           scope,
           ...subtree,
         ],
+        [
+          `UPDATE ${sourcesTable} SET path = ? || substr(path, ?) WHERE scope = ? AND ${within}`,
+          target,
+          tail,
+          scope,
+          ...subtree,
+        ],
       ])
     },
   }
@@ -626,5 +681,6 @@ export declare namespace create {
   type Options = {
     scope?: string | undefined
     maxFileBytes?: number | undefined
+    sources?: Sources.Sources | undefined
   }
 }

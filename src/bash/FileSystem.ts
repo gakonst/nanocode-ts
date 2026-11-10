@@ -44,6 +44,7 @@ export type NewFile = {
   path: string
   data: Uint8Array
   mtime: number
+  source?: string | undefined
 }
 
 export type FileInput = string | Uint8Array
