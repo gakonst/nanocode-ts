@@ -6,12 +6,9 @@
 
 [nanocode](https://nanocode.xyz) agents in TypeScript: the Rust SDK compiled to one WebAssembly module, for Workers, Vercel Functions, Node and browsers. The module holds the agent. The host supplies SQL, model requests and tools.
 
-<!-- ondine:eNpdkDFvgzAQhff-ihsbifQHZKiUrUOGtiB1sBAy5hJbNdj4jiAk__jagXRgsZ7k7957d1frZqVlYLh8vwBIpSrDFk9QaYRq8ViqYDyDdsRAOHQEyvW9zIIdcKJ-sD0TYd_aBXrXTRYLmLVRGpS0lqCV6heuLkD5dSkygRYCjhMSU5FMXGKSH-AdB6ZUImeJXXYNx-N73KLjliMGOTiVDJtZUv-WnzrNr5-PAWIX8OFu3S0CjVa8lqP9SI6HHaqZfUOcThGhM-QlKy2eYsfm0k3eLq79RTZc5Y5cl4rgp9Ya0tiJf5XJp39mwQd3Nx0G8bkJSEe7ScZZLvUf4TmZXA -->
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/README-1.dark.svg">
-  <img alt="The TypeScript host sends commands to the WebAssembly module, which calls back for SQL, model requests, tools and events" src="assets/README-1.light.svg">
-</picture>
-<!-- /ondine -->
+<p align="center">
+  <img alt="The TypeScript host sends commands to the WebAssembly module, which calls back for SQL, model requests, tools and events" src="assets/host.svg" />
+</p>
 
 ## Install
 

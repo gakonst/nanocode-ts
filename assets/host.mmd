@@ -1,0 +1,8 @@
+flowchart LR
+  accTitle: The TypeScript host sends commands to the WebAssembly module, which calls back for SQL, model requests, tools and events
+  host[TypeScript host] -->|command| module[nanocode_wasm.wasm]
+  module -->|store and log| sql[(SqlHost)]
+  module -->|http_start| dispatch[dispatch]
+  module -->|tool_call| tools[Host tools]
+  module -->|events| published[published]
+  dispatch --> provider[Provider or gateway]
