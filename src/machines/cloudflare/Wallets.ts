@@ -57,6 +57,9 @@ export class Wallet extends DurableObject<Env.Env> {
   logout() {
     return this.core().logout()
   }
+  warm() {
+    return this.core().warm()
+  }
   setSecret(name: string, value: string | null) {
     return this.core().setSecret(name, value)
   }

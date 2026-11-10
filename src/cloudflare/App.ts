@@ -588,6 +588,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             descriptor,
           )
         }
+        await this.planned(scope, descriptor)
         if (parts[2] === 'socket') return this.watch(scope, url, request, descriptor)
         if (parts[2] === 'hands') {
           if (request.method === 'POST' && parts.length === 3) {
@@ -638,6 +639,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           if (payer !== undefined && !offered.includes(payer as Contracts.Payer))
             return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
           descriptor.payer = payer as Contracts.Payer | undefined
+          const instance = this.instance(scope)
+          void instance.catch(() => {})
+          if (this.metadata.get(`model_provider:${scope}`) === undefined)
+            await this.subscribe(descriptor, provider, descriptor.payer)
           const model =
             this.metadata.get(`model:${scope}`) ??
             (typeof input?.model === 'string' && input.model
@@ -647,16 +652,35 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 : (this.env.CLAUDE_MODEL ?? 'claude-opus-5-5'))
           const opened = this.prewarm(scope, descriptor, provider, model).catch(() => false)
           if (provider === 'codex' && workersAiModels.has(model)) {
-            await Promise.all([this.instance(scope), opened])
+            await Promise.all([instance, opened])
             return new Response(null, { status: 204 })
           }
           this.modelAt = Date.now()
           const [, warmed] = await Promise.all([
-            this.instance(scope),
+            instance,
             egress(this.env).fetch(
               new Request('https://egress.internal/warm', {
                 method: 'POST',
-                headers: { 'x-nanocode-model': headerJson({ provider, model }) },
+                headers: {
+                  'x-nanocode-model': headerJson({
+                    provider,
+                    model,
+                    authority: {
+                      account_id: descriptor.account_id,
+                      session_id: '',
+                      session_name: descriptor.session_name,
+                    },
+                    subscription: served(
+                      provider,
+                      model,
+                      provider === 'codex'
+                        ? (descriptor.codex_subscription ?? true)
+                        : descriptor.subscription,
+                      descriptor.payer,
+                    ),
+                    ...(descriptor.payer ? { payer: descriptor.payer } : {}),
+                  }),
+                },
               }),
             ),
             opened,
@@ -755,6 +779,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.metadata.get(modelKey) ?? input.model,
           this.metadata.get(payerKey) ?? input.payer,
         )
+        const subscribing =
+          this.metadata.get(providerKey) === undefined
+            ? this.subscribe(
+                descriptor,
+                input.provider ?? 'claude',
+                this.metadata.get(payerKey) ?? input.payer,
+              )
+            : undefined
+        void subscribing?.catch(() => {})
         const sessionKey = this.sessionKey(scope)
         const unbound = () =>
           this.metadata.get(executorKey) === undefined &&
@@ -805,6 +838,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           descriptor.payer = input.payer ?? boundPayer
           descriptor.thinking = input.thinking
           descriptor.web_search = input.web_search
+          await subscribing
           if (descriptor.provider === 'codex')
             descriptor.subscription = descriptor.codex_subscription ?? true
           const subscribed = descriptor.subscription
@@ -2361,7 +2395,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       } else if (input?.type === 'warm') {
         const warmed =
           !watcher.descriptor.read_only &&
-          (await this.warm(watcher.scope, watcher.descriptor).catch(() => false))
+          (await this.planned(watcher.scope, watcher.descriptor)
+            .then(() => this.warm(watcher.scope, watcher.descriptor))
+            .catch(() => false))
         socket.send(JSON.stringify({ type: 'warm', warmed }))
       } else {
         socket.send(JSON.stringify({ type: 'error', error: 'unknown message type' }))
@@ -2442,6 +2478,27 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       return background === undefined
         ? fallback.grant
         : (JSON.parse(background) as SessionDescriptor).grant
+    }
+
+    private async subscribe(
+      descriptor: SessionDescriptor,
+      provider: Contracts.ModelProvider,
+      payer: unknown,
+    ): Promise<void> {
+      if (!subscribes || payer === 'deployment' || payer === 'wallet') return
+      const subscribed = await subscribes(descriptor.account_id, this.env, provider)
+      if (provider === 'codex') descriptor.codex_subscription = subscribed
+      else descriptor.subscription = subscribed
+    }
+
+    private async planned(scope: string, descriptor: SessionDescriptor): Promise<void> {
+      const provider = this.metadata.get(`model_provider:${scope}`)
+      if (provider === undefined) return
+      await this.subscribe(
+        descriptor,
+        provider as Contracts.ModelProvider,
+        this.metadata.get(`payer:${scope}`),
+      )
     }
 
     private bound(scope: string, base: SessionDescriptor): SessionDescriptor {
@@ -3181,16 +3238,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     if (!name || name.includes('\0')) return json({ error: 'invalid session name' }, 400)
     if (Number(request.headers.get('content-length') ?? 0) > valueLimit)
       return json({ error: tooLarge }, 413)
-    const mode = (provider: Contracts.ModelProvider) =>
-      subscribes ? subscribes(account, env, provider) : env.MODEL_AUTH === 'subscription'
-    const [subscription, codex_subscription] = await Promise.all([mode('claude'), mode('codex')])
+    const subscription = !subscribes && env.MODEL_AUTH === 'subscription'
     const caller = typeof principal === 'object' ? principal : undefined
     const descriptor: SessionDescriptor = {
       account_id: account,
       session_id: '',
       session_name: name,
       subscription,
-      codex_subscription,
+      codex_subscription: subscription,
       ...(handing ? { hand_token: handing[2]! } : {}),
       ...(caller?.read_only ? { read_only: true } : {}),
       ...(caller?.recorded ? { recorded: true } : {}),

@@ -49,6 +49,17 @@ async function model(env: Env.Env, request: Request): Promise<Response> {
   )
 }
 
+async function warm(env: Env.Env, request: Request): Promise<Response> {
+  let dispatch: Pick<App.ModelDispatch, 'authority'>
+  try {
+    dispatch = JSON.parse(request.headers.get('x-nanocode-model') ?? '')
+  } catch {
+    return modelError(undefined, 400, 'invalid model dispatch')
+  }
+  await Env.wallet(env, { account: dispatch.authority.account_id }).warm()
+  return new Response(null, { status: 204 })
+}
+
 export function paid(request: Request): boolean {
   const header = request.headers.get('x-nanocode-model') ?? request.headers.get('x-nanocode-socket')
   try {
@@ -63,8 +74,7 @@ export function create(env: Env.Env): App.PrivateBinding {
     async fetch(request: Request): Promise<Response> {
       const { pathname } = new URL(request.url)
       if (pathname === '/model' && request.method === 'POST') return model(env, request)
-      if (pathname === '/warm' && request.method === 'POST')
-        return new Response(null, { status: 204 })
+      if (pathname === '/warm' && request.method === 'POST') return warm(env, request)
       if (pathname === '/socket')
         return json(
           {

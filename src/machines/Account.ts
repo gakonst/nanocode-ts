@@ -519,6 +519,12 @@ export function create(options: create.Options) {
     return created
   }
 
+  async function warm(): Promise<boolean> {
+    if (!(await record())) return false
+    await pay()
+    return true
+  }
+
   async function send(kind: 'model' | 'pay', target: string, init: Init): Promise<Response> {
     if (kind === 'pay' && !new Headers(init.headers).has('user-agent'))
       init = { ...init, headers: [...new Headers(init.headers), ['user-agent', 'nanocode-ts']] }
@@ -563,6 +569,7 @@ export function create(options: create.Options) {
     send,
     setSecret,
     status,
+    warm,
     writeFile,
   }
 }
