@@ -91,8 +91,8 @@ function sleb(value: number): number[] {
   }
 }
 
-function instrument(bytes: Uint8Array): Uint8Array | undefined {
-  if (bytes.length < 8) return undefined
+function instrument(bytes: Uint8Array, pages: number): Uint8Array {
+  if (bytes.length < 8) throw new Unsupported()
   let pos = 8
   const u32 = () => {
     let result = 0
@@ -126,6 +126,21 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
     if (align & 0x40) skipLeb()
     skipLeb()
   }
+  const memory = () => {
+    const flags = u32()
+    if (flags === 2 || flags > 3) throw new Unsupported()
+    const min = u32()
+    const max = flags & 1 ? u32() : pages
+    if (min > pages)
+      throw new Refused(
+        'the module asks for ' +
+          min +
+          ' pages of memory, more than the ' +
+          pages +
+          ' (64 KiB each) of its memory budget',
+      )
+    return [flags | 1, ...leb(min), ...leb(Math.min(max, pages))]
+  }
   type Section = { id: number; head: number; start: number; end: number }
   const sections: Section[] = []
   while (pos < bytes.length) {
@@ -135,10 +150,9 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
     sections.push({ id, head, start: pos, end: pos + size })
     pos += size
   }
-  if (pos !== bytes.length) return undefined
+  if (pos !== bytes.length) throw new Unsupported()
   const find = (id: number) => sections.find((section) => section.id === id)
   const code = find(10)
-  if (!code) return undefined
   const count = (section: Section | undefined) => {
     if (!section) return 0
     pos = section.start
@@ -162,11 +176,8 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
         skipLeb()
         if (flags & 1) skipLeb()
         imported.table++
-      } else if (kind === 2) {
-        const flags = u32()
-        skipLeb()
-        if (flags & 1) skipLeb()
-      } else if (kind === 3) {
+      } else if (kind === 2) memory()
+      else if (kind === 3) {
         valtype()
         pos++
         imported.global++
@@ -175,6 +186,28 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
         skipLeb()
       } else throw new Unsupported()
     }
+  }
+  const exportSection = find(7)
+  if (exportSection) {
+    pos = exportSection.start
+    const n = u32()
+    for (let i = 0; i < n; i++) {
+      const length = u32()
+      const name = new TextDecoder().decode(bytes.subarray(pos, pos + length))
+      if (name === CHECK_TABLE)
+        throw new Refused('the module exports ' + CHECK_TABLE + ', a name the shell reserves')
+      pos += length + 1
+      skipLeb()
+    }
+  }
+  const memories: number[] = []
+  const memorySection = find(5)
+  if (memorySection) {
+    pos = memorySection.start
+    const n = u32()
+    memories.push(...leb(n))
+    for (let i = 0; i < n; i++) memories.push(...memory())
+    if (pos !== memorySection.end) throw new Unsupported()
   }
   const typeIndex = count(find(1))
   const tableIndex = imported.table + count(find(4))
@@ -203,10 +236,9 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
     ...leb(globalIndex),
     0x0b,
   ]
-  pos = code.start
-  const functions = u32()
+  if (code) pos = code.start
+  const functions = code ? u32() : 0
   const bodies: Uint8Array[] = []
-  let loops = 0
   for (let f = 0; f < functions; f++) {
     const size = u32()
     const start = pos
@@ -216,8 +248,8 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
       skipLeb()
       valtype()
     }
-    const pieces: Uint8Array[] = []
-    let copied = start
+    const pieces: Uint8Array[] = [bytes.subarray(start, pos), new Uint8Array(site)]
+    let copied = pos
     while (pos < end) {
       const op = bytes[pos++]!
       switch (op) {
@@ -225,7 +257,6 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
           blocktype()
           pieces.push(bytes.subarray(copied, pos), new Uint8Array(site))
           copied = pos
-          loops++
           break
         case 0x02:
         case 0x04:
@@ -360,7 +391,6 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
     }
     bodies.push(body)
   }
-  if (!loops) return undefined
   const vector = (section: Section | undefined, extra: number[]) => {
     const n = count(section)
     const rest = section ? bytes.subarray(pos, section.end) : new Uint8Array()
@@ -382,6 +412,7 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
     at += body.length
   }
   replaced.set(10, codeBytes)
+  if (memorySection) replaced.set(5, new Uint8Array(memories))
   const order = [1, 2, 3, 4, 5, 13, 6, 7, 8, 9, 12, 10, 11]
   const out: Uint8Array[] = [bytes.subarray(0, 8)]
   const emitted = new Set<number>()
@@ -409,9 +440,9 @@ function instrument(bytes: Uint8Array): Uint8Array | undefined {
   return result
 }
 
-function guarded(bytes: Uint8Array): Uint8Array | undefined {
+function guarded(bytes: Uint8Array, pages: number): Uint8Array | undefined {
   try {
-    return instrument(bytes)
+    return instrument(bytes, pages)
   } catch (error) {
     if (error instanceof Unsupported || error instanceof RangeError) return undefined
     throw error
@@ -442,22 +473,30 @@ function refusedMessage(text: string): boolean {
 
 export async function load(bytes: Uint8Array, options: Wasm.Options = {}): Promise<Loaded> {
   if (!(options.force && options.interpreter) && nativeRefused === undefined) {
-    try {
-      const compile = (
-        WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }
-      ).compile
-      const patched = guarded(bytes)
-      if (patched) {
-        const module = await compile(patched).catch(() => undefined)
-        helper ??= await compile(HELPER).catch(() => undefined)
-        if (module && helper) return native(module, true)
+    const compiled = await (async () => {
+      try {
+        const compile = (
+          WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }
+        ).compile
+        helper ??= await compile(HELPER)
+        const pages = Math.min(Math.floor((options.memoryBytes ?? 2 ** 32) / 65536), 65536)
+        const patched = guarded(bytes, pages)
+        const module = patched && (await compile(patched).catch(() => undefined))
+        if (module) return native(module, helper)
+        await compile(bytes.slice())
+        return undefined
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error)
+        if (!refusedMessage(text)) throw error
+        nativeRefused = text
+        return undefined
       }
-      return native(await compile(bytes.slice()), false)
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error)
-      if (!refusedMessage(text)) throw error
-      nativeRefused = text
-    }
+    })()
+    if (compiled) return compiled
+    if (nativeRefused === undefined && !options.interpreter)
+      throw new Refused(
+        'the shell cannot add its deadline checks to this module, and this host has no interpreter (BashOptions.wasm.interpreter, nanocode-ts/interpreter.wasm)',
+      )
   }
   if (!options.interpreter)
     throw new Refused(
@@ -476,14 +515,14 @@ function nativeKind(kind: string): ExternKind {
 
 let helper: WebAssembly.Module | undefined
 
-function native(module: WebAssembly.Module, instrumented: boolean): Loaded {
+function native(module: WebAssembly.Module, helper: WebAssembly.Module): Loaded {
   const imports = WebAssembly.Module.imports(module).map((entry) => ({
     module: entry.module,
     name: entry.name,
     kind: nativeKind(entry.kind),
   }))
   const exports = WebAssembly.Module.exports(module)
-    .filter((entry) => !instrumented || entry.name !== CHECK_TABLE)
+    .filter((entry) => entry.name !== CHECK_TABLE)
     .map((entry) => ({ name: entry.name, kind: nativeKind(entry.kind) }))
   return {
     engine: 'native',
@@ -507,8 +546,8 @@ function native(module: WebAssembly.Module, instrumented: boolean): Loaded {
       } catch (error) {
         throw error instanceof WebAssembly.RuntimeError ? new Trap(error.message) : error
       }
-      const table = instrumented ? instance.exports[CHECK_TABLE] : undefined
-      if (table instanceof WebAssembly.Table && helper) {
+      const table = instance.exports[CHECK_TABLE]
+      if (table instanceof WebAssembly.Table) {
         const tick = new WebAssembly.Instance(helper, { h: { c: () => check?.() } })
         table.set(0, tick.exports['f'])
       }

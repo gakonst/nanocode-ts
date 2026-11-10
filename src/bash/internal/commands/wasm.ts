@@ -1,4 +1,10 @@
-import { CommandError, LimitError, type CommandContext, type CommandHandler } from '../Shell.ts'
+import {
+  CommandError,
+  LimitError,
+  megabytes,
+  type CommandContext,
+  type CommandHandler,
+} from '../Shell.ts'
 import { FsError, normalize, type FileSystem } from '../../FileSystem.ts'
 import { decode, encode, fromBase64, parentOf, toBase64 } from '../Fs.ts'
 import { mkdirs } from './files.ts'
@@ -257,7 +263,8 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 }
 
 export async function compile(bytes: Uint8Array, options: Wasm.Options = {}): Promise<Loaded> {
-  const key = (await sha256(bytes)) + (options.force ? ':interpreter' : '')
+  const key =
+    (await sha256(bytes)) + (options.force ? ':interpreter' : '') + ':' + options.memoryBytes
   const cached = MODULES.get(key)
   if (cached && cached.interpreter === options.interpreter) return cached.loaded
   let loaded: Loaded
@@ -277,6 +284,13 @@ export async function compile(bytes: Uint8Array, options: Wasm.Options = {}): Pr
   if (loaded.engine === 'interpreter' && bytes.length > INTERPRETED_CACHE_BYTES) return loaded
   MODULES.set(key, { loaded, interpreter: options.interpreter })
   return loaded
+}
+
+function budgeted(options: Wasm.Options, limits: { maxMemoryBytes: number }): Wasm.Options {
+  return {
+    ...options,
+    memoryBytes: Math.min(options.memoryBytes ?? limits.maxMemoryBytes, limits.maxMemoryBytes),
+  }
 }
 
 export function release(loaded: Loaded): void {
@@ -369,7 +383,7 @@ const handler =
     const bytes = await ctx.fs.read(path)
     if (!isWasm(bytes))
       throw new CommandError(run.file + ': not a WebAssembly module (no \\0asm header)', 126)
-    const module = await compile(bytes, options)
+    const module = await compile(bytes, budgeted(options, ctx.limits))
     const tree = new Tree()
     tree.limit = Math.min(SNAPSHOT_BYTES, Math.floor(ctx.limits.maxMemoryBytes / 2))
     for (const arg of [...run.dirs.map((dir) => dir.host), ...run.args]) {
@@ -480,14 +494,20 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
     return E.FBIG
   }
 
+  let owned = 0
   const own = (node: FileNode, capacity: number) => {
     if (node.owned && node.data.length >= capacity) return
-    const data = new Uint8Array(
-      Math.max(capacity, node.owned ? node.data.length * 2 : node.size, 64),
-    )
+    const length = Math.max(capacity, node.owned ? node.data.length * 2 : node.size, 64)
+    const total = owned + length - (node.owned ? node.data.length : 0)
+    if (total > ctx.limits.maxMemoryBytes)
+      throw new LimitError(
+        'wasm: files grew beyond the ' + megabytes(ctx.limits.maxMemoryBytes) + ' memory limit',
+      )
+    const data = new Uint8Array(length)
     data.set(node.data.subarray(0, Math.min(node.size, data.length)))
     node.data = data
     node.owned = true
+    owned = total
   }
 
   const writeFile = (node: FileNode, position: number, chunk: Uint8Array) => {
@@ -817,7 +837,8 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
       const handle = file(fd)
       if (typeof handle === 'number') return handle === E.ISDIR ? E.BADF : handle
       if (!(handle.rights & WRITE)) return E.BADF
-      const length = Number(size)
+      const length = Number(BigInt.asUintN(64, size))
+      if (length > ctx.limits.maxBufferLength * 4) return E.FBIG
       own(handle.node, length)
       if (length > handle.node.size) handle.node.data.fill(0, handle.node.size, length)
       handle.node.size = length
@@ -837,7 +858,9 @@ function execute(ctx: CommandContext, module: Loaded, tree: Tree, run: Run): Res
     fd_allocate: (fd: number, offset: bigint, length: bigint) => {
       const handle = file(fd)
       if (typeof handle === 'number') return handle === E.ISDIR ? E.BADF : handle
-      const end = Number(offset + length)
+      if (!(handle.rights & WRITE)) return E.BADF
+      const end = Number(BigInt.asUintN(64, offset) + BigInt.asUintN(64, length))
+      if (end > ctx.limits.maxBufferLength * 4) return E.FBIG
       if (end > handle.node.size) {
         own(handle.node, end)
         handle.node.data.fill(0, handle.node.size, end)
@@ -1163,7 +1186,7 @@ export function wasmCommands(options: Wasm.Options = {}): Record<string, Command
 type CellShell = {
   fs: FileSystem
   cwd: string
-  limits: { timeoutMs: number }
+  limits: { timeoutMs: number; maxMemoryBytes: number }
   exec(
     script: string,
     options: { stdin?: string; signal?: AbortSignal },
@@ -1240,7 +1263,7 @@ export function wasmHost(
   const loaded = async (request: CellRequest) => {
     const found = await source(request)
     if (!isWasm(found.bytes)) throw new Error('not a WebAssembly module (no \\0asm header)')
-    return compile(found.bytes, options).catch((error) => {
+    return compile(found.bytes, budgeted(options, shell.limits)).catch((error) => {
       throw new Error(error instanceof Error ? error.message : String(error))
     })
   }
