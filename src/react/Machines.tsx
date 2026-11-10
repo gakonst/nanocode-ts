@@ -406,7 +406,7 @@ export function useUnlock(
     const total = Object.values(spent?.spent ?? {}).reduce((sum, value) => sum + BigInt(value), 0n)
     note(
       'tool',
-      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${Machine.until(connected)}; this site's server has paid ${Wallet.format(total)} MACH for tools with it.`,
+      `${Wallet.short(connected.address)} holds ${Wallet.format(balance)} MACH and ${Wallet.format(fees)} ${Wallet.usdc.symbol}. Key ${Wallet.short(connected.keyAddress)} may spend ${Wallet.format(remaining)} MACH more until ${Machine.until(connected)}; it has paid ${Wallet.format(total)} MACH for tools on this site.`,
     )
   }
 
