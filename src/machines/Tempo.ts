@@ -8,6 +8,8 @@ export const anthropic = `${gateway}/v1/messages`
 
 export const listing = `${gateway}/api/auction/models`
 
+export const outputTokens = 32_768
+
 export const efforts: readonly Contracts.Thinking[] = [
   'none',
   'low',
@@ -23,6 +25,7 @@ export type Entry = {
   efforts: Contracts.Thinking[]
   id: string
   label: string
+  maxTokens?: number
   name: string
 }
 
@@ -75,12 +78,13 @@ export async function list(
 
   const found = offers(body)
   if (!found.length) throw new Error(`${listing} lists no models`)
-  return groups(models, rows(models, found))
+  return groups(models, rows(models, found), options.harness ?? 'codex')
 }
 
 export declare namespace list {
   type Options = {
     fetch?: typeof fetch | undefined
+    harness?: Contracts.ModelProvider | undefined
     signal?: AbortSignal | undefined
   }
 }
@@ -173,7 +177,11 @@ function rows(models: Contracts.ModelCatalog, offers: readonly Offer[]): Row[] {
   return found
 }
 
-function groups(models: Contracts.ModelCatalog, rows: readonly Row[]): Harness[] {
+function groups(
+  models: Contracts.ModelCatalog,
+  rows: readonly Row[],
+  custom: Contracts.ModelProvider,
+): Harness[] {
   const native = (row: Row) => row.builtin !== undefined && row.id === row.builtin.id
   const detail = (row: Row) =>
     row.price ? { detail: `${row.price} per 1M input/output tokens` } : {}
@@ -207,11 +215,12 @@ function groups(models: Contracts.ModelCatalog, rows: readonly Row[]): Harness[]
       efforts: [...efforts],
       id: row.id,
       label: row.id,
+      ...(custom === 'claude' ? { maxTokens: outputTokens } : {}),
       name: row.id,
     }
     const group = providers.find((harness) => harness.label === `Tempo · ${row.provider}`)
     if (group) group.models.push(entry)
-    else providers.push({ id: 'codex', label: `Tempo · ${row.provider}`, models: [entry] })
+    else providers.push({ id: custom, label: `Tempo · ${row.provider}`, models: [entry] })
   }
   return [...builtins, ...providers].filter((harness) => harness.models.length)
 }

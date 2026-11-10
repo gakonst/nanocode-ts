@@ -83,7 +83,15 @@ function served(options: select.Options): Selection | undefined {
   if (options.harness !== 'claude' && options.harness !== 'codex') return undefined
   if (typeof options.model !== 'string' || !options.model.trim()) return undefined
   const thinking = Tempo.efforts.find((level) => level === options.effort)
-  return thinking ? { model: options.model, provider: options.harness, thinking } : undefined
+  if (!thinking) return undefined
+  return {
+    model: options.model,
+    provider: options.harness,
+    thinking,
+    ...(options.harness === 'claude' && !/^claude-/.test(options.model)
+      ? { max_tokens: Tempo.outputTokens }
+      : {}),
+  }
 }
 
 type Body = {

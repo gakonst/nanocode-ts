@@ -145,7 +145,7 @@ async function archive(pathname: string): Promise<Response> {
 
   const upstream = await fetch(
     `https://codeload.github.com/${match[1]}/${match[2]}/tar.gz/${match[3]}`,
-    { headers: { 'user-agent': 'nanocode-machines-web' } },
+    { headers: { 'user-agent': 'nanocode-ts' } },
   )
   return new Response(upstream.body, {
     headers: {
