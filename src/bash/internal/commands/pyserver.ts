@@ -23,6 +23,7 @@ type FS = PyodideFS & {
   lstat(path: string): Stat
   isLink(mode: number): boolean
   cwd(): string
+  lookupPath(path: string): { node: Record<string, unknown> }
   trackingDelegate: Record<string, unknown>
   truncate(path: unknown, length: number): void
 }
@@ -123,6 +124,31 @@ function stamp(fs: FS, path: string): string | undefined {
   return Fingerprint.from(fs.readFile(path))
 }
 
+function lazy(fs: FS, path: string, size: number, read: () => Uint8Array): void {
+  fs.writeFile(path, new Uint8Array(0))
+  const node = fs.lookupPath(path).node
+  let loaded: Uint8Array | undefined
+  Object.defineProperty(node, 'contents', {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      loaded ??= read()
+      if (loaded.length !== size)
+        throw new Error(path + ' holds ' + loaded.length + ' bytes in storage, not ' + size)
+      return loaded
+    },
+    set: (value: unknown) => {
+      Object.defineProperty(node, 'contents', {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      })
+    },
+  })
+  node.usedBytes = size
+}
+
 function base64(bytes: Uint8Array): string {
   let text = ''
   for (let i = 0; i < bytes.length; i += 0x8000)
@@ -157,8 +183,15 @@ function text(chunks: Uint8Array[]): string {
 }
 
 export type PythonServerState = {
+  files?: PythonFiles | undefined
   load(): Promise<string[][] | undefined>
   save(installs: string[][]): Promise<void>
+}
+
+export type PythonFiles = {
+  clear(): void
+  get(path: string): Uint8Array
+  put(path: string, data: Uint8Array): void
 }
 
 export function pythonServer(
@@ -170,6 +203,7 @@ export function pythonServer(
   let stamps = new Map<string, string | undefined>()
   let owned = new Map<string, string>()
   const parked = new Map<string, Parked>()
+  let placed = 0
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -239,10 +273,11 @@ export function pythonServer(
     wipe(fs)
   }
 
-  const enter = (fs: FS, id: string | undefined) => {
+  const enter = (fs: FS, id: string | undefined, files?: PythonFiles) => {
     if (mirror === id) return
     fs.chdir('/')
     park(fs)
+    files?.clear()
     mirror = id
     const found = id === undefined ? undefined : parked.get(id)
     if (!found || id === undefined) return
@@ -253,7 +288,13 @@ export function pythonServer(
     owned = found.owned
   }
 
-  const place = (fs: FS, files: [string, string][], dirs: string[], append: boolean) => {
+  const place = (
+    fs: FS,
+    files: [string, string][],
+    dirs: string[],
+    append: boolean,
+    store?: PythonFiles,
+  ) => {
     for (const path of [...dirs].sort()) if (allowed(path)) mkdirs(fs, path)
     for (const [path, data] of files) {
       if (!allowed(path)) continue
@@ -266,6 +307,12 @@ export function pythonServer(
         joined.set(before)
         joined.set(bytes, before.length)
         fs.writeFile(path, joined)
+      } else if (store) {
+        const key = String(++placed) + ':' + path
+        store.put(key, bytes)
+        lazy(fs, path, bytes.length, () => store.get(key))
+        stamps.set(path, Fingerprint.from(bytes))
+        continue
       } else fs.writeFile(path, bytes)
       stamps.set(path, stamp(fs, path))
     }
@@ -561,9 +608,9 @@ export function pythonServer(
       files: [],
       mirror: id,
     }
-    enter(fs, id)
+    enter(fs, id, state?.files)
     if (request.fetch) return { ...empty, ...fetchFiles(fs, request.fetch, request.range) }
-    place(fs, request.files, request.dirs, Boolean(request.append))
+    place(fs, request.files, request.dirs, Boolean(request.append), state?.files)
     for (const [path, stamp] of request.stamps ?? [])
       if (allowed(path) && kind(fs, path) === 'file') owned.set(path, stamp)
     if (request.listing)
