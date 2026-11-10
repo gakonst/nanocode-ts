@@ -1,5 +1,6 @@
 import * as GitHub from './GitHub.ts'
 import { TarReader } from './internal/commands/archive.ts'
+import * as GitPack from './internal/GitPack.ts'
 
 export type Sources = {
   prime(source: string, data: Uint8Array): void
@@ -64,14 +65,25 @@ export function create(options: create.Options = {}): Sources {
   }
 
   const download = async (archive: Archive, owner: string, repo: string, commit: string) => {
-    const url = options.archive
-      ? options.archive(owner, repo, commit)
-      : GitHub.codeload({ owner, ref: commit, repo })
+    const maxFileBytes = options.maxFileBytes ?? GitHub.maxFileBytes
+    if (!options.archive) {
+      const pack = await GitPack.fetchPack(fetcher, {
+        commit,
+        filterBytes: maxFileBytes,
+        repository: owner + '/' + repo,
+        segmentBytes: maxFileBytes,
+      })
+      for await (const item of GitPack.checkout(pack, { cacheBytes: maxFileBytes, commit }))
+        if (item.kind === 'file') keep(archive, item.path, item.data)
+      return
+    }
+
+    const url = options.archive(owner, repo, commit)
     const response = await fetcher(url, { redirect: 'follow' })
     if (!response.ok || !response.body)
       throw new Error('downloading ' + url + ' answered HTTP ' + response.status)
 
-    const reader = new TarReader(options.maxFileBytes ?? GitHub.maxFileBytes)
+    const reader = new TarReader(maxFileBytes)
     const stream = response.body.pipeThrough(new DecompressionStream('gzip')).getReader()
     for (;;) {
       const next = await stream.read()

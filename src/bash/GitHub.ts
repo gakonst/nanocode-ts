@@ -48,6 +48,8 @@ const allowed = [
   /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+(?:\/(?:tarball|zipball|commits|releases|contents)(?:\/[^?#]*)?)?(?:\?[^#]*)?$/,
 ]
 
+const uploadPack = /^https:\/\/github\.com\/[^/]+\/[^/]+\.git\/git-upload-pack$/
+
 const apiHost = 'api.github.com'
 
 const limitedHeader = 'x-nanocode-github'
@@ -377,21 +379,24 @@ export function archives(
   const network = wrap(fetcher, options)
   return Egress.mark(async (input, init) => {
     const request = new Request(input, init)
+    const pack = request.method === 'POST' && uploadPack.test(request.url)
     if (
-      (request.method !== 'GET' && request.method !== 'HEAD') ||
-      !allowed.some((pattern) => pattern.test(request.url))
+      !pack &&
+      ((request.method !== 'GET' && request.method !== 'HEAD') ||
+        !allowed.some((pattern) => pattern.test(request.url)))
     )
       throw new TypeError(
         request.method +
           ' ' +
           request.url +
-          ' refused: this host reaches only public GitHub repositories (raw.githubusercontent.com files, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, and GET https://api.github.com/repos/OWNER/REPO with its /contents, /commits, /releases, /tarball and /zipball), so no other URL works from cells, curl or wget',
+          ' refused: this host reaches only public GitHub repositories (raw.githubusercontent.com files, codeload.github.com archives, github.com/OWNER/REPO/archive/, /releases/download/ and /raw/ files, GET https://api.github.com/repos/OWNER/REPO with its /contents, /commits, /releases, /tarball and /zipball, and the POST to https://github.com/OWNER/REPO.git/git-upload-pack that git clone sends), so no other URL works from cells, curl or wget',
       )
     if (typeof (globalThis as { document?: unknown }).document !== 'undefined')
       return network(request)
     if (!request.headers.has('user-agent')) request.headers.set('user-agent', 'nanocode-ts')
     const mode = request.redirect
     const headers = new Headers(request.headers)
+    const body = pack ? await request.arrayBuffer() : undefined
     let url = request.url
     for (let hop = 0; ; hop++) {
       const response = await network(url, {
@@ -399,6 +404,7 @@ export function archives(
         headers,
         redirect: 'manual',
         signal: request.signal,
+        ...(body ? { body } : {}),
       })
       const location = response.headers.get('location')
       if (mode === 'manual' || response.status < 300 || response.status > 399 || location === null)

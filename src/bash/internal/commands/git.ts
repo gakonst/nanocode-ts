@@ -3,6 +3,7 @@ import { FsError, normalize, type FileSystem, type NewFile } from '../../FileSys
 import { breathe, decode, encode, parentOf, writeMany } from '../Fs.ts'
 import { TarReader } from './archive.ts'
 import * as GitHub from '../../GitHub.ts'
+import * as GitPack from '../GitPack.ts'
 import * as Sources from '../../Sources.ts'
 
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
@@ -180,6 +181,22 @@ function lost(error: unknown): boolean {
   )
 }
 
+function notFound(repository: string, ref: string): string {
+  return (
+    "fatal: repository 'https://github.com/" +
+    repository +
+    ".git/' or ref '" +
+    ref +
+    "' not found (private repositories cannot be cloned here)"
+  )
+}
+
+function missing(error: unknown): undefined {
+  if (error instanceof GitPack.GitError && [401, 403, 404].includes(error.status ?? 0))
+    return undefined
+  throw error
+}
+
 async function fetchArchive(
   ctx: CommandContext,
   github: GitHub.Options,
@@ -217,15 +234,7 @@ async function fetchArchive(
     last = response.status
     await response.body?.cancel().catch(() => {})
   }
-  if (last === 404)
-    throw new CommandError(
-      "fatal: repository 'https://github.com/" +
-        repository +
-        ".git/' or ref '" +
-        ref +
-        "' not found (private repositories cannot be cloned here)",
-      128,
-    )
+  if (last === 404) throw new CommandError(notFound(repository, ref), 128)
   if (last === -2)
     throw new Stalled(
       'GitHub did not start sending the archive within ' + Math.round(stallMs / 1000) + ' s',
@@ -332,11 +341,13 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
   const created = !existing
   let files: Record<string, Entry> = {}
   let reader = new TarReader(maxFileBytes)
-  let omitted: { path: string; bytes: number; reason: string }[] = []
+  let omitted: { path: string; bytes: number | undefined; reason: string }[] = []
+  let pinned: { branch: string | null; commit: string; info: GitPack.checkout.Info } | undefined
   let written = 0
   let count = 0
   let skipped = 0
-  let queued: { relative: string; file: NewFile }[] = []
+  let submodules = 0
+  let queued: { relative: string; file: NewFile; id?: string }[] = []
   let dirs: string[] = []
   let queuedBytes = 0
   const folder = (path: string) => {
@@ -358,7 +369,7 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
         made,
         batch.map((entry) => entry.file),
       ),
-      Promise.all(batch.map((entry) => blobId(entry.file.data))),
+      Promise.all(batch.map((entry) => entry.id ?? blobId(entry.file.data))),
     ])
     const failed = new Set(refused)
     batch.forEach((entry, index) => {
@@ -382,15 +393,100 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     written = 0
     count = 0
     skipped = 0
+    submodules = 0
     queued = []
     dirs = []
     queuedBytes = 0
     known.clear()
+    pinned = undefined
     let watch: Watch | undefined
     let stream: ReadableStreamDefaultReader<Uint8Array> | undefined
     let root: string | undefined
     let bytes = 0
     try {
+      if (!github.archive) {
+        const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
+        const found = /^[0-9a-f]{40}$/.test(ref)
+          ? { branch: null, commit: ref }
+          : await GitPack.refs(fetcher, {
+              ref,
+              repository: options.repository,
+              signal: ctx.signal,
+            }).catch(missing)
+        if (!found) throw new CommandError(notFound(options.repository, ref), 128)
+        const pack = await GitPack.fetchPack(fetcher, {
+          commit: found.commit,
+          filterBytes: maxFileBytes,
+          maxBytes: maxDownload,
+          repository: options.repository,
+          segmentBytes: maxFileBytes,
+          signal: ctx.signal,
+        }).catch(missing)
+        if (!pack) throw new CommandError(notFound(options.repository, ref), 128)
+        await ensure(target)
+        root = name
+        for await (const item of GitPack.checkout(pack, {
+          cacheBytes: maxFileBytes,
+          commit: found.commit,
+          windowBytes: BATCH_BYTES,
+        })) {
+          if (ctx.signal.aborted) throw new CommandError('fatal: clone aborted', 130)
+          if (item.kind === 'commit') {
+            pinned = { ...found, info: item.info }
+            continue
+          }
+          if (item.kind === 'skipped') {
+            if (item.mode === '160000') submodules++
+            else skipped++
+            continue
+          }
+          if (
+            item.path
+              .split('/')
+              .some((part) => part === '..' || part === '.' || part === '' || part === '.git')
+          )
+            throw new CommandError(
+              'fatal: repository tree contains an unsafe path: ' + item.path,
+              128,
+            )
+          const reason =
+            item.kind === 'filtered'
+              ? 'larger than ' + size(maxFileBytes)
+              : count >= maxFiles
+                ? 'past the ' + maxFiles + '-file limit'
+                : written + item.data.length > maxBytes
+                  ? 'past the ' + size(maxBytes) + ' limit'
+                  : undefined
+          if (reason) {
+            omitted.push({
+              path: item.path,
+              bytes: item.kind === 'file' ? item.data.length : undefined,
+              reason,
+            })
+            continue
+          }
+          if (item.kind !== 'file') continue
+          count++
+          written += item.data.length
+          const path = target + '/' + item.path
+          folder(parentOf(path))
+          queued.push({
+            id: item.sha,
+            relative: item.path,
+            file: {
+              path,
+              data: item.data,
+              mtime: Date.now(),
+              source: Sources.github(owner, name, found.commit, item.path),
+            },
+          })
+          queuedBytes += item.data.length + 512
+          if (queuedBytes >= BATCH_BYTES) await flush()
+          await breathe()
+        }
+        await flush()
+        break
+      }
       const download = await fetchArchive(ctx, github, options.repository, ref)
       watch = download.watch
       stream = download.response.body!.pipeThrough(new DecompressionStream('gzip')).getReader()
@@ -518,8 +614,15 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
   }
   const pax = reader.global['comment']
   const commit = pax && /^[0-9a-f]{40}$/.test(pax) ? pax : null
-  const info =
-    github.details === false
+  const info = pinned
+    ? {
+        branch: pinned.branch,
+        author: pinned.info.author,
+        date: pinned.info.date,
+        message: pinned.info.message,
+        commit: pinned.commit,
+      }
+    : github.details === false
       ? { branch: ref === 'HEAD' ? null : ref, author: null, date: null, message: null, commit }
       : await details(ctx, github, options.repository, ref, commit)
   const snapshot: Snapshot = {
@@ -567,19 +670,28 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
       '/' +
       (snapshot.commit ?? ref) +
       '/'
+    const known = omitted.every((item) => item.bytes !== undefined)
     ctx.stderr.write(
       'warning: left out ' +
         omitted.length +
         ' file' +
         (omitted.length === 1 ? '' : 's') +
-        ' (' +
-        size(omitted.reduce((total, item) => total + item.bytes, 0)) +
-        '); fetch one with curl -sLO ' +
+        (known
+          ? ' (' + size(omitted.reduce((total, item) => total + (item.bytes ?? 0), 0)) + ')'
+          : '') +
+        '; fetch one with curl -sLO ' +
         raw +
         'PATH\n',
     )
     for (const item of omitted.slice(0, 10))
-      ctx.stderr.write('  ' + item.path + ' (' + size(item.bytes) + ', ' + item.reason + ')\n')
+      ctx.stderr.write(
+        '  ' +
+          item.path +
+          ' (' +
+          (item.bytes === undefined ? '' : size(item.bytes) + ', ') +
+          item.reason +
+          ')\n',
+      )
     if (omitted.length > 10)
       ctx.stderr.write(
         '  ... and ' + (omitted.length - 10) + ' more, listed in .git/nanocode.json\n',
@@ -597,6 +709,9 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
         (snapshot.commit ? snapshot.commit.slice(0, 7) : ref) +
         ': a source snapshot without history' +
         (skipped ? '; skipped ' + skipped + ' symbolic link' + (skipped === 1 ? '' : 's') : '') +
+        (submodules
+          ? '; skipped ' + submodules + ' submodule' + (submodules === 1 ? '' : 's')
+          : '') +
         '.\n',
     )
   return 0
