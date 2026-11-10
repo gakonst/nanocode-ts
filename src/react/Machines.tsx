@@ -23,7 +23,15 @@ import {
   Wallet,
 } from '../machines/index.ts'
 import type * as Mcp from '../machines/Mcp.ts'
-import { useConfig, useConversations, useHand, usePart, useSend, useTranscript } from './index.tsx'
+import {
+  type Connection,
+  useConfig,
+  useConversations,
+  useHand,
+  usePart,
+  useSend,
+  useTranscript,
+} from './index.tsx'
 
 export function useMachine(runtime: Machine.Runtime, options: useMachine.Options) {
   const { model } = options
@@ -716,6 +724,26 @@ export function Unlock(props: Unlock.Props) {
 export declare namespace Unlock {
   type Props = {
     machine: Keyed
+  }
+}
+
+export function walletConnection(machine: Unlocking): Connection {
+  const connected = machine.connected
+  return {
+    id: 'wallet',
+    label: 'Tempo Wallet',
+    detail: 'pay for tools and services per request',
+    connect: () => void machine.command('/login', false),
+    status: connected
+      ? {
+          state: 'connected',
+          as: Wallet.short(connected.address),
+          ...(machine.checkout || machine.device ? { panel: <Prompts machine={machine} /> } : {}),
+          disconnect: () => void machine.command('/logout', false),
+        }
+      : machine.working
+        ? { state: 'pending', panel: <Prompts machine={machine} /> }
+        : { state: 'idle' },
   }
 }
 

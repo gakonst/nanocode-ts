@@ -8,6 +8,7 @@ export {
 export {
   Chat,
   type Command,
+  type Connection,
   type Disclosure,
   EntryView,
   type Picker,
@@ -16,10 +17,10 @@ export {
   Thinking,
 } from './Chat.tsx'
 export { Code, fences } from './Code.tsx'
-export { Hand, HandConnect, type HandState, useHand } from './Hand.tsx'
+export { Hand, HandConnect, handConnection, type HandState, useHand } from './Hand.tsx'
 export { Image, imageSource, useWorkspaceFile } from './Image.tsx'
 export { Markdown, Reply } from './Markdown.tsx'
-export { PlanConnect, type PlanState, usePlans } from './Plans.tsx'
+export { PlanConnect, planConnections, type PlanState, usePlans } from './Plans.tsx'
 export {
   type Highlighter,
   NanocodeProvider,

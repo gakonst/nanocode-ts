@@ -41,6 +41,18 @@ export type Picker = {
 
 export type Disclosure = 'expanded' | 'collapsed' | 'hidden'
 
+export type Connection = {
+  id: string
+  label: string
+  detail: string
+  connect(): void
+  status:
+    | { state: 'idle' }
+    | { state: 'pending'; panel?: ReactNode }
+    | { state: 'connected'; as?: string; panel?: ReactNode; disconnect?(): void }
+    | { state: 'failed'; error: string }
+}
+
 export function Thinking(props: Thinking.Props) {
   const part = usePart()
   const { entry, live = false, collapsed = true } = props
@@ -201,6 +213,9 @@ export function Chat(props: Chat.Props) {
   const log = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const stick = useRef(true)
+  const connections = props.connections ?? []
+  const linked = useRef(connections)
+  linked.current = connections
 
   useEffect(() => {
     if (!busy) return setTyping(false)
@@ -253,7 +268,12 @@ export function Chat(props: Chat.Props) {
     ? picker.items(picker.filter ? prompt : '')
     : query === undefined
       ? []
-      : (props.commands ?? [])
+      : [
+          ...(props.commands ?? []),
+          ...(connections.length && !props.commands?.some((command) => command.label === '/connect')
+            ? [{ label: '/connect', detail: connections.map((item) => item.label).join(', ') }]
+            : []),
+        ]
           .filter((command) => command.label.startsWith(query))
           .map((command) => ({ kind: 'choice', ...command }))
   const choices = items.filter((item) => item.kind === 'choice')
@@ -265,6 +285,10 @@ export function Chat(props: Chat.Props) {
     const attached = attachments.ready
     if (!text && !attached.length) return
     if (attachments.uploading) return
+    if (text === '/connect' && connections.length && !attached.length) {
+      setPrompt('')
+      return openConnections()
+    }
     setPrompt('')
     setRecalled(-1)
     stick.current = true
@@ -351,6 +375,38 @@ export function Chat(props: Chat.Props) {
       ? (props.steering ?? 'Steer the running turn')
       : (props.placeholder ?? 'Ask the agent, or type / for commands')
   let position = -1
+
+  const openConnections = () =>
+    setOwn({
+      title: 'Connect',
+      items: () =>
+        linked.current.map((item): Pickers.Item => {
+          const status = item.status
+          return {
+            kind: 'choice',
+            label: item.label,
+            value: item.id,
+            current: status.state === 'connected',
+            detail:
+              status.state === 'idle'
+                ? item.detail
+                : status.state === 'pending'
+                  ? 'connecting…'
+                  : status.state === 'failed'
+                    ? status.error
+                    : [status.as ?? 'connected', status.disconnect ? 'disconnect' : undefined]
+                        .filter(Boolean)
+                        .join(' · '),
+          }
+        }),
+      onChoose: (item) => {
+        const found = linked.current.find((entry) => entry.id === item.value)
+        if (!found) return
+        if (found.status.state === 'connected' && found.status.disconnect) found.status.disconnect()
+        else found.connect()
+      },
+    })
+  const joined = connections.filter((item) => item.status.state === 'connected').length
 
   const openHistory = () =>
     setOwn({
@@ -451,6 +507,22 @@ export function Chat(props: Chat.Props) {
       </p>
 
       {props.extras}
+
+      {connections.map((item) =>
+        (item.status.state === 'pending' || item.status.state === 'connected') &&
+        item.status.panel ? (
+          <Fragment key={item.id}>{item.status.panel}</Fragment>
+        ) : item.status.state === 'failed' ? (
+          <p key={item.id} {...part('row')}>
+            <span aria-hidden="true" {...part('chevron')}>
+              ❯
+            </span>
+            <button onClick={item.connect} type="button" {...part('suggestion')}>
+              {item.label}: {item.status.error} · try again
+            </button>
+          </p>
+        ) : null,
+      )}
 
       {(picker || items.length > 0) && (
         <div aria-label={picker?.title ?? 'Commands'} role="listbox" {...part('picker')}>
@@ -564,7 +636,7 @@ export function Chat(props: Chat.Props) {
 
       <p {...part('status')}>
         <span {...part('statusText')}>{props.status}</span>
-        {(props.actions || threads.enabled || canCancel) && (
+        {(props.actions || threads.enabled || canCancel || connections.length > 0) && (
           <span {...part('actions')}>
             {canCancel && (
               <button
@@ -585,6 +657,20 @@ export function Chat(props: Chat.Props) {
                 {...part('suggestion', { quiet: true })}
               >
                 history ({threads.conversations.length})
+              </button>
+            )}
+            {connections.length > 0 && (
+              <button
+                onClick={openConnections}
+                title={connections.map((item) => item.label).join(', ')}
+                type="button"
+                {...part('suggestion', { quiet: true })}
+              >
+                {connections.some((item) => item.status.state === 'pending')
+                  ? 'connecting…'
+                  : joined
+                    ? `connected (${joined})`
+                    : 'connect'}
               </button>
             )}
             {props.actions}
@@ -624,6 +710,7 @@ export declare namespace Chat {
     suggestions?: readonly Suggestion[]
     status?: ReactNode
     actions?: ReactNode
+    connections?: readonly Connection[]
     extras?: ReactNode
     after?(entry: Transcript.Entry, index: number): ReactNode
     link?: { href: string; label: string }

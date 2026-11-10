@@ -2,11 +2,13 @@
 
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
 import * as Plans from '../client/Plans.ts'
+import type { Connection } from './Chat.tsx'
 import { usePart } from './Provider.tsx'
 
 export type PlanState = {
   status?: Plans.Status
   pending?: Plans.SignIn
+  asked?: Plans.Provider
   error?: string
   busy: boolean
   signIn(provider: Plans.Provider): void
@@ -19,6 +21,7 @@ export type PlanState = {
 export function usePlans(client: Plans.Client | undefined): PlanState {
   const [status, setStatus] = useState<Plans.Status>()
   const [pending, setPending] = useState<Plans.SignIn>()
+  const [asked, setAsked] = useState<Plans.Provider>()
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState(false)
 
@@ -58,28 +61,33 @@ export function usePlans(client: Plans.Client | undefined): PlanState {
   return {
     ...(status ? { status } : {}),
     ...(pending ? { pending } : {}),
+    ...(asked ? { asked } : {}),
     ...(error ? { error } : {}),
     busy,
     refresh,
     cancel: () => setPending(undefined),
-    signIn: (provider) =>
+    signIn: (provider) => {
+      setAsked(provider)
       run(async (client) => {
         const started = await client.signIn(provider)
         setPending(started)
         if (started.provider === 'codex')
           setStatus((current) => current && { ...current, codex: started.status })
-      }),
+      })
+    },
     complete: (code) =>
       run(async (client) => {
         const claude = await client.complete(code.trim())
         setStatus((current) => current && { ...current, claude })
         setPending(undefined)
       }),
-    signOut: (provider) =>
+    signOut: (provider) => {
+      setAsked(provider)
       run(async (client) => {
         await client.signOut(provider)
         setStatus(await client.status())
-      }),
+      })
+    },
   }
 }
 
@@ -197,6 +205,26 @@ export function PlanConnect(props: PlanConnect.Props) {
       })}
     </>
   )
+}
+
+export function planConnections(
+  plans: PlanState,
+  providers: readonly Plans.Provider[] = ['codex', 'claude'],
+): Connection[] {
+  return providers.map((provider) => ({
+    id: `plan:${provider}`,
+    label: `${Plans.name(provider)} plan`,
+    detail: 'run the model on your subscription',
+    connect: () => plans.signIn(provider),
+    status:
+      plans.pending?.provider === provider
+        ? { state: 'pending', panel: <PlanConnect plans={plans} providers={[provider]} /> }
+        : plans.status?.[provider].state === 'authenticated'
+          ? { state: 'connected', disconnect: () => plans.signOut(provider) }
+          : plans.error && plans.asked === provider
+            ? { state: 'failed', error: plans.error }
+            : { state: 'idle' },
+  }))
 }
 
 export declare namespace PlanConnect {

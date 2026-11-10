@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import * as Relay from '../client/Relay.ts'
+import type { Connection } from './Chat.tsx'
 import { usePart } from './Provider.tsx'
 
 export function Hand(props: Hand.Props) {
@@ -180,6 +181,34 @@ export declare namespace HandConnect {
   type Props = {
     hand: HandState
     install?: string
+    tab?: string | false
+  }
+}
+
+export function handConnection(hand: HandState, options: handConnection.Options = {}): Connection {
+  return {
+    id: 'hand',
+    label: options.label ?? 'Your machine',
+    detail: "run the agent's code with your files and shell",
+    connect: hand.show,
+    status: hand.error
+      ? { state: 'failed', error: hand.error }
+      : hand.hands.length
+        ? {
+            state: 'connected',
+            as: `${hand.where} · show the command`,
+            ...(hand.open ? { panel: <HandConnect hand={hand} {...options} /> } : {}),
+          }
+        : hand.open
+          ? { state: 'pending', panel: <HandConnect hand={hand} {...options} /> }
+          : { state: 'idle' },
+  }
+}
+
+export declare namespace handConnection {
+  type Options = {
+    install?: string
+    label?: string
     tab?: string | false
   }
 }
