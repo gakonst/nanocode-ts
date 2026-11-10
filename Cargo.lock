@@ -2181,6 +2181,7 @@ dependencies = [
  "imbl-sized-chunks",
  "rand_core 0.9.5",
  "rand_xoshiro",
+ "serde_core",
  "version_check",
  "wide",
 ]
@@ -2622,6 +2623,7 @@ dependencies = [
  "nanocode-tool-contracts",
  "nanocode-tool-host",
  "nanocode-tool-runtime",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -2722,6 +2724,7 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "nanocode-home",
+ "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tools",
