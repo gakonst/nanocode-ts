@@ -278,7 +278,21 @@ export function Chat(props: Chat.Props) {
           .map((command) => ({ kind: 'choice', ...command }))
   const choices = items.filter((item) => item.kind === 'choice')
   const highlighted = Math.min(highlight, Math.max(0, choices.length - 1))
-  const width = Math.max(0, ...choices.map((item) => item.label.length))
+  const widths = (() => {
+    const found = new Map<Pickers.Item, number>()
+    let group: Pickers.Item[] = []
+    const close = () => {
+      const width = Math.max(0, ...group.map((item) => item.label.length))
+      for (const item of group) found.set(item, width)
+      group = []
+    }
+    for (const item of items) {
+      if (item.kind === 'header') close()
+      else group.push(item)
+    }
+    close()
+    return found
+  })()
 
   const submit = (raw: string) => {
     const text = raw.trim()
@@ -549,7 +563,7 @@ export function Chat(props: Chat.Props) {
                 onClick={() => choose(item)}
                 onMouseMove={() => setHighlight(index)}
                 role="option"
-                style={{ gridTemplateColumns: `2ch ${width}ch 2ch auto` }}
+                style={{ gridTemplateColumns: `2ch ${widths.get(item)}ch 2ch auto` }}
                 type="button"
                 {...part('choice')}
               >
