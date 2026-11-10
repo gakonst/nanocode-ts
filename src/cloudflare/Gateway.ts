@@ -317,6 +317,43 @@ async function warm(
   })
 }
 
+async function prime(ai: Ai, gateway: string, request: Request): Promise<Response> {
+  let dispatch: { provider?: unknown; model?: unknown }
+  try {
+    dispatch = JSON.parse(request.headers.get('x-nanocode-model') ?? '')
+  } catch {
+    return json({ error: 'invalid model dispatch' }, 400)
+  }
+  if (typeof dispatch.model !== 'string') return json({ error: 'prime names no model' }, 400)
+  let upstream: Response
+  if (dispatch.provider === 'codex') {
+    const opened = ai.gateway(gateway)
+    try {
+      upstream = await opened.run({
+        provider: 'openai',
+        endpoint: 'responses',
+        headers: { 'content-type': 'application/json' },
+        query: { model: dispatch.model, input: 'ok', max_output_tokens: 0, store: false },
+      })
+    } finally {
+      ;(opened as Partial<Disposable>)[Symbol.dispose]?.()
+    }
+  } else {
+    const catalog = catalogModel(dispatch.model)
+    upstream = (await ai.run(
+      catalog,
+      { model: catalog, max_tokens: 0, messages: [{ role: 'user', content: 'ok' }] },
+      {
+        gateway: { id: gateway },
+        returnRawResponse: true,
+        extraHeaders: { 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      },
+    )) as unknown as Response
+  }
+  await upstream.body?.cancel()
+  return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
+}
+
 export function create(ai: Ai, options: create.Options): App.PrivateBinding {
   const firstByteMs = options.firstByteMs ?? 45_000
   const gateway = options.id
@@ -329,6 +366,7 @@ export function create(ai: Ai, options: create.Options): App.PrivateBinding {
         return model(ai, gateway, serviceTier, firstByteMs, request)
       if (pathname === '/warm' && request.method === 'POST')
         return warm(ai, gateway, serviceTier, request)
+      if (pathname === '/prime' && request.method === 'POST') return prime(ai, gateway, request)
       if (pathname === '/socket')
         return json(
           {

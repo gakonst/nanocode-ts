@@ -38,6 +38,7 @@ export type Env = {
   EVENT_TAIL_BYTES: string
   EVENT_COALESCE_MS: string
   MODEL_SOCKET_LINGER_MS: string
+  MODEL_PRIME_IDLE_MS?: string
   RUNTIME_MEMORY_BUDGET_BYTES: string
   RUNNER_ENABLED?: string
   REMOTE_MAX_FRAME_BYTES: string
@@ -357,6 +358,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private handRequestsPruned = 0
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
+    private modelAt?: number
 
     private readonly tripwires = new Map<string, string>()
     private directoryEpoch = 0
@@ -648,6 +650,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             await Promise.all([this.instance(scope), opened])
             return new Response(null, { status: 204 })
           }
+          this.modelAt = Date.now()
           const [, warmed] = await Promise.all([
             this.instance(scope),
             egress(this.env).fetch(
@@ -747,6 +750,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const providerKey = `model_provider:${scope}`
         const modelKey = `model:${scope}`
         const payerKey = `payer:${scope}`
+        this.prime(
+          this.metadata.get(providerKey) ?? input.provider ?? 'claude',
+          this.metadata.get(modelKey) ?? input.model,
+          this.metadata.get(payerKey) ?? input.payer,
+        )
         const sessionKey = this.sessionKey(scope)
         const unbound = () =>
           this.metadata.get(executorKey) === undefined &&
@@ -1618,6 +1626,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   subscription: descriptor.subscription,
                   ...(descriptor.payer ? { payer: descriptor.payer } : {}),
                 }
+                this.modelAt = Date.now()
                 const response = await egress(this.env).fetch(
                   new Request('https://egress.internal/model', {
                     method: 'POST',
@@ -2457,6 +2466,36 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           payer,
         ),
       }
+    }
+
+    private prime(provider: unknown, model: unknown, payer: unknown): void {
+      if (this.env.MODEL_PRIME_IDLE_MS === undefined) return
+      if (payer === 'plan' || payer === 'wallet') return
+      if (typeof model === 'string' && workersAiModels.has(model)) return
+      const idle = policy(this.env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
+      if (this.modelAt !== undefined && Date.now() - this.modelAt < idle) return
+      this.modelAt = Date.now()
+      this.ctx.waitUntil(
+        egress(this.env)
+          .fetch(
+            new Request('https://egress.internal/prime', {
+              method: 'POST',
+              headers: {
+                'x-nanocode-model': headerJson({
+                  provider,
+                  model:
+                    typeof model === 'string' && model
+                      ? model
+                      : provider === 'codex'
+                        ? 'gpt-6.1-sol'
+                        : (this.env.CLAUDE_MODEL ?? 'claude-opus-5-5'),
+                }),
+              },
+            }),
+          )
+          .then((response) => response.body?.cancel())
+          .catch(() => undefined),
+      )
     }
 
     private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
