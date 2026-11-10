@@ -14,7 +14,9 @@ export type Item = {
   value?: string
 }
 
-export type Model = Pick<Contracts.ModelEntry, 'id' | 'name' | 'efforts' | 'effort'>
+export type Model = Pick<Contracts.ModelEntry, 'id' | 'name' | 'efforts' | 'effort'> & {
+  detail?: string | undefined
+}
 
 export function models(harnesses: readonly Harness[], options: models.Options): Item[] {
   const { model, query } = options
@@ -24,7 +26,13 @@ export function models(harnesses: readonly Harness[], options: models.Options): 
       .map((candidate) => ({
         kind: 'choice' as const,
         label: candidate.id,
-        detail: `${candidate.name} · thinking ${candidate.efforts.join('/')}`,
+        detail: [
+          candidate.name === candidate.id ? undefined : candidate.name,
+          candidate.detail,
+          `thinking ${candidate.efforts.join('/')}`,
+        ]
+          .filter(Boolean)
+          .join(' · '),
         current: candidate.id === model,
       }))
       .filter((item) =>

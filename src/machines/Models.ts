@@ -1,8 +1,9 @@
+import * as Tempo from './Tempo.ts'
 import * as Wallet from './Wallet.ts'
 
-export const endpoint = 'https://openai.mpp.tempo.xyz/v1'
+export const endpoint = Tempo.endpoint
 
-export const anthropic = 'https://anthropic.mpp.tempo.xyz/v1/messages'
+export const anthropic = Tempo.anthropic
 
 export type Model = {
   about: string

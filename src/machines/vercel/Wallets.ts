@@ -2,6 +2,7 @@ import { defineDoc, type DurableSessions } from 'durable-harness'
 import type * as Gateway from '../../vercel/Gateway.ts'
 import * as Egress from '../../vercel/internal/Egress.ts'
 import * as Payment from '../Payment.ts'
+import * as Tempo from '../Tempo.ts'
 import {
   create as createAccount,
   type Account,
@@ -12,7 +13,7 @@ import {
   type Store,
 } from '../Account.ts'
 
-const proxies = new Set(['https://openai.mpp.tempo.xyz', 'https://anthropic.mpp.tempo.xyz'])
+const proxies = new Set([Tempo.gateway])
 
 const forwardedHeaders = /^(accept|content-type|anthropic-version|anthropic-beta)$/
 
@@ -74,7 +75,9 @@ export function create(options: create.Options) {
       (sessionId: string): Gateway.Dispatch =>
       async (request, signal) => {
         if (!proxies.has(new URL(request.endpoint).origin))
-          throw new Error(`model request to ${request.endpoint} is not for an MPP model proxy`)
+          throw new Error(
+            `model request to ${request.endpoint} is not for the Tempo gateway at ${Tempo.gateway}`,
+          )
         return holder(sessionId).send('model', request.endpoint, {
           method: 'POST',
           headers: request.headers.filter(([name]) => forwardedHeaders.test(name.toLowerCase())),

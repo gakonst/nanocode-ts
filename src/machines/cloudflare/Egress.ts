@@ -1,10 +1,11 @@
 import type * as App from '../../cloudflare/App.ts'
 import { json } from '../Account.ts'
+import * as Tempo from '../Tempo.ts'
 import * as Env from './Env.ts'
 
 export const proxies: Record<string, string> = {
-  'api.openai.com': 'https://openai.mpp.tempo.xyz',
-  'api.anthropic.com': 'https://anthropic.mpp.tempo.xyz',
+  'api.openai.com': Tempo.gateway,
+  'api.anthropic.com': Tempo.gateway,
 }
 
 const forwardedHeaders = /^(accept|content-type|anthropic-version|anthropic-beta)$/
@@ -30,7 +31,12 @@ async function model(env: Env.Env, request: Request): Promise<Response> {
     )
   const upstream = new URL(dispatch.endpoint)
   const proxy = proxies[upstream.hostname]
-  if (!proxy) return modelError(dispatch.provider, 400, `no MPP proxy for ${upstream.hostname}`)
+  if (!proxy)
+    return modelError(
+      dispatch.provider,
+      400,
+      `the Tempo gateway serves no models for ${upstream.hostname}`,
+    )
   const headers: [string, string][] = dispatch.headers.filter(([name]) =>
     forwardedHeaders.test(name.toLowerCase()),
   )

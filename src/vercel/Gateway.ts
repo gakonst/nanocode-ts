@@ -1,4 +1,5 @@
 import type * as Contracts from '../Contracts.ts'
+import * as Tempo from '../machines/Tempo.ts'
 
 export type Dispatch = (
   request: { endpoint: string; method: string; headers: [string, string][]; body: Uint8Array },
@@ -59,9 +60,7 @@ export function planEndpoint(provider: Contracts.ModelProvider): string {
 }
 
 export function walletEndpoint(provider: Contracts.ModelProvider): string {
-  return provider === 'codex'
-    ? 'https://openai.mpp.tempo.xyz/v1'
-    : 'https://anthropic.mpp.tempo.xyz/v1/messages'
+  return provider === 'codex' ? Tempo.endpoint : Tempo.anthropic
 }
 
 export function url(): string {

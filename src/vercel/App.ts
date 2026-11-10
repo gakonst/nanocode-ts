@@ -14,6 +14,7 @@ import * as Harness from './Harness.ts'
 import * as Journal from './Journal.ts'
 import * as SqlFileSystem from '../bash/SqlFileSystem.ts'
 import * as Files from '../internal/Files.ts'
+import * as Tempo from '../machines/Tempo.ts'
 import * as Attachments from './internal/Attachments.ts'
 import * as LocalSql from './internal/LocalSql.ts'
 import * as Plans from './Plans.ts'
@@ -76,6 +77,13 @@ export declare namespace select {
     harness: unknown
     model: unknown
   }
+}
+
+function served(options: select.Options): Selection | undefined {
+  if (options.harness !== 'claude' && options.harness !== 'codex') return undefined
+  if (typeof options.model !== 'string' || !options.model.trim()) return undefined
+  const thinking = Tempo.efforts.find((level) => level === options.effort)
+  return thinking ? { model: options.model, provider: options.harness, thinking } : undefined
 }
 
 type Body = {
@@ -282,11 +290,19 @@ export function create(options: create.Options) {
     if (body.payer !== undefined && !payers.includes(body.payer as Contracts.Payer))
       return new Response(`payer must be one of ${payers.join(', ')}`, { status: 400 })
     const payer = body.payer as Contracts.Payer | undefined
+    const gateway = payer === 'wallet' && !payerHarnesses?.wallet
     const offered = (payer && payerHarnesses?.[payer]) || harnesses
-    const selection =
-      body.harness === undefined && body.model === undefined
-        ? defaultSelection
-        : select(offered, { effort: body.effort, harness: body.harness, model: body.model })
+    const selection = (() => {
+      const chosen = { effort: body.effort, harness: body.harness, model: body.model }
+      if (body.harness === undefined && body.model === undefined) return defaultSelection
+      if (gateway) return served(chosen)
+      return select(offered, chosen)
+    })()
+    if (!selection && gateway)
+      return new Response(
+        `harness must be claude or codex, model one that the Tempo gateway lists at ${Tempo.listing}, and effort one of ${Tempo.efforts.join(', ')}`,
+        { status: 400 },
+      )
     if (!selection)
       return new Response(
         `harness, model and effort must name one of ${offered.map((entry) => `${entry.id} (${entry.models.map((model) => `${model.id}: ${model.efforts.join('|')}`).join(', ')})`).join(' or ')}`,
