@@ -15,7 +15,6 @@ import * as AgentRuntime from '../AgentRuntime.ts'
 import * as Remote from '../Remote.ts'
 import * as Gateway from './Gateway.ts'
 import * as Journal from './Journal.ts'
-import * as Thread from '../internal/Thread.ts'
 import * as Wasm from './Wasm.ts'
 import * as Bash from '../bash/Bash.ts'
 import type * as FileSystem from '../bash/FileSystem.ts'
@@ -163,7 +162,6 @@ export function create(options: create.Options = {}): Harness {
   const gateway = options.endpoint ? options.gateway : 'vercel'
   const module = options.module ?? Wasm.load
   const durability = options.durability ?? 'on'
-  const engine = Thread.engine()
 
   async function run(
     ctx: DriveContext,
@@ -174,7 +172,6 @@ export function create(options: create.Options = {}): Harness {
     const opening = performance.now()
     const publish = publisher(ctx)
     const runtime = await AgentRuntime.instantiate(await module(), journal, {
-      ...(engine ? { engine } : {}),
       published: (events) => {
         for (const logged of events) {
           const call = modelCall(logged)
