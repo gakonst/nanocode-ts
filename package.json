@@ -100,6 +100,7 @@
     },
     "./nanocode_wasm.wasm": "./dist/nanocode_wasm.wasm",
     "./interpreter.wasm": "./dist/interpreter.wasm",
+    "./psh.wasm": "./dist/psh.wasm",
     "./pyodide-modules": {
       "types": "./dist/pyodide/modules.d.ts",
       "default": "./dist/pyodide/modules.js"

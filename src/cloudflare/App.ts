@@ -1433,6 +1433,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 fetch: cellFetch,
                 github: { archive: false, ...options.workspace?.github },
                 wasm: { interpreter },
+                ...(options.workspace?.psh ? { psh: options.workspace.psh } : {}),
                 ...(pythonRemote
                   ? {
                       python: {
@@ -3386,6 +3387,7 @@ export declare namespace create {
           limits?: Partial<Bash.Limits>
           maxFileBytes?: number
           mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>
+          psh?: WebAssembly.Module | Promise<WebAssembly.Module>
           python?(authority: SessionAuthority, env: E): Python.Remote | undefined
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
