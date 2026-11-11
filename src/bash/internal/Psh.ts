@@ -2,7 +2,14 @@ import * as FileSystem from '../FileSystem.ts'
 import { breathe, decode, encode } from './Fs.ts'
 import * as Shell from './Shell.ts'
 
-export type Ended = 'cancelled' | 'exited' | 'fuel' | 'memory' | 'missing' | 'operations'
+export type Ended =
+  | 'cancelled'
+  | 'exited'
+  | 'fuel'
+  | 'memory'
+  | 'missing'
+  | 'operations'
+  | 'unanswered'
 
 export type Instance = {
   current: Host | undefined
@@ -41,6 +48,7 @@ export type Ran = {
   stderr: Uint8Array
   stdout: Uint8Array
   truncated: boolean
+  unanswered: string
 }
 
 type Exports = {
@@ -97,11 +105,13 @@ type Reply = {
   err: number
 }
 
-const abiVersion = 4
+const abiVersion = 5
 
 const budget = 2_000
 
 const readBytes = 65_536
+
+const machineVariables = ['IFS', 'OPTERR', 'OPTIND', 'OSTYPE', 'PS4', 'PWD']
 
 const kind = {
   done: 8,
@@ -160,7 +170,14 @@ const stat = new DataView(new ArrayBuffer(24))
 
 const statView = new Uint8Array(stat.buffer)
 
-const ended: readonly Ended[] = ['exited', 'cancelled', 'fuel', 'missing', 'operations']
+const ended: readonly Ended[] = [
+  'exited',
+  'cancelled',
+  'fuel',
+  'missing',
+  'operations',
+  'unanswered',
+]
 
 const empty = new Uint8Array(0)
 
@@ -328,6 +345,7 @@ export declare namespace run {
     identity: Identity
     kept: Kept | undefined
     limits: Limits
+    machine: ReadonlySet<string> | undefined
     shellLimits: Shell.Limits
     script: string
     signal: AbortSignal
@@ -372,6 +390,7 @@ function exceeded(): Ran {
     stderr: empty,
     stdout: empty,
     truncated: false,
+    unanswered: '',
   }
 }
 
@@ -556,6 +575,10 @@ function hostCall(instance: Instance, call: Call): number {
 
 function code(host: Host, error: unknown): number {
   if (error instanceof FileSystem.FsError) return errno[error.code] ?? errno.EIO!
+  if (error instanceof Shell.MachineError) {
+    halt(host, error.message)
+    return errno.EIO!
+  }
   host.failure ??= error
   host.cancel()
   return errno.EIO!
@@ -662,6 +685,16 @@ function config(options: run.Options): Uint8Array {
 
   out.u32(options.without.length)
   for (const name of options.without) out.string(name)
+
+  const machine = options.machine
+  out.u32(machine ? 1 : 0)
+  if (machine) {
+    out.u32(machine.size)
+    for (const name of machine) out.string(name)
+    const variables = [...env.map((entry) => entry[0]), ...machineVariables]
+    out.u32(variables.length)
+    for (const name of variables) out.string(name)
+  }
   return out.done()
 }
 
@@ -691,6 +724,7 @@ function result(instance: Instance, host: Host): Ran {
   const stderr = data.bytes()
   const missing: string[] = []
   for (let left = data.u32(); left > 0; left--) missing.push(text.decode(data.bytes()))
+  const unanswered = text.decode(data.bytes())
   return {
     ended: how,
     fuel,
@@ -701,6 +735,7 @@ function result(instance: Instance, host: Host): Ran {
     stderr,
     stdout,
     truncated,
+    unanswered,
   }
 }
 
@@ -1111,7 +1146,7 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
     },
   )
   proc.feed = feed
-  const stdin = Shell.Input.pipe(feed)
+  const stdin = call.captured & 4 ? Shell.Input.machine() : Shell.Input.pipe(feed)
   const output = (fd: number): Shell.Output =>
     Shell.Output.spill(
       limits.maxBufferLength,
@@ -1191,13 +1226,15 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
 
   let status: number
   try {
-    if (Shell.buffered(name, { commands: options.commands, handler })) await stdin.fill()
+    if (!stdin.ready && Shell.buffered(name, { commands: options.commands, handler }))
+      await stdin.fill()
     status = (await handler(context)) ?? 0
   } catch (error) {
     status = await (async () => {
       if (error instanceof Shell.PipeError) return 141
       if (error instanceof Shell.ExitSignal) return error.status
       const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof Shell.MachineError) return halt(host, message)
       if (error instanceof Shell.LimitError) {
         stderr.write('bash: ' + message + '\n')
         return error.status

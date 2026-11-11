@@ -211,7 +211,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       if (execOptions.signal?.aborted) onAbort()
       execOptions.signal?.addEventListener('abort', onAbort, { once: true })
       const directory = FileSystem.resolvePath(cwd, execOptions.cwd ?? cwd)
-      const engine = machine ? undefined : await options.psh
+      const engine = await options.psh
       if (engine) {
         const outcome = await engineRun(engine, {
           controller,
@@ -444,12 +444,13 @@ export async function create(options: create.Options = {}): Promise<Bash> {
             operations: limits.maxFileOperations,
             output: limits.maxOutputLength,
           },
+          machine,
           script: request.script,
           shellLimits: { ...limits, timeoutMs: request.timeoutMs },
           signal: request.controller.signal,
           stdin:
             request.execOptions.stdin === undefined ? undefined : encode(request.execOptions.stdin),
-          strict: options.fallback === true,
+          strict: options.fallback === true || machine !== undefined,
           without: Object.keys(options.commands ?? {}),
         }
 
@@ -544,6 +545,13 @@ export async function create(options: create.Options = {}): Promise<Bash> {
           'command_not_found',
         )
       }
+
+      case 'unanswered':
+        return outcome(
+          '/bin/bash: ' + Shell.unanswered(ran.unanswered) + '\n',
+          127,
+          'command_not_found',
+        )
 
       case 'cancelled': {
         if (ran.halted !== undefined)
