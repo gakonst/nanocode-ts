@@ -7,6 +7,7 @@ import {
   type FileSystem,
   type LinkStat,
   type NewFile,
+  type SyncFileSystem,
 } from './FileSystem.ts'
 import { baseOf, encode, parentOf } from './internal/Fs.ts'
 
@@ -199,11 +200,8 @@ export function create(options: create.Options = {}): MemoryFileSystem {
   for (const [path, content] of Object.entries(options.files ?? {}))
     seed(normalize(path), typeof content === 'string' ? encode(content) : content)
 
-  const fs: MemoryFileSystem = {
-    maxFileBytes,
-
-    async stat(path: string): Promise<FileStat | null> {
-      await fault(path)
+  const now: Required<SyncFileSystem> = {
+    stat(path: string): FileStat | null {
       let target: string
       try {
         target = real(path)
@@ -221,17 +219,14 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       }
     },
 
-    async read(path: string): Promise<Uint8Array> {
-      await fault(path)
+    read(path: string): Uint8Array {
       const node = find(real(path))
       if (!node || node.kind === 'link') throw new FsError('ENOENT', path)
       if (node.kind !== 'file') throw new FsError('EISDIR', path)
-      await load(node)
       return node.data
     },
 
-    async write(path: string, data: Uint8Array, append = false): Promise<void> {
-      await fault(path)
+    write(path: string, data: Uint8Array, append = false): void {
       const target = real(path)
       const parent = directory(parentOf(target))
       const name = baseOf(target)
@@ -239,7 +234,6 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       const existing = parent.get(name)
       if (existing?.kind === 'directory') throw new FsError('EISDIR', path)
       if (existing?.kind === 'link') throw new FsError('ENOENT', path)
-      if (append && existing) await load(existing)
       if (append && existing && data.length) {
         existing.written = true
         const length = existing.data.length + data.length
@@ -275,31 +269,11 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       })
     },
 
-    async writeMany(dirs: string[], files: NewFile[]): Promise<string[]> {
-      for (const dir of dirs) {
-        await fault(dir)
-        if (find(real(dir))?.kind !== 'directory') await fs.mkdir(dir)
-      }
-      const refused: string[] = []
-      for (const file of files) {
-        if (file.data.length > maxFileBytes) {
-          refused.push(file.path)
-          continue
-        }
-        await fs.write(file.path, file.data)
-        const node = find(real(file.path))
-        if (node?.kind === 'file') node.mtime = file.mtime
-      }
-      return refused
-    },
-
-    async list(path: string): Promise<string[]> {
-      await fault(path)
+    list(path: string): string[] {
       return [...directory(real(path)).keys()].sort()
     },
 
-    async mkdir(path: string): Promise<void> {
-      await fault(path, false)
+    mkdir(path: string): void {
       const target = real(path, false)
       const parent = directory(parentOf(target))
       if (parent.has(baseOf(target))) throw new FsError('EEXIST', path)
@@ -311,8 +285,7 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       })
     },
 
-    async remove(path: string): Promise<void> {
-      await fault(path, false)
+    remove(path: string): void {
       const target = real(path, false)
       if (target === '/') throw new FsError('EINVAL', path)
       const parent = directory(parentOf(target))
@@ -322,22 +295,19 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       parent.delete(baseOf(target))
     },
 
-    async chmod(path: string, mode: number): Promise<void> {
-      await fault(path)
+    chmod(path: string, mode: number): void {
       const node = find(real(path))
       if (!node || node.kind === 'link') throw new FsError('ENOENT', path)
       node.mode = mode & 0o7777
     },
 
-    async utimes(path: string, mtime: number): Promise<void> {
-      await fault(path)
+    utimes(path: string, mtime: number): void {
       const node = find(real(path))
       if (!node || node.kind === 'link') throw new FsError('ENOENT', path)
       node.mtime = mtime
     },
 
-    async symlink(target: string, path: string): Promise<void> {
-      await fault(path, false)
+    symlink(target: string, path: string): void {
       const link = real(path, false)
       const parent = directory(parentOf(link))
       if (link === '/' || parent.has(baseOf(link))) throw new FsError('EEXIST', path)
@@ -345,14 +315,12 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       links++
     },
 
-    async readlink(path: string): Promise<string | null> {
-      await fault(path, false)
+    readlink(path: string): string | null {
       const node = find(real(path, false))
       return node?.kind === 'link' ? node.target : null
     },
 
-    async lstat(path: string): Promise<LinkStat | null> {
-      await fault(path, false)
+    lstat(path: string): LinkStat | null {
       let target: string
       try {
         target = real(path, false)
@@ -378,9 +346,7 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       }
     },
 
-    async rename(from: string, to: string): Promise<void> {
-      await fault(from, false)
-      await fault(to, false)
+    rename(from: string, to: string): void {
       const source = real(from, false)
       const target = real(to, false)
       if (target === source) return
@@ -393,6 +359,97 @@ export function create(options: create.Options = {}): MemoryFileSystem {
       if (existing?.kind === 'directory') throw new FsError('EISDIR', to)
       sourceParent.delete(baseOf(source))
       targetParent.set(baseOf(target), node)
+    },
+  }
+
+  const held = async (path: string) => {
+    const node = find(real(path))
+    if (node?.kind === 'file') await load(node)
+  }
+
+  const fs: MemoryFileSystem = {
+    maxFileBytes,
+    ...(lower ? {} : { sync: now }),
+
+    async stat(path: string): Promise<FileStat | null> {
+      await fault(path)
+      return now.stat(path)
+    },
+
+    async read(path: string): Promise<Uint8Array> {
+      await fault(path)
+      await held(path)
+      return now.read(path)
+    },
+
+    async write(path: string, data: Uint8Array, append = false): Promise<void> {
+      await fault(path)
+      if (append) await held(path)
+      now.write(path, data, append)
+    },
+
+    async writeMany(dirs: string[], files: NewFile[]): Promise<string[]> {
+      for (const dir of dirs) {
+        await fault(dir)
+        if (find(real(dir))?.kind !== 'directory') await fs.mkdir(dir)
+      }
+      const refused: string[] = []
+      for (const file of files) {
+        if (file.data.length > maxFileBytes) {
+          refused.push(file.path)
+          continue
+        }
+        await fs.write(file.path, file.data)
+        const node = find(real(file.path))
+        if (node?.kind === 'file') node.mtime = file.mtime
+      }
+      return refused
+    },
+
+    async list(path: string): Promise<string[]> {
+      await fault(path)
+      return now.list(path)
+    },
+
+    async mkdir(path: string): Promise<void> {
+      await fault(path, false)
+      now.mkdir(path)
+    },
+
+    async remove(path: string): Promise<void> {
+      await fault(path, false)
+      now.remove(path)
+    },
+
+    async chmod(path: string, mode: number): Promise<void> {
+      await fault(path)
+      now.chmod(path, mode)
+    },
+
+    async utimes(path: string, mtime: number): Promise<void> {
+      await fault(path)
+      now.utimes(path, mtime)
+    },
+
+    async symlink(target: string, path: string): Promise<void> {
+      await fault(path, false)
+      now.symlink(target, path)
+    },
+
+    async readlink(path: string): Promise<string | null> {
+      await fault(path, false)
+      return now.readlink(path)
+    },
+
+    async lstat(path: string): Promise<LinkStat | null> {
+      await fault(path, false)
+      return now.lstat(path)
+    },
+
+    async rename(from: string, to: string): Promise<void> {
+      await fault(from, false)
+      await fault(to, false)
+      now.rename(from, to)
     },
 
     async changes(): Promise<Changes> {
