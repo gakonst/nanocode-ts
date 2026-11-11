@@ -86,6 +86,11 @@ export type Result = {
   truncated: boolean
 }
 
+type EngineKept = {
+  entries: [string, string][]
+  held: Psh.Kept
+}
+
 type EngineOutcome = {
   category: Category
   exitCode: number
@@ -101,6 +106,8 @@ type EngineRequest = {
   script: string
   timeoutMs: number
 }
+
+const idle = new FinalizationRegistry<Psh.Kept>(Psh.drop)
 
 const workspaceTimeoutMs = 600_000
 
@@ -401,6 +408,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
     },
   }
   const wasm = wasmHost(shell, options.wasm)
+  let kept: EngineKept | undefined
 
   const engineRun = async (
     engine: WebAssembly.Module,
@@ -409,13 +417,14 @@ export async function create(options: create.Options = {}): Promise<Bash> {
     const budget = { used: 0, refused: false }
     const ran = await (async () => {
       try {
-        return await Psh.run(engine, {
+        const settings: Psh.run.Options = {
           commandFs: budgeted(fs, limits.maxFileOperations, budget),
           commands,
           cwd: request.directory,
           env: { ...env, ...request.execOptions.env, PWD: request.directory },
           fetch: options.fetch,
           fs,
+          kept: undefined,
           identity: {
             group: env.USER ?? 'user',
             home: env.HOME ?? '/',
@@ -442,7 +451,23 @@ export async function create(options: create.Options = {}): Promise<Bash> {
             request.execOptions.stdin === undefined ? undefined : encode(request.execOptions.stdin),
           strict: options.fallback === true,
           without: Object.keys(options.commands ?? {}),
-        })
+        }
+
+        const entries = Object.entries(settings.env)
+        const same =
+          kept !== undefined &&
+          kept.entries.length === entries.length &&
+          entries.every(
+            (entry, index) =>
+              entry[0] === kept!.entries[index]![0] && entry[1] === kept!.entries[index]![1],
+          )
+        if (!same) {
+          if (kept) Psh.drop(kept.held)
+          kept = { entries, held: Psh.keep(settings) }
+          idle.register(shell, kept.held)
+        }
+        settings.kept = kept!.held
+        return await Psh.run(engine, settings)
       } catch (error) {
         return error instanceof Error ? error : new Error(String(error))
       }

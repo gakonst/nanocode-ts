@@ -16,6 +16,12 @@ export type Instance = {
   view: Uint8Array
 }
 
+export type Kept = {
+  config: Uint8Array
+  idle: number
+  instance: Instance | undefined
+}
+
 export type Limits = {
   depth: number
   file: number
@@ -53,6 +59,7 @@ type Exports = {
   psh_shell_cancel(id: number): void
   psh_shell_free(id: number): void
   psh_shell_new(len: number): number
+  psh_shell_renew(id: number): number
   psh_shell_result(id: number): number
   psh_shell_start(id: number, len: number): number
   psh_shell_step(id: number, budget: number): number
@@ -61,6 +68,7 @@ type Exports = {
 type Host = {
   cancel(): void
   failure: unknown
+  finished: boolean
   halted: string | undefined
   id: number
   options: run.Options
@@ -70,14 +78,22 @@ type Host = {
 }
 
 type Proc = {
-  controller: AbortController
+  aborted: boolean
+  controller: AbortController | undefined
+  feed: Shell.Pipe | undefined
   host: Host
   live: boolean
   pending: Set<number>
 }
 
+type Answer = {
+  data: Uint8Array
+  err: number
+}
+
 type Reply = {
   data: Uint8Array
+  end: boolean
   err: number
 }
 
@@ -138,6 +154,8 @@ const errno: Record<string, number> = {
 
 const later = -2147483648
 
+const readEnd = 1 << 16
+
 const stat = new DataView(new ArrayBuffer(24))
 
 const statView = new Uint8Array(stat.buffer)
@@ -194,6 +212,23 @@ export function load(module: WebAssembly.Module): Promise<Instance> {
   return created
 }
 
+export function keep(options: run.Options): Kept {
+  return { config: config(options).slice(), idle: 0, instance: undefined }
+}
+
+export function drop(kept: Kept): void {
+  const instance = kept.instance
+  const idle = kept.idle
+  kept.idle = 0
+  kept.instance = undefined
+  if (!idle || !instance || instance.failure !== undefined) return
+  try {
+    instance.exports.psh_shell_free(idle)
+  } catch (error) {
+    instance.failure = 'psh stopped: ' + (error instanceof Error ? error.message : String(error))
+  }
+}
+
 export async function run(module: WebAssembly.Module, options: run.Options): Promise<Ran> {
   const instance = await load(module)
   if (instance.failure !== undefined) {
@@ -209,11 +244,12 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
         return
       }
       if (instance.failure !== undefined || !instance.shells.has(host.id)) return
-      for (const proc of instance.procs.values()) if (proc.host === host) proc.controller.abort()
+      for (const proc of instance.procs.values()) if (proc.host === host) abort(proc)
       x.psh_shell_cancel(host.id)
       wake(host)
     },
     failure: undefined,
+    finished: false,
     halted: undefined,
     id: 0,
     options,
@@ -224,7 +260,15 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
 
   try {
     x.psh_memory_limit(options.limits.memory < 2 ** 32 ? options.limits.memory : 0)
-    host.id = enter(instance, host, () => x.psh_shell_new(input(instance, config(options))))
+    const kept = options.kept
+    if (kept && kept.idle && kept.instance === instance) {
+      host.id = kept.idle
+      kept.idle = 0
+      if (x.psh_shell_renew(host.id) !== 0) throw new EngineError('psh lost a kept shell')
+    } else {
+      const bytes = kept ? kept.config : config(options)
+      host.id = enter(instance, host, () => x.psh_shell_new(input(instance, bytes)))
+    }
     if (host.id === 0) throw new EngineError('psh refused the shell configuration')
     instance.shells.set(host.id, host)
 
@@ -258,6 +302,7 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
       if (pause) await pause
     }
 
+    host.finished = true
     if (x.psh_shell_result(host.id) !== 1) throw new EngineError('psh kept no result')
     const ran = result(instance, host)
     if (host.failure !== undefined) throw host.failure
@@ -281,6 +326,7 @@ export declare namespace run {
     fetch: typeof fetch | undefined
     fs: FileSystem.FileSystem
     identity: Identity
+    kept: Kept | undefined
     limits: Limits
     shellLimits: Shell.Limits
     script: string
@@ -361,6 +407,14 @@ function release(instance: Instance, host: Host): void {
   host.timers.clear()
   instance.shells.delete(host.id)
   if (instance.failure !== undefined) return
+
+  const kept = host.options.kept
+  if (kept && host.finished && !kept.idle) {
+    kept.idle = host.id
+    kept.instance = instance
+    return
+  }
+
   try {
     instance.exports.psh_shell_free(host.id)
   } catch (error) {
@@ -386,7 +440,7 @@ function input(instance: Instance, data: Uint8Array): number {
   return data.length
 }
 
-function answer(instance: Instance, op: number, reply: Reply): void {
+function answer(instance: Instance, op: number, reply: Answer): void {
   if (instance.failure !== undefined) return
   try {
     instance.exports.psh_complete(op, reply.err, input(instance, reply.data))
@@ -478,7 +532,7 @@ function hostCall(instance: Instance, call: Call): number {
     case kind.done: {
       const resolve = instance.requests.get(call.op)
       instance.requests.delete(call.op)
-      resolve?.({ data: payload(), err: call.arg })
+      resolve?.({ data: payload(), end: (call.arg & readEnd) !== 0, err: call.arg & 0xffff })
       return 0
     }
 
@@ -531,16 +585,20 @@ function reader(data: Uint8Array) {
   }
 }
 
+let scratch = new Uint8Array(1024)
+
+let scratchView = new DataView(scratch.buffer)
+
 function writer() {
-  let buffer = new Uint8Array(1024)
-  let view = new DataView(buffer.buffer)
+  let buffer = scratch
+  let view = scratchView
   let at = 0
   const room = (length: number) => {
     if (at + length <= buffer.length) return
     const grown = new Uint8Array(Math.max(buffer.length * 2, at + length))
     grown.set(buffer.subarray(0, at))
-    buffer = grown
-    view = new DataView(buffer.buffer)
+    buffer = scratch = grown
+    view = scratchView = new DataView(buffer.buffer)
   }
   const u32 = (value: number) => {
     room(4)
@@ -888,15 +946,27 @@ function has(host: Host, name: string): boolean {
   return host.options.commands.has(name)
 }
 
+function abort(proc: Proc): void {
+  proc.aborted = true
+  proc.controller?.abort()
+  proc.feed?.close()
+}
+
+function signalOf(proc: Proc): AbortSignal {
+  proc.controller ??= new AbortController()
+  if (proc.aborted) proc.controller.abort()
+  return proc.controller.signal
+}
+
 function stop(instance: Instance, entry: stop.Entry): void {
   const proc = entry.proc
   proc.live = false
   instance.procs.delete(entry.pid)
-  proc.controller.abort()
+  abort(proc)
   for (const request of proc.pending) {
     const resolve = instance.requests.get(request)
     instance.requests.delete(request)
-    resolve?.({ data: empty, err: errno.EPIPE! })
+    resolve?.({ data: empty, end: true, err: errno.EPIPE! })
   }
   proc.pending.clear()
 }
@@ -912,16 +982,15 @@ function spawn(instance: Instance, options: spawn.Options): void {
   const fields = reader(options.payload)
   const argv: string[] = []
   for (let left = fields.u32(); left > 0; left--) argv.push(decode(fields.bytes()))
-  const env: Record<string, string> = {}
-  for (let left = fields.u32(); left > 0; left--) {
-    const name = text.decode(fields.bytes())
-    env[name] = decode(fields.bytes())
-  }
+  const pairs: [Uint8Array, Uint8Array][] = []
+  for (let left = fields.u32(); left > 0; left--) pairs.push([fields.bytes(), fields.bytes()])
   const cwd = text.decode(fields.bytes())
   const captured = fields.u32()
 
   const proc: Proc = {
-    controller: new AbortController(),
+    aborted: false,
+    controller: undefined,
+    feed: undefined,
     host: options.host,
     live: true,
     pending: new Set(),
@@ -929,9 +998,9 @@ function spawn(instance: Instance, options: spawn.Options): void {
   instance.procs.set(options.pid, proc)
 
   void Promise.resolve()
-    .then(() => command(instance, { argv, captured, cwd, env, pid: options.pid, proc }))
+    .then(() => command(instance, { argv, captured, cwd, pairs, pid: options.pid, proc }))
     .catch((error: unknown) => {
-      if (proc.controller.signal.aborted) return 143
+      if (proc.aborted) return 143
       options.host.failure ??= error
       options.host.cancel()
       return 1
@@ -960,7 +1029,7 @@ declare namespace spawn {
 
 function ask(instance: Instance, options: ask.Options): Promise<Reply> {
   if (!options.proc.live || instance.failure !== undefined)
-    return Promise.resolve({ data: empty, err: errno.EPIPE! })
+    return Promise.resolve({ data: empty, end: true, err: errno.EPIPE! })
 
   return new Promise<Reply>((resolve) => {
     const request = instance.nextRequest++
@@ -975,7 +1044,7 @@ function ask(instance: Instance, options: ask.Options): Promise<Reply> {
       instance.failure = 'psh stopped: ' + (error instanceof Error ? error.message : String(error))
       for (const host of instance.shells.values()) wake(host)
       instance.requests.delete(request)
-      resolve({ data: empty, err: errno.EPIPE! })
+      resolve({ data: empty, end: true, err: errno.EPIPE! })
     }
   })
 }
@@ -1013,7 +1082,14 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
   if (options.strict && name === 'file')
     return halt(host, 'file: (this simulated shell has no libmagic database of file types)')
 
+  let finishing = false
   const write = async (fd: number, chunk: string) => {
+    if (finishing) {
+      if (proc.live && instance.failure === undefined)
+        x.psh_proc_write(call.pid, 0, fd, input(instance, encode(chunk)))
+      return
+    }
+
     const reply = await ask(instance, {
       proc,
       send: (request) => x.psh_proc_write(call.pid, request, fd, input(instance, encode(chunk))),
@@ -1023,40 +1099,35 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
   const limits = options.shellLimits
   const feed: Shell.Pipe = new Shell.Pipe(
     limits.maxBufferLength,
-    proc.controller.signal,
+    undefined,
     limits.maxMemoryBytes,
     async () => {
       const reply = await ask(instance, {
         proc,
         send: (request) => x.psh_proc_read(call.pid, request, readBytes),
       })
-      if (reply.err || !reply.data.length) feed.end()
-      else feed.push(decode(reply.data))
+      if (!reply.err && reply.data.length) feed.push(decode(reply.data))
+      if (reply.err || reply.end || !reply.data.length) feed.end()
     },
   )
+  proc.feed = feed
   const stdin = Shell.Input.pipe(feed)
-  const pumps: Promise<void>[] = []
-  const closers: (() => void)[] = []
-  const output = (fd: number): Shell.Output => {
-    if (call.captured & fd)
-      return Shell.Output.spill(limits.maxBufferLength, (chunk) => write(fd, chunk))
-
-    const pipe = new Shell.Pipe(limits.maxBufferLength, proc.controller.signal)
-    closers.push(() => pipe.end())
-    pumps.push(
-      (async () => {
-        try {
-          for (let chunk = await pipe.take(); chunk !== null; chunk = await pipe.take())
-            await write(fd, chunk)
-        } catch {
-          pipe.close()
-        }
-      })(),
+  const output = (fd: number): Shell.Output =>
+    Shell.Output.spill(
+      limits.maxBufferLength,
+      (chunk) => write(fd, chunk),
+      (call.captured & fd) === 0,
     )
-    return Shell.Output.pipe(pipe)
-  }
   const stdout = output(1)
   const stderr = output(2)
+
+  let env: Record<string, string> | undefined
+  const environment = () => {
+    if (env) return env
+    env = {}
+    for (const [name, value] of call.pairs) env[text.decode(name)] = decode(value)
+    return env
+  }
 
   const nested = async (script: string, given: string | undefined) => {
     await stdout.settle()
@@ -1064,9 +1135,10 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
     return run(instance.module, {
       ...options,
       cwd: call.cwd,
-      env: call.env,
+      env: environment(),
+      kept: undefined,
       script,
-      signal: proc.controller.signal,
+      signal: signalOf(proc),
       stdin: given === undefined ? undefined : encode(given),
     })
   }
@@ -1074,7 +1146,12 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
   const context: Shell.CommandContext = {
     args: path ? call.argv : call.argv.slice(1),
     cwd: call.cwd,
-    env: call.env,
+    get env() {
+      return environment()
+    },
+    set env(value) {
+      env = value
+    },
     exec: async (script, given) => {
       const ran = await nested(script, given)
       if (ran.stderr.length) stderr.write(decode(ran.stderr))
@@ -1091,11 +1168,13 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
       if (ran.stderr.length) stderr.write(decode(ran.stderr))
       return ran.status
     },
-    signal: proc.controller.signal,
+    get signal() {
+      return signalOf(proc)
+    },
     sleep: (ms) =>
       new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, ms)
-        proc.controller.signal.addEventListener(
+        signalOf(proc).addEventListener(
           'abort',
           () => {
             clearTimeout(timer)
@@ -1131,14 +1210,15 @@ async function command(instance: Instance, call: command.Call): Promise<number> 
   }
 
   try {
+    await stdout.drain()
+    await stderr.drain()
+    finishing = true
     await stdout.settle()
     await stderr.settle()
   } catch (error) {
     if (!(error instanceof Shell.PipeError)) throw error
     status = 141
   }
-  for (const close of closers) close()
-  await Promise.all(pumps)
   return status
 }
 
@@ -1147,7 +1227,7 @@ declare namespace command {
     argv: string[]
     captured: number
     cwd: string
-    env: Record<string, string>
+    pairs: [Uint8Array, Uint8Array][]
     pid: number
     proc: Proc
   }

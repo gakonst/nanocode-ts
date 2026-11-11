@@ -248,6 +248,8 @@ export class Output {
   #spill: ((text: string) => Promise<void>) | undefined
   #pending: Promise<void> | undefined
   #failure: unknown
+  #piped = false
+  #broken = false
 
   constructor(limit: number, strict = true, discard = false) {
     this.limit = limit
@@ -261,18 +263,19 @@ export class Output {
     return out
   }
 
-  static spill(limit: number, spill: (text: string) => Promise<void>): Output {
+  static spill(limit: number, spill: (text: string) => Promise<void>, piped = false): Output {
     const out = new Output(limit)
     out.#spill = spill
+    out.#piped = piped
     return out
   }
 
   get piped(): boolean {
-    return this.#pipe !== undefined
+    return this.#pipe !== undefined || this.#piped
   }
 
   get closed(): boolean {
-    return this.#pipe?.closed ?? false
+    return this.#pipe?.closed ?? this.#broken
   }
 
   get bounded(): boolean {
@@ -315,6 +318,7 @@ export class Output {
     const pending: Promise<void> = (this.#pending ?? Promise.resolve())
       .then(() => spill(text))
       .catch((error) => {
+        if (error instanceof PipeError) this.#broken = true
         this.#failure ??= error
       })
       .then(() => {
