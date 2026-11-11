@@ -431,6 +431,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
             depth: limits.maxCallDepth,
             file: limits.maxMemoryBytes,
             fuel: limits.maxCommands,
+            memory: limits.maxMemoryBytes,
             operations: limits.maxFileOperations,
             output: limits.maxOutputLength,
           },
@@ -482,6 +483,15 @@ export async function create(options: create.Options = {}): Promise<Bash> {
             : ran.status === 127
               ? 'command_not_found'
               : 'command_exit',
+        )
+
+      case 'memory':
+        return outcome(
+          '/bin/bash: the script needs more than ' +
+            Shell.megabytes(limits.maxMemoryBytes) +
+            ", this host's memory budget\n",
+          126,
+          'resource_limit',
         )
 
       case 'fuel':

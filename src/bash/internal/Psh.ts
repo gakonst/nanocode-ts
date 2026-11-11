@@ -2,7 +2,7 @@ import * as FileSystem from '../FileSystem.ts'
 import { breathe, decode, encode } from './Fs.ts'
 import * as Shell from './Shell.ts'
 
-export type Ended = 'cancelled' | 'exited' | 'fuel' | 'missing' | 'operations'
+export type Ended = 'cancelled' | 'exited' | 'fuel' | 'memory' | 'missing' | 'operations'
 
 export type Instance = {
   current: Host | undefined
@@ -13,12 +13,14 @@ export type Instance = {
   procs: Map<number, Proc>
   requests: Map<number, (reply: Reply) => void>
   shells: Map<number, Host>
+  view: Uint8Array
 }
 
 export type Limits = {
   depth: number
   file: number
   fuel: number
+  memory: number
   operations: number
   output: number
 }
@@ -41,6 +43,8 @@ type Exports = {
   psh_complete(op: number, err: number, len: number): void
   psh_in(len: number): number
   psh_init(): void
+  psh_memory_exceeded(): number
+  psh_memory_limit(bytes: number): void
   psh_out_len(): number
   psh_out_ptr(): number
   psh_proc_exit(pid: number, status: number): void
@@ -78,7 +82,7 @@ type Reply = {
 
 const abiVersion = 4
 
-const budget = 10_000
+const budget = 2_000
 
 const readBytes = 65_536
 
@@ -131,6 +135,12 @@ const errno: Record<string, number> = {
   EXDEV: 18,
 }
 
+const later = -2147483648
+
+const stat = new DataView(new ArrayBuffer(24))
+
+const statView = new Uint8Array(stat.buffer)
+
 const ended: readonly Ended[] = ['exited', 'cancelled', 'fuel', 'missing', 'operations']
 
 const empty = new Uint8Array(0)
@@ -157,6 +167,7 @@ export function load(module: WebAssembly.Module): Promise<Instance> {
     procs: new Map(),
     requests: new Map(),
     shells: new Map(),
+    view: empty,
   } as unknown as Instance
   const created = WebAssembly.instantiate(module, {
     psh: {
@@ -210,6 +221,7 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
   }
 
   try {
+    x.psh_memory_limit(options.limits.memory < 2 ** 32 ? options.limits.memory : 0)
     host.id = enter(instance, host, () => x.psh_shell_new(input(instance, config(options))))
     if (host.id === 0) throw new EngineError('psh refused the shell configuration')
     instance.shells.set(host.id, host)
@@ -218,7 +230,9 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
     if (started !== 0) throw new EngineError('psh refused the script (' + started + ')')
   } catch (error) {
     if (host.id) release(instance, host)
-    throw broken(module, instance, error)
+    const failure = broken(module, instance, error)
+    if (failure === memoryExceeded) return exceeded()
+    throw failure
   }
 
   if (options.signal.aborted) host.cancel()
@@ -228,12 +242,12 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
     for (;;) {
       host.woken = false
       const step = enter(instance, host, () => x.psh_shell_step(host.id, budget))
-      if (instance.failure !== undefined) throw new EngineError(instance.failure)
+      if (instance.failure !== undefined) throw failed(instance)
       if (step === 0) break
 
       if (step === -1) {
         if (!host.woken) await new Promise<void>((resolve) => (host.waiting = resolve))
-        if (instance.failure !== undefined) throw new EngineError(instance.failure)
+        if (instance.failure !== undefined) throw failed(instance)
         continue
       }
 
@@ -247,7 +261,9 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
     if (host.failure !== undefined) throw host.failure
     return ran
   } catch (error) {
-    throw broken(module, instance, error)
+    const failure = broken(module, instance, error)
+    if (failure === memoryExceeded) return exceeded()
+    throw failure
   } finally {
     options.signal.removeEventListener('abort', host.cancel)
     release(instance, host)
@@ -295,15 +311,47 @@ function enter<T>(instance: Instance, host: Host, body: () => T): T {
   }
 }
 
+const memoryExceeded = new EngineError('psh passed its memory budget')
+
+function exceeded(): Ran {
+  return {
+    ended: 'memory',
+    fuel: 0,
+    halted: undefined,
+    missing: [],
+    operations: 0,
+    status: 126,
+    stderr: empty,
+    stdout: empty,
+    truncated: false,
+  }
+}
+
 function broken(module: WebAssembly.Module, instance: Instance, error: unknown): unknown {
+  if (instance.failure === memoryExceeded.message) return memoryExceeded
   if (error instanceof EngineError || !(error instanceof Error)) return error
   if (!(error instanceof WebAssembly.RuntimeError) && !(error instanceof RangeError)) return error
 
-  const message = 'psh stopped: ' + (instance.failure ?? error.message)
+  const spent = (() => {
+    try {
+      return instance.exports.psh_memory_exceeded() === 1
+    } catch {
+      return false
+    }
+  })()
+  const message = spent
+    ? memoryExceeded.message
+    : 'psh stopped: ' + (instance.failure ?? error.message)
   instance.failure = message
   instances.delete(module)
   for (const other of instance.shells.values()) wake(other)
-  return new EngineError(message)
+  return spent ? memoryExceeded : new EngineError(message)
+}
+
+function failed(instance: Instance): EngineError {
+  return instance.failure === memoryExceeded.message
+    ? memoryExceeded
+    : new EngineError(instance.failure)
 }
 
 function release(instance: Instance, host: Host): void {
@@ -324,7 +372,8 @@ function wake(host: Host): void {
 }
 
 function memory(instance: Instance): Uint8Array {
-  return new Uint8Array(instance.exports.memory.buffer)
+  if (instance.view.byteLength === 0) instance.view = new Uint8Array(instance.exports.memory.buffer)
+  return instance.view
 }
 
 function input(instance: Instance, data: Uint8Array): number {
@@ -358,25 +407,24 @@ function hostCall(instance: Instance, call: Call): number {
     case kind.fs: {
       const host = instance.current
       if (!host) throw new EngineError('psh asked for a file outside a step')
-      const asked = operation({ operation: call.arg, payload: payload() })
+      const asked = operation({
+        operation: call.arg,
+        payload: memory(instance).subarray(call.ptr, call.ptr + call.len),
+      })
       const sync = host.options.fs.sync
       if (sync) {
-        const reply = ((): Reply => {
-          try {
-            return { data: performNow(host, { fs: sync, operation: asked }) ?? empty, err: 0 }
-          } catch (error) {
-            return { data: empty, err: code(host, error) }
-          }
-        })()
-        answer(instance, call.op, reply)
-        return 0
+        try {
+          return performNow(instance, { fs: sync, host, operation: asked })
+        } catch (error) {
+          return -code(host, error)
+        }
       }
 
       perform(host, asked).then(
         (data) => answer(instance, call.op, { data: data ?? empty, err: 0 }),
         (error) => answer(instance, call.op, { data: empty, err: code(host, error) }),
       )
-      return 0
+      return later
     }
 
     case kind.sleep:
@@ -399,7 +447,9 @@ function hostCall(instance: Instance, call: Call): number {
     case kind.has: {
       const host = instance.current
       if (!host) return 0
-      return has(host, text.decode(payload())) ? 1 : 0
+      return has(host, text.decode(memory(instance).subarray(call.ptr, call.ptr + call.len)))
+        ? 1
+        : 0
     }
 
     case kind.spawn: {
@@ -472,38 +522,41 @@ function reader(data: Uint8Array) {
 }
 
 function writer() {
-  const parts: Uint8Array[] = []
-  let size = 0
-  const push = (part: Uint8Array) => {
-    parts.push(part)
-    size += part.length
+  let buffer = new Uint8Array(1024)
+  let view = new DataView(buffer.buffer)
+  let at = 0
+  const room = (length: number) => {
+    if (at + length <= buffer.length) return
+    const grown = new Uint8Array(Math.max(buffer.length * 2, at + length))
+    grown.set(buffer.subarray(0, at))
+    buffer = grown
+    view = new DataView(buffer.buffer)
   }
   const u32 = (value: number) => {
-    const part = new Uint8Array(4)
-    new DataView(part.buffer).setUint32(0, value, true)
-    push(part)
+    room(4)
+    view.setUint32(at, value, true)
+    at += 4
   }
   const bytes = (value: Uint8Array) => {
-    u32(value.length)
-    push(value)
+    room(4 + value.length)
+    view.setUint32(at, value.length, true)
+    buffer.set(value, at + 4)
+    at += 4 + value.length
   }
   return {
     bytes,
-    done: () => {
-      const out = new Uint8Array(size)
-      let at = 0
-      for (const part of parts) {
-        out.set(part, at)
-        at += part.length
-      }
-      return out
-    },
+    done: () => buffer.subarray(0, at),
     f64: (value: number) => {
-      const part = new Uint8Array(8)
-      new DataView(part.buffer).setFloat64(0, value, true)
-      push(part)
+      room(8)
+      view.setFloat64(at, value, true)
+      at += 8
     },
-    string: (value: string) => bytes(utf8.encode(value)),
+    string: (value: string) => {
+      room(4 + value.length * 3)
+      const written = utf8.encodeInto(value, buffer.subarray(at + 4)).written
+      view.setUint32(at, written, true)
+      at += 4 + written
+    },
     u32,
   }
 }
@@ -608,7 +661,7 @@ function operation(call: operation.Call): Operation {
     case fsOp.writeNew: {
       const fields = reader(call.payload)
       out.path = text.decode(fields.bytes())
-      out.data = fields.rest()
+      out.data = fields.rest().slice()
       return out
     }
 
@@ -652,16 +705,12 @@ function refuse(name: string, path: string): never {
   throw new FileSystem.FsError(name, path)
 }
 
-function statBytes(stat: FileSystem.FileStat | FileSystem.LinkStat | null, path: string) {
-  if (!stat) return refuse('ENOENT', path)
-
-  const out = new Uint8Array(24)
-  const view = new DataView(out.buffer)
-  view.setFloat64(0, stat.size, true)
-  view.setFloat64(8, stat.mtime, true)
-  view.setUint32(16, stat.mode, true)
-  view.setUint32(20, stat.kind === 'file' ? 0 : stat.kind === 'directory' ? 1 : 2, true)
-  return out
+function statBytes(found: FileSystem.FileStat | FileSystem.LinkStat): Uint8Array {
+  stat.setFloat64(0, found.size, true)
+  stat.setFloat64(8, found.mtime, true)
+  stat.setUint32(16, found.mode, true)
+  stat.setUint32(20, found.kind === 'file' ? 0 : found.kind === 'directory' ? 1 : 2, true)
+  return statView
 }
 
 function removable(stat: FileSystem.FileStat | FileSystem.LinkStat | null, call: Operation): void {
@@ -677,10 +726,11 @@ async function perform(host: Host, call: Operation): Promise<Uint8Array | undefi
 
   switch (call.operation) {
     case fsOp.stat:
-      return statBytes(await fs.stat(path), path)
-
-    case fsOp.lstat:
-      return statBytes(fs.lstat ? await fs.lstat(path) : await fs.stat(path), path)
+    case fsOp.lstat: {
+      const found =
+        call.operation === fsOp.lstat && fs.lstat ? await fs.lstat(path) : await fs.stat(path)
+      return found ? statBytes(found).slice() : refuse('ENOENT', path)
+    }
 
     case fsOp.read: {
       const data = await fs.read(path)
@@ -743,73 +793,72 @@ async function perform(host: Host, call: Operation): Promise<Uint8Array | undefi
   }
 }
 
-function performNow(host: Host, call: performNow.Call): Uint8Array | undefined {
+function performNow(instance: Instance, call: performNow.Call): number {
   const fs = call.fs
   const op = call.operation
   const path = op.path
 
   switch (op.operation) {
     case fsOp.stat:
-      return statBytes(fs.stat(path), path)
-
-    case fsOp.lstat:
-      return statBytes(fs.lstat ? fs.lstat(path) : fs.stat(path), path)
+    case fsOp.lstat: {
+      const found = op.operation === fsOp.lstat && fs.lstat ? fs.lstat(path) : fs.stat(path)
+      return found ? input(instance, statBytes(found)) : -errno.ENOENT!
+    }
 
     case fsOp.read: {
       const data = fs.read(path)
-      if (data.length > host.options.limits.file) return refuse('EFBIG', path)
-      return data
+      if (data.length > call.host.options.limits.file) return -errno.EFBIG!
+      return input(instance, data)
     }
 
     case fsOp.writeNew:
-      if (fs.stat(path)) return refuse('EEXIST', path)
+      if (fs.stat(path)) return -errno.EEXIST!
       fs.write(path, op.data)
-      return undefined
+      return 0
 
     case fsOp.writeReplace:
     case fsOp.writeAppend:
       fs.write(path, op.data, op.operation === fsOp.writeAppend)
-      return undefined
+      return 0
 
     case fsOp.list:
-      return utf8.encode(fs.list(path).join('\0'))
+      return input(instance, utf8.encode(fs.list(path).join('\0')))
 
     case fsOp.mkdir:
       fs.mkdir(path)
       if (op.mode !== 0o755 && fs.chmod) fs.chmod(path, op.mode)
-      return undefined
+      return 0
 
     case fsOp.removeFile:
     case fsOp.removeDir:
       removable(fs.lstat ? fs.lstat(path) : fs.stat(path), op)
       fs.remove(path)
-      return undefined
+      return 0
 
     case fsOp.rename:
       fs.rename(op.other, path)
-      return undefined
+      return 0
 
     case fsOp.symlink:
-      if (!fs.symlink) return refuse('ENOTSUP', path)
+      if (!fs.symlink) return -errno.ENOTSUP!
       fs.symlink(op.other, path)
-      return undefined
+      return 0
 
     case fsOp.readLink: {
-      if (!fs.readlink) return refuse('ENOTSUP', path)
+      if (!fs.readlink) return -errno.ENOTSUP!
       const target = fs.readlink(path)
-      if (target === null) return refuse('EINVAL', path)
-      return utf8.encode(target)
+      return target === null ? -errno.EINVAL! : input(instance, utf8.encode(target))
     }
 
     case fsOp.setMode:
-      if (!fs.chmod) return refuse('ENOTSUP', path)
+      if (!fs.chmod) return -errno.ENOTSUP!
       fs.chmod(path, op.mode)
-      return undefined
+      return 0
 
     case fsOp.setMtime:
-      if (!fs.utimes) return refuse('ENOTSUP', path)
+      if (!fs.utimes) return -errno.ENOTSUP!
       fs.utimes(path, op.mtime)
-      return undefined
+      return 0
 
     default:
       throw new EngineError('psh asked for an unknown file operation ' + op.operation)
@@ -819,6 +868,7 @@ function performNow(host: Host, call: performNow.Call): Uint8Array | undefined {
 declare namespace performNow {
   type Call = {
     fs: FileSystem.SyncFileSystem
+    host: Host
     operation: Operation
   }
 }
