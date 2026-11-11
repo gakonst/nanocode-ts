@@ -851,6 +851,7 @@ async function executeRemote(
   }
   const control = {
     ...base,
+    dirs: [],
     kind: 'version' as const,
     target: '',
     argv: [],
@@ -867,10 +868,25 @@ async function executeRemote(
   const upload = async (paths: string[]): Promise<[string, Uint8Array][]> => {
     let batch: [string, Uint8Array][] = []
     let bytes = 0
+    let sending: Promise<void> | undefined
+    const sync = async (files: [string, Uint8Array][]) => {
+      await sending
+      sending = send({ ...control, files, sync: true, stamps: stamped(files) }).then((reply) => {
+        if (reply.mirror !== mirror.id)
+          throw new CommandError(
+            ctx.name +
+              ': this directory holds more than one upload and the Python service does not keep files between runs; run python3 from a smaller directory',
+            127,
+          )
+        for (const [sent] of files) mirror.known.set(sent, tree.files.get(sent)!)
+      })
+      sending.catch(() => {})
+    }
     for (const path of paths) {
       const data = await ctx.fs.read(path).catch(() => null)
       if (!data) continue
       if (data.length > batchBytes) {
+        await sending
         for (let offset = 0; offset < data.length; offset += batchBytes) {
           const reply = await send({
             ...control,
@@ -894,20 +910,14 @@ async function executeRemote(
         continue
       }
       if (batch.length && bytes + data.length > batchBytes) {
-        const reply = await send({ ...control, files: batch, sync: true, stamps: stamped(batch) })
-        if (reply.mirror !== mirror.id)
-          throw new CommandError(
-            ctx.name +
-              ': this directory holds more than one upload and the Python service does not keep files between runs; run python3 from a smaller directory',
-            127,
-          )
-        for (const [sent] of batch) mirror.known.set(sent, tree.files.get(sent)!)
+        await sync(batch)
         batch = []
         bytes = 0
       }
       batch.push([path, data])
       bytes += data.length
     }
+    await sending
     return batch
   }
   if (!mirror.known.size && tree.files.size) {

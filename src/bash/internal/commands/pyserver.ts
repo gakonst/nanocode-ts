@@ -206,6 +206,12 @@ export function pythonServer(
   let owned = new Map<string, string>()
   const parked = new Map<string, Parked>()
   let placed = 0
+  let cached: { data: Uint8Array; key: string } | undefined
+
+  const chunk = (store: PythonFiles, key: string) => {
+    if (cached?.key !== key) cached = { data: store.get(key), key }
+    return cached.data
+  }
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -280,6 +286,7 @@ export function pythonServer(
     fs.chdir('/')
     park(fs)
     files?.clear()
+    cached = undefined
     mirror = id
     const found = id === undefined ? undefined : parked.get(id)
     if (!found || id === undefined) return
@@ -298,16 +305,24 @@ export function pythonServer(
     store?: PythonFiles,
   ) => {
     const made = new Set<string>()
+    const fresh = new Set<string>()
     const directory = (path: string) => {
       if (made.has(path)) return
-      mkdirs(fs, path)
+      if (kind(fs, path) !== 'dir') {
+        fs.mkdirTree(path)
+        fresh.add(path)
+      }
       made.add(path)
     }
     for (const path of [...dirs].sort()) if (allowed(path)) directory(path)
+    const key = String(++placed)
+    const batch: Uint8Array[] = []
+    let offset = 0
     for (const [path, data] of files) {
       if (!allowed(path)) continue
-      directory(parentOf(path))
-      const found = kind(fs, path)
+      const parent = parentOf(path)
+      directory(parent)
+      const found = fresh.has(parent) ? undefined : kind(fs, path)
       if (found === 'dir') remove(fs, path)
       const bytes = typeof data === 'string' ? unbase64(data) : data
       if (append && found === 'file') {
@@ -320,12 +335,22 @@ export function pythonServer(
         continue
       }
       if (store) {
-        const key = String(++placed) + ':' + path
-        store.put(key, bytes)
-        lazy(fs, path, bytes.length, () => store.get(key))
+        const start = offset
+        batch.push(bytes)
+        offset += bytes.length
+        const end = offset
+        lazy(fs, path, bytes.length, () => chunk(store, key).slice(start, end))
       } else fs.writeFile(path, bytes)
       stamps.set(path, Fingerprint.from(bytes))
     }
+    if (!store || !batch.length) return
+    const joined = new Uint8Array(offset)
+    let at = 0
+    for (const part of batch) {
+      joined.set(part, at)
+      at += part.length
+    }
+    store.put(key, joined)
   }
 
   const prune = (fs: FS, roots: string[], wanted: Set<string>, dirs: Set<string>) => {
