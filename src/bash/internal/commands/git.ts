@@ -404,14 +404,16 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     let root: string | undefined
     let bytes = 0
     try {
-      if (!github.archive) {
+      if (github.pack || !github.archive) {
         const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
+        const url = github.pack?.(owner, name)
         const found = /^[0-9a-f]{40}$/.test(ref)
           ? { branch: null, commit: ref }
           : await GitPack.refs(fetcher, {
               ref,
               repository: options.repository,
               signal: ctx.signal,
+              url,
             }).catch(missing)
         if (!found) throw new CommandError(notFound(options.repository, ref), 128)
         const pack = await GitPack.fetchPack(fetcher, {
@@ -421,6 +423,7 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
           repository: options.repository,
           segmentBytes: maxFileBytes,
           signal: ctx.signal,
+          url,
         }).catch(missing)
         if (!pack) throw new CommandError(notFound(options.repository, ref), 128)
         await ensure(target)

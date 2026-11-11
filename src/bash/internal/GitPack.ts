@@ -51,21 +51,28 @@ function request(command: string, args: readonly string[]): Uint8Array {
 
 async function post(
   fetcher: typeof fetch,
-  repository: string,
-  body: Uint8Array,
-  signal: AbortSignal | undefined,
+  options: {
+    body: Uint8Array
+    repository: string
+    signal?: AbortSignal | undefined
+    url?: string | undefined
+  },
 ): Promise<Response> {
-  const response = await fetcher('https://github.com/' + repository + '.git/git-upload-pack', {
-    body: body as Uint8Array<ArrayBuffer>,
-    headers: {
-      accept: 'application/x-git-upload-pack-result',
-      'content-type': 'application/x-git-upload-pack-request',
-      'git-protocol': 'version=2',
-      'user-agent': 'git/2.47.0 nanocode-ts',
+  const { body, repository, signal } = options
+  const response = await fetcher(
+    options.url ?? 'https://github.com/' + repository + '.git/git-upload-pack',
+    {
+      body: body as Uint8Array<ArrayBuffer>,
+      headers: {
+        accept: 'application/x-git-upload-pack-result',
+        'content-type': 'application/x-git-upload-pack-request',
+        'git-protocol': 'version=2',
+        'user-agent': 'git/2.47.0 nanocode-ts',
+      },
+      method: 'POST',
+      ...(signal ? { signal } : {}),
     },
-    method: 'POST',
-    ...(signal ? { signal } : {}),
-  })
+  )
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => {})
     throw new GitError(
@@ -114,12 +121,16 @@ async function* packets(
 export async function refs(fetcher: typeof fetch, options: refs.Options): Promise<refs.ReturnType> {
   const { ref, repository } = options
   const prefixes = ref === 'HEAD' ? ['HEAD'] : ['refs/heads/' + ref, 'refs/tags/' + ref]
-  const response = await post(
-    fetcher,
+  const response = await post(fetcher, {
+    body: request('ls-refs', [
+      'symrefs',
+      'peel',
+      ...prefixes.map((prefix) => 'ref-prefix ' + prefix),
+    ]),
     repository,
-    request('ls-refs', ['symrefs', 'peel', ...prefixes.map((prefix) => 'ref-prefix ' + prefix)]),
-    options.signal,
-  )
+    signal: options.signal,
+    url: options.url,
+  })
   const found = new Map<string, { sha: string; target?: string; peeled?: string }>()
   for await (const packet of packets(response.body!)) {
     if (typeof packet === 'string') continue
@@ -144,7 +155,12 @@ export async function refs(fetcher: typeof fetch, options: refs.Options): Promis
 }
 
 export declare namespace refs {
-  type Options = { ref: string; repository: string; signal?: AbortSignal | undefined }
+  type Options = {
+    ref: string
+    repository: string
+    signal?: AbortSignal | undefined
+    url?: string | undefined
+  }
   type ReturnType = { branch: string | null; commit: string } | undefined
 }
 
@@ -157,7 +173,12 @@ export async function fetchPack(fetcher: typeof fetch, options: fetchPack.Option
     'want ' + options.commit,
     'done',
   ]
-  const response = await post(fetcher, options.repository, request('fetch', args), options.signal)
+  const response = await post(fetcher, {
+    body: request('fetch', args),
+    repository: options.repository,
+    signal: options.signal,
+    url: options.url,
+  })
   const segment = options.segmentBytes
   const parts: Uint8Array[] = []
   const starts: number[] = []
@@ -214,6 +235,7 @@ export declare namespace fetchPack {
     repository: string
     segmentBytes: number
     signal?: AbortSignal | undefined
+    url?: string | undefined
   }
 }
 

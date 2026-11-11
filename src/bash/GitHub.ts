@@ -6,6 +6,7 @@ export const maxFileBytes = 8 * 1024 * 1024
 
 export type Options = {
   archive?(owner: string, repo: string, ref: string): string
+  pack?(owner: string, repo: string): string
   details?: boolean
   maxBytes?: number
   maxDownloadBytes?: number
