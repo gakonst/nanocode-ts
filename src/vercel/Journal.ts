@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto'
 import * as zlib from 'node:zlib'
 import { type DriveContext, Fatal, Restart, type SessionState } from 'durable-harness'
 import type * as Contracts from '../Contracts.ts'
@@ -32,6 +33,23 @@ export type Durability = 'on' | 'strict'
 export const defaultBatchMs = 500
 
 const batchBytes = 24 * 1024 * 1024
+
+export type Opened = {
+  replayed: { batches: number; transactions: number }
+  replica: Replica
+}
+
+export type Replica = {
+  batches: number
+  digests: string[]
+  runId: string
+  sql: LocalSql.LocalSql
+}
+
+export type Replicas = {
+  keep(replica: Replica): void
+  take(runId: string): Replica | undefined
+}
 
 export type Stats = {
   replayed_batches: number
@@ -124,28 +142,143 @@ function unpack(packed: Uint8Array): Transaction[] {
   }))
 }
 
-export function committed(state: SessionState): Transaction[][] {
-  const batches: Transaction[][] = []
+function digest(packed: Uint8Array): string {
+  return crypto.createHash('sha256').update(packed).digest('hex')
+}
+
+function inputs(state: SessionState): Batch[] {
+  const batches: Batch[] = []
   for (
     let record = state.effects.get(batchKey(0));
     record?.status === 'completed';
     record = state.effects.get(batchKey(batches.length))
-  ) {
-    const input = record.input as Batch
-    batches.push('packed' in input ? unpack(input.packed) : input.transactions)
-  }
+  )
+    batches.push(record.input as Batch)
   return batches
+}
+
+export function committed(state: SessionState): Transaction[][] {
+  return inputs(state).map((input) =>
+    'packed' in input ? unpack(input.packed) : input.transactions,
+  )
+}
+
+export function open(state: SessionState, replicas?: Replicas): Opened {
+  const batches = inputs(state)
+  const kept = replicas?.take(state.runId)
+  const reused = (() => {
+    if (!kept) return undefined
+    if (kept.batches > batches.length) {
+      replicas?.keep(kept)
+      return undefined
+    }
+    const same = kept.digests.every((known, n) => {
+      const input = batches[n]!
+      return 'packed' in input && digest(input.packed) === known
+    })
+    if (same) return kept
+    kept.sql.close()
+    return undefined
+  })()
+  const replica = reused ?? {
+    batches: 0,
+    digests: [],
+    runId: state.runId,
+    sql: LocalSql.create([]),
+  }
+  const from = replica.batches
+  let transactions = 0
+
+  try {
+    for (let n = from; n < batches.length; n++) {
+      const input = batches[n]!
+      const replayed = 'packed' in input ? unpack(input.packed) : input.transactions
+      replica.sql.replay(replayed, n)
+      transactions += replayed.length
+      if ('packed' in input && replica.digests.length === n)
+        replica.digests.push(digest(input.packed))
+      replica.batches = n + 1
+    }
+  } catch (error) {
+    replica.sql.close()
+    throw error
+  }
+
+  return { replayed: { batches: batches.length - from, transactions }, replica }
+}
+
+export function read(state: SessionState, replicas?: Replicas): read.ReturnType {
+  const { replica } = open(state, replicas)
+  const version = replica.sql.version()
+
+  return {
+    close() {
+      if (replicas && replica.sql.version() === version) replicas.keep(replica)
+      else replica.sql.close()
+    },
+    sql: replica.sql,
+  }
+}
+
+export declare namespace read {
+  type ReturnType = {
+    close(): void
+    sql: LocalSql.LocalSql
+  }
+}
+
+export function replicas(options: replicas.Options): Replicas {
+  const kept = new Map<string, { bytes: number; replica: Replica }>()
+  let total = 0
+
+  const take = (runId: string) => {
+    const found = kept.get(runId)
+    if (!found) return undefined
+    kept.delete(runId)
+    total -= found.bytes
+    return found.replica
+  }
+
+  return {
+    keep(replica) {
+      const bytes = replica.sql.bytes()
+      const longer = kept.get(replica.runId)
+      if (
+        replica.digests.length !== replica.batches ||
+        bytes > options.bytes ||
+        (longer && longer.replica.batches >= replica.batches)
+      ) {
+        replica.sql.close()
+        return
+      }
+
+      take(replica.runId)?.sql.close()
+      kept.set(replica.runId, { bytes, replica })
+      total += bytes
+      for (const runId of kept.keys()) {
+        if (total <= options.bytes) break
+        take(runId)?.sql.close()
+      }
+    },
+    take,
+  }
+}
+
+export declare namespace replicas {
+  type Options = {
+    bytes: number
+  }
 }
 
 export function create(ctx: DriveContext, options: create.Options = {}): Journal {
   const durability = options.durability ?? 'on'
   const batchMs = durability === 'on' ? (options.batchMs ?? defaultBatchMs) : 0
-  const batches = committed(ctx.state())
-  const sql = LocalSql.create(batches)
+  const { replayed, replica } = open(ctx.state(), options.replicas)
+  const sql = replica.sql
   const writer = crypto.randomUUID()
   const stats: Stats = {
-    replayed_batches: batches.length,
-    replayed_transactions: batches.reduce((count, batch) => count + batch.length, 0),
+    replayed_batches: replayed.batches,
+    replayed_transactions: replayed.transactions,
     batches: 0,
     transactions: 0,
     reads: 0,
@@ -153,7 +286,6 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
   }
 
   let closed = false
-  let count = batches.length
   let failure: { error: unknown } | undefined
   let flushing = false
   let hurry: (() => void) | undefined
@@ -194,18 +326,20 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
   }
 
   const commit = async (transactions: Transaction[]): Promise<void> => {
-    const n = count
+    const n = replica.batches
     const started = performance.now()
+    const packed = pack(transactions)
     const output = await ctx.effect(
       batchKey(n),
-      { name: sqlStep, replay: 'safe', input: { packed: pack(transactions) } satisfies Batch },
+      { name: sqlStep, replay: 'safe', input: { packed } satisfies Batch },
       async (): Promise<Committed> => ({ writer }),
     )
     stats.batch_wait_ms += performance.now() - started
 
     if (output.writer !== writer) throw new Restart(`SQL batch ${n} was committed by another drive`)
 
-    count = n + 1
+    if (replica.digests.length === n) replica.digests.push(digest(packed))
+    replica.batches = n + 1
     lastBatch = performance.now()
     stats.batches++
   }
@@ -252,17 +386,21 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
 
   return {
     get batches() {
-      return count
+      return replica.batches
     },
     close() {
+      if (closed) return
       closed = true
       hurry?.()
-      sql.close()
+      if (options.replicas && !failure && !flushing && queue.length === 0)
+        options.replicas.keep(replica)
+      else sql.close()
     },
     durable: () => enqueue(undefined),
     stats,
     transaction(kind, operation, statements, access = 'write') {
       if (failure) return Promise.reject(failure.error)
+      if (closed) return Promise.reject(new Error('the SQL journal is closed'))
 
       let rows: Contracts.SqlValue[][][]
       let wrote: boolean
@@ -303,5 +441,6 @@ export declare namespace create {
   type Options = {
     batchMs?: number | undefined
     durability?: Durability | undefined
+    replicas?: Replicas | undefined
   }
 }

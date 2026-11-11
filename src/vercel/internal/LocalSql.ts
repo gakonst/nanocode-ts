@@ -4,7 +4,9 @@ import type * as Contracts from '../../Contracts.ts'
 import type * as Journal from '../Journal.ts'
 
 export type LocalSql = {
+  bytes(): number
   close(): void
+  replay(transactions: Journal.Transaction[], n: number): void
   run(statements: Contracts.Statement[], access?: Contracts.SqlAccess): Contracts.SqlValue[][][]
   version(): string
 }
@@ -45,7 +47,7 @@ export function create(batches: Journal.Transaction[][]): LocalSql {
     }
   }
 
-  batches.forEach((transactions, n) => {
+  const replay = (transactions: Journal.Transaction[], n: number) => {
     for (const transaction of transactions) {
       try {
         run(transaction.statements, transaction.access)
@@ -55,10 +57,19 @@ export function create(batches: Journal.Transaction[][]): LocalSql {
         )
       }
     }
-  })
+  }
+
+  batches.forEach(replay)
 
   return {
+    bytes() {
+      const [pages, size] = prepare(
+        'SELECT page_count, page_size FROM pragma_page_count, pragma_page_size',
+      ).get() as unknown as [number, number]
+      return pages * size
+    },
     close: () => db.close(),
+    replay,
     run,
     version() {
       const [changes, schema] = prepare(

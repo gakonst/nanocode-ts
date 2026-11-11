@@ -421,7 +421,11 @@ export function create(options: create.Options = {}): Harness {
     modelCalls: 'self',
     async drive(ctx) {
       const started = performance.now()
-      const journal = Journal.create(ctx, { batchMs: options.batchMs, durability })
+      const journal = Journal.create(ctx, {
+        batchMs: options.batchMs,
+        durability,
+        replicas: options.replicas,
+      })
       const replay_ms = performance.now() - started
       const counts = { model_requests: 0, tool_calls: 0, models: [] as ModelCall[], open_ms: 0 }
       let outcome: DriveReport['outcome'] = 'idle'
@@ -551,6 +555,7 @@ export declare namespace create {
     name?: string
     promptImages?: (session: Session) => boolean
     provider?: Contracts.ModelProvider
+    replicas?: Journal.Replicas
     report?: (report: DriveReport) => void
     sessionFetch?(sessionId: string): typeof fetch
     streamToolInput?: boolean

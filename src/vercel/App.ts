@@ -18,7 +18,6 @@ import * as Files from '../internal/Files.ts'
 import * as Tempo from '../machines/Tempo.ts'
 import * as Attachments from './internal/Attachments.ts'
 import * as Egress from './internal/Egress.ts'
-import * as LocalSql from './internal/LocalSql.ts'
 import * as Plans from './Plans.ts'
 import * as Transport from './Transport.ts'
 import * as Wasm from './Wasm.ts'
@@ -176,6 +175,7 @@ export function create(options: create.Options) {
     plans: planOptions,
     payers: chosenPayers,
     payerHarnesses,
+    replicaBytes,
     ...rest
   } = options
   const hands = chosenHands ?? {}
@@ -193,6 +193,8 @@ export function create(options: create.Options) {
     thinking: first.efforts.includes('low') ? 'low' : first.effort,
   }
   const durability = options.durability ?? 'on'
+  const replicas =
+    replicaBytes === undefined ? undefined : Journal.replicas({ bytes: replicaBytes })
   const kernel = durability === 'on' && runAhead === true ? 'on' : 'strict'
   const agent = durableAgent({
     harness: Harness.create({
@@ -203,6 +205,7 @@ export function create(options: create.Options) {
       model: defaultSelection.model,
       thinking: defaultSelection.thinking,
       durability,
+      ...(replicas ? { replicas } : {}),
     }),
     durability: kernel,
     marks: marks ?? false,
@@ -359,11 +362,14 @@ export function create(options: create.Options) {
       return Response.json({ error: 'this deployment has no workspace' }, { status: 404 })
     const state = await agent.sessions.inspect(sessionId).catch(() => undefined)
     if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
-    const sql = LocalSql.create(Journal.committed(state))
+    const journal = Journal.read(state, replicas)
     try {
       return await Files.response(
         SqlFileSystem.create(
-          { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
+          {
+            transaction: (_kind, _operation, statements, access) =>
+              journal.sql.run(statements, access),
+          },
           {
             scope: Harness.scope,
             sources: Sources.create({
@@ -376,7 +382,7 @@ export function create(options: create.Options) {
         { root: harness.workspace?.cwd ?? '/workspace' },
       )
     } finally {
-      sql.close()
+      journal.close()
     }
   }
 
@@ -385,10 +391,12 @@ export function create(options: create.Options) {
     if (refused) return refused
     const state = await agent.sessions.inspect(sessionId).catch(() => undefined)
     if (!state) return Response.json({ error: 'no such session' }, { status: 404 })
-    const sql = LocalSql.create(Journal.committed(state))
+    const journal = Journal.read(state, replicas)
     const runtime = await AgentRuntime.instantiate(
       await Wasm.load(),
-      { transaction: (_kind, _operation, statements, access) => sql.run(statements, access) },
+      {
+        transaction: (_kind, _operation, statements, access) => journal.sql.run(statements, access),
+      },
       { published: () => {} },
     )
     try {
@@ -408,7 +416,7 @@ export function create(options: create.Options) {
       )
     } finally {
       await runtime.dispose().catch(() => undefined)
-      sql.close()
+      journal.close()
     }
   }
 
@@ -582,7 +590,7 @@ export function create(options: create.Options) {
 export declare namespace create {
   type Options = Omit<
     Harness.create.Options,
-    'provider' | 'model' | 'thinking' | 'tools' | 'durability'
+    'provider' | 'model' | 'thinking' | 'tools' | 'durability' | 'replicas'
   > & {
     account?(request: Request): string | null | undefined | Promise<string | null | undefined>
     authorize?: Authorize
@@ -598,6 +606,7 @@ export declare namespace create {
     payers?: readonly Contracts.Payer[]
     plans?: Plans.Options
     maxPromptCharacters?: number
+    replicaBytes?: number
     runAhead?: boolean
     tools?: HostTool[]
     traceAudience?: string
