@@ -842,7 +842,7 @@ type Local = {
   branches: Record<string, string | null>
   commits: Record<string, Commit>
   index: Record<string, string | null>
-  stat: Record<string, [number, number, string]>
+  stat: Record<string, [number, number, string, number?]>
   config?: Record<string, string>
 }
 
@@ -1019,8 +1019,10 @@ async function hashWork(
   const full = repo.root + '/' + path
   const stat = await ctx.fs.stat(full)
   if (!stat || stat.kind !== 'file') return null
-  const cached = repo.local.stat[path] ?? (repo.snapshot.files[path] as Entry | undefined)
-  if (cached && cached[0] === stat.size && cached[1] === stat.mtime) {
+  const local = repo.local.stat[path]
+  const cached = local ?? (repo.snapshot.files[path] as Entry | undefined)
+  const racy = local !== undefined && !((local[3] ?? 0) > stat.mtime)
+  if (cached && cached[0] === stat.size && cached[1] === stat.mtime && !racy) {
     const id = cached[2] ?? 'base:' + path
     if (keep && !id.startsWith('base:') && !(await ctx.fs.stat(repo.root + '/.git/objects/' + id)))
       await store(ctx, repo, id, await ctx.fs.read(full))
@@ -1028,7 +1030,7 @@ async function hashWork(
   }
   const data = await ctx.fs.read(full)
   const id = await blobId(data)
-  repo.local.stat[path] = [stat.size, stat.mtime, id]
+  repo.local.stat[path] = [stat.size, stat.mtime, id, Date.now()]
   if (keep) await store(ctx, repo, id, data)
   return id
 }
@@ -1726,7 +1728,8 @@ async function writeTree(
     await mkdirTree(ctx.fs, parentOf(full))
     await ctx.fs.write(full, data)
     const stat = await ctx.fs.stat(full)
-    if (stat && !ref.startsWith('base:')) repo.local.stat[path] = [stat.size, stat.mtime, ref]
+    if (stat && !ref.startsWith('base:'))
+      repo.local.stat[path] = [stat.size, stat.mtime, ref, Date.now()]
   }
 }
 
