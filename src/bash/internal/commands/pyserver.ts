@@ -23,7 +23,8 @@ type FS = PyodideFS & {
   lstat(path: string): Stat
   isLink(mode: number): boolean
   cwd(): string
-  lookupPath(path: string): { node: Record<string, unknown> }
+  close(stream: unknown): void
+  open(path: string, flags: string): { node: Record<string, unknown> }
   trackingDelegate: Record<string, unknown>
   truncate(path: unknown, length: number): void
 }
@@ -125,8 +126,9 @@ function stamp(fs: FS, path: string): string | undefined {
 }
 
 function lazy(fs: FS, path: string, size: number, read: () => Uint8Array): void {
-  fs.writeFile(path, new Uint8Array(0))
-  const node = fs.lookupPath(path).node
+  const stream = fs.open(path, 'w')
+  const node = stream.node
+  fs.close(stream)
   let loaded: Uint8Array | undefined
   Object.defineProperty(node, 'contents', {
     configurable: true,
@@ -204,6 +206,7 @@ export function pythonServer(
   let owned = new Map<string, string>()
   const parked = new Map<string, Parked>()
   let placed = 0
+  let resident = 0
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -237,6 +240,7 @@ export function pythonServer(
     }
     stamps.clear()
     owned.clear()
+    resident = 0
   }
 
   const size = (fs: FS, path: string): number => {
@@ -284,6 +288,7 @@ export function pythonServer(
     parked.delete(id)
     for (const path of found.dirs) mkdirs(fs, path)
     for (const [path, data] of found.files) fs.writeFile(path, data)
+    resident = found.bytes
     stamps = found.stamps
     owned = found.owned
   }
@@ -295,26 +300,37 @@ export function pythonServer(
     append: boolean,
     store?: PythonFiles,
   ) => {
-    for (const path of [...dirs].sort()) if (allowed(path)) mkdirs(fs, path)
+    const made = new Set<string>()
+    const directory = (path: string) => {
+      if (made.has(path)) return
+      mkdirs(fs, path)
+      made.add(path)
+    }
+    for (const path of [...dirs].sort()) if (allowed(path)) directory(path)
     for (const [path, data] of files) {
       if (!allowed(path)) continue
-      mkdirs(fs, parentOf(path))
-      if (kind(fs, path) === 'dir') remove(fs, path)
+      directory(parentOf(path))
+      const found = kind(fs, path)
+      if (found === 'dir') remove(fs, path)
       const bytes = typeof data === 'string' ? unbase64(data) : data
-      if (append && kind(fs, path) === 'file') {
+      if (append && found === 'file') {
         const before = fs.readFile(path)
         const joined = new Uint8Array(before.length + bytes.length)
         joined.set(before)
         joined.set(bytes, before.length)
         fs.writeFile(path, joined)
-      } else if (store) {
+        stamps.set(path, stamp(fs, path))
+        continue
+      }
+      if (store && resident + bytes.length > PARKED_BYTES) {
         const key = String(++placed) + ':' + path
         store.put(key, bytes)
         lazy(fs, path, bytes.length, () => store.get(key))
-        stamps.set(path, Fingerprint.from(bytes))
-        continue
-      } else fs.writeFile(path, bytes)
-      stamps.set(path, stamp(fs, path))
+      } else {
+        fs.writeFile(path, bytes)
+        resident += bytes.length
+      }
+      stamps.set(path, Fingerprint.from(bytes))
     }
   }
 
