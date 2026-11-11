@@ -206,7 +206,6 @@ export function pythonServer(
   let owned = new Map<string, string>()
   const parked = new Map<string, Parked>()
   let placed = 0
-  let resident = 0
 
   const boot = (): Promise<Runner> => {
     runner ??= (async () => {
@@ -240,7 +239,6 @@ export function pythonServer(
     }
     stamps.clear()
     owned.clear()
-    resident = 0
   }
 
   const size = (fs: FS, path: string): number => {
@@ -288,7 +286,6 @@ export function pythonServer(
     parked.delete(id)
     for (const path of found.dirs) mkdirs(fs, path)
     for (const [path, data] of found.files) fs.writeFile(path, data)
-    resident = found.bytes
     stamps = found.stamps
     owned = found.owned
   }
@@ -322,14 +319,11 @@ export function pythonServer(
         stamps.set(path, stamp(fs, path))
         continue
       }
-      if (store && resident + bytes.length > PARKED_BYTES) {
+      if (store) {
         const key = String(++placed) + ':' + path
         store.put(key, bytes)
         lazy(fs, path, bytes.length, () => store.get(key))
-      } else {
-        fs.writeFile(path, bytes)
-        resident += bytes.length
-      }
+      } else fs.writeFile(path, bytes)
       stamps.set(path, Fingerprint.from(bytes))
     }
   }
