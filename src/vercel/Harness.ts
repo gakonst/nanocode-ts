@@ -268,6 +268,9 @@ export function create(options: create.Options = {}): Harness {
             service_tier: session.service_tier,
             subagents: options.subagents,
             ...(options.codeMode === false ? { code_mode: false } : {}),
+            ...(options.cellMemoryBytes === undefined
+              ? {}
+              : { cell_memory_bytes: options.cellMemoryBytes }),
             instructions:
               executor && options.handInstructions
                 ? [options.instructions, options.handInstructions].filter(Boolean).join('\n\n')
@@ -533,6 +536,7 @@ export function create(options: create.Options = {}): Harness {
 export declare namespace create {
   type Options = {
     batchMs?: number
+    cellMemoryBytes?: number
     codeMode?: boolean
     dispatch?: Gateway.Dispatch
     durability?: Journal.Durability

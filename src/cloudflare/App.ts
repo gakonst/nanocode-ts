@@ -1500,6 +1500,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 : { max_resident_subagents: options.maxResidentSubagents }),
               ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
               cell_interrupt_checks: options.cellInterruptChecks ?? cellInterruptChecks,
+              cell_memory_bytes:
+                options.cellMemoryBytes ??
+                Math.floor(
+                  policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES') / 2,
+                ),
               ...withHand(
                 options.instructions,
                 this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -3366,6 +3371,7 @@ export declare namespace create {
     streamToolInput?: boolean
     subagentBudgets?: boolean
     cellInterruptChecks?: number
+    cellMemoryBytes?: number
     subagents?: boolean
     subscription?(
       account: string,

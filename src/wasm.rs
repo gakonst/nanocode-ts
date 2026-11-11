@@ -152,6 +152,8 @@ struct Configuration {
     #[serde(default)]
     cell_interrupt_checks: Option<u64>,
     #[serde(default)]
+    cell_memory_bytes: Option<usize>,
+    #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
@@ -1086,6 +1088,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     }
     if let Some(checks) = config.cell_interrupt_checks {
         nanocode_code_mode::code_mode::set_interrupt_checks(checks);
+    }
+    if let Some(bytes) = config.cell_memory_bytes {
+        nanocode_code_mode::code_mode::set_cell_memory(bytes);
     }
     if config.subagent_budgets
         && let Some(subagents) = &subagents
