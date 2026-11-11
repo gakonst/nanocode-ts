@@ -42,7 +42,7 @@ export type Remote = (request: Request, signal: AbortSignal) => Promise<Reply>
 
 export type Reply = {
   dirs: string[]
-  files: [string, string | null][]
+  files: [string, string | Uint8Array | null][]
   large?: [string, number][]
   mirror?: string
   missing?: string[]
@@ -55,12 +55,13 @@ export type Reply = {
 export type Request = {
   append?: boolean
   argv: string[]
+  binary?: boolean
   cwd: string
   dirs: string[]
   env: Record<string, string>
   fetch?: string[]
   filename: string
-  files: [string, string][]
+  files: [string, string | Uint8Array][]
   keep?: string[]
   kind: 'code' | 'stdin' | 'file' | 'module' | 'pip' | 'version'
   listing?: [string, string][]

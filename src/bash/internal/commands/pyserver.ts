@@ -290,7 +290,7 @@ export function pythonServer(
 
   const place = (
     fs: FS,
-    files: [string, string][],
+    files: [string, string | Uint8Array][],
     dirs: string[],
     append: boolean,
     store?: PythonFiles,
@@ -300,7 +300,7 @@ export function pythonServer(
       if (!allowed(path)) continue
       mkdirs(fs, parentOf(path))
       if (kind(fs, path) === 'dir') remove(fs, path)
-      const bytes = unbase64(data)
+      const bytes = typeof data === 'string' ? unbase64(data) : data
       if (append && kind(fs, path) === 'file') {
         const before = fs.readFile(path)
         const joined = new Uint8Array(before.length + bytes.length)
@@ -335,8 +335,13 @@ export function pythonServer(
     for (const root of roots) visit(root)
   }
 
-  const fetchFiles = (fs: FS, paths: string[], span?: [number, number]) => {
-    const files: [string, string][] = [],
+  const fetchFiles = (
+    fs: FS,
+    paths: string[],
+    encode: (data: Uint8Array) => string | Uint8Array,
+    span?: [number, number],
+  ) => {
+    const files: [string, string | Uint8Array][] = [],
       more: string[] = [],
       large: [string, number][] = []
     let budget = REPLY_BYTES
@@ -344,7 +349,7 @@ export function pythonServer(
       if (!allowed(path) || kind(fs, path) !== 'file') continue
       const data = fs.readFile(path)
       if (span) {
-        files.push([path, base64(data.subarray(span[0], span[0] + span[1]))])
+        files.push([path, encode(data.subarray(span[0], span[0] + span[1]))])
         stamps.set(path, Fingerprint.from(data))
         continue
       }
@@ -357,15 +362,20 @@ export function pythonServer(
         continue
       }
       budget -= data.length
-      files.push([path, base64(data)])
+      files.push([path, encode(data)])
       stamps.set(path, Fingerprint.from(data))
     }
     return { files, more, large }
   }
 
-  const changed = (fs: FS, roots: string[], touched: Set<string>) => {
+  const changed = (
+    fs: FS,
+    roots: string[],
+    touched: Set<string>,
+    encode: (data: Uint8Array) => string | Uint8Array,
+  ) => {
     const dirs: string[] = [],
-      files: [string, string | null][] = [],
+      files: [string, string | Uint8Array | null][] = [],
       more: string[] = [],
       large: [string, number][] = []
     const seen = new Set<string>()
@@ -403,16 +413,21 @@ export function pythonServer(
         return
       }
       budget -= data.length
-      files.push([path, base64(data)])
+      files.push([path, encode(data)])
       stamps.set(path, now)
     }
     for (const root of roots) visit(root)
     return { dirs, files, more, large }
   }
 
-  const collect = (fs: FS, roots: string[], before: Map<string, Uint8Array>) => {
+  const collect = (
+    fs: FS,
+    roots: string[],
+    before: Map<string, Uint8Array>,
+    encode: (data: Uint8Array) => string | Uint8Array,
+  ) => {
     const dirs: string[] = [],
-      files: [string, string | null][] = []
+      files: [string, string | Uint8Array | null][] = []
     const seen = new Set<string>()
     const visit = (path: string) => {
       if (seen.has(path)) return
@@ -425,7 +440,7 @@ export function pythonServer(
       }
       if (found !== 'file') return
       const data = fs.readFile(path)
-      files.push([path, same(before.get(path), data) ? null : base64(data)])
+      files.push([path, same(before.get(path), data) ? null : encode(data)])
     }
     for (const root of roots) visit(root)
     return { dirs, files }
@@ -608,8 +623,9 @@ export function pythonServer(
       files: [],
       mirror: id,
     }
+    const encode = (data: Uint8Array) => (request.binary ? data : base64(data))
     enter(fs, id, state?.files)
-    if (request.fetch) return { ...empty, ...fetchFiles(fs, request.fetch, request.range) }
+    if (request.fetch) return { ...empty, ...fetchFiles(fs, request.fetch, encode, request.range) }
     place(fs, request.files, request.dirs, Boolean(request.append), state?.files)
     for (const [path, stamp] of request.stamps ?? [])
       if (allowed(path) && kind(fs, path) === 'file') owned.set(path, stamp)
@@ -642,7 +658,7 @@ export function pythonServer(
       if (!roots.some((root) => within(path, root))) stamps.delete(path)
       if (kind(fs, path) !== 'file') owned.delete(path)
     }
-    return { ...empty, ...result, ...changed(fs, roots, touched) }
+    return { ...empty, ...result, ...changed(fs, roots, touched, encode) }
   }
 
   const run = async (request: PythonRequest, state?: PythonServerState): Promise<PythonReply> => {
@@ -664,7 +680,11 @@ export function pythonServer(
     if (request.mirror) return mirrored(python, request, roots, state)
     const { fs } = python
     enter(fs, undefined)
-    const before = new Map(request.files.map(([path, data]) => [path, unbase64(data)] as const))
+    const before = new Map(
+      request.files.map(
+        ([path, data]) => [path, typeof data === 'string' ? unbase64(data) : data] as const,
+      ),
+    )
     for (const root of roots) {
       if (kind(fs, root) === 'dir') for (const name of names(fs, root)) remove(fs, join(root, name))
       else remove(fs, root)
@@ -675,7 +695,10 @@ export function pythonServer(
       fs.writeFile(path, data)
     }
     const { touched: _touched, ...result } = await execute(python, request, state)
-    return { ...result, ...collect(fs, roots, before) }
+    return {
+      ...result,
+      ...collect(fs, roots, before, (data) => (request.binary ? data : base64(data))),
+    }
   }
 
   return (request, state) => {

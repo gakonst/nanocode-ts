@@ -681,13 +681,6 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
   return { pip: handler, pip3: handler, python: handler, python3: handler }
 }
 
-function base64(bytes: Uint8Array): string {
-  let text = ''
-  for (let i = 0; i < bytes.length; i += 32768)
-    text += String.fromCharCode(...bytes.subarray(i, i + 32768))
-  return btoa(text)
-}
-
 function unbase64(text: string): Uint8Array {
   const raw = atob(text)
   const bytes = new Uint8Array(raw.length)
@@ -854,6 +847,7 @@ async function executeRemote(
     dirs: [...tree.dirs],
     timeoutMs: ctx.limits.timeoutMs,
     mirror: mirror.id,
+    binary: true,
   }
   const control = {
     ...base,
@@ -864,14 +858,14 @@ async function executeRemote(
     stdin: '',
     keep: [],
   }
-  const stamped = (files: [string, string][]): [string, string][] =>
+  const stamped = (files: [string, string | Uint8Array][]): [string, string][] =>
     files.map(([path]) => [path, tree.files.get(path)!])
   const adopt = (path: string, stamp: string) => {
     mirror.known.set(path, stamp)
     mirror.adopted.set(path, stamp)
   }
-  const upload = async (paths: string[]): Promise<[string, string][]> => {
-    let batch: [string, string][] = []
+  const upload = async (paths: string[]): Promise<[string, Uint8Array][]> => {
+    let batch: [string, Uint8Array][] = []
     let bytes = 0
     for (const path of paths) {
       const data = await ctx.fs.read(path).catch(() => null)
@@ -880,7 +874,7 @@ async function executeRemote(
         for (let offset = 0; offset < data.length; offset += batchBytes) {
           const reply = await send({
             ...control,
-            files: [[path, base64(data.subarray(offset, offset + batchBytes))]],
+            files: [[path, data.subarray(offset, offset + batchBytes)]],
             sync: true,
             append: offset > 0,
             ...(offset + batchBytes >= data.length
@@ -911,7 +905,7 @@ async function executeRemote(
         batch = []
         bytes = 0
       }
-      batch.push([path, base64(data)])
+      batch.push([path, data])
       bytes += data.length
     }
     return batch
@@ -966,7 +960,7 @@ async function executeRemote(
   if (reply.stdout) ctx.stdout.write(reply.stdout)
   if (reply.stderr) ctx.stderr.write(reply.stderr)
   if (unique.length) {
-    const changed = new Map<string, string>()
+    const changed = new Map<string, string | Uint8Array>()
     const large = new Map(reply.large ?? [])
     for (const [path, data] of reply.files) if (data !== null) changed.set(path, data)
     for (let more = reply.more ?? []; more.length; ) {
@@ -997,7 +991,7 @@ async function executeRemote(
     for (const [path, data] of changed) {
       await breathe()
       await mkdirs(ctx.fs, parentOf(path))
-      await ctx.fs.write(path, unbase64(data))
+      await ctx.fs.write(path, typeof data === 'string' ? unbase64(data) : data)
       const stat = await ctx.fs.stat(path)
       if (stat && reply.mirror === mirror.id) adopt(path, stat.size + ':' + stat.mtime)
     }
@@ -1017,7 +1011,7 @@ async function executeRemote(
               ctx.name + ': ' + path + ' changed while it was copied back',
               127,
             )
-          await ctx.fs.write(path, unbase64(data), offset > 0)
+          await ctx.fs.write(path, typeof data === 'string' ? unbase64(data) : data, offset > 0)
           if (offset + batchBytes >= size) break
         }
       } catch (error) {
