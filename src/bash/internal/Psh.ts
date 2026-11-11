@@ -64,6 +64,7 @@ type Host = {
   halted: string | undefined
   id: number
   options: run.Options
+  timers: Set<ReturnType<typeof setTimeout>>
   waiting: (() => void) | undefined
   woken: boolean
 }
@@ -216,6 +217,7 @@ export async function run(module: WebAssembly.Module, options: run.Options): Pro
     halted: undefined,
     id: 0,
     options,
+    timers: new Set(),
     waiting: undefined,
     woken: false,
   }
@@ -355,6 +357,8 @@ function failed(instance: Instance): EngineError {
 }
 
 function release(instance: Instance, host: Host): void {
+  for (const timer of host.timers) clearTimeout(timer)
+  host.timers.clear()
   instance.shells.delete(host.id)
   if (instance.failure !== undefined) return
   try {
@@ -427,9 +431,15 @@ function hostCall(instance: Instance, call: Call): number {
       return later
     }
 
-    case kind.sleep:
-      setTimeout(() => answer(instance, call.op, { data: empty, err: 0 }), call.arg)
+    case kind.sleep: {
+      const host = instance.current
+      const timer = setTimeout(() => {
+        host?.timers.delete(timer)
+        answer(instance, call.op, { data: empty, err: 0 })
+      }, call.arg)
+      host?.timers.add(timer)
       return 0
+    }
 
     case kind.now: {
       const now = new Uint8Array(8)
