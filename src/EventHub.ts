@@ -111,6 +111,7 @@ export function create(retained: () => number, retainedBytes: () => number) {
     streams: Map<string, Stream>
     sizes: number[]
     bytes: number
+    frames: WeakMap<Contracts.LoggedEvent, string>
     retained: () => number
     retainedBytes: () => number
   } = {
@@ -121,12 +122,21 @@ export function create(retained: () => number, retainedBytes: () => number) {
     streams: new Map<string, Stream>(),
     sizes: [],
     bytes: 0,
+    frames: new WeakMap<Contracts.LoggedEvent, string>(),
     retained: undefined as unknown as () => number,
     retainedBytes: undefined as unknown as () => number,
   }
   state.retained = retained
   state.retainedBytes = retainedBytes
   const internal = {
+    frame(event: Contracts.LoggedEvent): string {
+      const found = state.frames.get(event)
+      if (found !== undefined) return found
+      const frame = `id: ${event.seq}\ndata: ${JSON.stringify(event).slice(0, -1)},"streamed_at":`
+      state.frames.set(event, frame)
+      return frame
+    },
+
     settle(event: Contracts.LoggedEvent): void {
       const found = streamed(event)
       if (!found) return
@@ -160,7 +170,7 @@ export function create(retained: () => number, retainedBytes: () => number) {
 
     notify(): void {
       state.revision++
-      for (const resolve of [...state.listeners]) resolve()
+      for (const resolve of state.listeners) resolve()
     },
 
     publish(events: Contracts.LoggedEvent[], bytes: number[]): void {
@@ -184,6 +194,7 @@ export function create(retained: () => number, retainedBytes: () => number) {
         state.bytes = 0
       }
       state.highest = Math.max(state.highest, last)
+      state.frames = new WeakMap()
       for (const event of events) internal.settle(event)
       self.notify()
     },
@@ -247,9 +258,18 @@ export function create(retained: () => number, retainedBytes: () => number) {
 
     recent(after: number, requestId?: string): Contracts.LogPage | undefined {
       if (!state.tail.length || after < state.tail[0].seq - 1) return undefined
-      const events = state.tail.filter(
-        (event) => event.seq > after && (requestId === undefined || event.request_id === requestId),
-      )
+      let low = 0
+      let high = state.tail.length
+      while (low < high) {
+        const middle = (low + high) >> 1
+        if (state.tail[middle].seq > after) high = middle
+        else low = middle + 1
+      }
+      const newer = state.tail.slice(low)
+      const events =
+        requestId === undefined
+          ? newer
+          : newer.filter((event) => event.request_id === requestId)
       return {
         events,
         next_cursor: Math.max(after, state.tail[state.tail.length - 1].seq),
@@ -325,12 +345,14 @@ export function create(retained: () => number, retainedBytes: () => number) {
                 cursor = page.next_cursor
                 complete = !!finished && page.events.some((event) => finished(event as Event))
                 const streamedAt = Date.now()
+                const end = `${streamedAt}}\n\n`
                 controller.enqueue(
                   encoder.encode(
                     page.events
-                      .map(
-                        (event) =>
-                          `id: ${event.seq}\ndata: ${JSON.stringify({ ...event, streamed_at: streamedAt })}\n\n`,
+                      .map((event) =>
+                        'streamed_at' in event
+                          ? `id: ${event.seq}\ndata: ${JSON.stringify({ ...event, streamed_at: streamedAt })}\n\n`
+                          : internal.frame(event) + end,
                       )
                       .join('') +
                       chunks
