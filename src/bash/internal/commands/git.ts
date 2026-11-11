@@ -386,7 +386,7 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
       written -= entry.file.data.length
     })
   }
-  for (let attempt = 1; ; attempt++) {
+  const reset = () => {
     files = {}
     reader = new TarReader(maxFileBytes)
     omitted = []
@@ -399,33 +399,51 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     queuedBytes = 0
     known.clear()
     pinned = undefined
+  }
+  const clear = async () => {
+    if (created) await removeTree(ctx.fs, target).catch(() => {})
+    else
+      for (const name of await ctx.fs.list(target).catch(() => [] as string[]))
+        await removeTree(ctx.fs, target + '/' + name).catch(() => {})
+  }
+  const racing = (() => {
+    if (!github.pack && github.archive) return undefined
+    const controller = new AbortController()
+    const signal = AbortSignal.any([ctx.signal, controller.signal])
+    const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
+    const url = github.pack?.(owner, name)
+    const result = (async () => {
+      const found = /^[0-9a-f]{40}$/.test(ref)
+        ? { branch: null, commit: ref }
+        : await GitPack.refs(fetcher, { ref, repository: options.repository, signal, url }).catch(
+            missing,
+          )
+      if (!found) return undefined
+      const pack = await GitPack.fetchPack(fetcher, {
+        commit: found.commit,
+        filterBytes: maxFileBytes,
+        maxBytes: maxDownload,
+        repository: options.repository,
+        segmentBytes: maxFileBytes,
+        signal,
+        url,
+      }).catch(missing)
+      return pack && { found, pack }
+    })()
+    result.catch(() => {})
+    return { abort: () => controller.abort(), result }
+  })()
+  for (let attempt = 1; ; attempt++) {
+    reset()
     let watch: Watch | undefined
     let stream: ReadableStreamDefaultReader<Uint8Array> | undefined
     let root: string | undefined
     let bytes = 0
     try {
-      if (github.pack || !github.archive) {
-        const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
-        const url = github.pack?.(owner, name)
-        const found = /^[0-9a-f]{40}$/.test(ref)
-          ? { branch: null, commit: ref }
-          : await GitPack.refs(fetcher, {
-              ref,
-              repository: options.repository,
-              signal: ctx.signal,
-              url,
-            }).catch(missing)
-        if (!found) throw new CommandError(notFound(options.repository, ref), 128)
-        const pack = await GitPack.fetchPack(fetcher, {
-          commit: found.commit,
-          filterBytes: maxFileBytes,
-          maxBytes: maxDownload,
-          repository: options.repository,
-          segmentBytes: maxFileBytes,
-          signal: ctx.signal,
-          url,
-        }).catch(missing)
-        if (!pack) throw new CommandError(notFound(options.repository, ref), 128)
+      const viaPack = async (
+        found: { branch: string | null; commit: string },
+        pack: GitPack.Pack,
+      ) => {
         await ensure(target)
         root = name
         for await (const item of GitPack.checkout(pack, {
@@ -488,98 +506,128 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
           await breathe()
         }
         await flush()
-        break
       }
-      const download = await fetchArchive(ctx, github, options.repository, ref)
-      watch = download.watch
-      stream = download.response.body!.pipeThrough(new DecompressionStream('gzip')).getReader()
-      await ensure(target)
-      for (;;) {
-        if (ctx.signal.aborted) throw new CommandError('fatal: clone aborted', 130)
-        watch.arm()
-        const next = await watch.race(stream.read())
-        if (next.done) break
-        bytes += next.value.length
-        if (bytes > maxDownload)
-          throw new CommandError(
-            'fatal: repository archive is larger than ' +
-              Math.round(maxDownload / 1024 / 1024) +
-              ' MiB uncompressed; clone a smaller repository or fetch single files with curl',
-            128,
-          )
-        watch.stop()
-        for (const entry of reader.push(next.value)) {
-          const parts = entry.name.split('/')
-          if (
-            entry.name.startsWith('/') ||
-            entry.name.includes('\\') ||
-            entry.name.includes('\0') ||
-            parts.some((part) => part === '..' || part === '.' || part === '' || part === '.git')
-          )
+
+      const viaArchive = async (signal: AbortSignal) => {
+        const download = await fetchArchive({ ...ctx, signal }, github, options.repository, ref)
+        watch = download.watch
+        stream = download.response.body!.pipeThrough(new DecompressionStream('gzip')).getReader()
+        await ensure(target)
+        for (;;) {
+          if (signal.aborted) throw new CommandError('fatal: clone aborted', 130)
+          watch.arm()
+          const next = await watch.race(stream.read())
+          if (next.done) break
+          bytes += next.value.length
+          if (bytes > maxDownload)
             throw new CommandError(
-              'fatal: repository archive contains an unsafe path: ' + entry.name,
+              'fatal: repository archive is larger than ' +
+                Math.round(maxDownload / 1024 / 1024) +
+                ' MiB uncompressed; clone a smaller repository or fetch single files with curl',
               128,
             )
-          root ??= parts[0]
-          if (parts[0] !== root)
-            throw new CommandError('fatal: repository archive must contain one root directory', 128)
-          if (parts.length === 1) continue
-          const relative = parts.slice(1).join('/')
-          const path = target + '/' + relative
-          if (entry.type === 'directory') {
-            folder(path)
-            continue
+          watch.stop()
+          for (const entry of reader.push(next.value)) {
+            const parts = entry.name.split('/')
+            if (
+              entry.name.startsWith('/') ||
+              entry.name.includes('\\') ||
+              entry.name.includes('\0') ||
+              parts.some((part) => part === '..' || part === '.' || part === '' || part === '.git')
+            )
+              throw new CommandError(
+                'fatal: repository archive contains an unsafe path: ' + entry.name,
+                128,
+              )
+            root ??= parts[0]
+            if (parts[0] !== root)
+              throw new CommandError(
+                'fatal: repository archive must contain one root directory',
+                128,
+              )
+            if (parts.length === 1) continue
+            const relative = parts.slice(1).join('/')
+            const path = target + '/' + relative
+            if (entry.type === 'directory') {
+              folder(path)
+              continue
+            }
+            if (entry.type !== 'file') {
+              skipped++
+              continue
+            }
+            const reason =
+              entry.omitted !== undefined
+                ? 'larger than ' + size(maxFileBytes)
+                : count >= maxFiles
+                  ? 'past the ' + maxFiles + '-file limit'
+                  : written + entry.data.length > maxBytes
+                    ? 'past the ' + size(maxBytes) + ' limit'
+                    : undefined
+            if (reason) {
+              omitted.push({ path: relative, bytes: entry.omitted ?? entry.data.length, reason })
+              continue
+            }
+            count++
+            written += entry.data.length
+            folder(parentOf(path))
+            const pinned = reader.global['comment']
+            queued.push({
+              relative,
+              file: {
+                path,
+                data: entry.data,
+                mtime: Date.now(),
+                ...(pinned && /^[0-9a-f]{40}$/.test(pinned)
+                  ? { source: Sources.github(owner, name, pinned, relative) }
+                  : {}),
+              },
+            })
+            queuedBytes += entry.data.length + 512
+            if (queuedBytes >= BATCH_BYTES) await flush()
           }
-          if (entry.type !== 'file') {
-            skipped++
-            continue
-          }
-          const reason =
-            entry.omitted !== undefined
-              ? 'larger than ' + size(maxFileBytes)
-              : count >= maxFiles
-                ? 'past the ' + maxFiles + '-file limit'
-                : written + entry.data.length > maxBytes
-                  ? 'past the ' + size(maxBytes) + ' limit'
-                  : undefined
-          if (reason) {
-            omitted.push({ path: relative, bytes: entry.omitted ?? entry.data.length, reason })
-            continue
-          }
-          count++
-          written += entry.data.length
-          folder(parentOf(path))
-          const pinned = reader.global['comment']
-          queued.push({
-            relative,
-            file: {
-              path,
-              data: entry.data,
-              mtime: Date.now(),
-              ...(pinned && /^[0-9a-f]{40}$/.test(pinned)
-                ? { source: Sources.github(owner, name, pinned, relative) }
-                : {}),
-            },
-          })
-          queuedBytes += entry.data.length + 512
-          if (queuedBytes >= BATCH_BYTES) await flush()
+          await breathe()
+          if (reader.done) break
         }
-        await breathe()
-        if (reader.done) break
+        await flush()
+        if (!root) throw new CommandError('fatal: repository archive is empty', 128)
+        watch.stop()
+        await stream.cancel().catch(() => {})
       }
-      await flush()
-      if (!root) throw new CommandError('fatal: repository archive is empty', 128)
-      watch.stop()
-      await stream.cancel().catch(() => {})
+
+      if (!racing) {
+        await viaArchive(ctx.signal)
+        break
+      }
+      const archiving = new AbortController()
+      racing.result.then(
+        (raced) => raced && archiving.abort(),
+        () => {},
+      )
+      const failure = await viaArchive(AbortSignal.any([ctx.signal, archiving.signal])).then(
+        () => undefined,
+        (error: unknown) => ({ error }),
+      )
+      if (!failure) {
+        racing.abort()
+        break
+      }
+      if (ctx.signal.aborted) throw failure.error
+      const raced = await racing.result.catch(() => undefined)
+      if (!raced) throw failure.error
+      watch?.stop()
+      await stream?.cancel().catch(() => {})
+      await clear()
+      reset()
+      await viaPack(raced.found, raced.pack)
       break
     } catch (error) {
       watch?.stop()
       await stream?.cancel().catch(() => {})
-      if (created) await removeTree(ctx.fs, target).catch(() => {})
-      else
-        for (const name of await ctx.fs.list(target).catch(() => [] as string[]))
-          await removeTree(ctx.fs, target + '/' + name).catch(() => {})
-      if (!ctx.signal.aborted && lost(error)) {
+      await clear()
+      const retry = !ctx.signal.aborted && lost(error)
+      if (!retry || attempt >= ATTEMPTS) racing?.abort()
+      if (retry) {
         const reason = error instanceof Error ? error.message.replace(/\.$/, '') : String(error)
         if (attempt < ATTEMPTS) {
           if (!options.quiet)
