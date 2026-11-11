@@ -41,3 +41,6 @@ lto = "off"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[profile.wasm.package.djs-core]
+opt-level = 3
