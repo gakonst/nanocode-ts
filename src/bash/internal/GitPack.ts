@@ -333,16 +333,7 @@ function inflate(pack: Pack, start: number, size: number): { data: Uint8Array; e
   }
 }
 
-export async function* objects(
-  pack: Pack,
-  options: objects.Options = {},
-): AsyncGenerator<objects.Item> {
-  const head = new Uint8Array(12).map((_, index) => byte(pack, index))
-  if (decoder.decode(head.subarray(0, 4)) !== 'PACK') throw new GitError('github.com sent no pack')
-  const view = new DataView(head.buffer)
-  const version = view.getUint32(4)
-  if (version !== 2 && version !== 3) throw new GitError('the pack has version ' + version)
-  const count = view.getUint32(8)
+export function objects(pack: Pack, options: objects.Options = {}): objects.ReturnType {
   const limit = options.cacheBytes ?? 0
   const entries = new Map<number, Entry>()
   const bySha = new Map<string, number>()
@@ -386,54 +377,73 @@ export async function* objects(
     return done
   }
 
-  let offset = 12
-  for (let n = 0; n < count; n++) {
-    const start = offset
-    let next = byte(pack, offset++)
-    const code = (next >> 4) & 7
-    let size = next & 15
-    let shift = 4
-    while (next & 128) {
-      next = byte(pack, offset++)
-      size += (next & 127) * 2 ** shift
-      shift += 7
-    }
-    const entry: Entry = (() => {
-      if (code === 6) {
-        next = byte(pack, offset++)
-        let back = next & 127
-        while (next & 128) {
-          next = byte(pack, offset++)
-          back = (back + 1) * 128 + (next & 127)
-        }
-        return { kind: 'ofs-delta', offset: start, size, start: offset, base: start - back }
-      }
-      if (code === 7) {
-        const base = hex(new Uint8Array(20).map((_, index) => byte(pack, offset + index)))
-        offset += 20
-        return { kind: 'ref-delta', offset: start, size, start: offset, base }
-      }
-      const kind = types[code]
-      if (!kind) throw new GitError('the pack holds an object of type ' + code)
-      return { kind, offset: start, size, start: offset }
-    })()
-    entry.start = offset
-    const raw = inflate(pack, offset, size)
-    offset = raw.end
-    entries.set(start, entry)
-    if (entry.kind === 'ref-delta' && !bySha.has(String(entry.base))) yield* await settle()
-    const value = resolve(entry, raw.data)
-    keep(start, value)
-    pending.push({ data: value.data, id: sha(value.kind, value.data), kind: value.kind, start })
-    held += value.data.length
-    if (held >= window) yield* await settle()
+  const read = (sha: string) => {
+    const at = bySha.get(sha)
+    const entry = at === undefined ? undefined : entries.get(at)
+    if (!entry) throw new GitError('the pack does not hold object ' + sha)
+    return resolve(entry).data
   }
-  yield* await settle()
+
+  const items = async function* (): AsyncGenerator<objects.Item> {
+    const head = new Uint8Array(12).map((_, index) => byte(pack, index))
+    if (decoder.decode(head.subarray(0, 4)) !== 'PACK')
+      throw new GitError('github.com sent no pack')
+    const view = new DataView(head.buffer)
+    const version = view.getUint32(4)
+    if (version !== 2 && version !== 3) throw new GitError('the pack has version ' + version)
+    const count = view.getUint32(8)
+    let offset = 12
+    for (let n = 0; n < count; n++) {
+      const start = offset
+      let next = byte(pack, offset++)
+      const code = (next >> 4) & 7
+      let size = next & 15
+      let shift = 4
+      while (next & 128) {
+        next = byte(pack, offset++)
+        size += (next & 127) * 2 ** shift
+        shift += 7
+      }
+      const entry: Entry = (() => {
+        if (code === 6) {
+          next = byte(pack, offset++)
+          let back = next & 127
+          while (next & 128) {
+            next = byte(pack, offset++)
+            back = (back + 1) * 128 + (next & 127)
+          }
+          return { kind: 'ofs-delta', offset: start, size, start: offset, base: start - back }
+        }
+        if (code === 7) {
+          const base = hex(new Uint8Array(20).map((_, index) => byte(pack, offset + index)))
+          offset += 20
+          return { kind: 'ref-delta', offset: start, size, start: offset, base }
+        }
+        const kind = types[code]
+        if (!kind) throw new GitError('the pack holds an object of type ' + code)
+        return { kind, offset: start, size, start: offset }
+      })()
+      entry.start = offset
+      const raw = inflate(pack, offset, size)
+      offset = raw.end
+      entries.set(start, entry)
+      if (entry.kind === 'ref-delta' && !bySha.has(String(entry.base))) yield* await settle()
+      const value = resolve(entry, raw.data)
+      keep(start, value)
+      pending.push({ data: value.data, id: sha(value.kind, value.data), kind: value.kind, start })
+      held += value.data.length
+      if (held >= window) yield* await settle()
+    }
+    yield* await settle()
+  }
+
+  return { items: items(), read }
 }
 
 export declare namespace objects {
   type Options = { cacheBytes?: number | undefined; windowBytes?: number | undefined }
   type Item = { data: Uint8Array; kind: Kind; sha: string }
+  type ReturnType = { items: AsyncGenerator<Item>; read: (sha: string) => Uint8Array }
 }
 
 export function tree(data: Uint8Array): { mode: string; name: string; sha: string }[] {
@@ -480,67 +490,66 @@ export async function* checkout(
   pack: Pack,
   options: checkout.Options,
 ): AsyncGenerator<checkout.Item> {
-  const structures = new Map<string, Uint8Array>()
-  const waiting = new Map<string, Uint8Array>()
-  const missing = new Set<string>([options.commit])
-  let paths: Map<string, { mode: string; path: string }[]> | undefined
+  const unpacked = objects(pack, options)
+  const trees = new Map<string, Uint8Array>()
+  const arrived = new Set<string>()
+  const prefixes = new Map<string, string[]>()
+  const wanted = new Map<string, { mode: string; path: string }[]>()
+  let found = false
 
-  const plan = () => {
-    const head = structures.get(options.commit)
-    if (!head) return undefined
-    const found = new Map<string, { mode: string; path: string }[]>()
-    const walk = (sha: string, prefix: string) => {
-      const data = structures.get(sha)
-      if (!data) {
-        missing.add(sha)
-        return
-      }
-      for (const item of tree(data)) {
+  const expand = function* (sha: string, list: readonly string[]): Generator<checkout.Item> {
+    for (const item of tree(trees.get(sha)!))
+      for (const prefix of list) {
         const path = prefix + item.name
-        if (item.mode === '40000') walk(item.sha, path + '/')
-        else found.set(item.sha, [...(found.get(item.sha) ?? []), { mode: item.mode, path }])
+        if (item.mode === '40000') yield* place(item.sha, [path + '/'])
+        else if (!item.mode.startsWith('100')) yield { kind: 'skipped', mode: item.mode, path }
+        else if (arrived.has(item.sha))
+          yield {
+            data: unpacked.read(item.sha),
+            kind: 'file',
+            mode: item.mode,
+            path,
+            sha: item.sha,
+          }
+        else wanted.set(item.sha, [...(wanted.get(item.sha) ?? []), { mode: item.mode, path }])
       }
+  }
+
+  const place = function* (sha: string, list: readonly string[]): Generator<checkout.Item> {
+    if (!trees.has(sha)) {
+      prefixes.set(sha, [...(prefixes.get(sha) ?? []), ...list])
+      return
     }
-    walk(commit(head).tree, '')
-    return missing.size ? undefined : found
+    yield* expand(sha, list)
   }
 
-  const files = function* (sha: string, data: Uint8Array): Generator<checkout.Item> {
-    const list = paths!.get(sha)
-    if (!list) return
-    paths!.delete(sha)
-    for (const item of list)
-      if (item.mode.startsWith('100'))
-        yield { data, kind: 'file', mode: item.mode, path: item.path, sha }
-  }
-
-  const planned = function* (): Generator<checkout.Item> {
-    for (const [, list] of paths!)
-      for (const entry of list)
-        if (!entry.mode.startsWith('100'))
-          yield { kind: 'skipped', mode: entry.mode, path: entry.path }
-    for (const [sha, data] of waiting) yield* files(sha, data)
-    waiting.clear()
-  }
-
-  for await (const item of objects(pack, options)) {
+  for await (const item of unpacked.items) {
     if (item.kind === 'blob') {
-      if (paths) yield* files(item.sha, item.data)
-      else waiting.set(item.sha, item.data)
+      arrived.add(item.sha)
+      const list = wanted.get(item.sha)
+      wanted.delete(item.sha)
+      for (const entry of list ?? [])
+        yield { data: item.data, kind: 'file', mode: entry.mode, path: entry.path, sha: item.sha }
       continue
     }
-    structures.set(item.sha, item.data)
-    if (item.sha === options.commit) yield { info: commit(item.data), kind: 'commit' }
-    if (paths || !missing.delete(item.sha) || missing.size) continue
-    paths = plan()
-    if (paths) yield* planned()
+    if (item.kind === 'tree') {
+      trees.set(item.sha, item.data)
+      const list = prefixes.get(item.sha)
+      prefixes.delete(item.sha)
+      if (list) yield* expand(item.sha, list)
+      continue
+    }
+    if (item.sha !== options.commit) continue
+    const info = commit(item.data)
+    found = true
+    yield { info, kind: 'commit' }
+    yield* place(info.tree, [''])
   }
 
-  if (!paths) throw new GitError('the pack lacks a tree of commit ' + options.commit)
-  for (const [sha, list] of paths)
-    for (const entry of list)
-      if (entry.mode.startsWith('100'))
-        yield { kind: 'filtered', mode: entry.mode, path: entry.path, sha }
+  if (!found || prefixes.size)
+    throw new GitError('the pack lacks a tree of commit ' + options.commit)
+  for (const [sha, list] of wanted)
+    for (const entry of list) yield { kind: 'filtered', mode: entry.mode, path: entry.path, sha }
 }
 
 export declare namespace checkout {
