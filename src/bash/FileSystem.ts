@@ -32,7 +32,23 @@ export type FileSystem = {
   excerpt?(path: string, literals: string[], every?: Conjunction): Promise<Uint8Array | null>
   matches?(dir: string, literals: string[], ignoreCase: boolean): Promise<string[] | null>
   scanLimit?(dir: string): Promise<number | null>
+  sync?: SyncFileSystem
   writeMany?(dirs: string[], files: NewFile[]): Promise<string[]>
+}
+
+export type SyncFileSystem = {
+  chmod?(path: string, mode: number): void
+  list(path: string): string[]
+  lstat?(path: string): LinkStat | null
+  mkdir(path: string): void
+  read(path: string): Uint8Array
+  readlink?(path: string): string | null
+  remove(path: string): void
+  rename(from: string, to: string): void
+  stat(path: string): FileStat | null
+  symlink?(target: string, path: string): void
+  utimes?(path: string, mtime: number): void
+  write(path: string, data: Uint8Array, append?: boolean): void
 }
 
 export type Conjunction = {

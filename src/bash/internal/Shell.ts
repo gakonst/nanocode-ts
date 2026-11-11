@@ -139,13 +139,15 @@ export class Pipe {
   readonly limit: number
   readonly memory: number
   readonly signal: AbortSignal | undefined
+  #pull: (() => Promise<void>) | undefined
   #reader: (() => void) | undefined
   #writer: (() => void) | undefined
 
-  constructor(limit: number, signal?: AbortSignal, memory = Infinity) {
+  constructor(limit: number, signal?: AbortSignal, memory = Infinity, pull?: () => Promise<void>) {
     this.limit = limit
     this.memory = memory
     this.signal = signal
+    this.#pull = pull
     signal?.addEventListener('abort', () => this.#wake(), { once: true })
   }
 
@@ -181,7 +183,8 @@ export class Pipe {
     while (!this.#chunks.length) {
       if (this.ended || this.closed) return null
       this.#abort()
-      await new Promise<void>((resolve) => (this.#reader = resolve))
+      if (this.#pull) await this.#pull()
+      else await new Promise<void>((resolve) => (this.#reader = resolve))
     }
     const chunks = this.#chunks
     const head = chunks[0]
@@ -579,6 +582,20 @@ const UNREAD = new Set([
 export function streaming<T extends CommandHandler>(handler: T): T {
   STREAMS.add(handler)
   return handler
+}
+
+export function buffered(name: string, options: buffered.Options): boolean {
+  return (
+    !STREAMS.has(options.handler) &&
+    !(UNREAD.has(name) && options.handler === options.commands.get(name))
+  )
+}
+
+export declare namespace buffered {
+  type Options = {
+    commands: ReadonlyMap<string, CommandHandler>
+    handler: CommandHandler
+  }
 }
 
 type Job = {
@@ -4302,10 +4319,10 @@ function syntax(error: ParseError, label: string, offset = 0): string {
   )
 }
 
-const UNSUPPORTED =
+export const UNSUPPORTED =
   /^(unrecognized|invalid|unsupported|unknown) option|^Unknown option|not supported|network access is not available|Cannot find package 'pyodide'/
 
-function missing(name: string): string {
+export function missing(name: string): string {
   if (/^(node|nodejs|npm|npx|pnpm|yarn|bun|bunx|deno|tsc|tsx|ts-node)$/.test(name))
     return ' (this simulated shell has no JavaScript runtime or package manager)'
   if (/^(python[23]?(\.\d+)?|pip3?|pytest|ipython)$/.test(name))

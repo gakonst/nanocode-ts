@@ -6,6 +6,7 @@ import * as MemoryFileSystem from './MemoryFileSystem.ts'
 import type * as Python from './Python.ts'
 import type * as Wasm from './Wasm.ts'
 import { decode, display, encode, parentOf, useCodec, type Codec } from './internal/Fs.ts'
+import * as Psh from './internal/Psh.ts'
 import * as Shell from './internal/Shell.ts'
 import { awk } from './internal/commands/awk.ts'
 import { curl, wget } from './internal/commands/curl.ts'
@@ -83,6 +84,22 @@ export type Result = {
   stderr: string
   stdout: string
   truncated: boolean
+}
+
+type EngineOutcome = {
+  category: Category
+  exitCode: number
+  stderr: string
+  stdout: string
+  truncated: boolean
+}
+
+type EngineRequest = {
+  controller: AbortController
+  directory: string
+  execOptions: ExecOptions
+  script: string
+  timeoutMs: number
 }
 
 const workspaceTimeoutMs = 600_000
@@ -186,8 +203,49 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       const onAbort = () => controller.abort('execution aborted')
       if (execOptions.signal?.aborted) onAbort()
       execOptions.signal?.addEventListener('abort', onAbort, { once: true })
-      const state = new Shell.State()
       const directory = FileSystem.resolvePath(cwd, execOptions.cwd ?? cwd)
+      const engine = machine ? undefined : await options.psh
+      if (engine) {
+        const outcome = await engineRun(engine, {
+          controller,
+          directory,
+          execOptions,
+          script,
+          timeoutMs,
+        }).finally(() => {
+          clearTimeout(timer)
+          execOptions.signal?.removeEventListener('abort', onAbort)
+        })
+        const category = (() => {
+          if (outcome.exitCode === 0) return 'none'
+          if (outcome.category === 'exception') return 'exception'
+          if (execOptions.signal?.aborted)
+            return (execOptions.signal.reason as { name?: unknown } | undefined)?.name ===
+              'TimeoutError'
+              ? 'timeout'
+              : 'cancelled'
+          if (timedOut) return 'timeout'
+          return outcome.category
+        })()
+        emit({
+          phase: 'finished',
+          call,
+          command,
+          status: outcome.exitCode === 0 ? 'success' : 'error',
+          category,
+          exitCode: outcome.exitCode,
+          durationMs: Date.now() - started,
+          outputTruncated: outcome.truncated,
+        })
+        return {
+          stdout: outcome.stdout,
+          stderr: outcome.stderr,
+          exitCode: outcome.exitCode,
+          truncated: outcome.truncated,
+        }
+      }
+
+      const state = new Shell.State()
       state.cwd = directory
       for (const [name, value] of Object.entries({ ...env, ...execOptions.env, PWD: directory })) {
         state.vars.set(name, [value])
@@ -344,6 +402,135 @@ export async function create(options: create.Options = {}): Promise<Bash> {
   }
   const wasm = wasmHost(shell, options.wasm)
 
+  const engineRun = async (
+    engine: WebAssembly.Module,
+    request: EngineRequest,
+  ): Promise<EngineOutcome> => {
+    const budget = { used: 0, refused: false }
+    const ran = await (async () => {
+      try {
+        return await Psh.run(engine, {
+          commandFs: budgeted(fs, limits.maxFileOperations, budget),
+          commands,
+          cwd: request.directory,
+          env: { ...env, ...request.execOptions.env, PWD: request.directory },
+          fetch: options.fetch,
+          fs,
+          identity: {
+            group: env.USER ?? 'user',
+            home: env.HOME ?? '/',
+            hostname: 'localhost',
+            hosttype: 'x86_64',
+            machtype: 'x86_64-pc-linux-gnu',
+            ostype: 'linux-gnu',
+            pid: 1,
+            uid: 1000,
+            user: env.USER ?? 'user',
+          },
+          limits: {
+            depth: limits.maxCallDepth,
+            file: limits.maxMemoryBytes,
+            fuel: limits.maxCommands,
+            operations: limits.maxFileOperations,
+            output: limits.maxOutputLength,
+          },
+          script: request.script,
+          shellLimits: { ...limits, timeoutMs: request.timeoutMs },
+          signal: request.controller.signal,
+          stdin:
+            request.execOptions.stdin === undefined ? undefined : encode(request.execOptions.stdin),
+          strict: options.fallback === true,
+          without: Object.keys(options.commands ?? {}),
+        })
+      } catch (error) {
+        return error instanceof Error ? error : new Error(String(error))
+      }
+    })()
+    if (ran instanceof Error)
+      return {
+        category: 'exception',
+        exitCode: 1,
+        stderr: '/bin/bash: ' + ran.message + '\n',
+        stdout: '',
+        truncated: false,
+      }
+
+    const stdout = display(decode(ran.stdout))
+    const stderr = ran.missing.reduce(
+      (all, name) => {
+        const hint = Shell.missing(name)
+        const told = ': ' + name + ': command not found\n'
+        return hint ? all.replace(told, told.slice(0, -1) + hint + '\n') : all
+      },
+      display(decode(ran.stderr)),
+    )
+    const outcome = (extra: string, exitCode: number, category: Category): EngineOutcome => ({
+      category,
+      exitCode,
+      stderr: stderr + extra,
+      stdout,
+      truncated: ran.truncated,
+    })
+
+    switch (ran.ended) {
+      case 'exited':
+        return outcome(
+          '',
+          ran.status,
+          ran.status === 2 && /^\/bin\/bash: -c: line \d+: syntax error/m.test(stderr)
+            ? 'syntax'
+            : ran.status === 127
+              ? 'command_not_found'
+              : 'command_exit',
+        )
+
+      case 'fuel':
+        return outcome(
+          '/bin/bash: too many commands (limit ' + limits.maxCommands + ')\n',
+          126,
+          'resource_limit',
+        )
+
+      case 'operations':
+        return outcome(
+          '/bin/bash: too many file operations (limit ' +
+            limits.maxFileOperations +
+            '); search a narrower path\n',
+          126,
+          'search_admission',
+        )
+
+      case 'missing': {
+        const name = ran.missing.at(-1) ?? ''
+        const told = ': ' + name + ': command not found'
+        return outcome(
+          stderr.includes(told) ? '' : '/bin/bash' + told + Shell.missing(name) + '\n',
+          127,
+          'command_not_found',
+        )
+      }
+
+      case 'cancelled': {
+        if (ran.halted !== undefined)
+          return outcome('/bin/bash: ' + ran.halted + '\n', 127, 'command_not_found')
+        if (budget.refused)
+          return outcome(
+            '/bin/bash: too many file operations (limit ' +
+              limits.maxFileOperations +
+              '); search a narrower path\n',
+            126,
+            'search_admission',
+          )
+        const reason = request.controller.signal.reason
+        return outcome(
+          '/bin/bash: ' + (typeof reason === 'string' ? reason : 'execution aborted') + '\n',
+          124,
+          'cancelled',
+        )
+      }
+    }
+  }
+
   if (options.fs && options.files)
     for (const [path, content] of Object.entries(options.files))
       await shell.writeFile(path, content)
@@ -365,6 +552,7 @@ export declare namespace create {
     limits?: Partial<Shell.Limits>
     machine?: Machine
     observe?: (event: Event) => void
+    psh?: WebAssembly.Module | Promise<WebAssembly.Module>
     python?: Python.Options
     wasm?: Wasm.Options
     webassembly?: boolean
