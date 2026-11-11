@@ -406,12 +406,11 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
       for (const name of await ctx.fs.list(target).catch(() => [] as string[]))
         await removeTree(ctx.fs, target + '/' + name).catch(() => {})
   }
-  const racing = (() => {
-    if (!github.pack && github.archive) return undefined
+  const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
+  const url = github.pack?.(owner, name)
+  const race = () => {
     const controller = new AbortController()
     const signal = AbortSignal.any([ctx.signal, controller.signal])
-    const fetcher = GitHub.wrap(ctx.fetch, { token: github.token })
-    const url = github.pack?.(owner, name)
     const result = (async () => {
       const found = /^[0-9a-f]{40}$/.test(ref)
         ? { branch: null, commit: ref }
@@ -432,9 +431,10 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     })()
     result.catch(() => {})
     return { abort: () => controller.abort(), result }
-  })()
+  }
   for (let attempt = 1; ; attempt++) {
     reset()
+    const racing = github.archive && !github.pack ? undefined : race()
     let watch: Watch | undefined
     let stream: ReadableStreamDefaultReader<Uint8Array> | undefined
     let root: string | undefined
@@ -599,6 +599,12 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
         await viaArchive(ctx.signal)
         break
       }
+      if (github.archive === false) {
+        const raced = await racing.result
+        if (!raced) throw new CommandError(notFound(options.repository, ref), 128)
+        await viaPack(raced.found, raced.pack)
+        break
+      }
       const archiving = new AbortController()
       racing.result.then(
         (raced) => raced && archiving.abort(),
@@ -624,10 +630,9 @@ async function clone(ctx: CommandContext, github: GitHub.Options, args: string[]
     } catch (error) {
       watch?.stop()
       await stream?.cancel().catch(() => {})
+      racing?.abort()
       await clear()
-      const retry = !ctx.signal.aborted && lost(error)
-      if (!retry || attempt >= ATTEMPTS) racing?.abort()
-      if (retry) {
+      if (!ctx.signal.aborted && lost(error)) {
         const reason = error instanceof Error ? error.message.replace(/\.$/, '') : String(error)
         if (attempt < ATTEMPTS) {
           if (!options.quiet)

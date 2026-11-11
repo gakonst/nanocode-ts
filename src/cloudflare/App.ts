@@ -1431,6 +1431,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 cwd: options.workspace?.cwd ?? '/workspace',
                 ...(options.workspace?.files ? { files: options.workspace.files } : {}),
                 fetch: cellFetch,
+                github: { archive: false, ...options.workspace?.github },
                 wasm: { interpreter },
                 ...(pythonRemote
                   ? {
@@ -3381,6 +3382,7 @@ export declare namespace create {
       | {
           cwd?: string
           files?: Record<string, string>
+          github?: GitHub.Options
           limits?: Partial<Bash.Limits>
           maxFileBytes?: number
           mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>

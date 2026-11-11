@@ -245,6 +245,7 @@ export function create(options: create.Options = {}): Harness {
             cwd: options.workspace?.cwd ?? '/workspace',
             python: { mirror: ctx.runId },
             ...(options.workspace?.files ? { files: options.workspace.files } : {}),
+            ...(options.workspace?.github ? { github: options.workspace.github } : {}),
             ...(configuredFetch ? { fetch: cellFetch } : {}),
           })
     const mcpServers = options.mcp?.servers ?? []
@@ -562,7 +563,7 @@ export declare namespace create {
     thinking?: Contracts.AgentConfiguration['thinking']
     tools?: HostTool[]
     wallet?(sessionId: string): Gateway.Dispatch
-    workspace?: false | { cwd?: string; files?: Record<string, string> }
+    workspace?: false | { cwd?: string; files?: Record<string, string>; github?: GitHub.Options }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
     webSearch?: false
   }
