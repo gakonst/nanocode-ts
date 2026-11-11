@@ -63,30 +63,9 @@ export async function localEngine(
     allocate(length: number): number
     poll(): void
   } & Record<Contracts.EngineCall, (id: number, pointer: number, length: number) => void>
-  const step = 16_384
-  const args = new Array<number>(step / 8).fill(0)
-  let levels = 0
-  const descend = (): number => {
-    if (--levels <= 0) return 1
-    try {
-      return 1 + Reflect.apply(descend, undefined, args)
-    } catch {
-      return 1
-    }
-  }
-  const room = (want: number): number => {
-    levels = Math.floor(want / step)
-    try {
-      return Reflect.apply(descend, undefined, args) * step
-    } catch {
-      return 0
-    }
-  }
   let exports: Exports | undefined
-  let entry = 0
   const bytes = (pointer: number, length: number) =>
     new Uint8Array(exports!.memory.buffer, pointer, length)
-  const view = () => new DataView(exports!.memory.buffer)
   const imports = {
     dispatch: (id: number, pointer: number, length: number) =>
       host.dispatch(id, bytes(pointer, length)),
@@ -99,10 +78,6 @@ export async function localEngine(
     ) => host.dispatch(id, bytes(pointer, length), bytes(body, bodyLength).slice()),
     cancel: (id: number) => host.cancel(id),
     clock: (monotonic: number) => (monotonic ? performance.now() : Date.now()),
-    stack_room: (want: number, at: number) => {
-      entry = at
-      return room(want)
-    },
     calendar_date: (pointer: number, length: number) =>
       calendarDate(new TextDecoder().decode(bytes(pointer, length))),
     random: (pointer: number, length: number) => {
@@ -111,30 +86,7 @@ export async function localEngine(
     reply: (id: number, pointer: number, length: number) => host.reply(id, bytes(pointer, length)),
     panicked: (pointer: number, length: number) => host.panicked(bytes(pointer, length)),
   }
-  const libc = {
-    clock_time_get: (clock: number, _precision: bigint, out: number) => {
-      view().setBigUint64(
-        out,
-        BigInt(Math.round((clock === 0 ? Date.now() : performance.now()) * 1e6)),
-        true,
-      )
-      return 0
-    },
-    fd_write: (_fd: number, iovs: number, count: number, written: number) => {
-      let total = 0
-      for (let index = 0; index < count; index++)
-        total += view().getUint32(iovs + index * 8 + 4, true)
-      view().setUint32(written, total, true)
-      return 0
-    },
-    fd_close: () => 0,
-    fd_fdstat_get: () => 8,
-    fd_seek: () => 8,
-  }
-  const instance = await WebAssembly.instantiate(module, {
-    host: imports,
-    wasi_snapshot_preview1: libc,
-  })
+  const instance = await WebAssembly.instantiate(module, { host: imports })
   const wasm = instance.exports as unknown as Exports
   exports = wasm
   return {
@@ -142,7 +94,6 @@ export async function localEngine(
       return wasm.memory.buffer.byteLength
     },
     enter(call, id, length, fill) {
-      if (entry) new Uint32Array(wasm.memory.buffer, entry, 1)[0]++
       if (call && fill) {
         const pointer = wasm.allocate(length)
         fill(new Uint8Array(wasm.memory.buffer, pointer, length))

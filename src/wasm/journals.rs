@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
 };
 
 use nanocode::durability::{Sql, SqlStatement};
@@ -77,7 +78,7 @@ impl CellJournalSink for WorkerJournals {
             let tools = match update.header.as_mut() {
                 Some(header) => {
                     let (digest, body) = catalog(&header.tools)?;
-                    header.tools = vec![json!({ (TOOLS_MARK): digest })];
+                    header.tools = [json!({ (TOOLS_MARK): digest })].into();
                     let known = CATALOGS
                         .with_borrow(|known| known.contains(&(scope.clone(), digest.clone())));
                     Some((digest, (!known).then_some(body)))
@@ -201,10 +202,13 @@ pub async fn load(scope: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, Str
         )
         .await
         .map_err(|error| error.to_string())?;
-    let mut catalogs: HashMap<&str, Option<Vec<Value>>> = HashMap::new();
+    let mut catalogs: HashMap<&str, Option<Arc<[Value]>>> = HashMap::new();
     for row in rows.get(4).into_iter().flatten() {
         if let [Some(digest), Some(body)] = row.as_slice() {
-            catalogs.insert(digest.as_str(), serde_json::from_str(body).ok());
+            catalogs.insert(
+                digest.as_str(),
+                serde_json::from_str::<Vec<Value>>(body).ok().map(Arc::from),
+            );
         }
     }
     let mut cells: BTreeMap<(String, u64), Vec<CellJournalUpdate>> = BTreeMap::new();
@@ -224,7 +228,7 @@ pub async fn load(scope: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, Str
                 };
                 CATALOGS
                     .with_borrow_mut(|known| known.insert((scope.to_owned(), digest.to_owned())));
-                header.tools = tools.clone();
+                header.tools = Arc::clone(tools);
             }
             cells
                 .entry((update.session_id.clone(), update.cell_id))

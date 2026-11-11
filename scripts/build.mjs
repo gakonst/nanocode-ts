@@ -20,27 +20,6 @@ if (differing.length > 0 || rust.size === 0) {
   process.exit(1);
 }
 
-const WASI_SDK = "25.0";
-let wasiSdk = process.env.WASI_SDK_PATH;
-if (!wasiSdk) {
-  wasiSdk = join(process.cwd(), "target", "wasi-sdk-" + WASI_SDK);
-  if (!existsSync(join(wasiSdk, "bin", "clang"))) {
-    const host = (arch() === "arm64" ? "arm64" : "x86_64") + "-" + (platform() === "darwin" ? "macos" : "linux");
-    const url = "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-" + WASI_SDK.split(".")[0] + "/wasi-sdk-" + WASI_SDK + "-" + host + ".tar.gz";
-    mkdirSync(wasiSdk, { recursive: true });
-    const fetched = spawnSync("sh", ["-c", 'curl -sSfL "$0" | tar xz --strip-components 1 -C "$1"', url, wasiSdk], { stdio: "inherit" });
-    if (fetched.status !== 0) process.exit(fetched.status ?? 1);
-  }
-}
-const sysroot = join(wasiSdk, "share", "wasi-sysroot");
-const cflags = "--target=wasm32-wasip1 --sysroot=" + sysroot;
-process.env.CC_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "clang");
-process.env.AR_wasm32_unknown_unknown ??= join(wasiSdk, "bin", "ar");
-const quickjsHeader = join(process.cwd(), "..", "nanocodex", "crates", "runtime", "code-mode-engine", "wasm", "quickjs-wasi.h");
-process.env.CFLAGS_wasm32_unknown_unknown ??= cflags + " -DEMSCRIPTEN=1 -DFE_DOWNWARD=0 -DFE_UPWARD=0 -DNANOCODE_QUICKJS_WASI_H=0x" + createHash("sha256").update(readFileSync(quickjsHeader)).digest("hex").slice(0, 12) + " -include " + quickjsHeader;
-process.env.BINDGEN_EXTRA_CLANG_ARGS_wasm32_unknown_unknown ??= cflags + " -fvisibility=default";
-process.env.WASI_SYSROOT ??= sysroot;
-
 const BINARYEN = "133";
 const binaryenDigests = {
   "aarch64-linux": "89c07ea56faf38d0fbecf36ca8ec0721756716185f265b568e133d427f299bf8",

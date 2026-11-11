@@ -229,7 +229,7 @@ const ownerScope = 'owner'
 const unfinishedStatuses = new Set(['queued', 'running'])
 const interruptedNote = 'Agent execution interrupted; recovery scheduled'
 
-const cellInterruptChecks = 2_000
+const cellInterruptChecks = 500
 
 const pumpResets = 4
 

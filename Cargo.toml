@@ -41,6 +41,3 @@ lto = "off"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
-
-[profile.wasm.package.rquickjs-sys]
-opt-level = 3

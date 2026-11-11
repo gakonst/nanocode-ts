@@ -11,7 +11,7 @@ const moduleHint = (name) => {
   if (bare === "util") return "Use JSON.stringify, TextEncoder and TextDecoder.";
   return "Use fetch, bash, tools.* and the built-in globals instead.";
 };
-const require = (name) => { throw new Error("require(" + JSON.stringify(String(name)) + ") is not available: Code Mode cells run in QuickJS, not Node.js, and cannot load modules or npm packages. " + moduleHint(name)); };
+const require = (name) => { throw new Error("require(" + JSON.stringify(String(name)) + ") is not available: Code Mode cells run in a strict-mode JavaScript engine, not Node.js, and cannot load modules or npm packages. " + moduleHint(name)); };
 require.resolve = require;
 const stdio = { write: (chunk) => { const line = typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? fromUtf8(chunk) : String(chunk); if (line) log(line.replace(/\n$/, "")); return true; }, isTTY: false, columns: 80 };
 const hrtime = (previous) => {
@@ -23,18 +23,18 @@ const hrtime = (previous) => {
 hrtime.bigint = () => BigInt(Math.floor(performance.now() * 1e6));
 const process = {
   env: {},
-  argv: ["quickjs"],
+  argv: ["djs"],
   execArgv: [],
-  platform: "quickjs",
+  platform: "djs",
   arch: "wasm32",
   version: "",
   versions: {},
   pid: 1,
-  title: "quickjs",
-  release: { name: "quickjs" },
+  title: "djs",
+  release: { name: "djs" },
   stdout: stdio,
   stderr: stdio,
-  cwd: () => { throw new Error("process.cwd() is not available in a Code Mode cell (QuickJS, not Node.js): run (await bash('pwd')).stdout for the shell's directory"); },
+  cwd: () => { throw new Error("process.cwd() is not available in a Code Mode cell (a strict-mode JavaScript engine, not Node.js): run (await bash('pwd')).stdout for the shell's directory"); },
   exit: () => hostFunction("exit")(),
   nextTick: (callback, ...args) => queueMicrotask(() => callback(...args)),
   hrtime,
