@@ -433,8 +433,10 @@ export async function create(options: create.Options = {}): Promise<Bash> {
             machtype: 'x86_64-pc-linux-gnu',
             ostype: 'linux-gnu',
             pid: 1,
+            release: '6.0.0',
             uid: 1000,
             user: env.USER ?? 'user',
+            version: '#1 SMP',
           },
           limits: {
             depth: limits.maxCallDepth,

@@ -105,7 +105,7 @@ type Reply = {
   err: number
 }
 
-const abiVersion = 6
+const abiVersion = 7
 
 const budget = 2_000
 
@@ -362,8 +362,10 @@ export declare namespace run {
     machtype: string
     ostype: string
     pid: number
+    release: string
     uid: number
     user: string
+    version: string
   }
 }
 
@@ -680,6 +682,8 @@ function config(options: run.Options): Uint8Array {
     identity.ostype,
     identity.machtype,
     identity.hosttype,
+    identity.release,
+    identity.version,
   ])
     out.string(value)
 
