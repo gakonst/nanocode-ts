@@ -254,8 +254,8 @@ export function create(options: create.Options = {}): Harness {
     ctx.signal.addEventListener('abort', stop, { once: true })
     try {
       try {
-        await runtime.open(
-          {
+        const defaults: create.configure.Options = {
+          configuration: {
             scope,
             session_id: session.session_id,
             provider: session.provider,
@@ -288,7 +288,7 @@ export function create(options: create.Options = {}): Harness {
             ...(shell ? { workspace: shell.cwd } : {}),
             ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}),
           },
-          {
+          runtime: {
             ...(shell ? { workspace: shell.workspace() } : {}),
             fetch: cellFetch,
             ...(executor
@@ -324,14 +324,18 @@ export function create(options: create.Options = {}): Harness {
                   : dispatch(request, signal)
             },
             ...(plan?.socket ? { socket: plan.socket } : {}),
-            tools: {
-              call: (name, input, signal, { call_id }) => {
-                counts.tool_calls++
-                return callTool(ctx, journal, tools, name, input, signal, call_id)
-              },
+          },
+        }
+        const opening = options.configure ? await options.configure(session, defaults) : defaults
+        await runtime.open(opening.configuration, {
+          ...opening.runtime,
+          tools: {
+            call: (name, input, signal, { call_id }) => {
+              counts.tool_calls++
+              return callTool(ctx, journal, tools, name, input, signal, call_id)
             },
           },
-        )
+        })
       } catch (error) {
         if (error instanceof Contracts.HostFailureError && error.permanent)
           throw new Fatal(`nanocode refused its configuration: ${error.message}`)
@@ -535,6 +539,7 @@ export declare namespace create {
     batchMs?: number
     cellMemoryBytes?: number
     codeMode?: boolean
+    configure?: (session: Session, options: configure.Options) => configure.Options | Promise<configure.Options>
     dispatch?: Gateway.Dispatch
     durability?: Journal.Durability
     endpoint?: string
@@ -580,6 +585,13 @@ export declare namespace create {
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
     webSearch?: false
+  }
+
+  namespace configure {
+    type Options = {
+      configuration: Contracts.AgentConfiguration
+      runtime: Omit<Contracts.RuntimeOptions, 'tools'>
+    }
   }
 }
 
