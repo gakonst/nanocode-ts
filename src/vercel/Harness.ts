@@ -151,7 +151,15 @@ function runSessionUuid(runId: string): string | undefined {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-export function create(options: create.Options = {}): Harness {
+export function create(input: create.Options | create.Factory = {}): Harness {
+  if (typeof input === 'function')
+    return {
+      name: 'nanocode',
+      modelCalls: 'self',
+      drive: async (ctx) =>
+        create(await input({ runId: ctx.runId, config: ctx.config, signal: ctx.signal })).drive(ctx),
+    }
+  const options = input
   const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
   const definitions = [...tools.values()].map((tool) => ({
     name: tool.name,
@@ -254,8 +262,8 @@ export function create(options: create.Options = {}): Harness {
     ctx.signal.addEventListener('abort', stop, { once: true })
     try {
       try {
-        const defaults: create.configure.Options = {
-          configuration: {
+        await runtime.open(
+          {
             scope,
             session_id: session.session_id,
             provider: session.provider,
@@ -288,7 +296,7 @@ export function create(options: create.Options = {}): Harness {
             ...(shell ? { workspace: shell.cwd } : {}),
             ...(shell && options.workspaceTools ? { workspace_tools: options.workspaceTools } : {}),
           },
-          runtime: {
+          {
             ...(shell ? { workspace: shell.workspace() } : {}),
             fetch: cellFetch,
             ...(executor
@@ -324,18 +332,14 @@ export function create(options: create.Options = {}): Harness {
                   : dispatch(request, signal)
             },
             ...(plan?.socket ? { socket: plan.socket } : {}),
-          },
-        }
-        const opening = options.configure ? await options.configure(session, defaults) : defaults
-        await runtime.open(opening.configuration, {
-          ...opening.runtime,
-          tools: {
-            call: (name, input, signal, { call_id }) => {
-              counts.tool_calls++
-              return callTool(ctx, journal, tools, name, input, signal, call_id)
+            tools: {
+              call: (name, input, signal, { call_id }) => {
+                counts.tool_calls++
+                return callTool(ctx, journal, tools, name, input, signal, call_id)
+              },
             },
           },
-        })
+        )
       } catch (error) {
         if (error instanceof Contracts.HostFailureError && error.permanent)
           throw new Fatal(`nanocode refused its configuration: ${error.message}`)
@@ -535,11 +539,12 @@ export function create(options: create.Options = {}): Harness {
 }
 
 export declare namespace create {
+  type Factory = (ctx: Pick<DriveContext, 'runId' | 'config' | 'signal'>) => Options | Promise<Options>
+
   type Options = {
     batchMs?: number
     cellMemoryBytes?: number
     codeMode?: boolean
-    configure?: (session: Session, options: configure.Options) => configure.Options | Promise<configure.Options>
     dispatch?: Gateway.Dispatch
     durability?: Journal.Durability
     endpoint?: string
@@ -585,13 +590,6 @@ export declare namespace create {
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
     webSearch?: false
-  }
-
-  namespace configure {
-    type Options = {
-      configuration: Contracts.AgentConfiguration
-      runtime: Omit<Contracts.RuntimeOptions, 'tools'>
-    }
   }
 }
 
