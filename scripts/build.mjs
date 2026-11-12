@@ -46,8 +46,8 @@ if (!binaryen) {
   }
 }
 const wasmFeatures = ["--enable-bulk-memory", "--enable-bulk-memory-opt", "--enable-multivalue", "--enable-mutable-globals", "--enable-nontrapping-float-to-int", "--enable-reference-types", "--enable-sign-ext", "--enable-simd"];
-function optimize(input, output) {
-  const result = spawnSync(join(binaryen, "bin", "wasm-opt"), ["-O1", ...wasmFeatures, input, "-o", output], { stdio: "inherit" });
+function optimize(input, output, level = "-O1") {
+  const result = spawnSync(join(binaryen, "bin", "wasm-opt"), [level, ...wasmFeatures, input, "-o", output], { stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
@@ -88,7 +88,7 @@ if (previousBuild?.inputs !== fingerprint || !existsSync(artifact) || previousBu
   built = true;
 }
 if (built || !existsSync(optimized) || previousBuild?.optimized !== fileDigest(optimized)) {
-  optimize(artifact, optimized);
+  optimize(artifact, optimized, "-O3");
   mkdirSync("output", { recursive: true });
   writeFileSync("output/wasm-build-fingerprint", JSON.stringify({ inputs: fingerprint, artifact: fileDigest(artifact), optimized: fileDigest(optimized) }));
 }
