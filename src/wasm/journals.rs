@@ -4,14 +4,14 @@ use std::{
     sync::Arc,
 };
 
-use nanocode::durability::{Deferred, Sql, SqlStatement};
+use nanocode::durability::{Sql, SqlStatement};
 use nanocode_code_mode::{
     code_mode::{CellJournal, CellJournalSink, CellJournalUpdate},
     embedded::HostFuture,
 };
 use serde_json::{Value, json};
 
-use super::ledger;
+use super::store::WorkerStore;
 
 const APPEND: &str = "UPDATE nanocode_cell_journal_batches SET body = body || char(10) || ? WHERE session_id = ? AND cell_id = CAST(? AS INTEGER) AND seq = CAST(? AS INTEGER)";
 
@@ -49,17 +49,6 @@ thread_local! {
     static BATCHES: RefCell<HashMap<(String, u64), (u64, usize)>> = RefCell::new(HashMap::new());
     static CATALOGS: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
     static UPDATES: Cell<bool> = const { Cell::new(true) };
-}
-
-fn deferred(statements: &[SqlStatement<'_>]) -> Vec<Deferred> {
-    statements
-        .iter()
-        .map(|statement| Deferred {
-            sql: statement.sql,
-            params: statement.params.iter().map(|param| (*param).to_owned()).collect(),
-            changes: None,
-        })
-        .collect()
 }
 
 fn catalog(tools: &[Value]) -> Result<(String, String), String> {
@@ -141,18 +130,10 @@ impl CellJournalSink for WorkerJournals {
                     params: vec![&scope, &update.session_id, &cell, &first, &body],
                 },
             });
-            let ledger = ledger();
-            if update.calls.is_empty() {
-                ledger
-                    .defer("cell_journal_save", deferred(&statements), None)
-                    .await
-            } else {
-                ledger
-                    .transaction("cell_journal_save", &statements)
-                    .await
-                    .map(drop)
-            }
-            .map_err(|error| error.to_string())?;
+            WorkerStore::durability()
+                .transaction("cell_journal_save", &statements)
+                .await
+                .map_err(|error| error.to_string())?;
             BATCHES.with_borrow_mut(|batches| batches.insert(key, (seq, bytes)));
             if let Some((digest, _)) = tools {
                 CATALOGS.with_borrow_mut(|known| known.insert((scope, digest)));
@@ -176,8 +157,8 @@ impl CellJournalSink for WorkerJournals {
                     params: vec![&session_id, &cell],
                 });
             }
-            let _ = ledger()
-                .defer("cell_journal_forget", deferred(&statements), None)
+            let _ = WorkerStore::durability()
+                .transaction("cell_journal_forget", &statements)
                 .await;
         })
     }
@@ -192,7 +173,7 @@ pub async fn load(scope: &str) -> Result<BTreeMap<String, Vec<CellJournal>>, Str
             .collect::<Vec<_>>()
     });
     let known = serde_json::to_string(&known).map_err(|error| error.to_string())?;
-    let rows = ledger()
+    let rows = WorkerStore::durability()
         .transaction(
             "cell_journal_load",
             &[

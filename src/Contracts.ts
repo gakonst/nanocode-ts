@@ -395,7 +395,6 @@ export type EngineFactory = (module: WebAssembly.Module, host: EngineHost) => Pr
 export type HostOptions = {
   engine?: EngineFactory
   log_logical_limit?: number
-  log_flush_ms?: number
   blobs?: BlobHost
   published(events: LoggedEvent[], bytes: number[]): void
   live?(events: LoggedEvent[]): void

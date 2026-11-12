@@ -14,6 +14,10 @@ impl WorkerStore {
     pub const fn durability() -> Self {
         Self("store")
     }
+
+    pub const fn log() -> Self {
+        Self("log")
+    }
 }
 
 #[derive(Serialize)]

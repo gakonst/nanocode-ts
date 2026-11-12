@@ -33,8 +33,7 @@ use nanocode::{
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
     durability::{
-        BranchCursor, BranchExport, BranchPage, InitialSettings, Ledger, Prepare, RowStore, Sql,
-        SessionRecord,
+        BranchCursor, BranchExport, BranchPage, InitialSettings, RowStore, SessionRecord,
     },
     session_host::{
         Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, SessionLog,
@@ -371,8 +370,6 @@ enum Command {
         logical_limit: Option<usize>,
         #[serde(default)]
         blob_threshold: Option<usize>,
-        #[serde(default)]
-        flush_ms: Option<u64>,
     },
     Init {
         config: Value,
@@ -541,7 +538,7 @@ enum Command {
     },
 }
 
-type Log = SessionLog<Ledger<store::WorkerStore>>;
+type Log = SessionLog<store::WorkerStore>;
 
 type Hand = (String, Arc<dyn CodeModeHost>);
 
@@ -575,10 +572,8 @@ enum Phase {
 thread_local! {
     static PHASE: RefCell<Phase> = const { RefCell::new(Phase::Empty) };
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
-    static LEDGER: RefCell<Option<Arc<Ledger<store::WorkerStore>>>> = const { RefCell::new(None) };
     static LOGICAL_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
-    static FLUSH_EVERY: Cell<Option<Duration>> = const { Cell::new(None) };
     static BLOB_THRESHOLD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
@@ -663,30 +658,10 @@ fn configuration(error: impl std::fmt::Display) -> Opening {
     Opening::Configuration(error.to_string())
 }
 
-fn ledger() -> Arc<Ledger<store::WorkerStore>> {
-    if let Some(current) =
-        LEDGER.with_borrow(|ledger| ledger.as_ref().filter(|ledger| !ledger.broken()).cloned())
-    {
-        return current;
-    }
-    LOGS.with_borrow_mut(HashMap::clear);
-    let fresh = Arc::new(
-        Ledger::new(Arc::new(store::WorkerStore::durability()))
-            .expect("the worker store speaks SQLite"),
-    );
-    LEDGER.set(Some(Arc::clone(&fresh)));
-    fresh
-}
-
 fn log(scope: &str) -> Arc<Log> {
-    let ledger = ledger();
     LOGS.with_borrow_mut(|logs| {
         Arc::clone(logs.entry(scope.to_owned()).or_insert_with(|| {
-            let log = SessionLog::new(Arc::clone(&ledger), scope);
-            let log = match FLUSH_EVERY.get() {
-                Some(period) => log.flush_every(period),
-                None => log,
-            };
+            let log = SessionLog::new(Arc::new(store::WorkerStore::log()), scope);
             let log = match VALUE_LIMIT.get() {
                 Some(limit) => log.value_limit(limit),
                 None => log,
@@ -695,13 +670,10 @@ fn log(scope: &str) -> Arc<Log> {
                 Some(limit) => log.logical_limit(limit),
                 None => log,
             };
-            let log = Arc::new(match BLOB_THRESHOLD.get() {
+            Arc::new(match BLOB_THRESHOLD.get() {
                 Some(threshold) => log.blobs(Arc::new(store::WorkerBlobs), threshold),
                 None => log,
-            });
-            let prepare: Arc<dyn Prepare> = Arc::clone(&log) as Arc<dyn Prepare>;
-            ledger.prepare_with(Arc::downgrade(&prepare));
-            log
+            })
         }))
     })
 }
@@ -852,7 +824,7 @@ fn codex_harness(
 
 async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
-    let store = nanocode::session_store(RowStore::shared(ledger()))
+    let store = nanocode::session_store(RowStore::new(store::WorkerStore::durability()))
         .map_err(text)?
         .with_logged_prompts();
     let model = config.model().map_err(configuration)?;
@@ -1606,9 +1578,7 @@ fn execute(command: Command) -> Executed {
             value_limit,
             logical_limit,
             blob_threshold,
-            flush_ms,
         } => executed(async move {
-            FLUSH_EVERY.set(flush_ms.map(Duration::from_millis));
             VALUE_LIMIT.set(value_limit);
             LOGICAL_LIMIT.set(logical_limit);
             BLOB_THRESHOLD.set(blob_threshold);
