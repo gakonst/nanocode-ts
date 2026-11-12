@@ -451,7 +451,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
           stdin:
             request.execOptions.stdin === undefined ? undefined : encode(request.execOptions.stdin),
           strict: options.fallback === true || machine !== undefined,
-          without: Object.keys(options.commands ?? {}),
+          without: ['curl', 'wget', ...Object.keys(options.commands ?? {})],
         }
 
         const entries = Object.entries(settings.env)

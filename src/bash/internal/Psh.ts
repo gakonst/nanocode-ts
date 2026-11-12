@@ -105,7 +105,7 @@ type Reply = {
   err: number
 }
 
-const abiVersion = 5
+const abiVersion = 6
 
 const budget = 2_000
 

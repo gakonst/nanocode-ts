@@ -51,7 +51,7 @@ export function build() {
       'build',
       '--locked',
       '-p',
-      'psh-wasm',
+      'psh-wasm-core',
       '--target',
       'wasm32-unknown-unknown',
       '--profile',
@@ -61,7 +61,7 @@ export function build() {
     ],
     join(source(), workspace),
   )
-  return join(target, 'wasm32-unknown-unknown', 'wasm', 'psh_wasm.wasm')
+  return join(target, 'wasm32-unknown-unknown', 'wasm', 'psh_wasm_core.wasm')
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) console.log(build())
