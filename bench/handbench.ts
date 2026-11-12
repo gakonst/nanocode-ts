@@ -292,7 +292,10 @@ export class Session {
     this.marks = []
   }
   async open() {
-    this.runtime = await AgentRuntime.instantiate(module, this.sql, { published() {} })
+    this.runtime = await AgentRuntime.instantiate(module, this.sql, {
+      published() {},
+      ...(process.env.LOG_FLUSH_MS ? { log_flush_ms: Number(process.env.LOG_FLUSH_MS) } : {}),
+    })
     const local = this.attached?.local
     const shell = local ? (this.shell ??= await Bash.create({ cwd: '/workspace' })) : undefined
     await this.runtime.open(

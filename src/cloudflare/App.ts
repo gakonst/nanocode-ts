@@ -233,6 +233,8 @@ const cellInterruptChecks = 500
 
 const pumpResets = 4
 
+const logFlushMs = 1000
+
 const subagentScanPages = 32
 
 const waitingKey = 'retry_waiting'
@@ -1214,7 +1216,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return ''
         }
       }
-      return `${read('SELECT total(revision) AS value FROM state_rows')}:${read("SELECT count(*) || ':' || total(seq) AS value FROM nanocode_cell_journal_batches")}`
+      const revisions = 'SELECT total(revision) AS value FROM state_rows'
+      const journals =
+        "SELECT count(*) || ':' || total(seq) AS value FROM nanocode_cell_journal_batches"
+      return (
+        read(`SELECT (${revisions}) || ':' || (${journals}) AS value`) ||
+        `${read(revisions)}:${read(journals)}`
+      )
     }
 
     private retryWaiting(): void {
@@ -2830,6 +2838,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (!current) {
         current = AgentRuntime.instantiate(wasm, this.store, {
           log_logical_limit: valueLimit,
+          log_flush_ms: options.logFlushMs ?? logFlushMs,
           blobs: this.blobs,
           published: (events, bytes) => this.published(scope, events, bytes),
           live: (events) => this.lived(scope, events),
@@ -3357,6 +3366,7 @@ export declare namespace create {
     instructions?: string
     limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
     liveDeltas?: boolean
+    logFlushMs?: number
     maxResidentSubagents?: number
     mcp?: {
       servers:

@@ -6,7 +6,7 @@ use nanocode::durability::{
 };
 use serde::Deserialize;
 
-use super::{store::WorkerStore, text};
+use super::{ledger, text};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +26,7 @@ fn sessions() -> Result<SessionStore, String> {
         return Ok(sessions);
     }
     let sessions =
-        nanocode::session_store(RowStore::new(WorkerStore::durability())).map_err(text)?;
+        nanocode::session_store(RowStore::shared(ledger())).map_err(text)?;
     SESSIONS.set(Some(sessions.clone()));
     Ok(sessions)
 }
