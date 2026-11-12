@@ -28,6 +28,27 @@ unsafe extern "C" {
     fn random(pointer: *mut u8, length: usize);
     fn reply(id: u32, pointer: *const u8, length: usize);
     fn panicked(pointer: *const u8, length: usize);
+    fn snapshot_length(setup: u64) -> usize;
+    fn snapshot_read(setup: u64, pointer: *mut u8, length: usize);
+    fn snapshot_write(setup: u64, pointer: *const u8, length: usize);
+}
+
+pub struct HostSnapshots;
+
+impl nanocode_code_mode::code_mode::SnapshotStore for HostSnapshots {
+    fn load(&self, setup: u64) -> Option<Vec<u8>> {
+        let length = unsafe { snapshot_length(setup) };
+        if length == 0 {
+            return None;
+        }
+        let mut bytes = vec![0; length];
+        unsafe { snapshot_read(setup, bytes.as_mut_ptr(), length) };
+        Some(bytes)
+    }
+
+    fn save(&self, setup: u64, bytes: Vec<u8>) {
+        unsafe { snapshot_write(setup, bytes.as_ptr(), bytes.len()) };
+    }
 }
 
 thread_local! {

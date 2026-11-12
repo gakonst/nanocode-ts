@@ -54,6 +54,8 @@ export type Metrics = {
   bridge_reply_bytes: number
 }
 
+const snapshots = new WeakMap<WebAssembly.Module, Map<bigint, Uint8Array>>()
+
 export async function localEngine(
   module: WebAssembly.Module,
   host: Contracts.EngineHost,
@@ -64,6 +66,8 @@ export async function localEngine(
     poll(): void
   } & Record<Contracts.EngineCall, (id: number, pointer: number, length: number) => void>
   let exports: Exports | undefined
+  const stored = snapshots.get(module) ?? new Map<bigint, Uint8Array>()
+  snapshots.set(module, stored)
   const bytes = (pointer: number, length: number) =>
     new Uint8Array(exports!.memory.buffer, pointer, length)
   const imports = {
@@ -85,6 +89,13 @@ export async function localEngine(
     },
     reply: (id: number, pointer: number, length: number) => host.reply(id, bytes(pointer, length)),
     panicked: (pointer: number, length: number) => host.panicked(bytes(pointer, length)),
+    snapshot_length: (setup: bigint) => stored.get(setup)?.length ?? 0,
+    snapshot_read: (setup: bigint, pointer: number, length: number) => {
+      bytes(pointer, length).set(stored.get(setup)!)
+    },
+    snapshot_write: (setup: bigint, pointer: number, length: number) => {
+      stored.set(setup, bytes(pointer, length).slice())
+    },
   }
   const instance = await WebAssembly.instantiate(module, { host: imports })
   const wasm = instance.exports as unknown as Exports

@@ -2519,7 +2519,6 @@ version = "0.7.0"
 dependencies = [
  "blake3",
  "futures-util",
- "imbl",
  "nanocode-agent-config",
  "nanocode-agent-core",
  "nanocode-durability",

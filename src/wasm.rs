@@ -1086,6 +1086,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
         subagents.set_max_resident(limit);
     }
+    nanocode_code_mode::code_mode::set_snapshot_store(Some(Arc::new(bridge::HostSnapshots)));
     if let Some(checks) = config.cell_interrupt_checks {
         nanocode_code_mode::code_mode::set_interrupt_checks(checks);
     }
