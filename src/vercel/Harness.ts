@@ -152,6 +152,7 @@ function runSessionUuid(runId: string): string | undefined {
 }
 
 export function create(options: create.Options = {}): Harness {
+  const statics = hostTools(options.tools)
   const dispatch = options.dispatch ?? Gateway.dispatch()
   const gateway = options.endpoint ? options.gateway : 'vercel'
   const module = options.module ?? Wasm.load
@@ -163,13 +164,8 @@ export function create(options: create.Options = {}): Harness {
     session: Session,
     counts: { model_requests: number; tool_calls: number; models: ModelCall[]; open_ms: number },
     options: create.Options,
+    { tools, definitions }: ReturnType<typeof hostTools>,
   ): Promise<void> {
-    const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
-    const definitions = [...tools.values()].map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema as Record<string, unknown>,
-    }))
     const opening = performance.now()
     const publish = publisher(ctx)
     const runtime = await AgentRuntime.instantiate(await module(), journal, {
@@ -434,14 +430,9 @@ export function create(options: create.Options = {}): Harness {
       let failure: unknown
       try {
         if (ctx.pending().length === 0 && isIdle(ctx.state(), { batches: journal.batches })) return
-        const {
-          instructions = options.instructions,
-          mcp = options.mcp,
-          tools = options.tools,
-          workspace = options.workspace,
-        } = options.resolve
+        const resolved: create.Resolved = options.resolve
           ? await options.resolve({ runId: ctx.runId, config: ctx.config })
-          : options
+          : {}
         const chosen = (
           ctx.config as
             | {
@@ -495,13 +486,24 @@ export function create(options: create.Options = {}): Harness {
         })
         if (derived) recorded.catch((error: unknown) => ctx.halt?.(error))
         const session = derived ? chosenSession : await recorded
-        await run(ctx, journal, session, counts, {
-          ...options,
-          instructions,
-          mcp,
-          tools,
-          workspace,
-        })
+        await run(
+          ctx,
+          journal,
+          session,
+          counts,
+          {
+            ...options,
+            instructions: resolved.instructions ?? options.instructions,
+            mcp: resolved.mcpServers
+              ? { ...options.mcp, servers: resolved.mcpServers }
+              : options.mcp,
+            workspace:
+              resolved.workspaceFiles && options.workspace !== false
+                ? { ...options.workspace, files: resolved.workspaceFiles }
+                : options.workspace,
+          },
+          resolved.tools ? hostTools(resolved.tools) : statics,
+        )
         await recorded
         if (ctx.signal.aborted) {
           outcome = 'stopped'
@@ -598,7 +600,10 @@ export declare namespace create {
     webSearch?: false
   }
 
-  type Resolved = Pick<Options, 'instructions' | 'mcp' | 'tools' | 'workspace'>
+  type Resolved = Pick<Options, 'instructions' | 'tools'> & {
+    mcpServers?: Contracts.McpServer[]
+    workspaceFiles?: Record<string, string>
+  }
 }
 
 export function effort(
@@ -906,6 +911,16 @@ function submitted(ctx: DriveContext): Promise<void> {
       resolve()
     }
   })
+}
+
+function hostTools(list: HostTool[] = []) {
+  const tools = new Map(list.map((tool) => [tool.name, tool]))
+  const definitions = [...tools.values()].map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputSchema as Record<string, unknown>,
+  }))
+  return { tools, definitions }
 }
 
 async function callTool(
