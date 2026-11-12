@@ -100,7 +100,18 @@ async function load() {
     try { mod = createRequire(from)("pyodide"); break; } catch {}
   }
   if (!mod) mod = await import("pyodide");
-  py = await mod.loadPyodide({ packageCacheDir: workerData.cacheDir, stdout: () => {}, stderr: () => {} });
+  const options = { packageCacheDir: workerData.cacheDir, stdout: () => {}, stderr: () => {} };
+  const fs = require("node:fs");
+  const snapshot = workerData.cacheDir + "/pyodide-" + mod.version + ".snapshot";
+  const saved = fs.existsSync(snapshot) ? fs.readFileSync(snapshot) : undefined;
+  if (saved) py = await mod.loadPyodide({ ...options, _loadSnapshot: saved }).catch(() => undefined);
+  if (!py) {
+    py = await mod.loadPyodide({ ...options, _makeSnapshot: true });
+    const partial = snapshot + "." + process.pid + ".partial";
+    fs.mkdirSync(workerData.cacheDir, { recursive: true });
+    fs.writeFileSync(partial, py.makeMemorySnapshot());
+    fs.renameSync(partial, snapshot);
+  }
   track(py.FS);
   const ns = py.globals.get("dict")();
   py.runPython(workerData.helper, { globals: ns });
