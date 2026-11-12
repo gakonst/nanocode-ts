@@ -24,12 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "appendlist"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e149dc73cd30538307e7ffa2acd3d2221148eaeed4871f246657b1c3eaa1cbd2"
-
-[[package]]
 name = "arc-swap"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,15 +274,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "blocking"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -300,12 +285,6 @@ dependencies = [
  "futures-lite",
  "piper",
 ]
-
-[[package]]
-name = "borrow-or-share"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "brotli-decompressor"
@@ -400,12 +379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -452,26 +425,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
-name = "crypto-common"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
-name = "digest"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
-dependencies = [
- "block-buffer",
- "const-oid",
- "crypto-common",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -511,15 +464,6 @@ version = "0.0.0"
 dependencies = [
  "djs-core",
  "djs-lzrc",
-]
-
-[[package]]
-name = "email_address"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -616,23 +560,6 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
-
-[[package]]
-name = "fluent-uri"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc74ac4d8359ae70623506d512209619e5cf8f347124910440dbc221714b328e"
-dependencies = [
- "borrow-or-share",
- "ref-cast",
- "serde",
-]
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -847,21 +774,6 @@ name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
-
-[[package]]
-name = "httpdate"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "hybrid-array"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
-dependencies = [
- "typenum",
-]
 
 [[package]]
 name = "hyper"
@@ -1253,10 +1165,10 @@ dependencies = [
 name = "nanocode-agent"
 version = "0.7.0"
 dependencies = [
- "blake3",
  "futures-util",
  "nanocode-agent-config",
  "nanocode-agent-core",
+ "nanocode-digest",
  "nanocode-durability",
  "nanocode-platform",
  "nanocode-subagents",
@@ -1334,8 +1246,8 @@ name = "nanocode-audio"
 version = "0.7.0"
 dependencies = [
  "base64-simd",
+ "nanocode-digest",
  "nanocode-sync",
- "sha1",
  "tracing",
 ]
 
@@ -1378,13 +1290,12 @@ name = "nanocode-backend-claude-client"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "bytes",
  "futures-util",
  "http",
- "httpdate",
  "memchr",
  "nanocode-agent-types",
+ "nanocode-digest",
  "nanocode-home",
  "nanocode-http",
  "nanocode-platform",
@@ -1393,13 +1304,10 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tracing",
  "unicode-normalization",
  "url",
- "uuid",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -1416,7 +1324,6 @@ dependencies = [
  "nanocode-tools",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 
@@ -1433,6 +1340,7 @@ dependencies = [
  "nanocode-agent-core",
  "nanocode-backend-codex-client",
  "nanocode-code-mode",
+ "nanocode-digest",
  "nanocode-durability",
  "nanocode-home",
  "nanocode-http",
@@ -1448,7 +1356,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tracing",
 ]
@@ -1462,11 +1369,11 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http",
- "httpdate",
  "image",
  "memchr",
  "nanocode-agent-types",
  "nanocode-audio",
+ "nanocode-digest",
  "nanocode-home",
  "nanocode-http",
  "nanocode-platform",
@@ -1478,23 +1385,21 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tokio-rustls",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
 name = "nanocode-code-mode"
 version = "0.7.0"
 dependencies = [
- "blake3",
  "futures-util",
  "imbl",
  "nanocode-audio",
  "nanocode-code-mode-engine",
+ "nanocode-digest",
  "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
@@ -1513,13 +1418,12 @@ version = "0.7.0"
 dependencies = [
  "base64-simd",
  "djs-embed",
+ "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tool-contracts",
  "serde",
  "serde_json",
- "sha1",
- "sha2",
  "tokio",
  "tracing",
 ]
@@ -1561,6 +1465,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-digest"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-durability"
 version = "0.7.0"
 dependencies = [
@@ -1581,14 +1489,13 @@ name = "nanocode-durability-core"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "futures-util",
  "imbl",
+ "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
  "serde",
  "serde_json",
- "sha2",
 ]
 
 [[package]]
@@ -1596,9 +1503,9 @@ name = "nanocode-home"
 version = "0.7.0"
 dependencies = [
  "libc",
+ "nanocode-digest",
  "nanocode-platform",
  "serde",
- "sha2",
 ]
 
 [[package]]
@@ -1622,11 +1529,11 @@ dependencies = [
  "image",
  "image-webp",
  "memchr",
+ "nanocode-digest",
  "nanocode-durability-core",
  "nanocode-sync",
  "nanocode-types-core",
  "png",
- "sha1",
  "tokio",
  "tracing",
 ]
@@ -1638,11 +1545,10 @@ dependencies = [
  "base64 0.22.1",
  "futures-channel",
  "memchr",
+ "nanocode-digest",
  "nanocode-sync",
  "serde",
  "serde_json",
- "sha2",
- "subtle",
  "tracing",
  "url",
 ]
@@ -1673,6 +1579,7 @@ version = "0.7.0"
 dependencies = [
  "futures-util",
  "http",
+ "nanocode-digest",
  "nanocode-home",
  "nanocode-http",
  "nanocode-mcp",
@@ -1687,7 +1594,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha1",
  "tokio",
  "tracing",
 ]
@@ -1698,8 +1604,9 @@ version = "0.7.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+ "nanocode-digest",
+ "serde",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1731,14 +1638,8 @@ dependencies = [
 name = "nanocode-schema"
 version = "0.7.0"
 dependencies = [
- "appendlist",
  "base64 0.22.1",
- "email_address",
- "fluent-uri",
  "idna",
- "num-cmp",
- "percent-encoding",
- "regress",
  "serde",
  "serde_json",
  "url",
@@ -1749,13 +1650,12 @@ name = "nanocode-store-jsonl"
 version = "0.7.0"
 dependencies = [
  "libc",
+ "nanocode-digest",
  "nanocode-durability-core",
  "nanocode-platform",
  "nanocode-zstd",
  "serde",
  "serde_json",
- "sha2",
- "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1784,7 +1684,6 @@ version = "0.7.0"
 dependencies = [
  "arc-swap",
  "crossbeam-utils",
- "foldhash",
  "futures-util",
  "imbl",
  "nanocode-platform",
@@ -1817,9 +1716,9 @@ dependencies = [
 name = "nanocode-tool-host"
 version = "0.7.0"
 dependencies = [
- "blake3",
  "futures-util",
  "nanocode-code-mode",
+ "nanocode-digest",
  "nanocode-home",
  "nanocode-image",
  "nanocode-platform",
@@ -1851,7 +1750,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http",
- "httpdate",
  "nanocode-code-mode",
  "nanocode-home",
  "nanocode-mcp-tools",
@@ -1870,7 +1768,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -1887,7 +1784,6 @@ dependencies = [
 name = "nanocode-tools-macros"
 version = "0.7.0"
 dependencies = [
- "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -1943,6 +1839,7 @@ dependencies = [
  "getrandom 0.4.3",
  "http",
  "httparse",
+ "nanocode-digest",
  "tokio",
  "tokio-rustls",
 ]
@@ -1950,12 +1847,6 @@ dependencies = [
 [[package]]
 name = "nanocode-zstd"
 version = "0.7.0"
-
-[[package]]
-name = "num-cmp"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
 
 [[package]]
 name = "num-traits"
@@ -2117,35 +2008,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core",
-]
-
-[[package]]
-name = "ref-cast"
-version = "1.0.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
-dependencies = [
- "ref-cast-impl",
-]
-
-[[package]]
-name = "ref-cast-impl"
-version = "1.0.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
-name = "regress"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32eef8b209c3c1c15dbad02c1f30f9539f00dc7253e0cbcdaae442a50a09d7c1"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -2420,34 +2282,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "sha1"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
-]
-
-[[package]]
-name = "sha1_smol"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
-
-[[package]]
-name = "sha2"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
 ]
 
 [[package]]
@@ -2786,12 +2620,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "typenum"
-version = "1.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
 name = "uds_windows"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2842,10 +2670,8 @@ version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
- "getrandom 0.4.3",
  "js-sys",
  "serde_core",
- "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -3133,12 +2959,6 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yoke"
