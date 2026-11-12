@@ -75,7 +75,7 @@ function track(fs) {
   delegate.onWriteToFile = path => { if (tracking) tracking.dirty.add(absolute(path)); };
   delegate.onMovePath = (from, to) => { if (tracking) { tracking.gone.add(absolute(from)); tracking.dirty.add(absolute(to)); } };
   delegate.onDeletePath = path => { if (tracking) tracking.gone.add(absolute(path)); };
-  delegate.onMakeDirectory = path => { if (tracking) tracking.dirty.add(absolute(path)); };
+  delegate.onMakeDirectory = path => { if (tracking && !fs.analyzePath(path).exists) tracking.dirty.add(absolute(path)); };
   const truncate = fs.truncate.bind(fs);
   fs.truncate = (path, length) => { if (tracking && typeof path === "string") tracking.dirty.add(absolute(path)); return truncate(path, length); };
 }

@@ -614,6 +614,27 @@ const programInstructions =
 export const instructions =
   gitInstructions + ' ' + githubFileInstructions + ' ' + programInstructions
 
+function budgetedSync(
+  sync: FileSystem.SyncFileSystem,
+  charge: () => void,
+): FileSystem.SyncFileSystem {
+  return {
+    list: (path) => (charge(), sync.list(path)),
+    mkdir: (path) => (charge(), sync.mkdir(path)),
+    read: (path) => (charge(), devices.has(path) ? device(path) : sync.read(path)),
+    remove: (path) => (charge(), sync.remove(path)),
+    rename: (from, to) => (charge(), sync.rename(from, to)),
+    stat: (path) => (
+      charge(),
+      devices.has(path) ? { kind: 'file', size: 0, mtime: 0, mode: 0o666 } : sync.stat(path)
+    ),
+    write: (path, data, append) => (
+      charge(),
+      devices.has(path) ? undefined : sync.write(path, data, append)
+    ),
+  }
+}
+
 function budgeted(
   fs: FileSystem.FileSystem,
   limit: number,
@@ -652,6 +673,7 @@ function budgeted(
     mkdir: (path) => (charge(), fs.mkdir(path)),
     remove: (path) => (charge(), fs.remove(path)),
     rename: (from, to) => (charge(), fs.rename(from, to)),
+    ...(fs.sync ? { sync: budgetedSync(fs.sync, charge) } : {}),
     ...(fs.chmod
       ? { chmod: (path: string, mode: number) => (charge(), fs.chmod!(path, mode)) }
       : {}),

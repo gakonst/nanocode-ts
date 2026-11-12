@@ -2,6 +2,7 @@ import { CommandError, type CommandContext, type CommandHandler } from '../Shell
 import { FsError, type FileSystem } from '../../FileSystem.ts'
 import { breathe, decode, encode, parentOf } from '../Fs.ts'
 import { mkdirs } from './files.ts'
+import * as Lazy from './pylazy.ts'
 import type {
   Options as PythonOptions,
   Pyodide,
@@ -11,6 +12,7 @@ import type {
   Request as PythonRequest,
 } from '../../Python.ts'
 import {
+  type PythonChanges,
   pythonWorkers,
   workerExclusive,
   workerPreload,
@@ -1049,6 +1051,39 @@ async function executeRemote(
   throw new CommandError('timed out after ' + ctx.limits.timeoutMs + ' ms', 124)
 }
 
+function mountable(ctx: CommandContext, mode: Mode): string[] | undefined {
+  const mounts = [ctx.cwd, '/tmp', ...(mode.kind === 'file' ? [parentOf(mode.filename)] : [])]
+  const roots = mounts.filter(
+    (root, index) =>
+      mounts.indexOf(root) === index &&
+      !mounts.some((other) => other !== root && within(root, other)),
+  )
+  const free = (root: string) =>
+    root !== '/' && !reserved(root) && !RESERVED.some((prefix) => within(prefix, root))
+  return roots.every(free) ? roots : undefined
+}
+
+async function erase(fs: FileSystem, path: string): Promise<void> {
+  const stat = await fs.stat(path)
+  if (stat?.kind === 'directory')
+    for (const name of await fs.list(path)) await erase(fs, join(path, name))
+  await fs.remove(path)
+}
+
+async function apply(fs: FileSystem, changes: PythonChanges): Promise<void> {
+  for (const path of [...changes.deleted].sort((a, b) => b.length - a.length)) {
+    await erase(fs, path).catch((error) => {
+      if (!(error instanceof FsError)) throw error
+    })
+  }
+  for (const dir of [...changes.dirs].sort()) await mkdirs(fs, dir)
+  for (const [path, data] of changes.files) {
+    await breathe()
+    await mkdirs(fs, parentOf(path))
+    await fs.write(path, data)
+  }
+}
+
 async function executeThreaded(
   ctx: CommandContext,
   mode: Mode | 'version',
@@ -1079,17 +1114,8 @@ async function executeThreaded(
   const path0 =
     mode.kind === 'file' ? parentOf(mode.filename) : mode.kind === 'module' ? ctx.cwd : ''
   const cacheDir = packageCacheDir()
-  const mounts = [ctx.cwd, '/tmp', ...(mode.kind === 'file' ? [parentOf(mode.filename)] : [])]
-  const lazy = mounts.filter(
-    (root, index) =>
-      mounts.indexOf(root) === index &&
-      !mounts.some((other) => other !== root && within(root, other)),
-  )
-  if (
-    lazy.every(
-      (root) => root !== '/' && !reserved(root) && !RESERVED.some((prefix) => within(prefix, root)),
-    )
-  )
+  const lazy = mountable(ctx, mode)
+  if (lazy)
     return workerExclusive(async () => {
       const result = await workerRun(HELPER, cacheDir, ctx, {
         kind: mode.kind,
@@ -1105,18 +1131,7 @@ async function executeThreaded(
         stdin: encode(mode.kind === 'stdin' ? '' : stdin),
         lazy: true,
       })
-      const { changes } = result
-      for (const path of [...changes.deleted].sort((a, b) => b.length - a.length)) {
-        await ctx.fs.remove(path).catch((error) => {
-          if (!(error instanceof FsError)) throw error
-        })
-      }
-      for (const dir of [...changes.dirs].sort()) await mkdirs(ctx.fs, dir)
-      for (const [path, data] of changes.files) {
-        await breathe()
-        await mkdirs(ctx.fs, parentOf(path))
-        await ctx.fs.write(path, data)
-      }
+      await apply(ctx.fs, result.changes)
       if (result.failure !== undefined) throw result.failure
       if (result.status >= 0) return result.status
       if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
@@ -1212,10 +1227,12 @@ async function execute(
   )
   pyodide.FS.chdir('/')
   for (const path of python.mirrored) unmirror(pyodide.FS, path)
-  python.mirrored = new Set(unique)
+  const mounts = ctx.fs.sync && mode.kind !== 'pip' ? mountable(ctx, mode) : undefined
+  const lazy = mounts && ctx.fs.sync ? Lazy.attach(pyodide, ctx.fs.sync, mounts) : undefined
+  python.mirrored = new Set(lazy ? [] : unique)
   const snap = await snapshot(
     ctx.fs,
-    unique,
+    lazy ? [] : unique,
     Math.min(maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2)),
     maxFiles,
   )
@@ -1335,7 +1352,8 @@ async function execute(
     stderr.flush()
   }
 
-  await writeBack(ctx.fs, snap, collect(pyodide.FS, unique))
+  if (lazy) await apply(ctx.fs, lazy.finish())
+  else await writeBack(ctx.fs, snap, collect(pyodide.FS, unique))
   if (failure !== undefined) throw failure
   if (status >= 0) return status
   if (ctx.signal.aborted && Date.now() <= deadline) throw new CommandError('interrupted', 130)
