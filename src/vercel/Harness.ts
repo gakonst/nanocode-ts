@@ -151,21 +151,7 @@ function runSessionUuid(runId: string): string | undefined {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-export function create(input: create.Options | create.Factory = {}): Harness {
-  if (typeof input === 'function')
-    return {
-      name: 'nanocode',
-      modelCalls: 'self',
-      drive: async (ctx) =>
-        create(await input({ runId: ctx.runId, config: ctx.config, signal: ctx.signal })).drive(ctx),
-    }
-  const options = input
-  const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
-  const definitions = [...tools.values()].map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.inputSchema as Record<string, unknown>,
-  }))
+export function create(options: create.Options = {}): Harness {
   const dispatch = options.dispatch ?? Gateway.dispatch()
   const gateway = options.endpoint ? options.gateway : 'vercel'
   const module = options.module ?? Wasm.load
@@ -176,7 +162,14 @@ export function create(input: create.Options | create.Factory = {}): Harness {
     journal: Journal.Journal,
     session: Session,
     counts: { model_requests: number; tool_calls: number; models: ModelCall[]; open_ms: number },
+    options: create.Options,
   ): Promise<void> {
+    const tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]))
+    const definitions = [...tools.values()].map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema as Record<string, unknown>,
+    }))
     const opening = performance.now()
     const publish = publisher(ctx)
     const runtime = await AgentRuntime.instantiate(await module(), journal, {
@@ -441,6 +434,14 @@ export function create(input: create.Options | create.Factory = {}): Harness {
       let failure: unknown
       try {
         if (ctx.pending().length === 0 && isIdle(ctx.state(), { batches: journal.batches })) return
+        const {
+          instructions = options.instructions,
+          mcp = options.mcp,
+          tools = options.tools,
+          workspace = options.workspace,
+        } = options.resolve
+          ? await options.resolve({ runId: ctx.runId, config: ctx.config })
+          : options
         const chosen = (
           ctx.config as
             | {
@@ -494,7 +495,13 @@ export function create(input: create.Options | create.Factory = {}): Harness {
         })
         if (derived) recorded.catch((error: unknown) => ctx.halt?.(error))
         const session = derived ? chosenSession : await recorded
-        await run(ctx, journal, session, counts)
+        await run(ctx, journal, session, counts, {
+          ...options,
+          instructions,
+          mcp,
+          tools,
+          workspace,
+        })
         await recorded
         if (ctx.signal.aborted) {
           outcome = 'stopped'
@@ -539,8 +546,6 @@ export function create(input: create.Options | create.Factory = {}): Harness {
 }
 
 export declare namespace create {
-  type Factory = (ctx: Pick<DriveContext, 'runId' | 'config' | 'signal'>) => Options | Promise<Options>
-
   type Options = {
     batchMs?: number
     cellMemoryBytes?: number
@@ -569,6 +574,7 @@ export declare namespace create {
     provider?: Contracts.ModelProvider
     replicas?: Journal.Replicas
     report?: (report: DriveReport) => void
+    resolve?(run: { runId: string; config: unknown }): Resolved | Promise<Resolved>
     sessionFetch?(sessionId: string): typeof fetch
     streamToolInput?: boolean
     subscription?(session: {
@@ -591,6 +597,8 @@ export declare namespace create {
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
     webSearch?: false
   }
+
+  type Resolved = Pick<Options, 'instructions' | 'mcp' | 'tools' | 'workspace'>
 }
 
 export function effort(
