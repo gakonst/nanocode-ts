@@ -358,23 +358,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "cfg_aliases"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
-
-[[package]]
-name = "chacha20"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "rand_core 0.10.1",
-]
-
-[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,12 +461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data-encoding"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
-
-[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -535,12 +512,6 @@ dependencies = [
  "djs-core",
  "djs-lzrc",
 ]
-
-[[package]]
-name = "dyn-clone"
-version = "1.0.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "email_address"
@@ -798,7 +769,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1091,7 +1061,7 @@ dependencies = [
  "archery",
  "equivalent",
  "imbl-sized-chunks",
- "rand_core 0.9.5",
+ "rand_core",
  "rand_xoshiro",
  "serde_core",
  "version_check",
@@ -1260,6 +1230,7 @@ dependencies = [
 name = "nanocode"
 version = "0.7.0"
 dependencies = [
+ "libc",
  "nanocode-agent",
  "nanocode-agent-host",
  "nanocode-backend-claude",
@@ -1274,7 +1245,6 @@ dependencies = [
  "nanocode-subagents",
  "nanocode-tool-runtime",
  "nanocode-tools",
- "nix",
  "serde_json",
  "tokio",
 ]
@@ -1331,7 +1301,6 @@ dependencies = [
 name = "nanocode-agent-host"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "nanocode-agent",
  "nanocode-agent-core",
  "nanocode-computer-repl",
@@ -1358,7 +1327,6 @@ dependencies = [
  "nanocode-types-core",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1375,7 +1343,6 @@ dependencies = [
 name = "nanocode-backend-claude"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "futures-util",
  "http",
@@ -1427,7 +1394,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
  "tokio",
  "tracing",
  "unicode-normalization",
@@ -1442,13 +1408,12 @@ version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "libc",
  "nanocode-home",
  "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tools",
- "nix",
- "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -1459,7 +1424,6 @@ dependencies = [
 name = "nanocode-backend-codex"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "base64-simd",
  "futures-util",
  "http",
@@ -1482,13 +1446,10 @@ dependencies = [
  "nanocode-tools",
  "nanocode-types",
  "reqwest",
- "schemars",
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
  "tokio",
- "tower",
  "tracing",
 ]
 
@@ -1512,16 +1473,14 @@ dependencies = [
  "nanocode-sync",
  "nanocode-tls",
  "nanocode-types",
+ "nanocode-websocket",
  "nanocode-zstd",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
- "tower",
  "tracing",
  "url",
  "uuid",
@@ -1569,7 +1528,6 @@ dependencies = [
 name = "nanocode-computer"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "atspi-common",
  "atspi-proxies",
  "base64 0.22.1",
@@ -1593,7 +1551,6 @@ dependencies = [
 name = "nanocode-computer-repl"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "base64-simd",
  "nanocode-sync",
  "nanocode-tool-contracts",
@@ -1632,7 +1589,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
 ]
 
 [[package]]
@@ -1640,10 +1596,9 @@ name = "nanocode-home"
 version = "0.7.0"
 dependencies = [
  "libc",
- "nix",
+ "nanocode-platform",
  "serde",
  "sha2",
- "thiserror",
 ]
 
 [[package]]
@@ -1672,7 +1627,6 @@ dependencies = [
  "nanocode-types-core",
  "png",
  "sha1",
- "thiserror",
  "tokio",
  "tracing",
 ]
@@ -1697,7 +1651,6 @@ dependencies = [
 name = "nanocode-mcp-http"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "getrandom 0.4.3",
  "http",
@@ -1718,7 +1671,6 @@ dependencies = [
 name = "nanocode-mcp-tools"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "http",
  "nanocode-home",
@@ -1736,7 +1688,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "thiserror",
  "tokio",
  "tracing",
 ]
@@ -1746,6 +1697,7 @@ name = "nanocode-platform"
 version = "0.7.0"
 dependencies = [
  "getrandom 0.4.3",
+ "libc",
  "tokio",
  "uuid",
 ]
@@ -1755,10 +1707,11 @@ name = "nanocode-process"
 version = "0.7.0"
 dependencies = [
  "getrandom 0.4.3",
+ "libc",
  "nanocode-home",
+ "nanocode-platform",
  "nanocode-process-contracts",
  "nanocode-sync",
- "nix",
  "rustix",
  "serde_json",
  "tokio",
@@ -1795,9 +1748,10 @@ dependencies = [
 name = "nanocode-store-jsonl"
 version = "0.7.0"
 dependencies = [
+ "libc",
  "nanocode-durability-core",
+ "nanocode-platform",
  "nanocode-zstd",
- "nix",
  "serde",
  "serde_json",
  "sha2",
@@ -1810,7 +1764,6 @@ dependencies = [
 name = "nanocode-subagents"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "imbl",
  "nanocode-agent-core",
@@ -1858,14 +1811,12 @@ dependencies = [
  "nanocode-types-core",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
 name = "nanocode-tool-host"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "blake3",
  "futures-util",
  "nanocode-code-mode",
@@ -1878,10 +1829,8 @@ dependencies = [
  "nanocode-tools",
  "nanocode-types",
  "reqwest",
- "schemars",
  "serde",
  "serde_json",
- "thiserror",
  "tracing",
 ]
 
@@ -1889,7 +1838,6 @@ dependencies = [
 name = "nanocode-tool-provider"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "nanocode-home",
  "nanocode-tool-contracts",
  "serde_json",
@@ -1899,7 +1847,6 @@ dependencies = [
 name = "nanocode-tool-runtime"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
@@ -1908,19 +1855,18 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-home",
  "nanocode-mcp-tools",
+ "nanocode-platform",
  "nanocode-process",
  "nanocode-sync",
  "nanocode-tls",
  "nanocode-tool-host",
  "nanocode-tool-provider",
  "nanocode-tools",
- "nix",
+ "nanocode-websocket",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "url",
@@ -1931,10 +1877,8 @@ dependencies = [
 name = "nanocode-tools"
 version = "0.7.0"
 dependencies = [
- "async-trait",
  "nanocode-tool-contracts",
  "nanocode-tools-macros",
- "schemars",
  "serde",
  "serde_json",
 ]
@@ -1971,7 +1915,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "thiserror",
 ]
 
 [[package]]
@@ -1992,21 +1935,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanocode-zstd"
+name = "nanocode-websocket"
 version = "0.7.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "httparse",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
-name = "nix"
-version = "0.31.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
-dependencies = [
- "bitflags 2.13.2",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
-]
+name = "nanocode-zstd"
+version = "0.7.0"
 
 [[package]]
 name = "num-cmp"
@@ -2162,27 +2105,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rand"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
-dependencies = [
- "chacha20",
- "getrandom 0.4.3",
- "rand_core 0.10.1",
-]
-
-[[package]]
 name = "rand_core"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-
-[[package]]
-name = "rand_core"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_xoshiro"
@@ -2190,7 +2116,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
- "rand_core 0.9.5",
+ "rand_core",
 ]
 
 [[package]]
@@ -2414,30 +2340,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
-dependencies = [
- "dyn-clone",
- "schemars_derive",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2494,17 +2396,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "serde_derive_internals"
-version = "0.29.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -2726,12 +2617,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinyvec"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
 name = "tokio"
 version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2767,21 +2652,6 @@ checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite",
 ]
 
 [[package]]
@@ -2916,24 +2786,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2958,12 +2810,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
-dependencies = [
- "tinyvec",
-]
+version = "0.1.25"
 
 [[package]]
 name = "untrusted"
