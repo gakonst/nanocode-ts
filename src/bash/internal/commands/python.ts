@@ -1079,6 +1079,49 @@ async function executeThreaded(
   const path0 =
     mode.kind === 'file' ? parentOf(mode.filename) : mode.kind === 'module' ? ctx.cwd : ''
   const cacheDir = packageCacheDir()
+  const mounts = [ctx.cwd, '/tmp', ...(mode.kind === 'file' ? [parentOf(mode.filename)] : [])]
+  const lazy = mounts.filter(
+    (root, index) =>
+      mounts.indexOf(root) === index &&
+      !mounts.some((other) => other !== root && within(root, other)),
+  )
+  if (
+    lazy.every(
+      (root) => root !== '/' && !reserved(root) && !RESERVED.some((prefix) => within(prefix, root)),
+    )
+  )
+    return workerExclusive(async () => {
+      const result = await workerRun(HELPER, cacheDir, ctx, {
+        kind: mode.kind,
+        name: ctx.name,
+        target,
+        argv: mode.argv,
+        filename: mode.filename,
+        cwd: ctx.cwd,
+        env,
+        path0,
+        roots: lazy,
+        files: [],
+        stdin: encode(mode.kind === 'stdin' ? '' : stdin),
+        lazy: true,
+      })
+      const { changes } = result
+      for (const path of [...changes.deleted].sort((a, b) => b.length - a.length)) {
+        await ctx.fs.remove(path).catch((error) => {
+          if (!(error instanceof FsError)) throw error
+        })
+      }
+      for (const dir of [...changes.dirs].sort()) await mkdirs(ctx.fs, dir)
+      for (const [path, data] of changes.files) {
+        await breathe()
+        await mkdirs(ctx.fs, parentOf(path))
+        await ctx.fs.write(path, data)
+      }
+      if (result.failure !== undefined) throw result.failure
+      if (result.status >= 0) return result.status
+      if (ctx.signal.aborted) throw new CommandError('interrupted', 130)
+      throw new CommandError('timed out after ' + ctx.limits.timeoutMs + ' ms', 124)
+    })
   const done = await workerExclusive(async () => {
     const listing = await scan(ctx.fs, unique, maxBytes, maxFiles, maxBytes)
     leftOut(

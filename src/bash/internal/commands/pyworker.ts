@@ -1,3 +1,4 @@
+import { FsError, type FileSystem } from '../../FileSystem.ts'
 import { CommandError, type CommandContext } from '../Shell.ts'
 
 export type PythonJob = {
@@ -12,6 +13,7 @@ export type PythonJob = {
   roots: string[]
   files: [string, Uint8Array, string][]
   stdin: Uint8Array
+  lazy?: boolean
 }
 
 export type PythonSync = {
@@ -42,12 +44,13 @@ type Pending = {
   resolve(value: Record<string, unknown>): void
   reject(error: Error): void
   output?(fd: number, text: string): void
+  serve?(request: Record<string, unknown>): void
 }
 
 type Remote = { port: Port; pending: Map<number, Pending>; next: number; failed?: Error }
 
 const SOURCE = String.raw`
-const { parentPort, workerData } = require("node:worker_threads");
+const { parentPort, receiveMessageOnPort, workerData } = require("node:worker_threads");
 const { createRequire } = require("node:module");
 const RESERVED = ["/dev", "/proc", "/lib", "/home/pyodide", "/home/web_user"];
 const reserved = path => RESERVED.some(prefix => path === prefix || path.startsWith(prefix + "/"));
@@ -55,7 +58,9 @@ const join = (base, name) => base === "/" ? "/" + name : base + "/" + name;
 const within = (path, dir) => path === dir || path.startsWith(dir === "/" ? "/" : dir + "/");
 const parentOf = path => { const i = path.lastIndexOf("/"); return i <= 0 ? "/" : path.slice(0, i); };
 const decoder = new TextDecoder();
-let py, start, cancel, loading, micropip = false, mirrored = [], mirror = null, known = new Map(), tracking = null;
+let py, start, cancel, loading, micropip = false, mirrored = [], mirror = null, known = new Map(), tracking = null, lazy = null, lazyOps = null;
+const S_IFDIR = 0o40000;
+const S_IFREG = 0o100000;
 const WRITES = 1 | 2 | 64 | 512 | 1024;
 const PARKED_BYTES = 64 * 1024 * 1024;
 const parked = new Map();
@@ -101,6 +106,96 @@ async function load() {
   py.runPython(workerData.helper, { globals: ns });
   start = ns.get("start");
   cancel = ns.get("cancel");
+}
+function ask(op, path) {
+  Atomics.store(lazy.flag, 0, 0);
+  parentPort.postMessage({ id: lazy.id, type: "fs", op, path });
+  Atomics.wait(lazy.flag, 0, 0);
+  const reply = receiveMessageOnPort(lazy.port).message;
+  if (reply.code !== undefined) throw new py.FS.ErrnoError(py.ERRNO_CODES[reply.code] ?? py.ERRNO_CODES.EIO);
+  return reply.value;
+}
+function fill(node) {
+  if (node.lazyDir === undefined) return;
+  const host = node.lazyDir;
+  node.lazyDir = undefined;
+  const MEMFS = py.FS.filesystems.MEMFS;
+  for (const [name, kind, size, mtime, mode] of ask("list", host)) {
+    if (name in node.contents) continue;
+    const dir = kind === "directory";
+    const child = MEMFS.createNode(node, name, (dir ? S_IFDIR : S_IFREG) | (mode & 0o777), 0);
+    child.atime = child.mtime = child.ctime = mtime;
+    if (dir) {
+      child.lazyDir = join(host, name);
+      child.node_ops = lazyOps.dir;
+      continue;
+    }
+    child.lazyFile = join(host, name);
+    child.lazySize = size;
+    child.node_ops = lazyOps.file;
+    child.stream_ops = lazyOps.stream;
+  }
+  node.atime = node.mtime = node.ctime = Date.now();
+}
+function materialize(node) {
+  if (node.lazyFile === undefined) return;
+  const data = ask("read", node.lazyFile);
+  node.lazyFile = undefined;
+  node.contents = data;
+  node.usedBytes = data.length;
+}
+function tables(MEMFS) {
+  if (lazyOps) return lazyOps;
+  const dir = MEMFS.ops_table.dir.node;
+  const file = MEMFS.ops_table.file;
+  lazyOps = {
+    dir: {
+      ...dir,
+      lookup(parent, name) {
+        fill(parent);
+        const node = parent.contents[name];
+        if (!node) throw new py.FS.ErrnoError(py.ERRNO_CODES.ENOENT);
+        return node;
+      },
+      readdir(node) { fill(node); return dir.readdir(node); },
+      rename(node, target, name) { if (target.contents[name]) fill(target.contents[name]); return dir.rename(node, target, name); },
+      rmdir(parent, name) { if (parent.contents[name]) fill(parent.contents[name]); return dir.rmdir(parent, name); },
+    },
+    file: {
+      ...file.node,
+      getattr(node) {
+        const attr = file.node.getattr(node);
+        if (node.lazyFile !== undefined) {
+          attr.size = node.lazySize;
+          attr.blocks = Math.ceil(attr.size / attr.blksize);
+        }
+        return attr;
+      },
+      setattr(node, attr) {
+        if (attr.size === 0) node.lazyFile = undefined;
+        else if (attr.size !== undefined) materialize(node);
+        return file.node.setattr(node, attr);
+      },
+    },
+    stream: { ...file.stream, open(stream) { materialize(stream.node); } },
+  };
+  return lazyOps;
+}
+function attach(roots) {
+  const fs = py.FS;
+  const MEMFS = fs.filesystems.MEMFS;
+  for (const root of roots) {
+    fs.mkdirTree(root);
+    const node = fs.mount(MEMFS, {}, root);
+    const ops = tables(MEMFS);
+    node.lazyDir = root;
+    node.node_ops = ops.dir;
+  }
+}
+function detach(roots) {
+  const fs = py.FS;
+  fs.chdir("/");
+  for (const root of roots) fs.unmount(root);
 }
 function unmirror(fs, path) {
   if (reserved(path) || !fs.analyzePath(path).exists) return;
@@ -181,6 +276,10 @@ function sync(message) {
 async function run(id, job) {
   const fs = py.FS;
   const out = (fd, text) => parentPort.postMessage({ id, type: "out", fd, text });
+  if (job.lazy) {
+    lazy = { id, flag: new Int32Array(job.lazy.flag), port: job.lazy.port };
+    attach(job.roots);
+  }
   for (const [path, data, stamp] of job.files) {
     fs.mkdirTree(parentOf(path));
     fs.writeFile(path, data);
@@ -210,6 +309,11 @@ async function run(id, job) {
   }
   const found = changes(fs, job.roots);
   tracking = null;
+  if (lazy) {
+    detach(job.roots);
+    lazy.port.close();
+    lazy = null;
+  }
   for (const path of [...found.files.keys(), ...found.deleted]) known.delete(path);
   parentPort.postMessage({ id, type: "done", status, files: found.files, dirs: found.dirs, deleted: found.deleted });
 }
@@ -278,6 +382,7 @@ function spawn(helper: string, cacheDir: string): Remote {
     const pending = current.pending.get(data.id)
     if (!pending) return
     if (data.type === 'out') return pending.output?.(data.fd ?? 1, data.text ?? '')
+    if (data.type === 'fs') return pending.serve?.(data as unknown as Record<string, unknown>)
     current.pending.delete(data.id)
     if (!current.pending.size) port.unref?.()
     if (data.type === 'error') pending.reject(new Error(data.message ?? 'python worker failed'))
@@ -299,11 +404,17 @@ function call(
   message: Record<string, unknown>,
   output?: Pending['output'],
   transfer: unknown[] = [],
+  serve?: Pending['serve'],
 ): { remote: Remote; result: Promise<Record<string, unknown>> } {
   const current = (remote ??= spawn(helper, cacheDir))
   const id = ++current.next
   const result = new Promise<Record<string, unknown>>((resolve, reject) => {
-    current.pending.set(id, { resolve, reject, ...(output ? { output } : {}) })
+    current.pending.set(id, {
+      resolve,
+      reject,
+      ...(output ? { output } : {}),
+      ...(serve ? { serve } : {}),
+    })
   })
   current.port.ref?.()
   current.port.postMessage({ ...message, id }, transfer)
@@ -366,11 +477,36 @@ export function workerRun(
         failure ??= error
       }
     }
+    const channel = job.lazy ? new MessageChannel() : undefined
+    const answered = new SharedArrayBuffer(4)
+    const serve = (request: Record<string, unknown>) =>
+      void answer(ctx.fs, String(request['op']), String(request['path']))
+        .then(
+          (reply) => reply,
+          (error: unknown) => {
+            failure ??= error
+            return { code: 'EIO' }
+          },
+        )
+        .then((reply) => {
+          channel?.port1.postMessage(reply)
+          Atomics.store(new Int32Array(answered), 0, 1)
+          Atomics.notify(new Int32Array(answered), 0)
+        })
     const { remote: current, result } = call(
       helper,
       cacheDir,
-      { type: 'run', job: { ...job, interrupt } },
+      {
+        type: 'run',
+        job: {
+          ...job,
+          interrupt,
+          lazy: channel ? { flag: answered, port: channel.port2 } : undefined,
+        },
+      },
       output,
+      channel ? [channel.port2] : [],
+      channel ? serve : undefined,
     )
     let killed: string | undefined
     let stoppedAt = 0
@@ -409,6 +545,26 @@ export function workerRun(
       }
     } finally {
       clearInterval(watch)
+      channel?.port1.close()
     }
   })()
+}
+
+async function answer(
+  fs: FileSystem,
+  op: string,
+  path: string,
+): Promise<{ code?: string; value?: unknown }> {
+  try {
+    if (op === 'read') return { value: await fs.read(path) }
+    const entries: [string, string, number, number, number][] = []
+    for (const name of await fs.list(path)) {
+      const stat = await fs.stat(path === '/' ? '/' + name : path + '/' + name)
+      if (stat) entries.push([name, stat.kind, stat.size, stat.mtime, stat.mode])
+    }
+    return { value: entries }
+  } catch (error) {
+    if (error instanceof FsError) return { code: error.code }
+    throw error
+  }
 }
