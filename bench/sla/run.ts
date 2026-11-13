@@ -257,7 +257,7 @@ async function tuiSample(name: string, lane: Lane, url: string, index: number): 
     const mark = marks(turn)
     term.reset()
     const pair = mark.first.slice(0, 2)
-    term.write(live ? "Reply with only the word formed by writing '" + pair + "' four times." : 'Reply SLA[run=' + run + ',turn=' + turn + ',tokens=' + tokens + ',rate=' + rate + ',ttft=' + ttft + ',tool=' + tool + ']')
+    term.write(live ? "Reply with only the word formed by writing '" + pair + "' four times. (" + run + ')' : 'Reply SLA[run=' + run + ',turn=' + turn + ',tokens=' + tokens + ',rate=' + rate + ',ttft=' + ttft + ',tool=' + tool + ']')
     await sleep(200)
     const enter = now()
     term.write('\r')
