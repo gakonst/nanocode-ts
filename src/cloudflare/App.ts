@@ -876,6 +876,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.metadata.get(modelKey) ?? input.model,
           this.metadata.get(payerKey) ?? input.payer,
         )
+        if (!this.opened(scope)?.resident)
+          void options.mcp?.store?.(this.env)?.get('nanocode-mcp:prime').catch(() => undefined)
         const subscribing =
           this.metadata.get(providerKey) === undefined
             ? this.subscribe(
