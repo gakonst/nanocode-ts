@@ -33,6 +33,8 @@ const label = arg('label', mode + '-t' + tokens + '-r' + rate + '-f' + ttft + '-
 const settle = Number(arg('settle', '1500'))
 const live = process.argv.includes('--live')
 const rejected = process.argv.includes('--rejected')
+const keyed = process.argv.includes('--key')
+const anthropicKey = (keyed ? process.env.ANTHROPIC_API_KEY : undefined) ?? 'sk-ant-invalid'
 const claudeModel = arg('claude-model', 'claude-haiku-4-5')
 const codexModel = arg('codex-model', 'gpt-6-luna')
 const rows = 40
@@ -52,7 +54,7 @@ const lanes: { [name: string]: Lane } = {
     ready: '\u276f',
     setup: (home, cwd) => {
       Fs.mkdirSync(home + '/.claude', { recursive: true })
-      Fs.writeFileSync(home + '/.claude/.claude.json', JSON.stringify({ bypassPermissionsModeAccepted: true, customApiKeyResponses: { approved: ['fixture-key', 'sk-ant-invalid'], rejected: [] }, hasCompletedOnboarding: true, projects: { [Fs.realpathSync(cwd)]: { hasCompletedProjectOnboarding: true, hasTrustDialogAccepted: true } } }))
+      Fs.writeFileSync(home + '/.claude/.claude.json', JSON.stringify({ bypassPermissionsModeAccepted: true, customApiKeyResponses: { approved: ['fixture-key', anthropicKey.slice(-20)], rejected: [] }, hasCompletedOnboarding: true, projects: { [Fs.realpathSync(cwd)]: { hasCompletedProjectOnboarding: true, hasTrustDialogAccepted: true } } }))
       Fs.writeFileSync(home + '/.claude/settings.json', JSON.stringify({ permissions: { allow: ['Bash(true)'] }, theme: 'dark' }))
     },
     tui: () => [bins.claude],
@@ -78,7 +80,7 @@ const lanes: { [name: string]: Lane } = {
   },
   'live-nc-claude': liveNcLane(bins.nc, claudeModel),
   'rejected-claude': {
-    env: (home) => ({ ...base, ANTHROPIC_API_KEY: 'sk-ant-invalid', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CONFIG_DIR: home + '/.claude', DISABLE_AUTOUPDATER: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_TELEMETRY: '1', HOME: home }),
+    env: (home) => ({ ...base, ANTHROPIC_API_KEY: anthropicKey, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CONFIG_DIR: home + '/.claude', DISABLE_AUTOUPDATER: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_TELEMETRY: '1', HOME: home }),
     ready: '\u276f',
     setup: (home, cwd) => lanes.claude!.setup!(home, cwd),
     tui: () => [bins.claude, '--model', claudeModel],
@@ -116,7 +118,7 @@ function liveNcLane(bin: string, model: string): Lane {
 }
 
 function rejectedLane(bin: string, kind: string): Lane {
-  const env = kind === 'claude' ? { NANOCODE_ANTHROPIC_API_KEY: 'sk-ant-invalid', NANOCODE_ANTHROPIC_BASE_URL: 'https://api.anthropic.com/v1' } : { AI_GATEWAY_API_KEY: 'invalid' }
+  const env = kind === 'claude' ? { NANOCODE_ANTHROPIC_API_KEY: anthropicKey, NANOCODE_ANTHROPIC_BASE_URL: 'https://api.anthropic.com/v1' } : { AI_GATEWAY_API_KEY: 'invalid' }
   const args = kind === 'claude' ? ['-m', claudeModel] : ['--gateway', 'vercel', '-m', 'luna']
   return {
     env: (home) => ({ ...base, ...env, HOME: home, NANOCODE_TELEMETRY: 'off' }),
@@ -260,11 +262,13 @@ async function tuiSample(name: string, lane: Lane, url: string, index: number): 
     const enter = now()
     term.write('\r')
     if (process.env.SLA_DEBUG) console.error(name, index, turn, 'enter')
-    const seen = await term.wait(rejected ? '401' : mark.first, Number(arg('timeout', '20000')))
+    const seen = await term.wait(rejected && !keyed ? '401' : mark.first, Number(arg('timeout', '20000')))
     const last = seen && !live ? await term.wait(mark.last, Number(arg('timeout', '20000'))) : undefined
     if (process.env.SLA_DEBUG) console.error(name, index, turn, 'seen', seen !== undefined, 'last', last !== undefined)
     await sleep(300)
-    out.push({ index, lane: name, ready: ms(ready, started), turn, ...(live ? { e2e: ms(seen, enter) } : derive(await log(url, run), enter, seen, last)), ...(seen ? {} : { error: 'no token: ' + term.plain().slice(-300) }) })
+    const entries = live ? [] : await log(url, run)
+    if (process.env.SLA_TRACE) Fs.appendFileSync(process.env.SLA_TRACE, JSON.stringify({ enter: String(enter), headers: String(entries.find((entry) => entry.kind !== 'side')?.headers_ns), lane: name, turn }) + '\n')
+    out.push({ index, lane: name, ready: ms(ready, started), turn, ...(live ? { e2e: ms(seen, enter) } : derive(entries, enter, seen, last)), ...(seen ? {} : { error: 'no token: ' + term.plain().slice(-300) }) })
     await sleep(live ? 3000 : 500)
   }
   term.kill()

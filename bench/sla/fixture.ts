@@ -220,7 +220,7 @@ const server = Http.createServer((req, res) => {
       }
     })()
     const names = toolNames(parsed)
-    if (process.env.DUMP) Fs.writeFileSync(process.env.DUMP + '/' + Date.now() + '-' + connections + '.json', req.headers['content-encoding'] + ' ' + url.pathname + '\n' + body.slice(0, 20000))
+    if (process.env.DUMP) Fs.writeFileSync(process.env.DUMP + '/' + Date.now() + '-' + connections + '.json', req.headers['content-encoding'] + ' ' + url.pathname + '\n' + body)
     const sc = scenario(body)
     const list = runs.get(sc.run) ?? []
     runs.set(sc.run, list)
