@@ -175,27 +175,32 @@ export function create(retained: () => number, retainedBytes: () => number) {
 
     publish(events: Contracts.LoggedEvent[], bytes: number[]): void {
       if (!events.length) return
-      const first = events[0].seq
-      const last = events[events.length - 1].seq
-      if (state.highest < 0 || first === state.highest + 1) {
-        const tail = [...state.tail, ...events]
-        const sizes = [...state.sizes, ...bytes]
-        let total = state.bytes + bytes.reduce((sum, size) => sum + size, 0)
-        let start = Math.max(0, tail.length - state.retained())
-        for (let index = 0; index < start; index++) total -= sizes[index]
-        const budget = state.retainedBytes()
-        while (start < tail.length && total > budget) total -= sizes[start++]
-        state.tail = tail.slice(start)
-        state.sizes = sizes.slice(start)
-        state.bytes = total
-      } else {
-        state.tail = []
-        state.sizes = []
-        state.bytes = 0
+      const kept = events.flatMap((event, index) => (event.seq > 0 ? [index] : []))
+      if (kept.length) {
+        const stored = kept.map((index) => events[index])
+        const added = kept.map((index) => bytes[index])
+        const first = stored[0].seq
+        const last = stored[stored.length - 1].seq
+        if (state.highest < 0 || first === state.highest + 1) {
+          const tail = [...state.tail, ...stored]
+          const sizes = [...state.sizes, ...added]
+          let total = state.bytes + added.reduce((sum, size) => sum + size, 0)
+          let start = Math.max(0, tail.length - state.retained())
+          for (let index = 0; index < start; index++) total -= sizes[index]
+          const budget = state.retainedBytes()
+          while (start < tail.length && total > budget) total -= sizes[start++]
+          state.tail = tail.slice(start)
+          state.sizes = sizes.slice(start)
+          state.bytes = total
+        } else {
+          state.tail = []
+          state.sizes = []
+          state.bytes = 0
+        }
+        state.highest = Math.max(state.highest, last)
+        state.frames = new WeakMap()
+        for (const event of stored) internal.settle(event)
       }
-      state.highest = Math.max(state.highest, last)
-      state.frames = new WeakMap()
-      for (const event of events) internal.settle(event)
       self.notify()
     },
 
@@ -342,7 +347,10 @@ export function create(retained: () => number, retainedBytes: () => number) {
               if (page.events.length || chunks.length) {
                 release()
                 release = undefined
-                cursor = page.next_cursor
+                cursor = page.events.reduce(
+                  (highest, event) => Math.max(highest, event.seq),
+                  Math.max(cursor, page.next_cursor),
+                )
                 complete = !!finished && page.events.some((event) => finished(event as Event))
                 const streamedAt = Date.now()
                 const end = `${streamedAt}}\n\n`
@@ -365,7 +373,7 @@ export function create(retained: () => number, retainedBytes: () => number) {
                 )
                 return
               }
-              cursor = page.next_cursor
+              cursor = Math.max(cursor, page.next_cursor)
               await ready
               release()
               release = undefined
