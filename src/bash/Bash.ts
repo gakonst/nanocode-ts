@@ -172,7 +172,7 @@ export async function create(options: create.Options = {}): Promise<Bash> {
       ...options.commands,
     }),
   )
-  if (!options.python?.remote && !(options.webassembly ?? compiles()))
+  if (!options.python?.remote && !options.python?.module && !(options.webassembly ?? compiles()))
     for (const name of ['python', 'python3', 'pip', 'pip3'])
       if (!options.commands?.[name]) commands.delete(name)
   let calls = 0

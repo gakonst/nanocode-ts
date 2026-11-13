@@ -1,8 +1,9 @@
-import { CommandError, type CommandContext, type CommandHandler } from '../Shell.ts'
-import { FsError, type FileSystem } from '../../FileSystem.ts'
+import { CommandError, Input, type CommandContext, type CommandHandler } from '../Shell.ts'
+import { FsError, type FileStat, type FileSystem, type SyncFileSystem } from '../../FileSystem.ts'
 import { breathe, decode, encode, parentOf } from '../Fs.ts'
 import { mkdirs } from './files.ts'
 import * as Lazy from './pylazy.ts'
+import * as RustPython from './rustpython.ts'
 import type {
   Options as PythonOptions,
   Pyodide,
@@ -412,9 +413,12 @@ function threaded(options: PythonOptions): boolean {
 
 const warmed = new Set<string>()
 
-export function preload(options: preload.Options = {}): Promise<void> {
+export async function preload(options: preload.Options = {}): Promise<void> {
   const packages = options.packages ?? []
-  if (!canCompile()) return Promise.resolve()
+  const compiled = await rustModule(options)
+  if (compiled) warmRust(compiled)
+  if (compiled && !packages.length) return
+  if (!canCompile()) return
   if (threaded(options)) {
     const fresh = packages.filter((name) => !warmed.has(name))
     for (const name of fresh) warmed.add(name)
@@ -628,16 +632,29 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
   const maxFiles = options.maxFiles ?? 20_000
   const mirror: Mirror = { id: '', known: new Map(), adopted: new Map() }
   let local = options.mirror ?? ''
-  const handler: CommandHandler = async (ctx) => {
+  const handler: CommandHandler = async (context) => {
+    let ctx = context
     const mode = parse(ctx, ctx.args.slice())
     if (mode === 'help') {
       ctx.stdout.write(
         usage(ctx.name) +
-          '\nPython on Pyodide ' +
+          '\nPython on RustPython, with Pyodide ' +
           pyodideVersion +
-          ' (CPython for WebAssembly), with pip install through micropip\n',
+          ' (CPython for WebAssembly) for packages and pip install through micropip\n',
       )
       return 0
+    }
+    const compiled =
+      mode !== 'version' && mode.kind === 'pip' ? undefined : await rustModule(options)
+    if (compiled) {
+      const stdin = ctx.stdin.read()
+      const status = await executeRust(ctx, compiled, {
+        fallback: options.remote !== undefined || canCompile(),
+        maxBytes,
+        stdin,
+      })
+      if (status !== undefined) return status
+      ctx = { ...ctx, stdin: new Input(stdin) }
     }
     if (options.remote) {
       if (!options.shared) mirror.id ||= options.mirror ?? crypto.randomUUID()
@@ -1082,6 +1099,283 @@ async function apply(fs: FileSystem, changes: PythonChanges): Promise<void> {
     await mkdirs(fs, parentOf(path))
     await fs.write(path, data)
   }
+}
+
+const packagedRust: { module?: Promise<WebAssembly.Module | undefined> } = {}
+
+function rustModule(options: PythonOptions): Promise<WebAssembly.Module | undefined> {
+  if (options.module === false) return Promise.resolve(undefined)
+  if (options.module) return Promise.resolve(options.module)
+  packagedRust.module ??= (async () => {
+    const process = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } })
+      .process
+    const fs = process?.getBuiltinModule?.('node:fs') as
+      | { promises: { readFile(path: URL): Promise<Uint8Array> } }
+      | undefined
+    const resolve = (import.meta as { resolve?: (specifier: string) => string }).resolve
+    if (!fs || !resolve || !canCompile()) return undefined
+    const bytes = await fs.promises.readFile(new URL(resolve('nanocode-ts/python.wasm')))
+    const compile = (
+      WebAssembly as unknown as { compile(bytes: Uint8Array): Promise<WebAssembly.Module> }
+    ).compile
+    return compile(bytes)
+  })().catch(() => undefined)
+  return packagedRust.module
+}
+
+function warmRust(module: WebAssembly.Module): void {
+  const files: SyncFileSystem = {
+    list: () => [],
+    mkdir: (path) => {
+      throw new FsError('EROFS', path)
+    },
+    read: (path) => {
+      throw new FsError('ENOENT', path)
+    },
+    remove: (path) => {
+      throw new FsError('EROFS', path)
+    },
+    rename: (from) => {
+      throw new FsError('EROFS', from)
+    },
+    stat: (path) => (path === '/' ? { kind: 'directory', mode: 0o755, mtime: 0, size: 0 } : null),
+    write: (path) => {
+      throw new FsError('EROFS', path)
+    },
+  }
+  RustPython.run(module, {
+    files,
+    request: {
+      argv: ['-c', 'pass'],
+      cwd: '/',
+      depth: 1000,
+      env: {},
+      file: 0,
+      output: 0,
+      stdin: new Uint8Array(),
+      timeMs: Number.MAX_SAFE_INTEGER,
+    },
+    stopped: () => false,
+  })
+}
+
+function layered(fs: FileSystem): {
+  changes(): PythonChanges
+  fetch(): Promise<void>
+  files: SyncFileSystem
+  missed(): boolean
+  reset(): void
+} {
+  const stats = new Map<string, FileStat | null>()
+  const names = new Map<string, string[]>()
+  const bytes = new Map<string, Uint8Array>()
+  const wanted = {
+    list: new Set<string>(),
+    read: new Set<string>(),
+    stat: new Set<string>(),
+    tree: new Set<string>(),
+  }
+  let missing = false
+  let files = new Map<string, Uint8Array>()
+  let dirs = new Set<string>()
+  let gone = new Set<string>()
+  let touched = new Set<string>()
+  let made = new Set<string>()
+  const miss = (set: Set<string>, path: string) => {
+    set.add(path)
+    missing = true
+    return new FsError('EIO', path)
+  }
+  const hidden = (path: string) => {
+    if (files.has(path) || dirs.has(path)) return false
+    for (let at = path; ; at = parentOf(at)) {
+      if (gone.has(at)) return true
+      if (at === '/') return false
+    }
+  }
+  const kind = (path: string): 'file' | 'directory' | undefined => {
+    if (files.has(path)) return 'file'
+    if (dirs.has(path)) return 'directory'
+    if (hidden(path)) return undefined
+    if (!stats.has(path)) throw miss(wanted.stat, path)
+    return stats.get(path)?.kind
+  }
+  const read = (path: string) => {
+    const own = files.get(path)
+    if (own) return own
+    const found = kind(path)
+    if (found !== 'file') throw new FsError(found ? 'EISDIR' : 'ENOENT', path)
+    const data = bytes.get(path)
+    if (!data) throw miss(wanted.read, path)
+    return data
+  }
+  const list = (path: string) => {
+    const found = kind(path)
+    if (found !== 'directory') throw new FsError(found ? 'ENOTDIR' : 'ENOENT', path)
+    const listed = new Set<string>()
+    if (!made.has(path) && !hidden(path)) {
+      const base = names.get(path)
+      if (!base) throw miss(wanted.list, path)
+      for (const name of base) if (!hidden(join(path, name))) listed.add(name)
+    }
+    for (const key of [...files.keys(), ...dirs])
+      if (key !== '/' && parentOf(key) === path)
+        listed.add(key.slice(path === '/' ? 1 : path.length + 1))
+    return [...listed].sort()
+  }
+  const parent = (path: string) => {
+    if (kind(parentOf(path)) !== 'directory') throw new FsError('ENOENT', path)
+  }
+  const remove = (path: string) => {
+    files.delete(path)
+    dirs.delete(path)
+    touched.delete(path)
+    made.delete(path)
+    gone.add(path)
+  }
+  const write = (path: string, data: Uint8Array, append?: boolean) => {
+    if (kind(path) === 'directory') throw new FsError('EISDIR', path)
+    parent(path)
+    const before = append && kind(path) === 'file' ? read(path) : undefined
+    const joined = before ? new Uint8Array(before.length + data.length) : data
+    if (before) {
+      joined.set(before)
+      joined.set(data, before.length)
+    }
+    files.set(path, joined)
+    touched.add(path)
+  }
+  const copy = (from: string, to: string) => {
+    if (kind(from) === 'file') return write(to, read(from))
+    dirs.add(to)
+    made.add(to)
+    for (const name of list(from)) copy(join(from, name), join(to, name))
+  }
+  const fetchTree = async (path: string): Promise<void> => {
+    const stat = await fs.stat(path)
+    stats.set(path, stat)
+    if (stat?.kind === 'file') bytes.set(path, await fs.read(path))
+    if (stat?.kind !== 'directory') return
+    const children = await fs.list(path)
+    names.set(path, children)
+    for (const name of children) await fetchTree(join(path, name))
+  }
+  return {
+    changes: () => ({
+      deleted: [...gone].filter((path) => kind(path) === undefined),
+      dirs: [...made].filter((path) => dirs.has(path)),
+      files: new Map(
+        [...touched].flatMap((path) => {
+          const data = files.get(path)
+          return data ? [[path, data] as const] : []
+        }),
+      ),
+    }),
+    async fetch() {
+      for (const path of wanted.stat) stats.set(path, await fs.stat(path))
+      for (const path of wanted.list) {
+        const children = await fs.list(path)
+        names.set(path, children)
+        for (const name of children) {
+          const child = join(path, name)
+          if (!stats.has(child)) stats.set(child, await fs.stat(child))
+        }
+      }
+      for (const path of wanted.read) bytes.set(path, await fs.read(path))
+      for (const path of wanted.tree) await fetchTree(path)
+      for (const set of Object.values(wanted)) set.clear()
+    },
+    files: {
+      list,
+      mkdir: (path) => {
+        if (kind(path)) throw new FsError('EEXIST', path)
+        parent(path)
+        dirs.add(path)
+        made.add(path)
+      },
+      read,
+      remove: (path) => {
+        if (!kind(path)) throw new FsError('ENOENT', path)
+        remove(path)
+      },
+      rename: (from, to) => {
+        const found = kind(from)
+        if (!found) throw new FsError('ENOENT', from)
+        if (found === 'directory' && !bytes.has(from) && !names.has(from) && !made.has(from))
+          throw miss(wanted.tree, from)
+        parent(to)
+        if (kind(to)) remove(to)
+        try {
+          copy(from, to)
+        } catch (error) {
+          if (missing) wanted.tree.add(from)
+          throw error
+        }
+        remove(from)
+      },
+      stat: (path) => {
+        const found = kind(path)
+        if (!found) return null
+        if (files.has(path))
+          return {
+            kind: 'file',
+            mode: 0o644,
+            mtime: Date.now(),
+            size: files.get(path)?.length ?? 0,
+          }
+        if (dirs.has(path)) return { kind: 'directory', mode: 0o755, mtime: Date.now(), size: 0 }
+        return stats.get(path) ?? null
+      },
+      write,
+    },
+    missed: () => missing,
+    reset() {
+      missing = false
+      files = new Map()
+      dirs = new Set()
+      gone = new Set()
+      touched = new Set()
+      made = new Set()
+    },
+  }
+}
+
+async function executeRust(
+  ctx: CommandContext,
+  module: WebAssembly.Module,
+  options: { fallback: boolean; maxBytes: number; stdin: string },
+): Promise<number | undefined> {
+  const limit = Math.min(options.maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2))
+  const deadline = Date.now() + ctx.limits.timeoutMs
+  const cache = ctx.fs.sync ? undefined : layered(ctx.fs)
+  const files = ctx.fs.sync ?? cache?.files
+  if (!files) return undefined
+  const attempt = () =>
+    RustPython.run(module, {
+      files,
+      request: {
+        argv: ctx.args,
+        cwd: ctx.cwd,
+        depth: ctx.limits.maxCallDepth,
+        env: { ...ctx.env, PWD: ctx.cwd },
+        file: limit,
+        output: ctx.limits.maxOutputLength,
+        stdin: encode(options.stdin),
+        timeMs: deadline - Date.now(),
+      },
+      stopped: () => ctx.signal.aborted || (cache?.missed() ?? false),
+    })
+  let ran = attempt()
+  while (cache?.missed()) {
+    await cache.fetch()
+    cache.reset()
+    ran = attempt()
+  }
+  if (cache) await apply(ctx.fs, cache.changes())
+  if (ran.kind !== 'needs') return RustPython.report(ctx, ran)
+  if (options.fallback && ran.missing.every((missing) => missing.package)) return undefined
+  for (const missing of ran.missing) ctx.stderr.write(missing.text + '\n')
+  return 127
 }
 
 async function executeThreaded(

@@ -7,6 +7,7 @@ export type Options = {
   maxBytes?: number
   maxFiles?: number
   mirror?: string
+  module?: false | WebAssembly.Module
   remote?: Remote
   shared?: boolean
   worker?: boolean
