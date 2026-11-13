@@ -9,24 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "atomic-waker"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "base64"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,12 +26,6 @@ dependencies = [
  "constant_time_eq",
  "cpufeatures",
 ]
-
-[[package]]
-name = "bumpalo"
-version = "3.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytes"
@@ -208,12 +184,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "futures-io"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
-
-[[package]]
 name = "futures-macro"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -243,11 +213,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
- "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
- "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -296,91 +264,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-body"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
-dependencies = [
- "bytes",
- "http",
-]
-
-[[package]]
-name = "http-body-util"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "pin-project-lite",
-]
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
-
-[[package]]
-name = "hyper"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
-dependencies = [
- "atomic-waker",
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "httparse",
- "itoa",
- "pin-project-lite",
- "smallvec",
- "tokio",
- "want",
-]
-
-[[package]]
-name = "hyper-rustls"
-version = "0.27.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53"
-dependencies = [
- "http",
- "hyper",
- "hyper-util",
- "rustls",
- "tokio",
- "tokio-rustls",
- "tower-service",
-]
-
-[[package]]
-name = "hyper-util"
-version = "0.1.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
-dependencies = [
- "base64 0.23.1",
- "bytes",
- "futures-channel",
- "futures-util",
- "http",
- "http-body",
- "httparse",
- "hyper",
- "ipnet",
- "libc",
- "percent-encoding",
- "pin-project-lite",
- "socket2",
- "tokio",
- "tower-service",
- "tracing",
-]
 
 [[package]]
 name = "icu_collections"
@@ -487,12 +374,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ipnet"
-version = "2.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -545,17 +426,6 @@ checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "js-sys"
-version = "0.3.106"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
-dependencies = [
- "cfg-if",
- "futures-util",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -698,9 +568,9 @@ dependencies = [
 name = "nanocode-audio"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "nanocode-digest",
  "nanocode-sync",
+ "nanocode-sys",
  "tracing",
 ]
 
@@ -708,7 +578,6 @@ dependencies = [
 name = "nanocode-backend-claude"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "http",
  "libc",
@@ -725,6 +594,7 @@ dependencies = [
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
  "nanocode-tools",
@@ -740,7 +610,6 @@ dependencies = [
 name = "nanocode-backend-claude-client"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -751,8 +620,8 @@ dependencies = [
  "nanocode-http",
  "nanocode-platform",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tls",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -765,13 +634,13 @@ dependencies = [
 name = "nanocode-backend-claude-tools"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "libc",
  "nanocode-home",
  "nanocode-image",
  "nanocode-jpeg",
  "nanocode-platform",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tools",
  "serde",
  "serde_json",
@@ -782,7 +651,6 @@ dependencies = [
 name = "nanocode-backend-codex"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "http",
  "libc",
@@ -799,11 +667,11 @@ dependencies = [
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tls",
  "nanocode-tool-host",
  "nanocode-tools",
  "nanocode-types",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -814,7 +682,6 @@ dependencies = [
 name = "nanocode-backend-codex-client"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "http",
  "memchr",
@@ -827,15 +694,14 @@ dependencies = [
  "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tls",
  "nanocode-types",
  "nanocode-websocket",
  "nanocode-zstd",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
- "tokio-rustls",
  "tracing",
  "url",
 ]
@@ -864,11 +730,11 @@ dependencies = [
 name = "nanocode-code-mode-engine"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "djs-embed",
  "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tool-contracts",
  "serde",
  "serde_json",
@@ -887,9 +753,6 @@ dependencies = [
 name = "nanocode-computer"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
- "core-foundation",
- "core-foundation-sys",
  "futures-util",
  "libc",
  "nanocode-computer-repl",
@@ -907,8 +770,8 @@ dependencies = [
 name = "nanocode-computer-repl"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tool-contracts",
  "nanocode-types",
  "serde",
@@ -942,11 +805,11 @@ dependencies = [
 name = "nanocode-durability-core"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
+ "nanocode-sys",
  "serde",
  "serde_json",
 ]
@@ -969,18 +832,27 @@ dependencies = [
 name = "nanocode-http"
 version = "0.7.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "http",
+ "httparse",
  "nanocode-compression",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
  "nanocode-zstd",
- "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "url",
 ]
 
 [[package]]
 name = "nanocode-image"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "memchr",
  "nanocode-compression",
  "nanocode-digest",
@@ -989,6 +861,7 @@ dependencies = [
  "nanocode-jpeg",
  "nanocode-png",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-types-core",
  "nanocode-webp",
  "tokio",
@@ -998,15 +871,18 @@ dependencies = [
 [[package]]
 name = "nanocode-jpeg"
 version = "0.7.0"
+dependencies = [
+ "nanocode-sys",
+]
 
 [[package]]
 name = "nanocode-mcp"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "memchr",
  "nanocode-digest",
  "nanocode-sync",
+ "nanocode-sys",
  "serde",
  "serde_json",
  "tokio",
@@ -1025,7 +901,6 @@ dependencies = [
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tls",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -1052,7 +927,6 @@ dependencies = [
  "nanocode-tools",
  "nanocode-turnlog",
  "nanocode-types",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -1105,8 +979,9 @@ dependencies = [
 name = "nanocode-schema"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "idna",
+ "memchr",
+ "nanocode-sys",
  "serde",
  "serde_json",
  "url",
@@ -1193,6 +1068,7 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-digest",
  "nanocode-home",
+ "nanocode-http",
  "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
@@ -1201,7 +1077,6 @@ dependencies = [
  "nanocode-tools",
  "nanocode-turnlog",
  "nanocode-types",
- "reqwest",
  "serde",
  "serde_json",
  "tracing",
@@ -1220,7 +1095,6 @@ dependencies = [
 name = "nanocode-tool-runtime"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "http",
  "nanocode-code-mode",
@@ -1229,6 +1103,7 @@ dependencies = [
  "nanocode-platform",
  "nanocode-process",
  "nanocode-sync",
+ "nanocode-sys",
  "nanocode-tls",
  "nanocode-tool-host",
  "nanocode-tool-provider",
@@ -1238,7 +1113,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tracing",
  "url",
 ]
@@ -1266,10 +1140,10 @@ dependencies = [
 name = "nanocode-turnlog"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "nanocode-compression",
  "nanocode-durability-core",
  "nanocode-sync",
+ "nanocode-sys",
  "serde",
  "serde_json",
 ]
@@ -1325,12 +1199,12 @@ dependencies = [
 name = "nanocode-websocket"
 version = "0.7.0"
 dependencies = [
- "base64 0.22.1",
  "futures-util",
  "http",
  "httparse",
  "nanocode-digest",
  "nanocode-platform",
+ "nanocode-sys",
  "tokio",
  "tokio-rustls",
 ]
@@ -1395,45 +1269,6 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
-
-[[package]]
-name = "reqwest"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
-dependencies = [
- "base64 0.23.1",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "serde",
- "serde_json",
- "sync_wrapper",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams",
- "web-sys",
-]
 
 [[package]]
 name = "ring"
@@ -1540,12 +1375,6 @@ dependencies = [
  "rustls-pki-types",
  "untrusted",
 ]
-
-[[package]]
-name = "rustversion"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "same-file"
@@ -1726,15 +1555,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sync_wrapper"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
-dependencies = [
- "futures-core",
-]
-
-[[package]]
 name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1813,64 +1633,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-util"
-version = "0.7.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "tower"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
-dependencies = [
- "futures-core",
- "futures-util",
- "pin-project-lite",
- "sync_wrapper",
- "tokio",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
-dependencies = [
- "bitflags",
- "bytes",
- "futures-util",
- "http",
- "http-body",
- "pin-project-lite",
- "tower",
- "tower-layer",
- "tower-service",
- "url",
-]
-
-[[package]]
-name = "tower-layer"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
-
-[[package]]
-name = "tower-service"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
-
-[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1888,12 +1650,6 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
 ]
-
-[[package]]
-name = "try-lock"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "unicode-ident"
@@ -1940,15 +1696,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "want"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
-dependencies = [
- "try-lock",
-]
-
-[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1961,85 +1708,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
 dependencies = [
  "wit-bindgen",
-]
-
-[[package]]
-name = "wasm-bindgen"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
-dependencies = [
- "cfg-if",
- "once_cell",
- "rustversion",
- "wasm-bindgen-macro",
- "wasm-bindgen-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-futures"
-version = "0.4.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbab34de2d982e9b48e18d216d04c4a6f641066ff19ffb699980f591ee3610e"
-dependencies = [
- "js-sys",
- "tokio",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "wasm-bindgen-macro"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
-dependencies = [
- "quote",
- "wasm-bindgen-macro-support",
-]
-
-[[package]]
-name = "wasm-bindgen-macro-support"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
-dependencies = [
- "bumpalo",
- "proc-macro2",
- "quote",
- "syn 3.0.9",
- "wasm-bindgen-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-shared"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
-dependencies = [
- "unicode-ident",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "web-sys"
-version = "0.3.106"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
 ]
 
 [[package]]
