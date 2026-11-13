@@ -3,33 +3,6 @@
 version = 4
 
 [[package]]
-name = "adler2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
-name = "alloc-no-stdlib"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
-
-[[package]]
-name = "alloc-stdlib"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
-dependencies = [
- "alloc-no-stdlib",
-]
-
-[[package]]
-name = "archery"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,18 +30,6 @@ dependencies = [
  "event-listener-strategy",
  "futures-core",
  "pin-project-lite",
-]
-
-[[package]]
-name = "async-compression"
-version = "0.4.50"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
-dependencies = [
- "compression-codecs",
- "compression-core",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -230,22 +191,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "base64-simd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
-dependencies = [
- "outref",
- "vsimd",
-]
-
-[[package]]
-name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -278,32 +223,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "brotli-decompressor"
-version = "5.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-
-[[package]]
-name = "bytemuck"
-version = "1.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
-
-[[package]]
-name = "byteorder-lite"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
@@ -328,12 +251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "color_quant"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
-
-[[package]]
 name = "combine"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,23 +259,6 @@ dependencies = [
  "bytes",
  "memchr",
 ]
-
-[[package]]
-name = "compression-codecs"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
-dependencies = [
- "compression-core",
- "flate2",
- "memchr",
-]
-
-[[package]]
-name = "compression-core"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "concurrent-queue"
@@ -398,15 +298,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "crc32fast"
-version = "1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -527,30 +418,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fdeflate"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
-dependencies = [
- "simd-adler32",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
-
-[[package]]
-name = "flate2"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
-dependencies = [
- "crc32fast",
- "miniz_oxide 0.9.1",
- "zlib-rs",
-]
 
 [[package]]
 name = "form_urlencoded"
@@ -674,29 +545,8 @@ checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
  "libc",
- "r-efi 5.3.0",
+ "r-efi",
  "wasip2",
-]
-
-[[package]]
-name = "getrandom"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi 6.0.0",
-]
-
-[[package]]
-name = "gif"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
-dependencies = [
- "color_quant",
- "weezl",
 ]
 
 [[package]]
@@ -929,55 +779,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "image"
-version = "0.25.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db35664ce6b9810857a38a906215e75a9c879f0696556a39f59c62829710251a"
-dependencies = [
- "bytemuck",
- "byteorder-lite",
- "color_quant",
- "gif",
- "image-webp",
- "num-traits",
- "png",
- "zune-core",
- "zune-jpeg",
-]
-
-[[package]]
-name = "image-webp"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
-dependencies = [
- "byteorder-lite",
- "quick-error",
-]
-
-[[package]]
-name = "imbl"
-version = "7.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec"
-dependencies = [
- "archery",
- "equivalent",
- "imbl-sized-chunks",
- "rand_core",
- "rand_xoshiro",
- "serde_core",
- "version_check",
- "wide",
-]
-
-[[package]]
-name = "imbl-sized-chunks"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6"
-
-[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1096,26 +897,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "miniz_oxide"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
-dependencies = [
- "adler2",
- "simd-adler32",
-]
-
-[[package]]
-name = "miniz_oxide"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
-dependencies = [
- "adler2",
- "simd-adler32",
 ]
 
 [[package]]
@@ -1238,7 +1019,7 @@ dependencies = [
 name = "nanocode-audio"
 version = "0.7.0"
 dependencies = [
- "base64-simd",
+ "base64 0.22.1",
  "nanocode-digest",
  "nanocode-sync",
  "tracing",
@@ -1251,8 +1032,6 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http",
- "image",
- "imbl",
  "libc",
  "nanocode-agent-config",
  "nanocode-agent-core",
@@ -1308,10 +1087,10 @@ name = "nanocode-backend-claude-tools"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "image",
  "libc",
  "nanocode-home",
  "nanocode-image",
+ "nanocode-jpeg",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tools",
@@ -1324,10 +1103,9 @@ dependencies = [
 name = "nanocode-backend-codex"
 version = "0.7.0"
 dependencies = [
- "base64-simd",
+ "base64 0.22.1",
  "futures-util",
  "http",
- "image",
  "libc",
  "nanocode-agent-config",
  "nanocode-agent-core",
@@ -1358,17 +1136,16 @@ name = "nanocode-backend-codex-client"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "flate2",
  "futures-util",
- "getrandom 0.4.3",
  "http",
- "image",
  "memchr",
  "nanocode-agent-types",
  "nanocode-audio",
+ "nanocode-compression",
  "nanocode-digest",
  "nanocode-home",
  "nanocode-http",
+ "nanocode-image",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-tls",
@@ -1389,7 +1166,6 @@ name = "nanocode-code-mode"
 version = "0.7.0"
 dependencies = [
  "futures-util",
- "imbl",
  "nanocode-audio",
  "nanocode-code-mode-engine",
  "nanocode-digest",
@@ -1409,7 +1185,7 @@ dependencies = [
 name = "nanocode-code-mode-engine"
 version = "0.7.0"
 dependencies = [
- "base64-simd",
+ "base64 0.22.1",
  "djs-embed",
  "nanocode-digest",
  "nanocode-platform",
@@ -1422,6 +1198,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-compression"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-computer"
 version = "0.7.0"
 dependencies = [
@@ -1431,9 +1211,9 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "futures-util",
- "image",
  "libc",
  "nanocode-computer-repl",
+ "nanocode-jpeg",
  "nanocode-mcp",
  "nanocode-mcp-tools",
  "nanocode-sync",
@@ -1448,7 +1228,7 @@ dependencies = [
 name = "nanocode-computer-repl"
 version = "0.7.0"
 dependencies = [
- "base64-simd",
+ "base64 0.22.1",
  "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-types",
@@ -1466,7 +1246,6 @@ name = "nanocode-durability"
 version = "0.7.0"
 dependencies = [
  "futures-util",
- "imbl",
  "nanocode-agent-core",
  "nanocode-durability-core",
  "nanocode-platform",
@@ -1483,13 +1262,16 @@ version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
- "imbl",
  "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "nanocode-gif"
+version = "0.7.0"
 
 [[package]]
 name = "nanocode-home"
@@ -1505,10 +1287,9 @@ dependencies = [
 name = "nanocode-http"
 version = "0.7.0"
 dependencies = [
- "brotli-decompressor",
- "flate2",
  "futures-util",
  "http",
+ "nanocode-compression",
  "nanocode-zstd",
  "reqwest",
 ]
@@ -1517,31 +1298,36 @@ dependencies = [
 name = "nanocode-image"
 version = "0.7.0"
 dependencies = [
- "base64-simd",
- "crc32fast",
- "image",
- "image-webp",
+ "base64 0.22.1",
  "memchr",
+ "nanocode-compression",
  "nanocode-digest",
  "nanocode-durability-core",
+ "nanocode-gif",
+ "nanocode-jpeg",
+ "nanocode-png",
  "nanocode-sync",
  "nanocode-types-core",
- "png",
+ "nanocode-webp",
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "nanocode-jpeg"
+version = "0.7.0"
 
 [[package]]
 name = "nanocode-mcp"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "futures-channel",
  "memchr",
  "nanocode-digest",
  "nanocode-sync",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "url",
 ]
@@ -1551,7 +1337,6 @@ name = "nanocode-mcp-http"
 version = "0.7.0"
 dependencies = [
  "futures-util",
- "getrandom 0.4.3",
  "http",
  "nanocode-http",
  "nanocode-mcp",
@@ -1596,18 +1381,24 @@ dependencies = [
 name = "nanocode-platform"
 version = "0.7.0"
 dependencies = [
- "getrandom 0.4.3",
- "libc",
  "nanocode-digest",
+ "nanocode-sys",
+ "rustls-pki-types",
  "serde",
  "tokio",
+]
+
+[[package]]
+name = "nanocode-png"
+version = "0.7.0"
+dependencies = [
+ "nanocode-compression",
 ]
 
 [[package]]
 name = "nanocode-process"
 version = "0.7.0"
 dependencies = [
- "getrandom 0.4.3",
  "libc",
  "nanocode-home",
  "nanocode-platform",
@@ -1659,7 +1450,6 @@ name = "nanocode-subagents"
 version = "0.7.0"
 dependencies = [
  "futures-util",
- "imbl",
  "nanocode-agent-core",
  "nanocode-durability-core",
  "nanocode-platform",
@@ -1677,9 +1467,9 @@ name = "nanocode-sync"
 version = "0.7.0"
 dependencies = [
  "futures-util",
- "imbl",
  "nanocode-platform",
  "nanocode-sys",
+ "serde",
  "tokio",
 ]
 
@@ -1688,16 +1478,17 @@ name = "nanocode-sys"
 version = "0.7.0"
 dependencies = [
  "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "nanocode-tls"
 version = "0.7.0"
 dependencies = [
+ "nanocode-platform",
  "nanocode-sync",
  "rustls",
  "rustls-graviola",
- "rustls-native-certs",
  "rustls-platform-verifier",
  "tokio",
  "tracing",
@@ -1749,7 +1540,6 @@ version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
- "getrandom 0.4.3",
  "http",
  "nanocode-code-mode",
  "nanocode-home",
@@ -1794,7 +1584,8 @@ dependencies = [
 name = "nanocode-turnlog"
 version = "0.7.0"
 dependencies = [
- "imbl",
+ "base64 0.22.1",
+ "nanocode-compression",
  "nanocode-durability-core",
  "nanocode-sync",
  "serde",
@@ -1843,15 +1634,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-webp"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-websocket"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
- "getrandom 0.4.3",
  "http",
  "httparse",
  "nanocode-digest",
+ "nanocode-platform",
  "tokio",
  "tokio-rustls",
 ]
@@ -1859,15 +1654,6 @@ dependencies = [
 [[package]]
 name = "nanocode-zstd"
 version = "0.7.0"
-
-[[package]]
-name = "num-traits"
-version = "0.2.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
-dependencies = [
- "autocfg",
-]
 
 [[package]]
 name = "once_cell"
@@ -1890,12 +1676,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "outref"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "parking"
@@ -1924,19 +1704,6 @@ dependencies = [
  "atomic-waker",
  "fastrand",
  "futures-io",
-]
-
-[[package]]
-name = "png"
-version = "0.17.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
-dependencies = [
- "bitflags 1.3.2",
- "crc32fast",
- "fdeflate",
- "flate2",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -1981,12 +1748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quick-error"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2000,27 +1761,6 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
-
-[[package]]
-name = "r-efi"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-
-[[package]]
-name = "rand_xoshiro"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
-dependencies = [
- "rand_core",
-]
 
 [[package]]
 name = "reqwest"
@@ -2090,7 +1830,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -2187,15 +1927,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "safe_arch"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2219,7 +1950,7 @@ version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "core-foundation",
  "core-foundation-sys",
  "libc",
@@ -2311,12 +2042,6 @@ dependencies = [
  "errno",
  "libc",
 ]
-
-[[package]]
-name = "simd-adler32"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simd_cesu8"
@@ -2562,17 +2287,12 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
- "async-compression",
- "bitflags 2.13.2",
+ "bitflags",
  "bytes",
- "futures-core",
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
- "tokio",
- "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2683,18 +2403,6 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vsimd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "walkdir"
@@ -2816,22 +2524,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "weezl"
-version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "wide"
-version = "0.7.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
-dependencies = [
- "bytemuck",
- "safe_arch",
 ]
 
 [[package]]
@@ -3160,31 +2852,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlib-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
-
-[[package]]
 name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zune-core"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
-
-[[package]]
-name = "zune-jpeg"
-version = "0.4.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
-dependencies = [
- "zune-core",
-]
 
 [[package]]
 name = "zvariant"

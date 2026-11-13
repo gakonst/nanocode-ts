@@ -358,6 +358,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private modelAt?: number
 
     private readonly tripwires = new Map<string, string>()
+    private directoryBodies = new Map<string, string>()
     private directoryEpoch = 0
     private recorded = false
     private deleted = false
@@ -3094,6 +3095,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private changed(scope: string): number {
       this.ctx.storage.sql.exec('DELETE FROM subagent_directories WHERE scope = ?', scope)
+      this.directoryBodies.delete(scope)
       return ++this.directoryEpoch
     }
 
@@ -3103,11 +3105,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       entries: Contracts.AgentDirectoryEntry[] | undefined,
     ): void {
       if (!entries || epoch !== this.directoryEpoch || this.metadata.first('background:')) return
+      const body = JSON.stringify(entries)
+      if (this.directoryBodies.get(scope) === body) return
       this.ctx.storage.sql.exec(
         'INSERT INTO subagent_directories (scope, body) VALUES (?, ?) ON CONFLICT (scope) DO UPDATE SET body = excluded.body WHERE body IS NOT excluded.body',
         scope,
-        JSON.stringify(entries),
+        body,
       )
+      this.directoryBodies.set(scope, body)
     }
 
     private attend(scope: string, descriptor: SessionDescriptor): void {

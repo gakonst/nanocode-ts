@@ -669,6 +669,7 @@ async fn log(scope: &str) -> Result<Arc<Log>, String> {
             effects: Effects::default(),
             max_row_bytes: VALUE_LIMIT.get(),
             restarts: RESTARTS.get().unwrap_or(u64::MAX),
+            snapshot_ratio: 2,
         },
     )
     .await
