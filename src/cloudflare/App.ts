@@ -121,7 +121,7 @@ const workspaceMemoryBytes = 48 * 1024 * 1024
 const workspaceFileBytes = 32 * 1024 * 1024
 const pythonRemoteBytes = 256 * 1024 * 1024
 const pythonStepsPerMs = 42_000
-const workerCpuMs = 30_000
+const pythonCpuMs = 5_000
 
 const workersAiModels = new Set(['glm-5.3'])
 
@@ -1433,7 +1433,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                         ...(pythonModule
                           ? {
                               module: pythonModule,
-                              cpuMs: options.workspace?.pythonCpuMs ?? workerCpuMs / 2,
+                              cpuMs: options.workspace?.pythonCpuMs ?? pythonCpuMs,
                               stepsPerMs: pythonStepsPerMs,
                             }
                           : {}),
