@@ -1410,6 +1410,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const pythonRemote = options.workspace
           ? options.workspace.python?.(authority, this.env)
           : undefined
+        const pythonModule = options.workspace ? await options.workspace.pythonModule : undefined
         const mcpServers =
           typeof options.mcp?.servers === 'function'
             ? options.mcp.servers(authority, this.env)
@@ -1440,12 +1441,17 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 github: { archive: false, ...options.workspace?.github },
                 wasm: { interpreter },
                 ...(options.workspace?.psh ? { psh: options.workspace.psh } : {}),
-                ...(pythonRemote
+                ...(pythonRemote || pythonModule
                   ? {
                       python: {
-                        remote: pythonRemote,
-                        maxBytes: pythonRemoteBytes,
-                        mirror: sessionId + ':' + scope,
+                        ...(pythonModule ? { module: pythonModule } : {}),
+                        ...(pythonRemote
+                          ? {
+                              remote: pythonRemote,
+                              maxBytes: pythonRemoteBytes,
+                              mirror: sessionId + ':' + scope,
+                            }
+                          : {}),
                       },
                     }
                   : {}),
@@ -3401,6 +3407,7 @@ export declare namespace create {
           mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>
           psh?: WebAssembly.Module | Promise<WebAssembly.Module>
           python?(authority: SessionAuthority, env: E): Python.Remote | undefined
+          pythonModule?: WebAssembly.Module | Promise<WebAssembly.Module>
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
   }
