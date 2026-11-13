@@ -10,6 +10,7 @@ export type Options = {
   module?: false | WebAssembly.Module
   remote?: Remote
   shared?: boolean
+  cpuMs?: number
   stepsPerMs?: number
   worker?: boolean
 }

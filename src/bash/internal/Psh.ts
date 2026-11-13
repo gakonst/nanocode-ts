@@ -369,6 +369,68 @@ export declare namespace run {
   }
 }
 
+export function runNow(instance: Instance, options: run.Options): Ran | undefined {
+  if (instance.failure !== undefined) throw failed(instance)
+  const x = instance.exports
+  const host: Host = {
+    cancel: () => {
+      if (instance.failure === undefined && instance.shells.has(host.id))
+        x.psh_shell_cancel(host.id)
+    },
+    failure: undefined,
+    finished: false,
+    halted: undefined,
+    id: 0,
+    options,
+    timers: new Set(),
+    waiting: undefined,
+    woken: false,
+  }
+  try {
+    x.psh_memory_limit(options.limits.memory < 2 ** 32 ? options.limits.memory : 0)
+    host.id = enter(instance, host, () => x.psh_shell_new(input(instance, config(options))))
+    if (host.id === 0) throw new EngineError('psh refused the shell configuration')
+    instance.shells.set(host.id, host)
+    const started = x.psh_shell_start(host.id, input(instance, start(options)))
+    if (started !== 0) throw new EngineError('psh refused the script (' + started + ')')
+    for (;;) {
+      if (options.signal.aborted) host.cancel()
+      const step = enter(instance, host, () => x.psh_shell_step(host.id, budget))
+      if (instance.failure !== undefined) throw failed(instance)
+      if (step === 0) break
+      if (step === -1) return undefined
+      if (step !== -2) throw new EngineError('psh step answered ' + step)
+    }
+    host.finished = true
+    if (x.psh_shell_result(host.id) !== 1) throw new EngineError('psh kept no result')
+    const ran = result(instance, host)
+    if (host.failure !== undefined) throw host.failure
+    return ran
+  } catch (error) {
+    const failure = broken(instance.module, instance, error)
+    if (failure === memoryExceeded) return exceeded()
+    throw failure
+  } finally {
+    if (host.id) release(instance, host)
+  }
+}
+
+export function identity(env: Record<string, string | undefined>): run.Identity {
+  return {
+    group: env.USER ?? 'user',
+    home: env.HOME ?? '/',
+    hostname: 'localhost',
+    hosttype: 'x86_64',
+    machtype: 'x86_64-pc-linux-gnu',
+    ostype: 'linux-gnu',
+    pid: 1,
+    release: '6.0.0',
+    uid: 1000,
+    user: env.USER ?? 'user',
+    version: '#1 SMP',
+  }
+}
+
 function enter<T>(instance: Instance, host: Host, body: () => T): T {
   const outer = instance.current
   instance.current = host

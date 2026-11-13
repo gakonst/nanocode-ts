@@ -175,6 +175,7 @@ function warmed(module) {
       host_random(ptr, len) {
         for (let at = 0; at < len; at += 65536) crypto.getRandomValues(view(ptr + at, Math.min(65536, len - at)))
       },
+      host_spawn: () => -95n,
       host_stopped: () => 0,
       host_time: () => Date.now(),
     },
@@ -196,6 +197,7 @@ function warmed(module) {
     ...u64(2n ** 64n - 1n),
     ...u64(1000n),
     ...u64(2n ** 64n - 1n),
+    ...new Uint8Array(new Uint32Array([0]).buffer),
   ])
   view(exports.python_input(request.length), request.length).set(request)
   const len = exports.python_run()

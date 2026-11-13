@@ -1,6 +1,7 @@
 import { CommandError, Input, type CommandContext, type CommandHandler } from '../Shell.ts'
 import { FsError, type FileStat, type FileSystem, type SyncFileSystem } from '../../FileSystem.ts'
 import { breathe, decode, encode, parentOf } from '../Fs.ts'
+import * as Psh from '../Psh.ts'
 import { mkdirs } from './files.ts'
 import * as Lazy from './pylazy.ts'
 import * as RustPython from './rustpython.ts'
@@ -627,7 +628,10 @@ function parse(ctx: CommandContext, args: string[]): Mode | 'help' | 'version' {
   return { kind: 'file', target: '', argv: args.slice(i), filename: ctx.resolve(file) }
 }
 
-export function pythonCommands(options: PythonOptions = {}): Record<string, CommandHandler> {
+export function pythonCommands(
+  options: PythonOptions = {},
+  psh?: WebAssembly.Module | Promise<WebAssembly.Module>,
+): Record<string, CommandHandler> {
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024
   const maxFiles = options.maxFiles ?? 20_000
   const mirror: Mirror = { id: '', known: new Map(), adopted: new Map() }
@@ -649,9 +653,11 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
     if (compiled) {
       const stdin = ctx.stdin.read()
       const status = await executeRust(ctx, compiled, {
+        engine: psh === undefined ? undefined : await Psh.load(await psh),
         fallback: options.remote !== undefined || canCompile(),
         maxBytes,
         stdin,
+        cpuMs: options.cpuMs,
         stepsPerMs: options.stepsPerMs,
       })
       if (status !== undefined) return status
@@ -1343,16 +1349,88 @@ function layered(fs: FileSystem): {
   }
 }
 
+const notFound = 127
+
+const refusedStatus = 126
+
+const programs = ['/usr/bin/', '/bin/']
+
+function program(path: string): string {
+  const directory = programs.find((prefix) => path.startsWith(prefix))
+  const name = directory === undefined ? path : path.slice(directory.length)
+  return name.includes('/') ? path : name
+}
+
 async function executeRust(
   ctx: CommandContext,
   module: WebAssembly.Module,
-  options: { fallback: boolean; maxBytes: number; stdin: string; stepsPerMs: number | undefined },
+  options: {
+    cpuMs: number | undefined
+    engine: Psh.Instance | undefined
+    fallback: boolean
+    maxBytes: number
+    stdin: string
+    stepsPerMs: number | undefined
+  },
 ): Promise<number | undefined> {
   const limit = Math.min(options.maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2))
   const deadline = Date.now() + ctx.limits.timeoutMs
   const cache = ctx.fs.sync ? undefined : layered(ctx.fs)
   const files = ctx.fs.sync ?? cache?.files
   if (!files) return undefined
+  const engine = options.engine
+  const spawn: RustPython.Spawn | undefined =
+    engine &&
+    ((child) => {
+      const fs: FileSystem = {
+        list: async (path) => files.list(path),
+        mkdir: async (path) => files.mkdir(path),
+        read: async (path) => files.read(path),
+        remove: async (path) => files.remove(path),
+        rename: async (from, to) => files.rename(from, to),
+        stat: async (path) => files.stat(path),
+        sync: files,
+        write: async (path, data, append) => files.write(path, data, append),
+      }
+      const name = program(child.argv[0] ?? '')
+      const ran = Psh.runNow(engine, {
+        commandFs: fs,
+        commands: new Map(),
+        cwd: child.cwd,
+        env: child.env,
+        fetch: undefined,
+        fs,
+        identity: Psh.identity(child.env),
+        kept: undefined,
+        limits: {
+          depth: ctx.limits.maxCallDepth,
+          file: ctx.limits.maxMemoryBytes,
+          fuel: ctx.limits.maxCommands,
+          memory: ctx.limits.maxMemoryBytes,
+          operations: ctx.limits.maxFileOperations,
+          output: ctx.limits.maxOutputLength,
+        },
+        machine: undefined,
+        script:
+          [name, ...child.argv.slice(1)].map((word) => "'" + word.replaceAll("'", "'\\''") + "'").join(' ') +
+          (child.merged ? ' 2>&1' : ''),
+        shellLimits: ctx.limits,
+        signal: ctx.signal,
+        stdin: child.stdin,
+        strict: false,
+        without: ['curl', 'wget'],
+      })
+      if (!ran) return 'EAGAIN'
+      if (ran.ended === 'cancelled') return 'EINTR'
+      if (ran.ended === 'exited' && ran.status === notFound && ran.missing.includes(name))
+        return 'ENOENT'
+      if (ran.ended === 'exited') return { status: ran.status, stderr: ran.stderr, stdout: ran.stdout }
+      return {
+        status: refusedStatus,
+        stderr: encode(name + ': it ran more than this shell allows\n'),
+        stdout: ran.stdout,
+      }
+    })
   const attempt = () =>
     RustPython.run(module, {
       files,
@@ -1368,9 +1446,13 @@ async function executeRust(
         steps:
           options.stepsPerMs === undefined
             ? Number.MAX_SAFE_INTEGER
-            : Math.ceil(ctx.limits.timeoutMs * options.stepsPerMs),
+            : Math.ceil(
+                Math.min(ctx.limits.timeoutMs, options.cpuMs ?? ctx.limits.timeoutMs) *
+                  options.stepsPerMs,
+              ),
         timeMs: deadline - Date.now(),
       },
+      spawn,
       stopped: () => ctx.signal.aborted || (cache?.missed() ?? false),
     })
   let ran = attempt()
@@ -1379,6 +1461,7 @@ async function executeRust(
     cache.reset()
     ran = attempt()
   }
+  if (cache && options.fallback && RustPython.outran(ran)) return undefined
   if (cache) await apply(ctx.fs, cache.changes())
   if (ran.kind !== 'needs') return RustPython.report(ctx, ran)
   if (options.fallback && ran.missing.every((missing) => missing.package)) return undefined

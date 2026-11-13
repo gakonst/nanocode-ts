@@ -15,8 +15,21 @@ type Instance = {
   files: SyncFileSystem | undefined
   panic: string | undefined
   running: boolean
+  spawn: Spawn | undefined
   stopped: () => boolean
 }
+
+export type Child = {
+  argv: string[]
+  cwd: string
+  env: Record<string, string>
+  merged: boolean
+  stdin: Uint8Array
+}
+
+export type Spawn = (
+  child: Child,
+) => { status: number; stderr: Uint8Array; stdout: Uint8Array } | FsError['code']
 
 export type Missing = { module: string; package: boolean; text: string }
 
@@ -41,9 +54,11 @@ export type Request = {
 
 const errno: Record<string, number> = {
   EACCES: 13,
+  EAGAIN: 11,
   EEXIST: 17,
   EFBIG: 27,
   EINVAL: 22,
+  EINTR: 4,
   EIO: 5,
   EISDIR: 21,
   ENOENT: 2,
@@ -67,6 +82,7 @@ function instantiate(module: WebAssembly.Module): Instance {
     files: undefined,
     panic: undefined,
     running: false,
+    spawn: undefined,
     stopped: () => false,
   }
   const view = (ptr: number, len: number) =>
@@ -153,6 +169,40 @@ function instantiate(module: WebAssembly.Module): Instance {
         for (let at = 0; at < len; at += randomBytes)
           crypto.getRandomValues(view(ptr + at, Math.min(randomBytes, len - at)))
       },
+      host_spawn(ptr: number, len: number) {
+        const spawn = state.spawn
+        if (!spawn) return -BigInt(errno['ENOTSUP'] ?? 0)
+        const bytes = view(ptr, len).slice()
+        const data = new DataView(bytes.buffer)
+        let at = 0
+        const u32 = () => {
+          const value = data.getUint32(at, true)
+          at += 4
+          return value
+        }
+        const field = () => {
+          const size = u32()
+          const value = bytes.subarray(at, at + size)
+          at += size
+          return value
+        }
+        const argv = Array.from({ length: u32() }, () => decode(field()))
+        const env: Record<string, string> = {}
+        for (let count = u32(); count > 0; count--) env[decode(field())] = decode(field())
+        const cwd = decode(field())
+        const stdin = field()
+        const merged = u32() !== 0
+        const exited = spawn({ argv, cwd, env, merged, stdin })
+        if (typeof exited === 'string') return -BigInt(errno[exited] ?? errno['EIO'] ?? 0)
+        const out = new Uint8Array(12 + exited.stdout.length + exited.stderr.length)
+        const fields = new DataView(out.buffer)
+        fields.setInt32(0, exited.status, true)
+        fields.setUint32(4, exited.stdout.length, true)
+        out.set(exited.stdout, 8)
+        fields.setUint32(8 + exited.stdout.length, exited.stderr.length, true)
+        out.set(exited.stderr, 12 + exited.stdout.length)
+        return reply(out)
+      },
       host_stopped: () => (state.stopped() ? 1 : 0),
       host_time: () => Date.now(),
     },
@@ -161,7 +211,7 @@ function instantiate(module: WebAssembly.Module): Instance {
   return state
 }
 
-function encodeRequest(request: Request): Uint8Array {
+function encodeRequest(request: Request, spawns: boolean): Uint8Array {
   const parts: Uint8Array[] = []
   const u32 = (value: number) => {
     const bytes = new Uint8Array(4)
@@ -194,6 +244,7 @@ function encodeRequest(request: Request): Uint8Array {
   u64(BigInt(Math.max(0, Math.ceil(request.timeMs))))
   u64(BigInt(request.depth))
   u64(BigInt(request.memory))
+  u32(spawns ? 1 : 0)
   const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
   let at = 0
   for (const part of parts) {
@@ -240,15 +291,16 @@ export function prepare(module: WebAssembly.Module): void {
 
 export function run(
   module: WebAssembly.Module,
-  options: { files: SyncFileSystem; request: Request; stopped: () => boolean },
+  options: { files: SyncFileSystem; request: Request; spawn?: Spawn; stopped: () => boolean },
 ): Ran {
   if (instances.get(module)?.running) instances.delete(module)
   prepare(module)
   const instance = instances.get(module)!
   instance.files = options.files
   instance.stopped = options.stopped
+  instance.spawn = options.spawn
   try {
-    const input = encodeRequest(options.request)
+    const input = encodeRequest(options.request, options.spawn !== undefined)
     const ptr = instance.exports.python_input(input.length)
     new Uint8Array(instance.exports.memory.buffer, ptr, input.length).set(input)
     instance.running = true
@@ -266,8 +318,13 @@ export function run(
     )
   } finally {
     instance.files = undefined
+    instance.spawn = undefined
     instance.stopped = () => false
   }
+}
+
+export function outran(ran: Ran): boolean {
+  return ran.kind === 'refused' && limits[ran.limit] === 'steps'
 }
 
 export function report(ctx: CommandContext, ran: Exclude<Ran, { kind: 'needs' }>): number {

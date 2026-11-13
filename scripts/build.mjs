@@ -116,7 +116,7 @@ let previousPsh;
 try { previousPsh = readFileSync("dist/psh.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previousPsh?.equals(pshBytes)) writeFileSync("dist/psh.wasm", pshBytes);
 
-optimize(buildPython(), "target/python/python.opt.wasm", ["-O2"]);
+optimize(buildPython(), "target/python/python.opt.wasm", ["-Oz"]);
 const pythonBytes = bakePython(readFileSync("target/python/python.opt.wasm"));
 let previousPython;
 try { previousPython = readFileSync("dist/python.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }

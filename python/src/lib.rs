@@ -7,7 +7,9 @@ use std::{
 };
 
 use nanocode_platform::{Host, LocalFuture};
-use nanocode_python::{Ended, Files, Kind, Limit, Limits, Python, Remove, Run, Stat, Why, Write};
+use nanocode_python::{
+    Child, Ended, Exited, Files, Kind, Limit, Limits, Python, Remove, Run, Stat, Why, Write,
+};
 
 #[global_allocator]
 static ALLOCATOR: nanocode_python::Metered<std::alloc::System> =
@@ -26,6 +28,7 @@ unsafe extern "C" {
     fn host_now() -> f64;
     fn host_panic(text: *const u8, len: usize);
     fn host_random(bytes: *mut u8, len: usize);
+    fn host_spawn(child: *const u8, len: usize) -> i64;
     fn host_stopped() -> u32;
     fn host_time() -> f64;
 }
@@ -74,6 +77,8 @@ impl Host for Page {
 fn failure(code: i64) -> io::Error {
     let kind = match code {
         2 => io::ErrorKind::NotFound,
+        4 => io::ErrorKind::Interrupted,
+        11 => io::ErrorKind::WouldBlock,
         13 => io::ErrorKind::PermissionDenied,
         17 => io::ErrorKind::AlreadyExists,
         20 => io::ErrorKind::NotADirectory,
@@ -109,7 +114,9 @@ fn call(op: u32, path: &[u8], data: &[u8], arg: u64) -> io::Result<Vec<u8>> {
     }))
 }
 
-struct Shell;
+struct Shell {
+    spawns: bool,
+}
 
 impl Files for Shell {
     fn stat(&self, path: &[u8]) -> io::Result<Stat> {
@@ -172,6 +179,45 @@ impl Files for Shell {
     fn rename(&self, from: &[u8], to: &[u8]) -> io::Result<()> {
         call(RENAME, from, to, 0).map(drop)
     }
+
+    fn spawns(&self) -> bool {
+        self.spawns
+    }
+
+    fn spawn(&self, child: Child) -> io::Result<Exited> {
+        let mut out = Vec::new();
+        let count = |len: usize| u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes();
+        out.extend_from_slice(&count(child.argv.len()));
+        for word in &child.argv {
+            put(&mut out, word);
+        }
+        out.extend_from_slice(&count(child.env.len()));
+        for (name, value) in &child.env {
+            put(&mut out, name);
+            put(&mut out, value);
+        }
+        put(&mut out, &child.cwd);
+        put(&mut out, &child.stdin);
+        out.extend_from_slice(&u32::from(child.merged).to_le_bytes());
+        let got = unsafe { host_spawn(out.as_ptr(), out.len()) };
+        let Ok(len) = usize::try_from(got) else {
+            return Err(failure(-got));
+        };
+        let reply = REPLY.with_borrow_mut(|reply| {
+            let mut taken = std::mem::take(reply);
+            taken.truncate(len);
+            taken
+        });
+        let mut reader = Reader(&reply);
+        let status = reader.u32().cast_signed();
+        let stdout = reader.bytes();
+        let stderr = reader.bytes();
+        Ok(Exited {
+            status,
+            stdout,
+            stderr,
+        })
+    }
 }
 
 struct Reader<'a>(&'a [u8]);
@@ -206,7 +252,7 @@ fn put(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn request(input: &[u8]) -> Run {
+fn request(input: &[u8]) -> (Run, Shell) {
     let mut reader = Reader(input);
     let argv = (0..reader.u32())
         .map(|_| String::from_utf8_lossy(&reader.bytes()).into_owned())
@@ -225,14 +271,18 @@ fn request(input: &[u8]) -> Run {
         memory: Some(reader.u64()),
         sleep: Duration::MAX,
     };
-    Run {
+    let shell = Shell {
+        spawns: reader.u32() != 0,
+    };
+    let run = Run {
         argv,
         stdin,
         cwd,
         env,
         limits,
         stop: Arc::new(|| unsafe { host_stopped() } != 0),
-    }
+    };
+    (run, shell)
 }
 
 fn respond(ended: &Ended, stdout: &[u8], stderr: &[u8], steps: u64) -> Vec<u8> {
@@ -309,7 +359,7 @@ pub extern "C" fn python_run() -> usize {
         }));
         nanocode_platform::install(Rc::new(Page)).expect("python.wasm installs its host once");
     }
-    let run = INPUT.with_borrow_mut(|input| request(&std::mem::take(input)));
+    let (run, shell) = INPUT.with_borrow_mut(|input| request(&std::mem::take(input)));
     let out = PYTHON.with_borrow_mut(|kept| {
         let python = match kept {
             Some(python) => python,
@@ -321,7 +371,7 @@ pub extern "C" fn python_run() -> usize {
                 }
             },
         };
-        let ran = python.run(run, Rc::new(Shell));
+        let ran = python.run(run, Rc::new(shell));
         respond(&ran.ended, &ran.stdout, &ran.stderr, ran.steps)
     });
     let len = out.len();

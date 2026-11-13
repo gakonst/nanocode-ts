@@ -121,6 +121,7 @@ const workspaceMemoryBytes = 48 * 1024 * 1024
 const workspaceFileBytes = 32 * 1024 * 1024
 const pythonRemoteBytes = 256 * 1024 * 1024
 const pythonStepsPerMs = 42_000
+const workerCpuMs = 30_000
 
 const workersAiModels = new Set(['glm-5.3'])
 
@@ -1430,7 +1431,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                   ? {
                       python: {
                         ...(pythonModule
-                          ? { module: pythonModule, stepsPerMs: pythonStepsPerMs }
+                          ? {
+                              module: pythonModule,
+                              cpuMs: options.workspace?.pythonCpuMs ?? workerCpuMs / 2,
+                              stepsPerMs: pythonStepsPerMs,
+                            }
                           : {}),
                         ...(pythonRemote
                           ? {
@@ -3404,6 +3409,7 @@ export declare namespace create {
           mounts?(authority: SessionAuthority, env: E): Record<string, FileSystem.FileSystem>
           psh?: WebAssembly.Module | Promise<WebAssembly.Module>
           python?(authority: SessionAuthority, env: E): Python.Remote | undefined
+          pythonCpuMs?: number
           pythonModule?: WebAssembly.Module | Promise<WebAssembly.Module>
         }
     workspaceTools?: Contracts.AgentConfiguration['workspace_tools']
