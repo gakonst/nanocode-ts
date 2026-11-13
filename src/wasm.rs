@@ -145,6 +145,8 @@ struct Configuration {
     #[serde(default)]
     max_resident_subagents: Option<usize>,
     #[serde(default)]
+    max_concurrent_subagents: Option<usize>,
+    #[serde(default)]
     subagent_budgets: bool,
     #[serde(default)]
     subagent_models: Option<Vec<SubagentModel>>,
@@ -1100,6 +1102,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let subagents = runtime.subagents().cloned();
     if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
         subagents.set_max_resident(limit);
+    }
+    if let (Some(limit), Some(subagents)) = (config.max_concurrent_subagents, &subagents) {
+        subagents.set_max_concurrency(limit);
+        subagents.set_queued_spawns(true);
     }
     nanocode_code_mode::code_mode::set_snapshot_store(Some(Arc::new(bridge::HostSnapshots)));
     if let Some(checks) = config.cell_interrupt_checks {

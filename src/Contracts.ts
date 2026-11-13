@@ -80,6 +80,7 @@ export type AgentConfiguration = {
   cloudflare_account_id?: string
   max_tokens?: number
   max_resident_subagents?: number
+  max_concurrent_subagents?: number
   subagent_budgets?: boolean
   subagent_models?: readonly SubagentModel[]
   cell_interrupt_checks?: number

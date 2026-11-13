@@ -1497,6 +1497,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               ...(options.maxResidentSubagents === undefined
                 ? {}
                 : { max_resident_subagents: options.maxResidentSubagents }),
+              ...(options.maxConcurrentSubagents === undefined
+                ? {}
+                : { max_concurrent_subagents: options.maxConcurrentSubagents }),
               ...(options.subagentBudgets ? { subagent_budgets: true } : {}),
               cell_interrupt_checks: options.cellInterruptChecks ?? cellInterruptChecks,
               cell_memory_bytes:
@@ -3361,6 +3364,7 @@ export declare namespace create {
     instructions?: string
     limits?(session: Session, env: E): Limits | undefined | Promise<Limits | undefined>
     liveDeltas?: boolean
+    maxConcurrentSubagents?: number
     maxResidentSubagents?: number
     mcp?: {
       servers:
