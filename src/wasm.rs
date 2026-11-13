@@ -3,7 +3,6 @@ mod bridge;
 mod cells;
 mod events;
 mod hand;
-mod journals;
 mod mcp;
 mod remote;
 mod store;
@@ -33,15 +32,15 @@ use nanocode::{
         transport::{ChatGateway, ResponsesGateway, ResponsesTransport},
     },
     durability::{
-        BranchCursor, BranchExport, BranchPage, InitialSettings, RowStore, SessionRecord,
+        BranchCursor, BranchExport, BranchPage, InitialSettings, SessionRecord, SessionStore,
     },
     session_host::{
-        Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, SessionLog,
-        Submission, Submitted, TurnInbox, TurnRecord, TurnState,
+        Driven, ImportedTurn, InboxError, LogEntry, LoggedEvent, MovedQueued, Replaced, Submission,
+        Submitted, TurnInbox, TurnRecord, TurnState,
     },
     tool_contract::{Tool, ToolCollection},
+    turnlog::{Effects, OneLog, Policy, SqlLog},
 };
-use nanocode_code_mode::code_mode::CellJournals;
 use nanocode_code_mode::remote::PLACEMENT_INSTRUCTIONS;
 use serde::{Deserialize, Serialize};
 
@@ -365,11 +364,11 @@ enum Command {
     HandClosed {},
     Configure {
         #[serde(default)]
-        value_limit: Option<usize>,
-        #[serde(default)]
-        logical_limit: Option<usize>,
-        #[serde(default)]
         blob_threshold: Option<usize>,
+        #[serde(default)]
+        restarts: Option<u64>,
+        #[serde(default)]
+        value_limit: Option<usize>,
     },
     Init {
         config: Value,
@@ -538,7 +537,7 @@ enum Command {
     },
 }
 
-type Log = SessionLog<store::WorkerStore>;
+type Log = OneLog;
 
 type Hand = (String, Arc<dyn CodeModeHost>);
 
@@ -558,6 +557,7 @@ struct Session {
     mcp_unavailable: Vec<String>,
     model: ModelSelection,
     scope: String,
+    store: SessionStore,
     subagents: Option<SubagentControl>,
 }
 
@@ -572,9 +572,9 @@ enum Phase {
 thread_local! {
     static PHASE: RefCell<Phase> = const { RefCell::new(Phase::Empty) };
     static LOGS: RefCell<HashMap<String, Arc<Log>>> = RefCell::new(HashMap::new());
-    static LOGICAL_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
-    static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static BLOB_THRESHOLD: Cell<Option<usize>> = const { Cell::new(None) };
+    static RESTARTS: Cell<Option<u64>> = const { Cell::new(None) };
+    static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -658,24 +658,22 @@ fn configuration(error: impl std::fmt::Display) -> Opening {
     Opening::Configuration(error.to_string())
 }
 
-fn log(scope: &str) -> Arc<Log> {
-    LOGS.with_borrow_mut(|logs| {
-        Arc::clone(logs.entry(scope.to_owned()).or_insert_with(|| {
-            let log = SessionLog::new(Arc::new(store::WorkerStore::log()), scope);
-            let log = match VALUE_LIMIT.get() {
-                Some(limit) => log.value_limit(limit),
-                None => log,
-            };
-            let log = match LOGICAL_LIMIT.get() {
-                Some(limit) => log.logical_limit(limit),
-                None => log,
-            };
-            Arc::new(match BLOB_THRESHOLD.get() {
-                Some(threshold) => log.blobs(Arc::new(store::WorkerBlobs), threshold),
-                None => log,
-            })
-        }))
-    })
+async fn log(scope: &str) -> Result<Arc<Log>, String> {
+    if let Some(log) = LOGS.with_borrow(|logs| logs.get(scope).cloned()) {
+        return Ok(log);
+    }
+    let opened = OneLog::open(
+        Arc::new(SqlLog::new(Arc::new(store::WorkerStore::log()))),
+        scope,
+        Policy {
+            effects: Effects::default(),
+            max_row_bytes: VALUE_LIMIT.get(),
+            restarts: RESTARTS.get().unwrap_or(u64::MAX),
+        },
+    )
+    .await
+    .map_err(text)?;
+    Ok(LOGS.with_borrow_mut(|logs| Arc::clone(logs.entry(scope.to_owned()).or_insert(opened))))
 }
 
 fn current() -> Option<Rc<Session>> {
@@ -824,7 +822,8 @@ fn codex_harness(
 
 async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
-    let store = nanocode::session_store(RowStore::new(store::WorkerStore::durability()))
+    let log = log(&config.scope).await?;
+    let store = nanocode::session_store(log.store())
         .map_err(text)?
         .with_logged_prompts();
     let model = config.model().map_err(configuration)?;
@@ -918,6 +917,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let mcp = mcp::tools(config.mcp_servers)
         .await
         .map_err(configuration)?;
+    for tool in &mcp.tools {
+        log.declare(tool.definition().name(), tool.effect());
+    }
     shared.extend(
         mcp.tools
             .into_iter()
@@ -1033,6 +1035,13 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .build()
             .map_err(configuration)
     };
+    let gated = |tools: Tools| {
+        tools
+            .into_builder()
+            .effect_gate(log.gate())
+            .build()
+            .map_err(configuration)
+    };
     let mut builder = Nanocode::builder();
     if BLOB_THRESHOLD.get().is_some() {
         builder = builder.images(
@@ -1040,10 +1049,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         );
     }
     if let Some((harness, _)) = claude {
-        builder = builder.claude(harness.tools(selected(Provider::Claude)?));
+        builder = builder.claude(harness.tools(gated(selected(Provider::Claude)?)?));
     }
     if let Some(harness) = codex {
-        builder = builder.openai(harness.tools(selected(Provider::Codex)?));
+        builder = builder.openai(harness.tools(gated(selected(Provider::Codex)?)?));
     }
     if config.subagents == Some(false) {
         builder = builder.without_subagents();
@@ -1059,7 +1068,8 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .into();
         let host: Arc<dyn CodeModeHost> = if local {
             Arc::new(
-                cells::host(config.workspace.as_deref()).journals(restored(&config.scope).await),
+                cells::host(config.workspace.as_deref())
+                    .journals(log.journals().await.map_err(text)?),
             )
         } else {
             let host = remote::host(None).await?;
@@ -1117,7 +1127,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         (*runtime).clone(),
         &store,
         record,
-        log(&config.scope),
+        Arc::clone(&log),
         host,
         coalesce,
     )
@@ -1134,6 +1144,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 mcp_unavailable: mcp.unavailable,
                 model,
                 scope: config.scope,
+                store,
                 subagents,
             })
         }
@@ -1147,20 +1158,6 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             })
         }
     }
-}
-
-async fn restored(scope: &str) -> CellJournals {
-    let restored =
-        CellJournals::with_sink(Arc::new(journals::WorkerJournals::new(scope.to_owned())));
-    match journals::load(scope).await {
-        Ok(sessions) => {
-            for (session_id, cells) in sessions {
-                restored.restore(&session_id, cells, None, HashMap::new());
-            }
-        }
-        Err(error) => tracing::warn!(%error, "stored Code Mode cell journals could not be loaded"),
-    }
-    restored
 }
 
 async fn init(config: Value) -> Result<Value, String> {
@@ -1293,7 +1290,7 @@ async fn submit(
         hand,
         metadata: serde_json::value::to_raw_value(metadata).map_err(text)?,
     };
-    let (status, record) = match log(scope).submit(&submission).await.map_err(text)? {
+    let (status, record) = match log(scope).await?.submit(&submission).await.map_err(text)? {
         Submitted::Accepted { record, event } => {
             events::publish(vec![event]).await?;
             ("accepted", record)
@@ -1308,7 +1305,7 @@ async fn submit(
 }
 
 async fn append(scope: &str, events: Vec<Annotation>) -> Result<Value, String> {
-    let log = log(scope);
+    let log = log(scope).await?;
     let mut entries = Vec::with_capacity(events.len());
     for Annotation { request_id, event } in events {
         let described = serde_json::from_str::<Value>(event.get()).map_err(text)?;
@@ -1338,6 +1335,7 @@ async fn replace(
     edited: &str,
 ) -> Result<Value, String> {
     let status = match log(scope)
+        .await?
         .replace_queued(request_id, edit_id, edited)
         .await
         .map_err(text)?
@@ -1367,7 +1365,12 @@ async fn cancel(
             .cancel(request_id, fields)
             .await
             .map_err(text)?,
-        _ => match log(scope).cancel(request_id, fields).await.map_err(text)? {
+        _ => match log(scope)
+            .await?
+            .cancel(request_id, fields)
+            .await
+            .map_err(text)?
+        {
             Some((record, event)) => {
                 let dequeued = event.is_some();
                 if let Some(event) = event {
@@ -1392,6 +1395,7 @@ async fn retry(
     retry_at: u64,
 ) -> Result<Value, String> {
     let retried = log(scope)
+        .await?
         .retry(request_id, error, kind, retry_at)
         .await
         .map_err(text)?;
@@ -1412,6 +1416,7 @@ async fn finish(
 ) -> Result<Value, String> {
     let state = TurnState::parse(status).map_err(text)?;
     if let Some((_, event)) = log(scope)
+        .await?
         .finish(request_id, state, fields)
         .await
         .map_err(text)?
@@ -1440,6 +1445,7 @@ async fn import(scope: &str, turns: Vec<Legacy>) -> Result<Value, String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     log(scope)
+        .await?
         .import(&turns)
         .await
         .map(Value::from)
@@ -1575,13 +1581,13 @@ fn execute(command: Command) -> Executed {
         Command::HandFrame { text } => executed(async move { hand::receive(&text) }),
         Command::HandClosed {} => executed(hand::closed()),
         Command::Configure {
-            value_limit,
-            logical_limit,
             blob_threshold,
+            restarts,
+            value_limit,
         } => executed(async move {
-            VALUE_LIMIT.set(value_limit);
-            LOGICAL_LIMIT.set(logical_limit);
             BLOB_THRESHOLD.set(blob_threshold);
+            RESTARTS.set(restarts);
+            VALUE_LIMIT.set(value_limit);
             Ok(Value::Null)
         }),
         Command::Init { config } => executed(init(config)),
@@ -1597,11 +1603,11 @@ fn execute(command: Command) -> Executed {
         ),
         Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {
-            let record = log(&scope).turn(&request_id).await.map_err(text)?;
+            let record = log(&scope).await?.turn(&request_id).await.map_err(text)?;
             Ok(json!({"turn": record.as_ref().map(described).transpose()?}))
         }),
         Command::Pending { scope } => executed(async move {
-            let records = log(&scope).pending().await.map_err(text)?;
+            let records = log(&scope).await?.pending().await.map_err(text)?;
             Ok(json!({"turns": records.iter().map(described).collect::<Result<Vec<_>, _>>()?}))
         }),
         Command::Cancel {
@@ -1615,6 +1621,7 @@ fn execute(command: Command) -> Executed {
             note,
         } => executed(async move {
             log(&scope)
+                .await?
                 .interrupted(&request_id, &note)
                 .await
                 .map_err(text)?;
@@ -1640,7 +1647,7 @@ fn execute(command: Command) -> Executed {
             request_id,
             max_bytes,
         } => executed(async move {
-            let log = log(&scope);
+            let log = log(&scope).await?;
             match (request_id, max_bytes) {
                 (Some(request_id), Some(bytes)) => {
                     log.turn_page_bounded(&request_id, after, limit, bytes)
@@ -1871,6 +1878,7 @@ fn execute(command: Command) -> Executed {
             events,
         } => executed(async move {
             log(&scope)
+                .await?
                 .import_events(after, &events)
                 .await
                 .map(Value::from)

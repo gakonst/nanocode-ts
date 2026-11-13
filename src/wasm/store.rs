@@ -11,10 +11,6 @@ const NULL_CELL: u32 = u32::MAX;
 pub struct WorkerStore(&'static str);
 
 impl WorkerStore {
-    pub const fn durability() -> Self {
-        Self("store")
-    }
-
     pub const fn log() -> Self {
         Self("log")
     }

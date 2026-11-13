@@ -24,15 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "archery"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,6 +1148,7 @@ dependencies = [
  "nanocode-subagents",
  "nanocode-tool-runtime",
  "nanocode-tools",
+ "nanocode-turnlog",
  "serde_json",
  "tokio",
 ]
@@ -1175,6 +1167,7 @@ dependencies = [
  "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
+ "nanocode-turnlog",
  "serde",
  "serde_json",
  "tokio",
@@ -1590,6 +1583,7 @@ dependencies = [
  "nanocode-tls",
  "nanocode-tool-provider",
  "nanocode-tools",
+ "nanocode-turnlog",
  "nanocode-types",
  "reqwest",
  "serde",
@@ -1619,7 +1613,7 @@ dependencies = [
  "nanocode-platform",
  "nanocode-process-contracts",
  "nanocode-sync",
- "rustix",
+ "nanocode-sys",
  "serde_json",
  "tokio",
  "tracing",
@@ -1682,12 +1676,18 @@ dependencies = [
 name = "nanocode-sync"
 version = "0.7.0"
 dependencies = [
- "arc-swap",
- "crossbeam-utils",
  "futures-util",
  "imbl",
  "nanocode-platform",
+ "nanocode-sys",
  "tokio",
+]
+
+[[package]]
+name = "nanocode-sys"
+version = "0.7.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1726,6 +1726,7 @@ dependencies = [
  "nanocode-tool-contracts",
  "nanocode-tool-provider",
  "nanocode-tools",
+ "nanocode-turnlog",
  "nanocode-types",
  "reqwest",
  "serde",
@@ -1790,6 +1791,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-turnlog"
+version = "0.7.0"
+dependencies = [
+ "imbl",
+ "nanocode-durability-core",
+ "nanocode-sync",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "nanocode-types"
 version = "0.7.0"
 dependencies = [
@@ -1807,10 +1820,9 @@ dependencies = [
 name = "nanocode-types-core"
 version = "0.7.0"
 dependencies = [
- "arc-swap",
+ "nanocode-sys",
  "serde",
  "serde_json",
- "smallvec",
 ]
 
 [[package]]
@@ -2333,9 +2345,6 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "socket2"
