@@ -9,9 +9,20 @@ use std::{
 use nanocode_platform::{Host, LocalFuture};
 use nanocode_python::{Ended, Files, Kind, Limit, Limits, Python, Remove, Run, Stat, Why, Write};
 
+#[global_allocator]
+static ALLOCATOR: nanocode_python::Metered<std::alloc::System> =
+    nanocode_python::Metered(std::alloc::System);
+
 #[link(wasm_import_module = "python")]
 unsafe extern "C" {
-    fn host_fs(op: u32, path: *const u8, path_len: usize, data: *const u8, data_len: usize, arg: u64) -> i64;
+    fn host_fs(
+        op: u32,
+        path: *const u8,
+        path_len: usize,
+        data: *const u8,
+        data_len: usize,
+        arg: u64,
+    ) -> i64;
     fn host_now() -> f64;
     fn host_panic(text: *const u8, len: usize);
     fn host_random(bytes: *mut u8, len: usize);
@@ -78,7 +89,16 @@ fn failure(code: i64) -> io::Error {
 }
 
 fn call(op: u32, path: &[u8], data: &[u8], arg: u64) -> io::Result<Vec<u8>> {
-    let got = unsafe { host_fs(op, path.as_ptr(), path.len(), data.as_ptr(), data.len(), arg) };
+    let got = unsafe {
+        host_fs(
+            op,
+            path.as_ptr(),
+            path.len(),
+            data.as_ptr(),
+            data.len(),
+            arg,
+        )
+    };
     let Ok(len) = usize::try_from(got) else {
         return Err(failure(-got));
     };
@@ -202,8 +222,8 @@ fn request(input: &[u8]) -> Run {
         steps: reader.u64(),
         time: Duration::from_millis(reader.u64()),
         depth: usize::try_from(reader.u64()).unwrap_or(usize::MAX),
+        memory: Some(reader.u64()),
         sleep: Duration::MAX,
-        memory: None,
     };
     Run {
         argv,
@@ -241,7 +261,11 @@ fn respond(ended: &Ended, stdout: &[u8], stderr: &[u8], steps: u64) -> Vec<u8> {
         Ended::Needs(missing) => missing.as_slice(),
         _ => &[],
     };
-    out.extend_from_slice(&u32::try_from(missing.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(missing.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     for missing in missing {
         put(&mut out, missing.module.as_bytes());
         out.extend_from_slice(&u32::to_le_bytes(match missing.why {

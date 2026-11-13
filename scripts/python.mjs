@@ -195,6 +195,7 @@ function warmed(module) {
     ...u64(2n ** 64n - 1n),
     ...u64(2n ** 64n - 1n),
     ...u64(1000n),
+    ...u64(2n ** 64n - 1n),
   ])
   view(exports.python_input(request.length), request.length).set(request)
   const len = exports.python_run()

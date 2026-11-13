@@ -652,6 +652,7 @@ export function pythonCommands(options: PythonOptions = {}): Record<string, Comm
         fallback: options.remote !== undefined || canCompile(),
         maxBytes,
         stdin,
+        stepsPerMs: options.stepsPerMs,
       })
       if (status !== undefined) return status
       ctx = { ...ctx, stdin: new Input(stdin) }
@@ -1151,8 +1152,10 @@ function warmRust(module: WebAssembly.Module): void {
       depth: 1000,
       env: {},
       file: 0,
+      memory: Number.MAX_SAFE_INTEGER,
       output: 0,
       stdin: new Uint8Array(),
+      steps: Number.MAX_SAFE_INTEGER,
       timeMs: Number.MAX_SAFE_INTEGER,
     },
     stopped: () => false,
@@ -1343,7 +1346,7 @@ function layered(fs: FileSystem): {
 async function executeRust(
   ctx: CommandContext,
   module: WebAssembly.Module,
-  options: { fallback: boolean; maxBytes: number; stdin: string },
+  options: { fallback: boolean; maxBytes: number; stdin: string; stepsPerMs: number | undefined },
 ): Promise<number | undefined> {
   const limit = Math.min(options.maxBytes, Math.floor(ctx.limits.maxMemoryBytes / 2))
   const deadline = Date.now() + ctx.limits.timeoutMs
@@ -1359,8 +1362,13 @@ async function executeRust(
         depth: ctx.limits.maxCallDepth,
         env: { ...ctx.env, PWD: ctx.cwd },
         file: limit,
+        memory: ctx.limits.maxMemoryBytes,
         output: ctx.limits.maxOutputLength,
         stdin: encode(options.stdin),
+        steps:
+          options.stepsPerMs === undefined
+            ? Number.MAX_SAFE_INTEGER
+            : Math.ceil(ctx.limits.timeoutMs * options.stepsPerMs),
         timeMs: deadline - Date.now(),
       },
       stopped: () => ctx.signal.aborted || (cache?.missed() ?? false),

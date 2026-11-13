@@ -14,6 +14,7 @@ type Instance = {
   exports: Exports
   files: SyncFileSystem | undefined
   panic: string | undefined
+  running: boolean
   stopped: () => boolean
 }
 
@@ -31,8 +32,10 @@ export type Request = {
   depth: number
   env: Record<string, string>
   file: number
+  memory: number
   output: number
   stdin: Uint8Array
+  steps: number
   timeMs: number
 }
 
@@ -54,8 +57,6 @@ const instances = new WeakMap<WebAssembly.Module, Instance>()
 
 const randomBytes = 65536
 
-const steps = 2n ** 64n - 1n
-
 const text = new TextDecoder()
 
 const limits = ['output', 'sleep', 'steps', 'time', 'memory'] as const
@@ -65,6 +66,7 @@ function instantiate(module: WebAssembly.Module): Instance {
     exports: undefined as unknown as Exports,
     files: undefined,
     panic: undefined,
+    running: false,
     stopped: () => false,
   }
   const view = (ptr: number, len: number) =>
@@ -188,9 +190,10 @@ function encodeRequest(request: Request): Uint8Array {
   field(request.stdin)
   u64(BigInt(request.output))
   u64(BigInt(request.file))
-  u64(steps)
+  u64(BigInt(request.steps))
   u64(BigInt(Math.max(0, Math.ceil(request.timeMs))))
   u64(BigInt(request.depth))
+  u64(BigInt(request.memory))
   const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
   let at = 0
   for (const part of parts) {
@@ -239,6 +242,7 @@ export function run(
   module: WebAssembly.Module,
   options: { files: SyncFileSystem; request: Request; stopped: () => boolean },
 ): Ran {
+  if (instances.get(module)?.running) instances.delete(module)
   prepare(module)
   const instance = instances.get(module)!
   instance.files = options.files
@@ -247,7 +251,9 @@ export function run(
     const input = encodeRequest(options.request)
     const ptr = instance.exports.python_input(input.length)
     new Uint8Array(instance.exports.memory.buffer, ptr, input.length).set(input)
+    instance.running = true
     const len = instance.exports.python_run()
+    instance.running = false
     return decodeRan(
       new Uint8Array(instance.exports.memory.buffer, instance.exports.python_output(), len).slice(),
     )
