@@ -1,0 +1,52 @@
+[package]
+name = "nanocode-python-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autobenches = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+nanocode-platform = { path = "../target/python-sdk/crates/core/platform" }
+nanocode-python = { path = "../target/python-sdk/crates/core/python" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[patch.crates-io]
+pymath = { path = "../target/python-sdk/crates/patches/pymath" }
+rustpython-codegen = { path = "../target/python-sdk/crates/patches/rustpython-codegen" }
+rustpython-common = { path = "../target/python-sdk/crates/patches/rustpython-common" }
+rustpython-compiler = { path = "../target/python-sdk/crates/patches/rustpython-compiler" }
+rustpython-compiler-core = { path = "../target/python-sdk/crates/patches/rustpython-compiler-core" }
+rustpython-derive = { path = "../target/python-sdk/crates/patches/rustpython-derive" }
+rustpython-derive-impl = { path = "../target/python-sdk/crates/patches/rustpython-derive-impl" }
+rustpython-doc = { path = "../target/python-sdk/crates/patches/rustpython-doc" }
+rustpython-host_env = { path = "../target/python-sdk/crates/patches/rustpython-host_env" }
+rustpython-literal = { path = "../target/python-sdk/crates/patches/rustpython-literal" }
+rustpython-pylib = { path = "../target/python-sdk/crates/patches/rustpython-pylib" }
+rustpython-ruff_python_ast = { path = "../target/python-sdk/crates/patches/rustpython-ruff_python_ast" }
+rustpython-ruff_python_parser = { path = "../target/python-sdk/crates/patches/rustpython-ruff_python_parser" }
+rustpython-ruff_python_trivia = { path = "../target/python-sdk/crates/patches/rustpython-ruff_python_trivia" }
+rustpython-ruff_source_file = { path = "../target/python-sdk/crates/patches/rustpython-ruff_source_file" }
+rustpython-ruff_text_size = { path = "../target/python-sdk/crates/patches/rustpython-ruff_text_size" }
+rustpython-sre_engine = { path = "../target/python-sdk/crates/patches/rustpython-sre_engine" }
+rustpython-stdlib = { path = "../target/python-sdk/crates/patches/rustpython-stdlib" }
+rustpython-unicode = { path = "../target/python-sdk/crates/patches/rustpython-unicode" }
+rustpython-vm = { path = "../target/python-sdk/crates/patches/rustpython-vm" }
+rustpython-wtf8 = { path = "../target/python-sdk/crates/patches/rustpython-wtf8" }
+unicode-normalization = { path = "../target/python-sdk/crates/core/unicode-normalization" }
+
+[workspace]

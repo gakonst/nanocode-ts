@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { arch, platform } from "node:os";
 import { fingerprint as wasmFingerprint, manifest, manifestName } from "./wasm.mjs";
 import { build as buildPsh } from "./psh.mjs";
+import { bake as bakePython, build as buildPython } from "./python.mjs";
 
 function fields(path, start, pattern) {
   const source = readFileSync(path, "utf8");
@@ -114,6 +115,12 @@ const pshBytes = readFileSync("target/psh/psh.opt.wasm");
 let previousPsh;
 try { previousPsh = readFileSync("dist/psh.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
 if (!previousPsh?.equals(pshBytes)) writeFileSync("dist/psh.wasm", pshBytes);
+
+optimize(buildPython(), "target/python/python.opt.wasm", ["-O2"]);
+const pythonBytes = bakePython(readFileSync("target/python/python.opt.wasm"));
+let previousPython;
+try { previousPython = readFileSync("dist/python.wasm"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+if (!previousPython?.equals(pythonBytes)) writeFileSync("dist/python.wasm", pythonBytes);
 
 const { AgentRuntime } = await import("../src/index.ts");
 const runtime = await AgentRuntime.instantiate(await WebAssembly.compile(bytes), { transaction() { throw new Error("the model catalog runs no SQL"); } }, { published() {} });
