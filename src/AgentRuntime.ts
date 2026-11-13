@@ -371,6 +371,8 @@ async function create(
           const timing: Contracts.RuntimeTiming = {
             runtime_id: state.runtimeId,
             dispatch_id: id,
+            origin: URL.parse(request.endpoint)?.origin,
+            provider: request.provider ?? null,
             started_ms: internal.elapsed(),
             body_read_wait_ms: 0,
             body_reads: 0,

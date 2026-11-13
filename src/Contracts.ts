@@ -287,6 +287,8 @@ export const recentModelLimit = 64
 
 export type ModelTiming = {
   dispatch_id: number
+  origin?: string
+  provider?: string | null
   transport?: 'websocket'
   started_ms: number
   headers_ms?: number

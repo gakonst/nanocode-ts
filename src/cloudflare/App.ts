@@ -3112,6 +3112,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         ...phases
       } = timing ?? { started: performance.now(), checkpoints: {} }
       if (run_started !== undefined) phases.run_ms = performance.now() - run_started
+      const since = runtime.elapsed_ms - (performance.now() - started)
       return {
         timing: {
           ...phases,
@@ -3119,6 +3120,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           runtime_id: runtime.runtime_id,
           checkpoint_spans: Timing.difference(runtime.checkpoints, checkpoints),
           runtime_spans: Timing.difference(runtime.spans, before ?? {}),
+          model_requests: runtime.models
+            .filter((model) => model.started_ms >= since)
+            .map((model) => ({ ...model, started_ms: model.started_ms - since })),
         },
       }
     }
