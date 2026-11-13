@@ -2633,10 +2633,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       this.counts.events_written += events.length
       this.eventHub.publish(events, bytes)
       let behind = false
+      const first = events.find((event) => event.seq > 0)
       for (const { socket, watcher } of this.watching()) {
         if (watcher.scope !== scope) continue
         this.recheck(socket, watcher.descriptor)
-        if (watcher.state.cursor < events[0].seq - 1) {
+        if (first && watcher.state.cursor < first.seq - 1) {
           behind = true
           continue
         }
