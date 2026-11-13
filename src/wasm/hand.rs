@@ -179,7 +179,12 @@ impl HandSession for Session {
                 self.brain
                     .tools(&context.call_id)
                     .into_iter()
-                    .filter(|tool| !self.own.iter().any(|own| own.definition().name() == tool.definition().name())),
+                    .filter(|tool| {
+                        !self
+                            .own
+                            .iter()
+                            .any(|own| own.definition().name() == tool.definition().name())
+                    }),
             );
             self.cells
                 .execute_with_local_tools(source, context.as_context(), tools, Some(observer))
@@ -207,7 +212,11 @@ impl HandSession for Session {
         context: OwnedToolContext,
     ) -> HostFuture<'a, ToolOutput> {
         Box::pin(async move {
-            let Some(tool) = self.own.iter().find(|tool| tool.definition().name() == name) else {
+            let Some(tool) = self
+                .own
+                .iter()
+                .find(|tool| tool.definition().name() == name)
+            else {
                 return ToolOutput::error(format!("this browser hand has no tool `{name}`"));
             };
             let raw = match serde_json::value::to_raw_value(&input) {
@@ -222,7 +231,10 @@ impl HandSession for Session {
 
     fn cancel<'a>(&'a self, observer: &'a mut dyn CodeModeObserver) -> HostFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.cells.cancel_with_updates(&self.session_id, observer).await;
+            let _ = self
+                .cells
+                .cancel_with_updates(&self.session_id, observer)
+                .await;
         })
     }
 
@@ -304,7 +316,7 @@ pub async fn open_hand(opening: Opening) -> Result<Value, String> {
                 .cloned(),
         );
     }
-    own.extend(tools::tools(host_tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
+    own.extend(tools::tools(host_tools));
     own.extend(
         mcp::tools(mcp_servers)
             .await?
@@ -328,7 +340,10 @@ pub async fn open_hand(opening: Opening) -> Result<Value, String> {
     };
     let (core, driver) = HandCore::new(Arc::new(host), options, HandActivity::default());
     spawn(driver);
-    let catalog = core.catalog(limit).await.map_err(|error| error.to_string())?;
+    let catalog = core
+        .catalog(limit)
+        .await
+        .map_err(|error| error.to_string())?;
     HAND.set(Some(Open {
         core,
         limit,
@@ -339,7 +354,10 @@ pub async fn open_hand(opening: Opening) -> Result<Value, String> {
 
 pub async fn connect() -> Result<Value, String> {
     let (core, limit) = open()?;
-    let catalog = core.catalog(limit).await.map_err(|error| error.to_string())?;
+    let catalog = core
+        .catalog(limit)
+        .await
+        .map_err(|error| error.to_string())?;
     let (wire, mut frames) = mpsc::unbounded_channel::<String>();
     let connection = core.connect(wire, limit);
     let id = connection.id;
@@ -356,7 +374,9 @@ pub async fn connect() -> Result<Value, String> {
     let failed = connection.failed;
     spawn(async move {
         if let Ok(issue) = failed.await {
-            let _ = call(json!({"op": "hand_failed", "reason": issue.to_string(), "connection": id})).await;
+            let _ =
+                call(json!({"op": "hand_failed", "reason": issue.to_string(), "connection": id}))
+                    .await;
         }
     });
     Ok(json!({"catalog": catalog, "connection": id}))
@@ -376,10 +396,10 @@ pub async fn closed() -> Result<Value, String> {
     let Ok((core, _)) = open() else {
         return Ok(Value::Null);
     };
-    let connection = HAND.with_borrow_mut(|hand| hand.as_mut().and_then(|open| open.connection.take()));
+    let connection =
+        HAND.with_borrow_mut(|hand| hand.as_mut().and_then(|open| open.connection.take()));
     if let Some(connection) = connection {
         core.closed(connection).await;
     }
     Ok(Value::Null)
 }
-

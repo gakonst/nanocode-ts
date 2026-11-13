@@ -1,6 +1,7 @@
 mod branch;
 mod bridge;
 mod cells;
+mod children;
 mod events;
 mod hand;
 mod mcp;
@@ -160,6 +161,10 @@ struct Configuration {
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
+    #[serde(default)]
+    remote_children: bool,
+    #[serde(default)]
+    child_lineage: Option<nanocode::Lineage>,
     #[serde(default)]
     providers: Providers,
     #[serde(default)]
@@ -387,6 +392,8 @@ enum Command {
         images: Vec<String>,
         #[serde(default)]
         hand: Option<String>,
+        #[serde(default)]
+        instruction_revision: Option<u64>,
         metadata: Value,
     },
     Append {
@@ -464,6 +471,8 @@ enum Command {
         prompt: String,
         #[serde(default)]
         into: Option<String>,
+        #[serde(default)]
+        instruction_revision: Option<u64>,
     },
     Replace {
         scope: String,
@@ -498,6 +507,19 @@ enum Command {
         agent_id: u64,
         #[serde(default)]
         budget_usd: Option<f64>,
+    },
+    ChildEvents {
+        session_id: String,
+        events: Vec<ChildEvent>,
+    },
+    ChildSubagent {
+        session_id: String,
+    },
+    ChildTool {
+        session_id: String,
+        name: String,
+        input: Box<RawValue>,
+        context: ChildToolContext,
     },
     CompletionOrigin {
         request_id: String,
@@ -562,6 +584,7 @@ struct Session {
     inbox: TurnInbox<Log>,
     mcp_unavailable: Vec<String>,
     model: ModelSelection,
+    remote_children: Option<Arc<nanocode::RemoteChildren>>,
     scope: String,
     store: SessionStore,
     subagents: Option<SubagentControl>,
@@ -582,6 +605,26 @@ thread_local! {
     static RESTARTS: Cell<Option<u64>> = const { Cell::new(None) };
     static RETAIN_FINISHED: Cell<Option<usize>> = const { Cell::new(None) };
     static VALUE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
+    static CHILD: Cell<bool> = const { Cell::new(false) };
+}
+
+#[derive(Deserialize)]
+struct ChildEvent {
+    #[serde(rename = "type")]
+    kind: nanocode::agent::events::AgentEventKind,
+    payload: Arc<RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ChildToolContext {
+    call_id: String,
+    #[serde(default)]
+    instruction_revision: Option<u64>,
+    #[serde(default)]
+    origin: Option<String>,
+    output_token_budget: usize,
+    #[serde(default)]
+    turn_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -697,6 +740,12 @@ fn ready() -> Result<Rc<Session>, String> {
 }
 
 async fn subagent(session_id: &str) -> Option<Value> {
+    if CHILD.get() {
+        return bridge::call(json!({"op": "child_subagent", "session_id": session_id}))
+            .await
+            .ok()
+            .filter(|value| !value.is_null());
+    }
     let subagents = current()?.subagents.clone()?;
     let lineage = subagents.lineage(session_id).await;
     let budgets = subagents.budgets(session_id).await;
@@ -832,6 +881,9 @@ fn codex_harness(
 async fn open(mut config: Configuration) -> Result<Session, Opening> {
     let coalesce = Duration::from_millis(config.event_coalesce_ms);
     let log = log(&config.scope).await?;
+    if config.remote_children {
+        log.settle_durably();
+    }
     let store = nanocode::session_store(log.store())
         .map_err(text)?
         .with_logged_prompts();
@@ -946,7 +998,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .tools
         .iter()
         .any(|tool| tool.name() == "image_gen__imagegen");
-    shared.extend(tools::tools(config.tools).map(|tool| Arc::new(tool) as Arc<dyn Tool>));
+    shared.extend(tools::tools(config.tools));
     let search = |family: Provider| -> Option<Arc<dyn Tool>> {
         let replaced = match family {
             Provider::Claude => host_search[0],
@@ -1067,6 +1119,8 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
     }
     if config.subagents == Some(false) {
         builder = builder.without_subagents();
+    } else if config.remote_children {
+        builder = builder.child_host(children::HostChildren);
     }
     builder = builder
         .workspace(config.workspace.as_deref().unwrap_or("/"))
@@ -1104,6 +1158,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         .build()
         .map_err(|error| configuration(format!("build runtime: {error}")))?;
     let subagents = runtime.subagents().cloned();
+    let remote_children = runtime.remote_children().cloned();
     if let (Some(limit), Some(subagents)) = (config.max_resident_subagents, &subagents) {
         subagents.set_max_resident(limit);
     }
@@ -1133,6 +1188,10 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         config.live_deltas,
     ));
     let mut record = SessionRecord::root(&config.session_id, model.clone(), None);
+    CHILD.set(config.child_lineage.is_some());
+    if let Some(lineage) = config.child_lineage {
+        record.lineage = lineage;
+    }
     record.initial =
         (thinking.is_some() || config.service_tier.is_some()).then(|| InitialSettings {
             thinking: thinking.unwrap_or_else(|| model.default_thinking()),
@@ -1159,6 +1218,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 mcp_unavailable: mcp.unavailable,
                 model,
                 scope: config.scope,
+                remote_children,
                 store,
                 subagents,
             })
@@ -1235,6 +1295,12 @@ impl Session {
         Value::Null
     }
 
+    fn remote_children(&self) -> Result<Arc<nanocode::RemoteChildren>, String> {
+        self.remote_children
+            .clone()
+            .ok_or_else(|| "the session has no remote children".into())
+    }
+
     fn subagents(&self) -> Result<&SubagentControl, String> {
         self.subagents
             .as_ref()
@@ -1287,6 +1353,7 @@ async fn submit(
     prompt: String,
     images: Vec<String>,
     hand: Option<String>,
+    instruction_revision: Option<u64>,
     metadata: &Value,
 ) -> Result<Value, String> {
     let prompt = if images.is_empty() {
@@ -1298,6 +1365,10 @@ async fn submit(
                 detail: None,
             }),
         ))
+    };
+    let prompt = match instruction_revision {
+        Some(revision) => prompt.with_instruction_revision(revision),
+        None => prompt,
     };
     let submission = Submission {
         request_id,
@@ -1614,10 +1685,20 @@ fn execute(command: Command) -> Executed {
             prompt,
             images,
             hand,
+            instruction_revision,
             metadata,
-        } => executed(
-            async move { submit(&scope, request_id, prompt, images, hand, &metadata).await },
-        ),
+        } => executed(async move {
+            submit(
+                &scope,
+                request_id,
+                prompt,
+                images,
+                hand,
+                instruction_revision,
+                &metadata,
+            )
+            .await
+        }),
         Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {
             let record = log(&scope).await?.turn(&request_id).await.map_err(text)?;
@@ -1728,10 +1809,16 @@ fn execute(command: Command) -> Executed {
             request_id,
             prompt,
             into,
+            instruction_revision,
         } => executed(async move {
+            let prompt = Prompt::from(prompt);
+            let prompt = match instruction_revision {
+                Some(revision) => prompt.with_instruction_revision(revision),
+                None => prompt,
+            };
             let steered = ready()?
                 .inbox
-                .steer(into.as_deref(), &request_id, Prompt::from(prompt))
+                .steer(into.as_deref(), &request_id, prompt)
                 .await
                 .map_err(text)?;
             Ok(Value::Bool(steered))
@@ -1785,7 +1872,12 @@ fn execute(command: Command) -> Executed {
                     .side_question(session.inbox.session_id(), AgentId::new(agent_id), question)
                     .await
                     .map_err(text)?,
-                None => session.inbox.agent().side_question(question).await.map_err(text)?,
+                None => session
+                    .inbox
+                    .agent()
+                    .side_question(question)
+                    .await
+                    .map_err(text)?,
             };
             Ok(json!({"text": answer.text(), "usage": answer.usage()}))
         }),
@@ -1811,6 +1903,42 @@ fn execute(command: Command) -> Executed {
                 .await
                 .map_err(text)?;
             serde_json::to_value(summary).map_err(text)
+        }),
+        Command::ChildEvents { session_id, events } => executed(async move {
+            let remote = ready()?.remote_children()?;
+            let published = events
+                .into_iter()
+                .filter(|event| remote.publish(&session_id, event.kind, Arc::clone(&event.payload)))
+                .count();
+            Ok(json!(published))
+        }),
+        Command::ChildSubagent { session_id } => executed(async move {
+            ready()?;
+            Ok(subagent(&session_id).await.unwrap_or(Value::Null))
+        }),
+        Command::ChildTool {
+            session_id,
+            name,
+            input,
+            context,
+        } => executed(async move {
+            let remote = ready()?.remote_children()?;
+            let output = remote
+                .call_tool(
+                    &session_id,
+                    nanocode::ChildToolCall {
+                        call_id: &context.call_id,
+                        host_context: context.origin.as_deref(),
+                        input: nanocode::tool_contract::ToolInput::Function(input),
+                        instruction_revision: context.instruction_revision,
+                        name: &name,
+                        output_budget: context.output_token_budget,
+                        turn_id: context.turn_id.as_deref(),
+                    },
+                )
+                .await
+                .map_err(text)?;
+            serde_json::to_value(output.into_wire().map_err(text)?).map_err(text)
         }),
         Command::CompletionOrigin { request_id } => executed(async move {
             let origin = match &ready()?.subagents {

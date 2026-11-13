@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use nanocode::{FunctionHandler, FunctionTool, tool_contract::ToolContext};
+use nanocode::{
+    FunctionHandler, FunctionTool,
+    tool_contract::{Tool, ToolContext},
+};
 use nanocode_code_mode::embedded::HostFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,6 +17,8 @@ pub struct HostTool {
     parameters: Value,
     #[serde(default)]
     content: bool,
+    #[serde(default)]
+    wire: bool,
 }
 
 struct Bridge;
@@ -53,16 +58,25 @@ impl HostTool {
     }
 }
 
-pub fn tools(definitions: Vec<HostTool>) -> impl Iterator<Item = FunctionTool> {
+pub fn tools(definitions: Vec<HostTool>) -> impl Iterator<Item = Arc<dyn Tool>> {
     let bridge: Arc<dyn FunctionHandler> = Arc::new(Bridge);
     definitions.into_iter().map(move |tool| {
-        FunctionTool::new(
-            tool.name,
-            tool.description,
-            tool.parameters,
-            Arc::clone(&bridge),
+        if tool.wire {
+            return Arc::new(super::children::WireTool::new(
+                tool.name,
+                tool.description,
+                tool.parameters,
+            )) as Arc<dyn Tool>;
+        }
+        Arc::new(
+            FunctionTool::new(
+                tool.name,
+                tool.description,
+                tool.parameters,
+                Arc::clone(&bridge),
+            )
+            .parallel_tool_calls(true)
+            .content_results(tool.content),
         )
-        .parallel_tool_calls(true)
-        .content_results(tool.content)
     })
 }

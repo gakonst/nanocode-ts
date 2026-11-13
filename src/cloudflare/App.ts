@@ -116,91 +116,6 @@ export type HostToolCall = {
   grant?: unknown
 }
 
-const remoteTools: Contracts.HostTool[] = [
-  {
-    name: 'spawn_agent',
-    description:
-      'Starts a reusable clean-room subagent without inherited conversation history in its own session and immediately returns its ID. The subagent runs on its own and reports its result when it finishes; wait_agent waits for it and list_agents lists the subagents.',
-    parameters: {
-      type: 'object',
-      properties: {
-        role: { type: 'string', description: 'A short role describing the subagent.' },
-        task: { type: 'string', description: 'A complete, focused task for the subagent.' },
-        output_contract: { description: 'The shape of the result the subagent returns.' },
-        harness: { type: ['string', 'null'] },
-        model: { type: ['string', 'null'] },
-        thinking: { type: ['string', 'null'] },
-        reasoning_mode: { type: ['string', 'null'] },
-      },
-      required: ['role', 'task'],
-    },
-  },
-  {
-    name: 'wait_agent',
-    description:
-      'Waits until any requested subagent reaches a terminal status and returns every requested subagent.',
-    parameters: {
-      type: 'object',
-      properties: {
-        agent_ids: { type: 'array', items: { type: 'integer' } },
-        timeout_ms: { type: 'integer', description: 'Wait in milliseconds. Defaults to 30000.' },
-      },
-      required: ['agent_ids'],
-    },
-  },
-  {
-    name: 'list_agents',
-    description:
-      'Lists the subagents in agent_id order: pending and running ones, and completed ones with include_completed.',
-    parameters: {
-      type: 'object',
-      properties: {
-        after_agent_id: { type: 'integer' },
-        include_completed: { type: 'boolean' },
-        limit: { type: 'integer' },
-      },
-    },
-  },
-]
-
-const remoteResult: Contracts.HostTool = {
-  name: 'submit_result',
-  description: "Submits this subagent's final result to the agent that started it.",
-  parameters: {
-    type: 'object',
-    properties: { output: { description: 'The result, in the shape the task asked for.' } },
-    required: ['output'],
-  },
-}
-
-const remoteNames = new Set([...remoteTools, remoteResult].map((tool) => tool.name))
-
-const remoteWaitMs = 30_000
-
-type RemoteRow = {
-  id: number
-  role: string
-  task: string
-  status: string
-  output: string | null
-  spawned_at: number
-  finished_at: number | null
-}
-
-function remoteEntry(row: RemoteRow) {
-  return {
-    agent_id: row.id,
-    role: row.role,
-    task: row.task,
-    status: {
-      state: row.status,
-      ...(row.output === null ? {} : { output: JSON.parse(row.output) }),
-    },
-    spawned_at: row.spawned_at,
-    finished_at: row.finished_at,
-  }
-}
-
 const workspaceMemoryBytes = 48 * 1024 * 1024
 
 const workspaceFileBytes = 32 * 1024 * 1024
@@ -341,6 +256,18 @@ function requestedYield(operation: unknown): number {
     }
   })() as { yield_time_ms?: unknown } | undefined
   return typeof requested?.yield_time_ms === 'number' ? requested.yield_time_ms : 0
+}
+
+function childTurn(report: Contracts.TurnReport): Contracts.ChildTurn {
+  if (report.status === 'completed')
+    return {
+      status: 'completed',
+      final_message: String((report['ok'] as { message?: unknown } | undefined)?.message ?? ''),
+      turn_id: null,
+      usage: (report['ok'] as { usage?: unknown } | undefined)?.usage ?? null,
+    }
+  if (report.status === 'cancelled') return { status: 'cancelled' }
+  return { status: 'failed', detail: String(report['error'] ?? report.status) }
 }
 
 function nextTask(): Promise<void> {
@@ -488,10 +415,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
         CREATE TABLE IF NOT EXISTS subagent_directories (scope TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
       `)
-      if (options.remoteSubagents)
-        ctx.storage.sql.exec(
-          'CREATE TABLE IF NOT EXISTS remote_agents (id INTEGER PRIMARY KEY, role TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, output TEXT, spawned_at INTEGER NOT NULL, finished_at INTEGER, notified INTEGER NOT NULL DEFAULT 0)',
-        )
       if (
         !this.store
           .row("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'metadata'")
@@ -641,8 +564,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           }
           this.recorded = true
         }
-        if (options.remoteSubagents && parts[2] === 'remote_done' && request.method === 'POST')
-          return this.remoteDone(await request.json())
         if (request.method === 'GET' && parts[2] === 'metrics')
           return json({
             ...this.counts,
@@ -789,12 +710,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.crash = after
           return json({ armed: true, after_ms: after })
         }
+        if (options.remoteSubagents && parts[1] === 'internal' && parts[2]?.startsWith('child_')) {
+          if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+          return await this.childRoute(scope, parts[2], await request.json(), descriptor)
+        }
         if (parts[2] === 'files') return await this.files(scope, url, request)
         if (parts[2] === 'side_question') return await this.sideQuestion(scope, request, descriptor)
-        if (parts[2] === 'subagents' && options.remoteSubagents && request.method === 'GET')
-          return json({
-            agents: this.remoteRows('SELECT * FROM remote_agents ORDER BY id').map(remoteEntry),
-          })
         if (parts[2] === 'subagents')
           return await this.subagents(scope, parts, url, request, descriptor)
         if (parts[2] !== 'turns') return json({ error: 'route not found' }, 404)
@@ -842,8 +763,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ error: 'web_search must be a boolean' }, 400)
         if (input.payer !== undefined && !offered.includes(input.payer))
           return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
-        if (options.remoteSubagents && input.remote_parent !== undefined)
-          this.metadata.set('remote_parent', JSON.stringify(input.remote_parent))
         if (
           input.images !== undefined &&
           (!Array.isArray(input.images) ||
@@ -877,7 +796,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.metadata.get(payerKey) ?? input.payer,
         )
         if (!this.opened(scope)?.resident)
-          void options.mcp?.store?.(this.env)?.get('nanocode-mcp:prime').catch(() => undefined)
+          void options.mcp
+            ?.store?.(this.env)
+            ?.get('nanocode-mcp:prime')
+            .catch(() => undefined)
         const subscribing =
           this.metadata.get(providerKey) === undefined
             ? this.subscribe(
@@ -977,6 +899,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             prompt: input.prompt,
             ...(images.length ? { images } : {}),
             hand: input.hand,
+            ...(Number.isSafeInteger(input.instruction_revision)
+              ? { instruction_revision: input.instruction_revision }
+              : {}),
             metadata: descriptor,
           })
           if (submitted.submitted === 'too_large')
@@ -1047,237 +972,353 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
     }
 
-    private remoteWaiters = new Set<() => void>()
+    private childRuns = new Map<string, (turn: Contracts.ChildTurn) => void>()
 
-    private remoteRows(query: string, ...bindings: unknown[]): RemoteRow[] {
-      return this.ctx.storage.sql.exec<RemoteRow>(query, ...bindings).toArray()
+    private childSpecs = new Map<string, Contracts.ChildOpen>()
+
+    private childEvents: unknown[] = []
+
+    private childForwarding: Promise<void> | undefined
+
+    private childOf():
+      | { spec: Contracts.ChildOpen; parent: string; parent_session_id: string }
+      | undefined {
+      const stored = this.metadata.get('child')
+      return stored ? JSON.parse(stored) : undefined
     }
 
-    private remoteDone(input: any): Response {
-      this.ctx.storage.sql.exec(
-        "UPDATE remote_agents SET status = ?, output = ?, finished_at = ? WHERE id = ? AND status = 'running'",
-        String(input?.status ?? 'completed'),
-        JSON.stringify(input?.output ?? null),
-        Date.now(),
-        Number(input?.agent_id),
-      )
-      for (const wake of [...this.remoteWaiters]) wake()
-      void this.remoteDeliver()
-      return json({ recorded: true })
+    private sessionStub(account: string, name: string) {
+      return this.env.SESSIONS.get(this.env.SESSIONS.idFromName(JSON.stringify([account, name])), {
+        locationHint: this.env.SESSION_LOCATION_HINT,
+      })
     }
 
-    private remoteDelivering = false
-
-    private async remoteDeliver(): Promise<void> {
-      const stored = this.metadata.get('remote_descriptor')
-      if (this.remoteDelivering || this.driving.size || !stored) return
-      const rows = this.remoteRows(
-        "SELECT * FROM remote_agents WHERE status != 'running' AND notified = 0 ORDER BY id",
-      )
-      if (!rows.length) return
-      this.remoteDelivering = true
-      try {
-        const ranges: string[] = []
-        for (const row of rows) {
-          const last = ranges.at(-1)?.split('-')
-          if (last && Number(last.at(-1)) + 1 === row.id)
-            ranges[ranges.length - 1] = `${last[0]}-${row.id}`
-          else ranges.push(String(row.id))
-        }
-        const failed = rows
-          .filter((row) => row.status !== 'completed')
-          .map((row) => `${row.id} ${row.status}`)
-        const prompt = `${rows.length} subagents finished (agent IDs ${ranges.join(', ')})${failed.length ? `; not completed: ${failed.join(', ')}` : ''}. Their results are in list_agents with include_completed, or wait_agent with their IDs.\n\n<subagent_completion count="${rows.length}" />`
-        const response = await this.fetch(
-          new Request('https://session.internal/internal/turns', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-nanocode-descriptor': stored },
-            body: JSON.stringify({
-              request_id: `subagent-completions-${rows[rows.length - 1]!.id}`,
-              prompt: `${prompt}\n\nContinue the current task using only the result fields needed for the next step.`,
-            }),
-          }),
-        )
-        if (response.ok)
-          this.ctx.storage.sql.exec(
-            `UPDATE remote_agents SET notified = 1 WHERE id IN (${rows.map(() => '?').join(', ')})`,
-            ...rows.map((row) => row.id),
-          )
-      } finally {
-        this.remoteDelivering = false
-      }
-    }
-
-    private remoteFinished(report: any): void {
-      const parent = this.metadata.get('remote_parent')
-      if (!parent) return
-      const output = this.metadata.get('remote_output')
-      const link = JSON.parse(parent)
-      this.metadata.set(
-        'remote_notice',
-        JSON.stringify({
-          link,
-          body: {
-            agent_id: link.agent_id,
-            status: report.status,
-            output: output === undefined ? (report.result ?? null) : JSON.parse(output),
-          },
+    private async parentPost(action: string, body: unknown): Promise<Response> {
+      const child = this.childOf()
+      if (!child) throw new Error('this session is not a remote child')
+      const parent = JSON.parse(child.parent) as SessionDescriptor
+      return await this.sessionStub(parent.account_id, parent.session_name).fetch(
+        new Request(`https://session.internal/internal/${action}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-nanocode-descriptor': child.parent },
+          body: JSON.stringify(body),
         }),
       )
-      void this.remoteNotify()
     }
 
-    private async remoteNotify(): Promise<void> {
-      const pending = this.metadata.get('remote_notice')
-      if (!pending) return
-      const { link, body } = JSON.parse(pending)
-      const descriptor: SessionDescriptor = {
-        account_id: link.account_id,
-        session_id: '',
-        session_name: link.session_name,
-        subscription: false,
+    private async childPost(
+      descriptor: SessionDescriptor,
+      sessionId: string,
+      action: string,
+      body: unknown,
+    ): Promise<Response> {
+      const name = `${descriptor.session_name}/child/${sessionId}`
+      const child: SessionDescriptor = {
+        account_id: descriptor.account_id,
+        session_id: sessionId,
+        session_name: name,
+        subscription: descriptor.subscription,
+        codex_subscription: descriptor.codex_subscription,
         recorded: true,
+        ...(descriptor.payer ? { payer: descriptor.payer } : {}),
       }
-      try {
-        const response = await this.env.SESSIONS.get(
-          this.env.SESSIONS.idFromName(JSON.stringify([link.account_id, link.session_name])),
-          { locationHint: this.env.SESSION_LOCATION_HINT },
-        ).fetch(
-          new Request('https://session.internal/internal/remote_done', {
+      return await this.sessionStub(descriptor.account_id, name).fetch(
+        new Request(`https://session.internal/internal/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-nanocode-descriptor': headerJson(child),
+          },
+          body: JSON.stringify(body),
+        }),
+      )
+    }
+
+    private async childRun(
+      descriptor: SessionDescriptor,
+      parentSessionId: string,
+      sessionId: string,
+      requestId: string,
+      prompt: string,
+      revision: number | null,
+    ): Promise<Contracts.ChildTurn> {
+      const spec = this.childSpecs.get(sessionId)
+      if (!spec) return { status: 'failed', detail: `remote child ${sessionId} is not open` }
+      const key = `${sessionId}
+${requestId}`
+      const done = new Promise<Contracts.ChildTurn>((resolve) => this.childRuns.set(key, resolve))
+      const response = await this.childPost(descriptor, sessionId, 'child_turn', {
+        spec,
+        parent: headerJson({
+          account_id: descriptor.account_id,
+          session_id: '',
+          session_name: descriptor.session_name,
+          subscription: descriptor.subscription,
+          codex_subscription: descriptor.codex_subscription,
+          recorded: true,
+        }),
+        parent_session_id: parentSessionId,
+        request_id: requestId,
+        prompt,
+        instruction_revision: revision,
+      }).catch((error: unknown) => error as Error)
+      if (response instanceof Error || !response.ok) {
+        this.childRuns.delete(key)
+        return {
+          status: 'failed',
+          detail:
+            response instanceof Error
+              ? response.message
+              : `remote child ${sessionId} refused the turn: ${response.status} ${await response.text()}`,
+        }
+      }
+      const report = (await response.json()) as Contracts.TurnReport
+      if (!unfinishedStatuses.has(report.status)) {
+        this.childRuns.delete(key)
+        return childTurn(report)
+      }
+      return await done
+    }
+
+    private async childRoute(
+      scope: string,
+      action: string,
+      input: any,
+      descriptor: SessionDescriptor,
+    ): Promise<Response> {
+      if (action === 'child_done') {
+        const key = `${input.session_id}
+${input.request_id}`
+        const resolve = this.childRuns.get(key)
+        this.childRuns.delete(key)
+        resolve?.(input.turn as Contracts.ChildTurn)
+        return json({ delivered: resolve !== undefined })
+      }
+      if (action === 'child_tool' || action === 'child_events' || action === 'child_subagent') {
+        const runtime = await this.subagentRuntime(scope, descriptor)
+        if (!runtime) return json({ error: 'parent session is not open' }, 409)
+        if (action === 'child_events')
+          return json({
+            published: await runtime.children.events(input.session_id, input.events),
+          })
+        if (action === 'child_subagent')
+          return json({ subagent: await runtime.children.subagent(input.session_id) })
+        try {
+          return json({
+            output: await runtime.children.tool(
+              input.session_id,
+              input.name,
+              input.input,
+              input.context,
+            ),
+          })
+        } catch (error) {
+          return json({ error: String(error instanceof Error ? error.message : error) }, 409)
+        }
+      }
+      if (action === 'child_turn' && this.childOf()) {
+        const instance = await this.instance(scope)
+        const notices = JSON.parse(this.metadata.get('child_notices') ?? '{}') as Record<
+          string,
+          { delivered?: boolean; turn: Contracts.ChildTurn }
+        >
+        const known = await instance.turn(scope, input.request_id)
+        if (!known && !notices[input.request_id]) this.childSuperseded()
+        const undelivered = notices[input.request_id]
+          ? input.request_id
+          : known
+            ? undefined
+            : Object.keys(notices)
+                .filter((id) => !notices[id]!.delivered)
+                .at(-1)
+        if (undelivered !== undefined) {
+          const { turn } = notices[undelivered]!
+          this.childDelivered(undelivered)
+          return json({
+            request_id: input.request_id,
+            status: turn.status,
+            ...(turn.status === 'completed'
+              ? { ok: { message: turn.final_message ?? '', usage: turn.usage ?? null } }
+              : { error: turn.detail ?? turn.status }),
+          })
+        }
+        if (!known) {
+          const running = (await instance.pending(scope)).find((turn) =>
+            unfinishedStatuses.has(turn.report.status),
+          )
+          if (running) {
+            const aliases = JSON.parse(this.metadata.get('child_aliases') ?? '{}')
+            aliases[running.report.request_id] = input.request_id
+            this.metadata.set('child_aliases', JSON.stringify(aliases))
+            if (!this.pumping) this.ctx.waitUntil(this.pump(true))
+            return json({ ...running.report, request_id: input.request_id }, 202)
+          }
+        }
+      }
+      if (action === 'child_pending') {
+        if (!this.childOf()) return json({ pending: null })
+        const inputs = JSON.parse(this.metadata.get('child_inputs') ?? '{}')
+        const running = (await (await this.instance(scope)).pending(scope)).find(
+          (turn) => unfinishedStatuses.has(turn.report.status) && inputs[turn.report.request_id],
+        )?.report.request_id
+        const requestId =
+          running ??
+          Object.keys(JSON.parse(this.metadata.get('child_notices') ?? '{}'))
+            .filter((id) => inputs[id])
+            .at(-1)
+        return json({
+          pending: requestId === undefined ? null : { request_id: requestId, ...inputs[requestId] },
+        })
+      }
+      if (action === 'child_turn') {
+        const inputs = JSON.parse(this.metadata.get('child_inputs') ?? '{}')
+        if (!inputs[input.request_id]) {
+          inputs[input.request_id] = {
+            prompt: input.prompt,
+            instruction_revision: input.instruction_revision ?? null,
+          }
+          this.metadata.set('child_inputs', JSON.stringify(inputs))
+        }
+      }
+      if (action === 'child_turn') {
+        if (!this.childOf())
+          this.metadata.insert(
+            'child',
+            JSON.stringify({
+              spec: input.spec,
+              parent: input.parent,
+              parent_session_id: input.parent_session_id,
+            }),
+          )
+        return await this.fetch(
+          new Request('https://session.internal/internal/turns', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               'x-nanocode-descriptor': headerJson(descriptor),
             },
-            body: JSON.stringify(body),
+            body: JSON.stringify({
+              request_id: input.request_id,
+              prompt: input.prompt,
+              model: input.spec.model,
+              thinking: input.spec.thinking,
+              instruction_revision: input.instruction_revision,
+            }),
           }),
         )
-        if (response.ok) {
-          if (this.metadata.get('remote_notice') === pending) this.metadata.delete('remote_notice')
-          return
-        }
-      } catch {}
-      await this.ctx.storage.setAlarm(Date.now() + remoteWaitMs)
+      }
+      if (action === 'child_steer') {
+        const resident = this.opened(scope)?.resident
+        const steered =
+          !!resident &&
+          this.driving.get(scope) === input.request_id &&
+          (await resident.steer(
+            input.id ?? crypto.randomUUID(),
+            input.prompt,
+            input.request_id,
+            input.instruction_revision ?? undefined,
+          ))
+        return json({ steered })
+      }
+      if (action === 'child_cancel') {
+        if (typeof input.request_id !== 'string')
+          return json({ error: 'request_id must be a string' }, 400)
+        return await this.cancel(input.request_id, scope)
+      }
+      return json({ error: 'route not found' }, 404)
     }
 
-    private async remoteTool(
-      descriptor: SessionDescriptor,
-      name: string,
-      input: any,
-    ): Promise<unknown> {
-      if (name === 'submit_result') {
-        this.metadata.set('remote_output', JSON.stringify(input?.output ?? null))
-        return { accepted: true }
+    private childFinished(report: Contracts.TurnReport): void {
+      const child = this.childOf()
+      if (!child) return
+      const aliases = JSON.parse(this.metadata.get('child_aliases') ?? '{}')
+      const requestId = aliases[report.request_id] ?? report.request_id
+      if (aliases[report.request_id] !== undefined) {
+        delete aliases[report.request_id]
+        this.metadata.set('child_aliases', JSON.stringify(aliases))
       }
-      if (name === 'list_agents') {
-        const after = Number(input?.after_agent_id ?? 0)
-        const rows = this.remoteRows(
-          input?.include_completed
-            ? 'SELECT * FROM remote_agents WHERE id > ? ORDER BY id LIMIT ?'
-            : "SELECT * FROM remote_agents WHERE id > ? AND status = 'running' ORDER BY id LIMIT ?",
-          after,
-          Number(input?.limit ?? -1),
-        )
-        return { agents: rows.map(remoteEntry) }
+      const notices = JSON.parse(this.metadata.get('child_notices') ?? '{}')
+      notices[requestId] = {
+        session_id: child.spec.session_id,
+        request_id: requestId,
+        turn: childTurn(report),
       }
-      if (name === 'wait_agent') {
-        const ids: number[] = (input?.agent_ids ?? []).map(Number)
-        const deadline = Date.now() + Number(input?.timeout_ms ?? remoteWaitMs)
-        for (;;) {
-          const rows = this.remoteRows(
-            `SELECT * FROM remote_agents WHERE id IN (${ids.map(() => '?').join(', ')}) ORDER BY id`,
-            ...ids,
-          )
-          const left = deadline - Date.now()
-          if (rows.some((row) => row.status !== 'running') || left <= 0)
-            return { agents: rows.map(remoteEntry), timed_out: left <= 0 }
-          await new Promise<void>((resolve) => {
-            const wake = () => {
-              this.remoteWaiters.delete(wake)
-              clearTimeout(timer)
-              resolve()
-            }
-            const timer = setTimeout(wake, left)
-            this.remoteWaiters.add(wake)
-          })
+      this.metadata.set('child_notices', JSON.stringify(notices))
+      void this.childNotify()
+    }
+
+    private childDelivered(requestId: string): void {
+      const notices = JSON.parse(this.metadata.get('child_notices') ?? '{}')
+      if (!notices[requestId]) return
+      notices[requestId].delivered = true
+      this.metadata.set('child_notices', JSON.stringify(notices))
+    }
+
+    private childSuperseded(): void {
+      const notices = JSON.parse(this.metadata.get('child_notices') ?? '{}')
+      const inputs = JSON.parse(this.metadata.get('child_inputs') ?? '{}')
+      const delivered = Object.keys(notices).filter((id) => notices[id].delivered)
+      if (!delivered.length) return
+      for (const id of delivered) {
+        delete notices[id]
+        delete inputs[id]
+      }
+      this.metadata.set('child_notices', JSON.stringify(notices))
+      this.metadata.set('child_inputs', JSON.stringify(inputs))
+    }
+
+    private async childNotify(): Promise<void> {
+      const notices = JSON.parse(this.metadata.get('child_notices') ?? '{}') as Record<
+        string,
+        { delivered?: boolean }
+      >
+      let failed = false
+      for (const [id, notice] of Object.entries(notices)) {
+        if (notice.delivered) continue
+        const response = await this.parentPost('child_done', notice).catch(() => undefined)
+        if (!response?.ok) {
+          failed = true
+          continue
         }
+        if (((await response.json()) as { delivered: boolean }).delivered) this.childDelivered(id)
       }
-      if (this.metadata.get('remote_descriptor') === undefined)
-        this.metadata.set(
-          'remote_descriptor',
-          headerJson({
-            account_id: descriptor.account_id,
-            session_id: '',
-            session_name: descriptor.session_name,
-            subscription: descriptor.subscription,
-            codex_subscription: descriptor.codex_subscription,
-            recorded: true,
-          }),
+      if (failed)
+        await this.ctx.storage.setAlarm(
+          Date.now() + policy(this.env.RECOVERY_DELAY_MS, 'RECOVERY_DELAY_MS'),
         )
-      const role = String(input?.role ?? 'worker')
-      const task = String(input?.task ?? '')
-      const spawned = Date.now()
-      const id = Number(
-        this.ctx.storage.sql
-          .exec<{ id: number }>(
-            "INSERT INTO remote_agents (role, task, status, spawned_at) VALUES (?, ?, 'running', ?) RETURNING id",
-            role,
-            task,
-            spawned,
-          )
-          .one().id,
-      )
-      const child = `${descriptor.session_name}/agent-${id}`
-      const childDescriptor: SessionDescriptor = {
-        account_id: descriptor.account_id,
-        session_id: '',
-        session_name: child,
-        subscription: descriptor.subscription,
-        codex_subscription: descriptor.codex_subscription,
-        recorded: true,
+    }
+
+    private childForward(events: Contracts.LoggedEvent[]): void {
+      const child = this.childOf()
+      if (!child) return
+      for (const entry of events) {
+        const event = (typeof entry.event === 'string' ? JSON.parse(entry.event) : entry.event) as {
+          type?: string
+          payload?: unknown
+        }
+        if (typeof event?.type !== 'string' || event.type.endsWith('.delta')) continue
+        this.childEvents.push({ type: event.type, payload: event.payload ?? null })
       }
-      const contract =
-        input?.output_contract === undefined
-          ? ''
-          : `\nReturn a result of this shape: ${JSON.stringify(input.output_contract)}.`
-      const response = await this.env.SESSIONS.get(
-        this.env.SESSIONS.idFromName(JSON.stringify([descriptor.account_id, child])),
-        { locationHint: this.env.SESSION_LOCATION_HINT },
-      ).fetch(
-        new Request('https://session.internal/internal/turns', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-nanocode-descriptor': headerJson(childDescriptor),
-          },
-          body: JSON.stringify({
-            request_id: 'task',
-            prompt: `Act as a specialist subagent. Your agent ID is ${id}. Your role: ${role}. Work only on this task and finish by calling submit_result with your result.${contract}\n\n${task}`,
-            remote_parent: {
-              account_id: descriptor.account_id,
-              session_name: descriptor.session_name,
-              agent_id: id,
-            },
-          }),
-        }),
-      )
-      if (!response.ok) {
-        const detail = await response.text()
-        this.ctx.storage.sql.exec(
-          "UPDATE remote_agents SET status = 'failed', output = ?, finished_at = ? WHERE id = ?",
-          JSON.stringify(detail),
-          Date.now(),
-          id,
-        )
-        throw new Error(`subagent ${id} could not start: ${response.status} ${detail}`)
-      }
-      return { agent_id: id, role, status: { state: 'running' } }
+      if (this.childForwarding || !this.childEvents.length) return
+      this.childForwarding = (async () => {
+        while (this.childEvents.length) {
+          const batch = this.childEvents
+          this.childEvents = []
+          const response = await this.parentPost('child_events', {
+            session_id: child.spec.session_id,
+            events: batch,
+          }).catch(() => undefined)
+          await response?.body?.cancel()
+        }
+        this.childForwarding = undefined
+      })()
+      this.ctx.waitUntil(this.childForwarding)
     }
 
     async alarm(): Promise<void> {
       if (this.deleted) return
-      void this.remoteNotify()
       this.counts.alarms++
+      if (this.metadata.get('child_notices')) void this.childNotify()
       await this.pump()
     }
 
@@ -1441,7 +1482,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (active) this.blocked.delete(active)
         if (driven.retry) throw new Error('runtime recovery required')
         if (driven.finished) {
-          if (options.remoteSubagents) this.remoteFinished(driven.finished.report)
+          if (options.remoteSubagents) this.childFinished(driven.finished.report)
           this.turnTimings.delete(driven.finished.report.request_id)
           this.queue =
             pending.length === 1 &&
@@ -1451,7 +1492,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               : 'unknown'
         }
         waiting = !!driven.waiting
-        if (options.remoteSubagents) void this.remoteDeliver()
         const version = this.eventHub.version
         if (await runtime.settle()) {
           this.metadata.delete(`background:${scope}`)
@@ -1683,11 +1723,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       const resident = (async () => {
         await this.ctx.storage.sync()
         await nextTask()
+        const child = options.remoteSubagents ? this.childOf() : undefined
+        const parent = child ? (JSON.parse(child.parent) as SessionDescriptor) : undefined
         const authority = {
           account_id: descriptor.account_id,
-          session_id: sessionId,
+          session_id: child ? child.parent_session_id : sessionId,
           executor_id: descriptor.executor_id,
-          session_name: descriptor.session_name,
+          session_name: parent ? parent.session_name : descriptor.session_name,
         }
         const enabled = this.executorEnabled(descriptor)
         let remote: HandExecutor | undefined
@@ -1827,11 +1869,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 : {}),
               remote: enabled,
               executor: descriptor.executor_id,
-              ...(options.remoteSubagents
-                ? { subagents: false }
+              ...(child
+                ? { subagents: false, child_lineage: child.spec.lineage }
                 : options.subagents === undefined
                   ? {}
                   : { subagents: options.subagents }),
+              ...(options.remoteSubagents && !child ? { remote_children: true } : {}),
               ...(options.maxResidentSubagents === undefined
                 ? {}
                 : { max_resident_subagents: options.maxResidentSubagents }),
@@ -1855,12 +1898,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               live_deltas: options.liveDeltas ?? true,
               ...(descriptor.web_search === undefined ? {} : { web_search: descriptor.web_search }),
               stream_tool_input: options.streamToolInput ?? true,
-              tools: options.remoteSubagents
-                ? [
-                    ...(options.tools?.definitions ?? []),
-                    ...remoteTools,
-                    ...(this.metadata.get('remote_parent') ? [remoteResult] : []),
-                  ]
+              tools: child
+                ? [...(options.tools?.definitions ?? []), ...child.spec.tools]
                 : options.tools?.definitions,
               ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
               ...(shell ? { workspace: shell.cwd } : {}),
@@ -1881,43 +1920,115 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
               fetch: (input, init, subagent) =>
                 subagent ? guarded(subagent)(input, init) : cellFetch(input, init),
-              tools:
-                options.tools || options.remoteSubagents
-                  ? {
-                      call: async (name, input, signal, context) => {
-                        if (this.dispatchBlocked(scope))
-                          throw new Error('request authority stopped')
-                        if (options.remoteSubagents && remoteNames.has(name))
-                          return this.remoteTool(descriptor, name, input)
-                        if (!options.tools) throw new Error(`no host tool is named ${name}`)
-                        await this.durable(scope)
-                        this.counts.host_tool_calls++
-                        const crash = this.crash
-                        this.crash = undefined
-                        if (crash !== undefined)
-                          setTimeout(
-                            () =>
-                              this.ctx.abort(`chaos: the session object was reset during ${name}`),
-                            crash,
-                          )
-                        return options.tools!.call(
-                          {
-                            authority: {
-                              account_id: authority.account_id,
-                              session_id: authority.session_id,
-                              session_name: authority.session_name,
-                            },
-                            name,
-                            input,
-                            context,
-                            grant: this.turnGrant(scope, descriptor),
-                          },
-                          this.env,
-                          signal,
+              ...(options.remoteSubagents && !child
+                ? {
+                    children: {
+                      open: async (spec: Contracts.ChildOpen) => {
+                        this.childSpecs.set(spec.session_id, spec)
+                      },
+                      pending: async (id: string) => {
+                        const response = await this.childPost(descriptor, id, 'child_pending', {})
+                        if (!response.ok) throw new Error(await response.text())
+                        return (
+                          (await response.json()) as {
+                            pending: {
+                              request_id: string
+                              prompt: string
+                              instruction_revision: number | null
+                            } | null
+                          }
+                        ).pending
+                      },
+                      run: (
+                        id: string,
+                        requestId: string,
+                        prompt: string,
+                        revision: number | null,
+                      ) => this.childRun(descriptor, sessionId, id, requestId, prompt, revision),
+                      steer: async (
+                        id: string,
+                        requestId: string,
+                        steerId: string | null,
+                        prompt: string,
+                        revision: number | null,
+                      ) => {
+                        const response = await this.childPost(descriptor, id, 'child_steer', {
+                          request_id: requestId,
+                          id: steerId,
+                          prompt,
+                          instruction_revision: revision,
+                        })
+                        return (
+                          response.ok &&
+                          ((await response.json()) as { steered?: boolean }).steered === true
                         )
                       },
-                    }
-                  : undefined,
+                      cancel: async (id: string, requestId: string | null) => {
+                        if (requestId === null)
+                          throw new Error('a remote child cancels only an identified turn')
+                        const response = await this.childPost(descriptor, id, 'child_cancel', {
+                          request_id: requestId,
+                        })
+                        if (!response.ok) throw new Error(await response.text())
+                      },
+                      close: async (id: string) => {
+                        this.childSpecs.delete(id)
+                      },
+                    },
+                  }
+                : {}),
+              ...(child
+                ? {
+                    childTool: async (name: string, input: unknown, context: unknown) => {
+                      const response = await this.parentPost('child_tool', {
+                        session_id: child.spec.session_id,
+                        name,
+                        input,
+                        context,
+                      })
+                      const body = (await response.json()) as { output?: unknown; error?: string }
+                      if (!response.ok) throw new Error(body.error ?? String(response.status))
+                      return body.output
+                    },
+                    childSubagent: async () => {
+                      const response = await this.parentPost('child_subagent', {
+                        session_id: child.spec.session_id,
+                      })
+                      if (!response.ok) throw new Error(await response.text())
+                      return ((await response.json()) as { subagent: Contracts.Subagent | null })
+                        .subagent
+                    },
+                  }
+                : {}),
+              tools: options.tools && {
+                call: async (name, input, signal, context) => {
+                  if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
+                  await this.durable(scope)
+                  this.counts.host_tool_calls++
+                  const crash = this.crash
+                  this.crash = undefined
+                  if (crash !== undefined)
+                    setTimeout(
+                      () => this.ctx.abort(`chaos: the session object was reset during ${name}`),
+                      crash,
+                    )
+                  return options.tools!.call(
+                    {
+                      authority: {
+                        account_id: authority.account_id,
+                        session_id: authority.session_id,
+                        session_name: authority.session_name,
+                      },
+                      name,
+                      input,
+                      context,
+                      grant: this.turnGrant(scope, descriptor),
+                    },
+                    this.env,
+                    signal,
+                  )
+                },
+              },
               remote: {
                 failed: () => remoteFailed || remote?.failure !== undefined,
                 execute: async (request: any, id: number) => {
@@ -2633,6 +2744,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private published(scope: string, events: Contracts.LoggedEvent[], bytes: number[]): void {
       if (!events.length || this.deleted) return
+      if (options.remoteSubagents) this.childForward(events)
       this.counts.events_written += events.length
       this.eventHub.publish(events, bytes)
       let behind = false

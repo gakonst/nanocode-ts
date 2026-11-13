@@ -307,6 +307,11 @@ async function create(
       }
     },
 
+    children(): Contracts.ChildHost {
+      if (!state.options.children) throw new Error('remote children are not configured')
+      return state.options.children
+    },
+
     onCancel(id: number, cancel: () => void) {
       if (state.inflight.has(id)) state.inflight.set(id, cancel)
       else cancel()
@@ -474,6 +479,56 @@ async function create(
             await body.reader.cancel().catch(() => undefined)
           }
           return null
+        }
+        case 'child_open': {
+          await internal.children().open(request)
+          return null
+        }
+        case 'child_pending':
+          return await internal.children().pending(request.session_id)
+        case 'child_run':
+          return await internal
+            .children()
+            .run(
+              request.session_id,
+              request.request_id,
+              request.prompt,
+              request.instruction_revision ?? null,
+            )
+        case 'child_steer':
+          return {
+            steered: await internal
+              .children()
+              .steer(
+                request.session_id,
+                request.request_id,
+                request.id ?? null,
+                request.prompt,
+                request.instruction_revision ?? null,
+              ),
+          }
+        case 'child_cancel': {
+          await internal.children().cancel(request.session_id, request.request_id ?? null)
+          return null
+        }
+        case 'child_close': {
+          await internal.children().close(request.session_id)
+          return null
+        }
+        case 'child_subagent': {
+          if (!state.options.childSubagent) throw new Error('child subagents are not configured')
+          return await state.options.childSubagent(request.session_id)
+        }
+        case 'child_tool': {
+          if (!state.options.childTool) throw new Error('child tools are not configured')
+          const controller = new AbortController()
+          internal.onCancel(id, () => controller.abort())
+          return await state.options.childTool(
+            request.name,
+            request.input,
+            request.context,
+            controller.signal,
+          )
         }
         case 'tool_call': {
           if (!state.options.tools) throw new Error('host tools are not configured')
@@ -1186,6 +1241,7 @@ async function create(
         prompt: string
         images?: string[]
         hand?: string
+        instruction_revision?: number
         metadata: unknown
       },
     ): Promise<Contracts.Submitted> {
@@ -1412,8 +1468,20 @@ async function create(
       })) as Contracts.SideAnswer
     },
 
-    async steer(requestId: string, prompt: string, into?: string): Promise<boolean> {
-      return (await internal.command('steer', { request_id: requestId, prompt, into })) === true
+    async steer(
+      requestId: string,
+      prompt: string,
+      into?: string,
+      instructionRevision?: number,
+    ): Promise<boolean> {
+      return (
+        (await internal.command('steer', {
+          request_id: requestId,
+          prompt,
+          into,
+          instruction_revision: instructionRevision,
+        })) === true
+      )
     },
 
     async replaceQueued(
@@ -1480,6 +1548,27 @@ async function create(
           agent_id,
           budget_usd,
         })) as Contracts.AgentSummary
+      },
+    },
+
+    children: {
+      async tool(
+        session_id: string,
+        name: string,
+        input: unknown,
+        context: unknown,
+      ): Promise<unknown> {
+        return await internal.command('child_tool', { session_id, name, input, context })
+      },
+
+      async events(session_id: string, events: unknown[]): Promise<number> {
+        return (await internal.command('child_events', { session_id, events })) as number
+      },
+
+      async subagent(session_id: string): Promise<Contracts.Subagent | null> {
+        return (await internal.command('child_subagent', {
+          session_id,
+        })) as Contracts.Subagent | null
       },
     },
 

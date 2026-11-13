@@ -88,6 +88,8 @@ export type AgentConfiguration = {
   cell_yield_ms?: number
   service_tier?: ServiceTier
   subagents?: boolean
+  remote_children?: boolean
+  child_lineage?: unknown
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>
   remote?: boolean
   code_mode?: boolean
@@ -406,7 +408,50 @@ export type HostOptions = {
   wake?(): void
 }
 
+export type ChildOpen = {
+  session_id: string
+  lineage: unknown
+  model: string
+  thinking: Thinking
+  restored: boolean
+  origin: string | null
+  tools: HostTool[]
+}
+
+export type ChildTurn = {
+  status: 'completed' | 'cancelled' | 'failed'
+  final_message?: string
+  turn_id?: string | null
+  detail?: string
+  usage?: unknown
+}
+
+export type ChildHost = {
+  cancel(session_id: string, request_id: string | null): Promise<void>
+  close(session_id: string): Promise<void>
+  open(child: ChildOpen): Promise<void>
+  pending(
+    session_id: string,
+  ): Promise<{ request_id: string; prompt: string; instruction_revision: number | null } | null>
+  run(
+    session_id: string,
+    request_id: string,
+    prompt: string,
+    instruction_revision: number | null,
+  ): Promise<ChildTurn>
+  steer(
+    session_id: string,
+    request_id: string,
+    id: string | null,
+    prompt: string,
+    instruction_revision: number | null,
+  ): Promise<boolean>
+}
+
 export type RuntimeOptions = {
+  children?: ChildHost
+  childSubagent?(session_id: string): Promise<Subagent | null>
+  childTool?(name: string, input: unknown, context: unknown, signal: AbortSignal): Promise<unknown>
   dispatch(
     request: {
       provider: ModelProvider | null
