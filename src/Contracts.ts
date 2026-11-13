@@ -393,9 +393,10 @@ export type Engine = {
 export type EngineFactory = (module: WebAssembly.Module, host: EngineHost) => Promise<Engine>
 
 export type HostOptions = {
-  engine?: EngineFactory
-  log_logical_limit?: number
   blobs?: BlobHost
+  engine?: EngineFactory
+  log_restarts?: number
+  log_retained_turns?: number
   published(events: LoggedEvent[], bytes: number[]): void
   live?(events: LoggedEvent[]): void
   wake?(): void

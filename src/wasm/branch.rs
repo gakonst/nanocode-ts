@@ -1,12 +1,11 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use nanocode::durability::{
-    BranchCursor, BranchExport, BranchImport, BranchPage, BranchPoint, RowStore, SessionStore,
-    SessionSummary,
+    BranchCursor, BranchExport, BranchImport, BranchPage, BranchPoint, SessionStore, SessionSummary,
 };
 use serde::Deserialize;
 
-use super::{store::WorkerStore, text};
+use super::{ready, text};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,18 +16,11 @@ pub enum At {
 }
 
 thread_local! {
-    static SESSIONS: RefCell<Option<SessionStore>> = const { RefCell::new(None) };
     static IMPORTS: RefCell<HashMap<String, (BranchExport, BranchImport)>> = RefCell::new(HashMap::new());
 }
 
 fn sessions() -> Result<SessionStore, String> {
-    if let Some(sessions) = SESSIONS.with_borrow(Clone::clone) {
-        return Ok(sessions);
-    }
-    let sessions =
-        nanocode::session_store(RowStore::new(WorkerStore::durability())).map_err(text)?;
-    SESSIONS.set(Some(sessions.clone()));
-    Ok(sessions)
+    Ok(ready()?.store.clone())
 }
 
 pub async fn export(session_id: &str, at: At) -> Result<BranchExport, String> {

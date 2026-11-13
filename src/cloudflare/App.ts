@@ -237,9 +237,6 @@ const subagentScanPages = 32
 
 const waitingKey = 'retry_waiting'
 
-const resetNote =
-  'The session was reset while driving this turn four times in a row without the turn making progress, so it stopped recovering it.'
-
 function requestedYield(operation: unknown): number {
   const body = operation as { source?: unknown; input?: unknown } | undefined
   const requested = (() => {
@@ -361,6 +358,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private modelAt?: number
 
     private readonly tripwires = new Map<string, string>()
+    private directoryBodies = new Map<string, string>()
     private directoryEpoch = 0
     private recorded = false
     private deleted = false
@@ -972,8 +970,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let retryAt: number | null | undefined
       let tripwire: string | undefined
       try {
-        if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
-        else await nextTask()
+        if (watchdogArmed) await nextTask()
         const reader = await this.instance(ownerScope)
         const admissions = this.admissions
         const pending = await reader.pending(ownerScope)
@@ -985,13 +982,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           immediate = admissions !== this.admissions
           return
         }
+        if (!watchdogArmed) await this.ctx.storage.setAlarm(Date.now() + delay)
         scope = next ? ownerScope : background![0].slice('background:'.length)
         const descriptor: SessionDescriptor = next
           ? this.descriptorOf(next.metadata)
           : JSON.parse(background![1])
         const serialized = JSON.stringify(descriptor)
         const marked = background?.[0] === `background:${scope}`
-        const accepted = !next || next.report.status === 'running'
         let sessionId!: string
         let preparationRequired = false
         const mark = () => {
@@ -999,16 +996,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           preparationRequired = true
         }
         this.metadata.transaction(() => {
-          if ((marked || accepted) && (!watchdogArmed || !marked || background![1] !== serialized))
-            mark()
+          if (!next && (!watchdogArmed || !marked || background![1] !== serialized)) mark()
           sessionId = this.sessionId(scope!, descriptor.session_id, () => {
             preparationRequired = true
           })
         })
         if (next) active = next.report.request_id
         if (next?.report.status === 'running') this.counts.recoveries++
-        {
-          const key = next ? `resets:${active}` : `resets:background:${scope}`
+        if (!next) {
+          const key = `resets:background:${scope}`
           const version = options.version?.(this.env) ?? ''
           const [counted, marked, stamped = '', dispatched = ''] = (
             this.metadata.get(key) ?? '0'
@@ -1019,14 +1015,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               : 0
           if (resets >= pumpResets) {
             this.metadata.delete(key)
-            if (next) {
-              await reader.finish(scope, active!, 'failed', { error: resetNote, kind: 'recovery' })
-              this.queue = 'unknown'
-              immediate = true
-            } else {
-              this.metadata.delete(`background:${scope}`)
-              console.error('Session background work reset without progress', { scope })
-            }
+            this.metadata.delete(`background:${scope}`)
+            console.error('Session background work reset without progress', { scope })
             return
           }
           this.metadata.set(key, `${resets + 1} ${this.progress()} ${version}`)
@@ -1102,7 +1092,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             return
           }
         }
-        if (!marked && !accepted) mark()
         if (preparationRequired) this.counts.preparation_writes++
         else this.counts.preparation_writes_skipped++
         if (timing) {
@@ -1137,8 +1126,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           this.metadata.delete(`background:${scope}`)
           if (this.queueKnownEmpty())
             this.remember(scope, epoch, await runtime.subagents.agents().catch(() => undefined))
-        } else if (waiting || this.queueKnownEmpty()) {
-          await this.eventHub.wait(delay, version)
+        } else {
+          if (this.metadata.get(`background:${scope}`) !== serialized) mark()
+          if (waiting || this.queueKnownEmpty()) await this.eventHub.wait(delay, version)
         }
         immediate = !this.queueKnownEmpty()
       } catch (error) {
@@ -1187,7 +1177,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         this.pumping = false
         if (retryAt !== null && (unfinished || background))
           await this.ctx.storage.setAlarm(retryAt ?? Date.now() + delay)
-        else await this.ctx.storage.deleteAlarm()
+        else if (retryAt === null) await this.ctx.storage.deleteAlarm()
         if (immediate && unfinished) this.ctx.waitUntil(this.pump(true))
       }
     }
@@ -1214,13 +1204,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return ''
         }
       }
-      const revisions = 'SELECT total(revision) AS value FROM state_rows'
-      const journals =
-        "SELECT count(*) || ':' || total(seq) AS value FROM nanocode_cell_journal_batches"
-      return (
-        read(`SELECT (${revisions}) || ':' || (${journals}) AS value`) ||
-        `${read(revisions)}:${read(journals)}`
-      )
+      return read('SELECT coalesce(max(seq), 0) AS value FROM nanocode_log')
     }
 
     private retryWaiting(): void {
@@ -2841,7 +2825,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       let current = found.instance
       if (!current) {
         current = AgentRuntime.instantiate(wasm, this.store, {
-          log_logical_limit: valueLimit,
+          log_restarts: pumpResets,
+          log_retained_turns: options.retainedTurns,
           blobs: this.blobs,
           published: (events, bytes) => this.published(scope, events, bytes),
           live: (events) => this.lived(scope, events),
@@ -3117,6 +3102,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
 
     private changed(scope: string): number {
       this.ctx.storage.sql.exec('DELETE FROM subagent_directories WHERE scope = ?', scope)
+      this.directoryBodies.delete(scope)
       return ++this.directoryEpoch
     }
 
@@ -3126,11 +3112,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       entries: Contracts.AgentDirectoryEntry[] | undefined,
     ): void {
       if (!entries || epoch !== this.directoryEpoch || this.metadata.first('background:')) return
+      const body = JSON.stringify(entries)
+      if (this.directoryBodies.get(scope) === body) return
       this.ctx.storage.sql.exec(
         'INSERT INTO subagent_directories (scope, body) VALUES (?, ?) ON CONFLICT (scope) DO UPDATE SET body = excluded.body WHERE body IS NOT excluded.body',
         scope,
-        JSON.stringify(entries),
+        body,
       )
+      this.directoryBodies.set(scope, body)
     }
 
     private attend(scope: string, descriptor: SessionDescriptor): void {
@@ -3380,6 +3369,7 @@ export declare namespace create {
     payers?: readonly Contracts.Payer[]
     plans?: Plans.Options<E>
     recordSession?(account: string, name: string, env: E): Promise<boolean> | boolean
+    retainedTurns?: number
     streamToolInput?: boolean
     subagentBudgets?: boolean
     cellInterruptChecks?: number
