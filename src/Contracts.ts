@@ -85,6 +85,7 @@ export type AgentConfiguration = {
   subagent_models?: readonly SubagentModel[]
   cell_interrupt_checks?: number
   cell_memory_bytes?: number
+  cell_yield_ms?: number
   service_tier?: ServiceTier
   subagents?: boolean
   providers?: Partial<Record<ModelProvider, ProviderEndpoint>>

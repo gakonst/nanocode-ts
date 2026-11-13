@@ -155,6 +155,8 @@ struct Configuration {
     #[serde(default)]
     cell_memory_bytes: Option<usize>,
     #[serde(default)]
+    cell_yield_ms: Option<u64>,
+    #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
     subagents: Option<bool>,
@@ -1043,11 +1045,13 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             .map_err(configuration)
     };
     let gated = |tools: Tools| {
-        tools
-            .into_builder()
-            .effect_gate(log.gate())
-            .build()
-            .map_err(configuration)
+        let builder = tools.into_builder().effect_gate(log.gate());
+        match config.cell_yield_ms {
+            Some(after) => builder.cell_yield(Duration::from_millis(after)),
+            None => builder,
+        }
+        .build()
+        .map_err(configuration)
     };
     let mut builder = Nanocode::builder();
     if BLOB_THRESHOLD.get().is_some() {

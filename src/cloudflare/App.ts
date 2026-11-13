@@ -1843,6 +1843,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 Math.floor(
                   policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES') / 2,
                 ),
+              ...(options.cellYieldMs === undefined ? {} : { cell_yield_ms: options.cellYieldMs }),
               ...withHand(
                 options.instructions,
                 this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -3736,6 +3737,7 @@ export declare namespace create {
     subagentBudgets?: boolean
     cellInterruptChecks?: number
     cellMemoryBytes?: number
+    cellYieldMs?: number
     subagents?: boolean
     remoteSubagents?: boolean
     subscription?(

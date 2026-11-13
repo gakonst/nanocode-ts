@@ -268,6 +268,7 @@ export function create(options: create.Options = {}): Harness {
             ...(options.cellMemoryBytes === undefined
               ? {}
               : { cell_memory_bytes: options.cellMemoryBytes }),
+            ...(options.cellYieldMs === undefined ? {} : { cell_yield_ms: options.cellYieldMs }),
             instructions:
               executor && options.handInstructions
                 ? [options.instructions, options.handInstructions].filter(Boolean).join('\n\n')
@@ -534,6 +535,7 @@ export declare namespace create {
   type Options = {
     batchMs?: number
     cellMemoryBytes?: number
+    cellYieldMs?: number
     codeMode?: boolean
     dispatch?: Gateway.Dispatch
     durability?: Journal.Durability
