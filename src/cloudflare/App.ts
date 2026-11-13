@@ -116,6 +116,91 @@ export type HostToolCall = {
   grant?: unknown
 }
 
+const remoteTools: Contracts.HostTool[] = [
+  {
+    name: 'spawn_agent',
+    description:
+      'Starts a reusable clean-room subagent without inherited conversation history in its own session and immediately returns its ID. The subagent runs on its own and reports its result when it finishes; wait_agent waits for it and list_agents lists the subagents.',
+    parameters: {
+      type: 'object',
+      properties: {
+        role: { type: 'string', description: 'A short role describing the subagent.' },
+        task: { type: 'string', description: 'A complete, focused task for the subagent.' },
+        output_contract: { description: 'The shape of the result the subagent returns.' },
+        harness: { type: ['string', 'null'] },
+        model: { type: ['string', 'null'] },
+        thinking: { type: ['string', 'null'] },
+        reasoning_mode: { type: ['string', 'null'] },
+      },
+      required: ['role', 'task'],
+    },
+  },
+  {
+    name: 'wait_agent',
+    description:
+      'Waits until any requested subagent reaches a terminal status and returns every requested subagent.',
+    parameters: {
+      type: 'object',
+      properties: {
+        agent_ids: { type: 'array', items: { type: 'integer' } },
+        timeout_ms: { type: 'integer', description: 'Wait in milliseconds. Defaults to 30000.' },
+      },
+      required: ['agent_ids'],
+    },
+  },
+  {
+    name: 'list_agents',
+    description:
+      'Lists the subagents in agent_id order: pending and running ones, and completed ones with include_completed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        after_agent_id: { type: 'integer' },
+        include_completed: { type: 'boolean' },
+        limit: { type: 'integer' },
+      },
+    },
+  },
+]
+
+const remoteResult: Contracts.HostTool = {
+  name: 'submit_result',
+  description: "Submits this subagent's final result to the agent that started it.",
+  parameters: {
+    type: 'object',
+    properties: { output: { description: 'The result, in the shape the task asked for.' } },
+    required: ['output'],
+  },
+}
+
+const remoteNames = new Set([...remoteTools, remoteResult].map((tool) => tool.name))
+
+const remoteWaitMs = 30_000
+
+type RemoteRow = {
+  id: number
+  role: string
+  task: string
+  status: string
+  output: string | null
+  spawned_at: number
+  finished_at: number | null
+}
+
+function remoteEntry(row: RemoteRow) {
+  return {
+    agent_id: row.id,
+    role: row.role,
+    task: row.task,
+    status: {
+      state: row.status,
+      ...(row.output === null ? {} : { output: JSON.parse(row.output) }),
+    },
+    spawned_at: row.spawned_at,
+    finished_at: row.finished_at,
+  }
+}
+
 const workspaceMemoryBytes = 48 * 1024 * 1024
 
 const workspaceFileBytes = 32 * 1024 * 1024
@@ -403,6 +488,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
         CREATE TABLE IF NOT EXISTS subagent_directories (scope TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
       `)
+      if (options.remoteSubagents)
+        ctx.storage.sql.exec(
+          'CREATE TABLE IF NOT EXISTS remote_agents (id INTEGER PRIMARY KEY, role TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, output TEXT, spawned_at INTEGER NOT NULL, finished_at INTEGER, notified INTEGER NOT NULL DEFAULT 0)',
+        )
       if (
         !this.store
           .row("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'metadata'")
@@ -552,6 +641,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           }
           this.recorded = true
         }
+        if (options.remoteSubagents && parts[2] === 'remote_done' && request.method === 'POST')
+          return this.remoteDone(await request.json())
         if (request.method === 'GET' && parts[2] === 'metrics')
           return json({
             ...this.counts,
@@ -700,6 +791,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         }
         if (parts[2] === 'files') return await this.files(scope, url, request)
         if (parts[2] === 'side_question') return await this.sideQuestion(scope, request, descriptor)
+        if (parts[2] === 'subagents' && options.remoteSubagents && request.method === 'GET')
+          return json({
+            agents: this.remoteRows('SELECT * FROM remote_agents ORDER BY id').map(remoteEntry),
+          })
         if (parts[2] === 'subagents')
           return await this.subagents(scope, parts, url, request, descriptor)
         if (parts[2] !== 'turns') return json({ error: 'route not found' }, 404)
@@ -747,6 +842,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ error: 'web_search must be a boolean' }, 400)
         if (input.payer !== undefined && !offered.includes(input.payer))
           return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
+        if (options.remoteSubagents && input.remote_parent !== undefined)
+          this.metadata.set('remote_parent', JSON.stringify(input.remote_parent))
         if (
           input.images !== undefined &&
           (!Array.isArray(input.images) ||
@@ -948,8 +1045,236 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
     }
 
+    private remoteWaiters = new Set<() => void>()
+
+    private remoteRows(query: string, ...bindings: unknown[]): RemoteRow[] {
+      return this.ctx.storage.sql.exec<RemoteRow>(query, ...bindings).toArray()
+    }
+
+    private remoteDone(input: any): Response {
+      this.ctx.storage.sql.exec(
+        "UPDATE remote_agents SET status = ?, output = ?, finished_at = ? WHERE id = ? AND status = 'running'",
+        String(input?.status ?? 'completed'),
+        JSON.stringify(input?.output ?? null),
+        Date.now(),
+        Number(input?.agent_id),
+      )
+      for (const wake of [...this.remoteWaiters]) wake()
+      void this.remoteDeliver()
+      return json({ recorded: true })
+    }
+
+    private remoteDelivering = false
+
+    private async remoteDeliver(): Promise<void> {
+      const stored = this.metadata.get('remote_descriptor')
+      if (this.remoteDelivering || this.driving.size || !stored) return
+      const rows = this.remoteRows(
+        "SELECT * FROM remote_agents WHERE status != 'running' AND notified = 0 ORDER BY id",
+      )
+      if (!rows.length) return
+      this.remoteDelivering = true
+      try {
+        const ranges: string[] = []
+        for (const row of rows) {
+          const last = ranges.at(-1)?.split('-')
+          if (last && Number(last.at(-1)) + 1 === row.id)
+            ranges[ranges.length - 1] = `${last[0]}-${row.id}`
+          else ranges.push(String(row.id))
+        }
+        const failed = rows
+          .filter((row) => row.status !== 'completed')
+          .map((row) => `${row.id} ${row.status}`)
+        const prompt = `${rows.length} subagents finished (agent IDs ${ranges.join(', ')})${failed.length ? `; not completed: ${failed.join(', ')}` : ''}. Their results are in list_agents with include_completed, or wait_agent with their IDs.\n\n<subagent_completion count="${rows.length}" />`
+        const response = await this.fetch(
+          new Request('https://session.internal/internal/turns', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-nanocode-descriptor': stored },
+            body: JSON.stringify({
+              request_id: `subagent-completions-${rows[rows.length - 1]!.id}`,
+              prompt: `${prompt}\n\nContinue the current task using only the result fields needed for the next step.`,
+            }),
+          }),
+        )
+        if (response.ok)
+          this.ctx.storage.sql.exec(
+            `UPDATE remote_agents SET notified = 1 WHERE id IN (${rows.map(() => '?').join(', ')})`,
+            ...rows.map((row) => row.id),
+          )
+      } finally {
+        this.remoteDelivering = false
+      }
+    }
+
+    private remoteFinished(report: any): void {
+      const parent = this.metadata.get('remote_parent')
+      if (!parent) return
+      const output = this.metadata.get('remote_output')
+      const link = JSON.parse(parent)
+      this.metadata.set(
+        'remote_notice',
+        JSON.stringify({
+          link,
+          body: {
+            agent_id: link.agent_id,
+            status: report.status,
+            output: output === undefined ? (report.result ?? null) : JSON.parse(output),
+          },
+        }),
+      )
+      void this.remoteNotify()
+    }
+
+    private async remoteNotify(): Promise<void> {
+      const pending = this.metadata.get('remote_notice')
+      if (!pending) return
+      const { link, body } = JSON.parse(pending)
+      const descriptor: SessionDescriptor = {
+        account_id: link.account_id,
+        session_id: '',
+        session_name: link.session_name,
+        subscription: false,
+        recorded: true,
+      }
+      try {
+        const response = await this.env.SESSIONS.get(
+          this.env.SESSIONS.idFromName(JSON.stringify([link.account_id, link.session_name])),
+          { locationHint: this.env.SESSION_LOCATION_HINT },
+        ).fetch(
+          new Request('https://session.internal/internal/remote_done', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-nanocode-descriptor': headerJson(descriptor),
+            },
+            body: JSON.stringify(body),
+          }),
+        )
+        if (response.ok) {
+          if (this.metadata.get('remote_notice') === pending) this.metadata.delete('remote_notice')
+          return
+        }
+      } catch {}
+      await this.ctx.storage.setAlarm(Date.now() + remoteWaitMs)
+    }
+
+    private async remoteTool(
+      descriptor: SessionDescriptor,
+      name: string,
+      input: any,
+    ): Promise<unknown> {
+      if (name === 'submit_result') {
+        this.metadata.set('remote_output', JSON.stringify(input?.output ?? null))
+        return { accepted: true }
+      }
+      if (name === 'list_agents') {
+        const after = Number(input?.after_agent_id ?? 0)
+        const rows = this.remoteRows(
+          input?.include_completed
+            ? 'SELECT * FROM remote_agents WHERE id > ? ORDER BY id LIMIT ?'
+            : "SELECT * FROM remote_agents WHERE id > ? AND status = 'running' ORDER BY id LIMIT ?",
+          after,
+          Number(input?.limit ?? -1),
+        )
+        return { agents: rows.map(remoteEntry) }
+      }
+      if (name === 'wait_agent') {
+        const ids: number[] = (input?.agent_ids ?? []).map(Number)
+        const deadline = Date.now() + Number(input?.timeout_ms ?? remoteWaitMs)
+        for (;;) {
+          const rows = this.remoteRows(
+            `SELECT * FROM remote_agents WHERE id IN (${ids.map(() => '?').join(', ')}) ORDER BY id`,
+            ...ids,
+          )
+          const left = deadline - Date.now()
+          if (rows.some((row) => row.status !== 'running') || left <= 0)
+            return { agents: rows.map(remoteEntry), timed_out: left <= 0 }
+          await new Promise<void>((resolve) => {
+            const wake = () => {
+              this.remoteWaiters.delete(wake)
+              clearTimeout(timer)
+              resolve()
+            }
+            const timer = setTimeout(wake, left)
+            this.remoteWaiters.add(wake)
+          })
+        }
+      }
+      if (this.metadata.get('remote_descriptor') === undefined)
+        this.metadata.set(
+          'remote_descriptor',
+          headerJson({
+            account_id: descriptor.account_id,
+            session_id: '',
+            session_name: descriptor.session_name,
+            subscription: descriptor.subscription,
+            codex_subscription: descriptor.codex_subscription,
+            recorded: true,
+          }),
+        )
+      const role = String(input?.role ?? 'worker')
+      const task = String(input?.task ?? '')
+      const spawned = Date.now()
+      const id = Number(
+        this.ctx.storage.sql
+          .exec<{ id: number }>(
+            "INSERT INTO remote_agents (role, task, status, spawned_at) VALUES (?, ?, 'running', ?) RETURNING id",
+            role,
+            task,
+            spawned,
+          )
+          .one().id,
+      )
+      const child = `${descriptor.session_name}/agent-${id}`
+      const childDescriptor: SessionDescriptor = {
+        account_id: descriptor.account_id,
+        session_id: '',
+        session_name: child,
+        subscription: descriptor.subscription,
+        codex_subscription: descriptor.codex_subscription,
+        recorded: true,
+      }
+      const contract =
+        input?.output_contract === undefined
+          ? ''
+          : `\nReturn a result of this shape: ${JSON.stringify(input.output_contract)}.`
+      const response = await this.env.SESSIONS.get(
+        this.env.SESSIONS.idFromName(JSON.stringify([descriptor.account_id, child])),
+        { locationHint: this.env.SESSION_LOCATION_HINT },
+      ).fetch(
+        new Request('https://session.internal/internal/turns', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-nanocode-descriptor': headerJson(childDescriptor),
+          },
+          body: JSON.stringify({
+            request_id: 'task',
+            prompt: `Act as a specialist subagent. Your agent ID is ${id}. Your role: ${role}. Work only on this task and finish by calling submit_result with your result.${contract}\n\n${task}`,
+            remote_parent: {
+              account_id: descriptor.account_id,
+              session_name: descriptor.session_name,
+              agent_id: id,
+            },
+          }),
+        }),
+      )
+      if (!response.ok) {
+        const detail = await response.text()
+        this.ctx.storage.sql.exec(
+          "UPDATE remote_agents SET status = 'failed', output = ?, finished_at = ? WHERE id = ?",
+          JSON.stringify(detail),
+          Date.now(),
+          id,
+        )
+        throw new Error(`subagent ${id} could not start: ${response.status} ${detail}`)
+      }
+      return { agent_id: id, role, status: { state: 'running' } }
+    }
+
     async alarm(): Promise<void> {
       if (this.deleted) return
+      void this.remoteNotify()
       this.counts.alarms++
       await this.pump()
     }
@@ -1114,6 +1439,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         if (active) this.blocked.delete(active)
         if (driven.retry) throw new Error('runtime recovery required')
         if (driven.finished) {
+          if (options.remoteSubagents) this.remoteFinished(driven.finished.report)
           this.turnTimings.delete(driven.finished.report.request_id)
           this.queue =
             pending.length === 1 &&
@@ -1123,6 +1449,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               : 'unknown'
         }
         waiting = !!driven.waiting
+        if (options.remoteSubagents) void this.remoteDeliver()
         const version = this.eventHub.version
         if (await runtime.settle()) {
           this.metadata.delete(`background:${scope}`)
@@ -1498,7 +1825,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                 : {}),
               remote: enabled,
               executor: descriptor.executor_id,
-              ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
+              ...(options.remoteSubagents
+                ? { subagents: false }
+                : options.subagents === undefined
+                  ? {}
+                  : { subagents: options.subagents }),
               ...(options.maxResidentSubagents === undefined
                 ? {}
                 : { max_resident_subagents: options.maxResidentSubagents }),
@@ -1521,7 +1852,13 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               live_deltas: options.liveDeltas ?? true,
               ...(descriptor.web_search === undefined ? {} : { web_search: descriptor.web_search }),
               stream_tool_input: options.streamToolInput ?? true,
-              tools: options.tools?.definitions,
+              tools: options.remoteSubagents
+                ? [
+                    ...(options.tools?.definitions ?? []),
+                    ...remoteTools,
+                    ...(this.metadata.get('remote_parent') ? [remoteResult] : []),
+                  ]
+                : options.tools?.definitions,
               ...(mcpServers.length ? { mcp_servers: mcpServers } : {}),
               ...(shell ? { workspace: shell.cwd } : {}),
               ...(shell && options.workspaceTools
@@ -1541,35 +1878,43 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
               fetch: (input, init, subagent) =>
                 subagent ? guarded(subagent)(input, init) : cellFetch(input, init),
-              tools: options.tools && {
-                call: async (name, input, signal, context) => {
-                  if (this.dispatchBlocked(scope)) throw new Error('request authority stopped')
-                  await this.durable(scope)
-                  this.counts.host_tool_calls++
-                  const crash = this.crash
-                  this.crash = undefined
-                  if (crash !== undefined)
-                    setTimeout(
-                      () => this.ctx.abort(`chaos: the session object was reset during ${name}`),
-                      crash,
-                    )
-                  return options.tools!.call(
-                    {
-                      authority: {
-                        account_id: authority.account_id,
-                        session_id: authority.session_id,
-                        session_name: authority.session_name,
+              tools:
+                options.tools || options.remoteSubagents
+                  ? {
+                      call: async (name, input, signal, context) => {
+                        if (this.dispatchBlocked(scope))
+                          throw new Error('request authority stopped')
+                        if (options.remoteSubagents && remoteNames.has(name))
+                          return this.remoteTool(descriptor, name, input)
+                        if (!options.tools) throw new Error(`no host tool is named ${name}`)
+                        await this.durable(scope)
+                        this.counts.host_tool_calls++
+                        const crash = this.crash
+                        this.crash = undefined
+                        if (crash !== undefined)
+                          setTimeout(
+                            () =>
+                              this.ctx.abort(`chaos: the session object was reset during ${name}`),
+                            crash,
+                          )
+                        return options.tools!.call(
+                          {
+                            authority: {
+                              account_id: authority.account_id,
+                              session_id: authority.session_id,
+                              session_name: authority.session_name,
+                            },
+                            name,
+                            input,
+                            context,
+                            grant: this.turnGrant(scope, descriptor),
+                          },
+                          this.env,
+                          signal,
+                        )
                       },
-                      name,
-                      input,
-                      context,
-                      grant: this.turnGrant(scope, descriptor),
-                    },
-                    this.env,
-                    signal,
-                  )
-                },
-              },
+                    }
+                  : undefined,
               remote: {
                 failed: () => remoteFailed || remote?.failure !== undefined,
                 execute: async (request: any, id: number) => {
@@ -3387,6 +3732,7 @@ export declare namespace create {
     cellInterruptChecks?: number
     cellMemoryBytes?: number
     subagents?: boolean
+    remoteSubagents?: boolean
     subscription?(
       account: string,
       env: E,
