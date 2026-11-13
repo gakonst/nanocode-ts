@@ -1296,7 +1296,7 @@ ${input.request_id}`
           type?: string
           payload?: unknown
         }
-        if (typeof event?.type !== 'string' || event.type.endsWith('.delta')) continue
+        if (!entry.seq || typeof event?.type !== 'string' || event.type.endsWith('.delta')) continue
         this.childEvents.push({ type: event.type, payload: event.payload ?? null })
       }
       if (this.childForwarding || !this.childEvents.length) return
