@@ -402,6 +402,8 @@ async function create(
           }
           timing.headers_ms = internal.elapsed() - timing.started_ms
           timing.status = response.status
+          const source = response.headers.get('x-nanocode-mcp-source')
+          if (source) timing.diagnostic = source
           if (!internal.live(id)) {
             void response.body?.cancel().catch(() => undefined)
             internal.finishModel(timing, 'cancelled')

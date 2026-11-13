@@ -117,9 +117,9 @@ async function fetchTools<R extends Request, A extends unknown[]>(
   return parsed?.result?.tools && !parsed.result.nextCursor ? parsed.result.tools : undefined
 }
 
-function reply(id: unknown, result: unknown) {
+function reply(id: unknown, result: unknown, source: string) {
   return new Response(JSON.stringify({ jsonrpc: '2.0', id, result }), {
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-nanocode-mcp-source': source },
   })
 }
 
@@ -213,14 +213,15 @@ export function defer<R extends Request, A extends unknown[]>(
       case 'initialize': {
         if (listing?.init) {
           revalidate(listing.at)
-          return reply(body.id, listing.init)
+          return reply(body.id, listing.init, 'memory')
         }
 
+        const read = Date.now()
         const shared = !listing && policy.store ? await stored(policy.store, url, keep) : undefined
         if (shared) {
           listings.set(url, { at: shared.at, init: shared.init, tools: shared.tools })
           revalidate(shared.at)
-          return reply(body.id, shared.init)
+          return reply(body.id, shared.init, 'store ' + (Date.now() - read))
         }
 
         const at = Date.now()
@@ -250,18 +251,18 @@ export function defer<R extends Request, A extends unknown[]>(
               await store.put(await digest(url), JSON.stringify(entry), keep)
             })
             .catch(() => undefined)
-        return reply(body.id, parsed.result)
+        return reply(body.id, parsed.result, 'origin, store ' + (at - read))
       }
       case 'notifications/initialized':
         return listing || pending.has(url)
           ? new Response(null, { status: 202 })
           : send(request, signal, ...rest)
       case 'tools/list': {
-        if (listing?.tools) return reply(body.id, { tools: listing.tools })
+        if (listing?.tools) return reply(body.id, { tools: listing.tools }, 'memory')
         const tools = await list()
         if (!tools) return send(request, signal, ...rest)
         if (!listings.has(url)) listings.set(url, { at: Date.now(), tools })
-        return reply(body.id, { tools })
+        return reply(body.id, { tools }, 'origin')
       }
       default:
         return send(request, signal, ...rest)
