@@ -1461,7 +1461,6 @@ async function executeRust(
     cache.reset()
     ran = attempt()
   }
-  if (cache && options.fallback && RustPython.outran(ran)) return undefined
   if (cache) await apply(ctx.fs, cache.changes())
   if (ran.kind !== 'needs') return RustPython.report(ctx, ran)
   if (options.fallback && ran.missing.every((missing) => missing.package)) return undefined

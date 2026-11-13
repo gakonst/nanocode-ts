@@ -323,10 +323,6 @@ export function run(
   }
 }
 
-export function outran(ran: Ran): boolean {
-  return ran.kind === 'refused' && limits[ran.limit] === 'steps'
-}
-
 export function report(ctx: CommandContext, ran: Exclude<Ran, { kind: 'needs' }>): number {
   ctx.stdout.write(decode(ran.stdout))
   ctx.stderr.write(decode(ran.stderr))
