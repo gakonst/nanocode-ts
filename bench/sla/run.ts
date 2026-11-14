@@ -164,6 +164,7 @@ function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: strin
   const line = 'stty rows ' + rows + ' cols ' + cols + ' 2>/dev/null; exec ' + command.map(quote).join(' ')
   const child = ChildProcess.spawn('script', ['-qfec', line, '/dev/null'], { cwd, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] })
   const watches: { at?: bigint; resolve: (at: bigint) => void; text: string }[] = []
+  let flat = ''
   let plain = ''
   let raw = ''
   child.stdout.on('data', (data: Buffer) => {
@@ -174,8 +175,10 @@ function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: strin
       pattern.lastIndex = 0
       for (let m = pattern.exec(chunk); m; m = pattern.exec(chunk)) child.stdin.write(reply(m))
     }
-    plain = (plain + chunk.replace(ansi, '')).slice(-65536)
-    for (const watch of watches) if (watch.at === undefined && plain.includes(watch.text)) {
+    const visible = chunk.replace(ansi, '')
+    plain = (plain + visible).slice(-65536)
+    flat = (flat + visible.replace(/\s/g, '')).slice(-65536)
+    for (const watch of watches) if (watch.at === undefined && flat.includes(watch.text)) {
       watch.at = at
       watch.resolve(at)
     }
@@ -190,13 +193,14 @@ function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: strin
     },
     plain: () => plain,
     reset() {
+      flat = ''
       plain = ''
     },
     wait(text: string, timeout: number) {
       return new Promise<bigint | undefined>((resolve) => {
-        const watch = { resolve, text }
+        const watch = { resolve, text: text.replace(/\s/g, '') }
         watches.push(watch)
-        if (plain.includes(text)) resolve(now())
+        if (flat.includes(watch.text)) resolve(now())
         setTimeout(() => resolve(undefined), timeout)
       })
     },
