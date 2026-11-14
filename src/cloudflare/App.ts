@@ -78,6 +78,7 @@ export type SessionDescriptor = SessionAuthority & {
   thinking?: Contracts.Thinking
   web_search?: boolean
   codex_orchestration?: Contracts.CodexOrchestration
+  subagents?: boolean
   session_name: string
   subscription: boolean
   codex_subscription?: boolean
@@ -887,6 +888,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             { error: `codex_orchestration must be one of ${codexOrchestrations.join(', ')}` },
             400,
           )
+        if (input.subagents !== undefined && typeof input.subagents !== 'boolean')
+          return json({ error: 'subagents must be a boolean' }, 400)
+        if (input.subagents === true && options.subagents === false)
+          return json({ error: 'subagents are disabled for this app' }, 400)
         if (input.payer !== undefined && !offered.includes(input.payer))
           return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
         if (
@@ -917,6 +922,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const modelKey = `model:${scope}`
         const payerKey = `payer:${scope}`
         const orchestrationKey = `codex_orchestration:${scope}`
+        const subagentsKey = `subagents:${scope}`
         this.prime(
           [
             [
@@ -1000,6 +1006,18 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               409,
             )
           descriptor.codex_orchestration = input.codex_orchestration ?? boundOrchestration
+          const storedSubagents = this.metadata.get(subagentsKey)
+          const sessionSubagents =
+            storedSubagents === undefined ? undefined : storedSubagents === 'true'
+          const boundSubagents =
+            sessionSubagents ?? (initialized ? options.subagents !== false : undefined)
+          if (
+            boundSubagents !== undefined &&
+            input.subagents !== undefined &&
+            input.subagents !== boundSubagents
+          )
+            return json({ error: 'session subagents is immutable; create a new session' }, 409)
+          descriptor.subagents = input.subagents ?? sessionSubagents
           descriptor.thinking = input.thinking
           descriptor.web_search = input.web_search
           await subscribing
@@ -1070,6 +1088,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               if (descriptor.payer !== undefined) this.metadata.insert(payerKey, descriptor.payer)
               if (descriptor.codex_orchestration !== undefined)
                 this.metadata.insert(orchestrationKey, descriptor.codex_orchestration)
+              if (descriptor.subagents !== undefined)
+                this.metadata.insert(subagentsKey, String(descriptor.subagents))
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
@@ -1868,6 +1888,7 @@ ${input.request_id}`
         descriptor.web_search ?? null,
         descriptor.payer ?? null,
         descriptor.codex_orchestration ?? null,
+        descriptor.subagents ?? null,
       ])
       if (current)
         return current.runtime.then(async (runtime) => {
@@ -2035,9 +2056,9 @@ ${input.request_id}`
               executor: descriptor.executor_id,
               ...(child
                 ? { subagents: false, child_lineage: child.spec.lineage }
-                : options.subagents === undefined
+                : (descriptor.subagents ?? options.subagents) === undefined
                   ? {}
-                  : { subagents: options.subagents }),
+                  : { subagents: descriptor.subagents ?? options.subagents }),
               ...(options.remoteSubagents && !child ? { remote_children: true } : {}),
               ...(options.maxResidentSubagents === undefined
                 ? {}
@@ -3206,6 +3227,7 @@ ${input.request_id}`
       const orchestration = this.metadata.get('codex_orchestration:' + scope) as
         | Contracts.CodexOrchestration
         | undefined
+      const subagents = this.metadata.get('subagents:' + scope)
       return {
         ...base,
         executor_id: executor || undefined,
@@ -3214,6 +3236,7 @@ ${input.request_id}`
         ...(model === undefined ? {} : { model }),
         ...(payer === undefined ? {} : { payer }),
         ...(orchestration === undefined ? {} : { codex_orchestration: orchestration }),
+        ...(subagents === undefined ? {} : { subagents: subagents === 'true' }),
         subscription: served(
           provider,
           model,
