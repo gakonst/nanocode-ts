@@ -8,6 +8,7 @@ type Lane = {
   readonly env: (home: string, base: string) => NodeJS.ProcessEnv
   readonly exec?: (home: string, base: string, prompt: string) => readonly string[]
   readonly ready: string
+  readonly reply?: { readonly glyph: string; readonly strict: boolean }
   readonly resume?: (home: string, base: string) => readonly string[]
   readonly setup?: (home: string, cwd: string) => void
   readonly tui: (home: string, base: string) => readonly string[]
@@ -31,6 +32,7 @@ const tool = arg('tool', '0')
 const mode = arg('mode', 'tui')
 const label = arg('label', mode + '-t' + tokens + '-r' + rate + '-f' + ttft + '-tool' + tool)
 const settle = Number(arg('settle', '1500'))
+const replyWindow = Number(arg('reply-window', '60'))
 const live = process.argv.includes('--live')
 const rejected = process.argv.includes('--rejected')
 const keyed = process.argv.includes('--key')
@@ -72,11 +74,13 @@ const lanes: { [name: string]: Lane } = {
   'live-claude': {
     env: () => ({ ...process.env, TERM: base.TERM }),
     ready: '\u276f',
+    reply: { glyph: '\u25cf', strict: false },
     tui: () => [bins.claude, '--model', claudeModel],
   },
   'live-codex': {
     env: () => ({ ...process.env, TERM: base.TERM }),
     ready: '\u203a',
+    reply: { glyph: '\u2022', strict: true },
     tui: () => [bins.codex, '-m', codexModel],
   },
   'live-nc-claude': liveNcLane(bins.nc, claudeModel),
@@ -114,6 +118,7 @@ function liveNcLane(bin: string, model: string): Lane {
   return {
     env: () => ({ ...process.env, NANOCODE_TELEMETRY: 'off', TERM: base.TERM }),
     ready: 'newsession',
+    reply: { glyph: '\u25cf', strict: false },
     tui: () => [bin, '-m', model, '--ephemeral'],
   }
 }
@@ -158,15 +163,35 @@ const replies: readonly [RegExp, (match: RegExpExecArray) => string][] = [
 ]
 const ansi = /\x1b\[[0-9;?<>=!]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\|\x1b[()][0-9A-Za-z]|\x1b[=>78DEHMNOZc]/g
 
+const contains = (text: string) => {
+  const word = text.replace(/\s/g, '')
+  return (flat: string) => flat.includes(word)
+}
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+function replied(reply: NonNullable<Lane['reply']>, text: string) {
+  const word = [...text].map(escape).join('[^A-Za-z]{0,6}')
+  const head = new RegExp('^' + escape(reply.glyph) + '[^A-Za-z]{0,12}' + word)
+  const near = new RegExp(word)
+  return (flat: string) => {
+    for (let i = flat.indexOf(reply.glyph); i >= 0; i = flat.indexOf(reply.glyph, i + 1)) {
+      const rest = flat.slice(i + reply.glyph.length)
+      if (reply.strict ? head.test(flat.slice(i)) : !/^[^A-Za-z]*Thinking/.test(rest) && near.test(rest.slice(0, replyWindow))) return true
+    }
+    return false
+  }
+}
+
 const quote = (word: string) => "'" + word.replaceAll("'", "'\\''") + "'"
 
 function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: string) {
   const line = 'stty rows ' + rows + ' cols ' + cols + ' 2>/dev/null; exec ' + command.map(quote).join(' ')
   const child = ChildProcess.spawn('script', ['-qfec', line, '/dev/null'], { cwd, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] })
-  const watches: { at?: bigint; resolve: (at: bigint) => void; text: string }[] = []
+  const watches: { at?: bigint; match: (flat: string) => boolean; resolve: (at: bigint) => void }[] = []
   let flat = ''
   let plain = ''
   let raw = ''
+  let trace: [bigint, string][] = []
   child.stdout.on('data', (data: Buffer) => {
     const at = now()
     const chunk = data.toString('utf8')
@@ -176,9 +201,10 @@ function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: strin
       for (let m = pattern.exec(chunk); m; m = pattern.exec(chunk)) child.stdin.write(reply(m))
     }
     const visible = chunk.replace(ansi, '')
+    if (process.env.SLA_STREAM) trace.push([at, visible])
     plain = (plain + visible).slice(-65536)
     flat = (flat + visible.replace(/\s/g, '')).slice(-65536)
-    for (const watch of watches) if (watch.at === undefined && flat.includes(watch.text)) {
+    for (const watch of watches) if (watch.at === undefined && watch.match(flat)) {
       watch.at = at
       watch.resolve(at)
     }
@@ -195,12 +221,14 @@ function terminal(command: readonly string[], env: NodeJS.ProcessEnv, cwd: strin
     reset() {
       flat = ''
       plain = ''
+      trace = []
     },
-    wait(text: string, timeout: number) {
+    trace: () => trace,
+    wait(text: string | ((flat: string) => boolean), timeout: number) {
       return new Promise<bigint | undefined>((resolve) => {
-        const watch = { resolve, text: text.replace(/\s/g, '') }
+        const watch = { match: typeof text === 'string' ? contains(text) : text, resolve }
         watches.push(watch)
-        if (flat.includes(watch.text)) resolve(now())
+        if (watch.match(flat)) resolve(now())
         setTimeout(() => resolve(undefined), timeout)
       })
     },
@@ -264,16 +292,19 @@ async function tuiSample(name: string, lane: Lane, url: string, index: number): 
     const pair = mark.first.slice(0, 2)
     term.write(live ? "Reply with only the word formed by writing '" + pair + "' four times. (" + run + ')' : 'Reply SLA[run=' + run + ',turn=' + turn + ',tokens=' + tokens + ',rate=' + rate + ',ttft=' + ttft + ',tool=' + tool + ']')
     await sleep(200)
+    const wall = Date.now()
     const enter = now()
     term.write('\r')
     if (process.env.SLA_DEBUG) console.error(name, index, turn, 'enter')
-    const seen = await term.wait(rejected && !keyed ? '401' : mark.first, Number(arg('timeout', '20000')))
+    const token = rejected && !keyed ? '401' : mark.first
+    const seen = await term.wait(lane.reply ? replied(lane.reply, token) : token, Number(arg('timeout', '20000')))
     const last = seen && !live ? await term.wait(mark.last, Number(arg('timeout', '20000'))) : undefined
     if (process.env.SLA_DEBUG) console.error(name, index, turn, 'seen', seen !== undefined, 'last', last !== undefined)
     await sleep(300)
+    if (process.env.SLA_STREAM) Fs.appendFileSync(process.env.SLA_STREAM, JSON.stringify({ chunks: term.trace().map((entry) => [ms(entry[0], enter), entry[1]]), e2e: ms(seen, enter), index, lane: name, turn, wall }) + '\n')
     const entries = live ? [] : await log(url, run)
     if (process.env.SLA_TRACE) Fs.appendFileSync(process.env.SLA_TRACE, JSON.stringify({ enter: String(enter), headers: String(entries.find((entry) => entry.kind !== 'side')?.headers_ns), lane: name, turn }) + '\n')
-    out.push({ index, lane: name, ready: ms(ready, started), turn, ...(live ? { e2e: ms(seen, enter) } : derive(entries, enter, seen, last)), ...(seen ? {} : { error: 'no token: ' + term.plain().slice(-300) }) })
+    out.push({ index, lane: name, ready: ms(ready, started), turn, wall, ...(live ? { e2e: ms(seen, enter) } : derive(entries, enter, seen, last)), ...(seen ? {} : { error: 'no token: ' + term.plain().slice(-300) }) })
     await sleep(live ? 3000 : 500)
   }
   term.kill()
