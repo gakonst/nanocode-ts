@@ -157,6 +157,7 @@ const setTimeoutWithArgs = (callback, delay, ...args) => {
   if (typeof callback !== "function") throw new TypeError("setTimeout expects a function callback, got " + typeof callback);
   return hostFunction("setTimeout")(args.length ? () => callback(...args) : callback, delay);
 };
+const hostClearTimeout = hostFunction("clearTimeout");
 const intervals = new Map();
 let nextInterval = 1 << 30;
 const setInterval = (callback, delay, ...args) => {
@@ -172,8 +173,8 @@ const setInterval = (callback, delay, ...args) => {
   return id;
 };
 const clearAnyTimer = (id) => {
-  if (intervals.has(id)) { hostFunction("clearTimeout")(intervals.get(id)); intervals.delete(id); }
-  else if (id !== undefined && id !== null) hostFunction("clearTimeout")(id);
+  if (intervals.has(id)) { hostClearTimeout(intervals.get(id)); intervals.delete(id); }
+  else if (id !== undefined && id !== null) hostClearTimeout(id);
 };
 const clearInterval = clearAnyTimer;
 const setImmediate = (callback, ...args) => setTimeoutWithArgs(callback, 0, ...args);
@@ -491,5 +492,5 @@ const lazyObject = (module, name) => new Proxy({}, {
 });
 const webClasses = Object.fromEntries(["Blob", "Buffer", "File", "FormData", "ReadableStream", "TextDecoderStream", "TextEncoderStream", "TransformStream", "URL", "URLSearchParams", "WritableStream"].map((name) => [name, lazyClass("web", name)]));
 const extraClasses = Object.fromEntries(["AbortController", "AbortSignal", "CustomEvent", "Event", "EventTarget"].map((name) => [name, lazyClass("extra", name)]));
-const globals = { ...webClasses, ...extraClasses, Headers, Intl: lazyObject("intl", "Intl"), Request, Response, TextDecoder, TextEncoder, WebAssembly: lazyObject("extra", "WebAssembly"), bash, clearImmediate, clearInterval, crypto: lazyObject("crypto", "crypto"), fetch, process: lazyObject("extra", "process"), require: (name) => load("extra").require(name), setImmediate, setInterval, structuredClone: (value, options) => load("web").structuredClone(value, options), wasm: lazyObject("extra", "wasm"), ...aliases };
+const globals = { ...webClasses, ...extraClasses, Headers, Intl: lazyObject("intl", "Intl"), Request, Response, TextDecoder, TextEncoder, WebAssembly: lazyObject("extra", "WebAssembly"), bash, clearImmediate, clearInterval, clearTimeout: clearAnyTimer, crypto: lazyObject("crypto", "crypto"), fetch, process: lazyObject("extra", "process"), require: (name) => load("extra").require(name), setImmediate, setInterval, structuredClone: (value, options) => load("web").structuredClone(value, options), wasm: lazyObject("extra", "wasm"), ...aliases };
 return globals;
