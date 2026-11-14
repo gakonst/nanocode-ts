@@ -47,6 +47,7 @@ export type Env = {
   REMOTE_TIMEOUT_MS: string
   SESSION_LOCATION_HINT?: DurableObjectLocationHint
   SESSION_POOL?: DurableObjectNamespace<Pool.SessionPool>
+  SESSION_POOL_BINDING_CACHE_S?: string
   SESSION_POOL_CACHED_NAMES?: string
 }
 
@@ -175,7 +176,7 @@ function withHand(
 
 async function sessionObject(
   env: Env,
-  options: { account: string; bound: Map<string, string>; name: string },
+  options: { account: string; bound: Map<string, string>; host?: string | undefined; name: string },
 ): Promise<DurableObjectStub> {
   const key = JSON.stringify([options.account, options.name])
   const id = await (async () => {
@@ -183,10 +184,27 @@ async function sessionObject(
     const cached = options.bound.get(key)
     if (cached) return env.SESSIONS.idFromString(cached)
 
-    const resolved = await Pool.resolve(env.SESSION_POOL, {
-      key,
-      locationHint: env.SESSION_LOCATION_HINT,
-    })
+    const shared = (() => {
+      if (env.SESSION_POOL_BINDING_CACHE_S === undefined || options.host === undefined) return
+      if (options.host.endsWith('.workers.dev')) return
+      const pool = env.SESSION_POOL.idFromName('pool').toString()
+      return {
+        seconds: policy(env.SESSION_POOL_BINDING_CACHE_S, 'SESSION_POOL_BINDING_CACHE_S'),
+        url: `https://${options.host}/internal/session-pool/${pool}/${encodeURIComponent(key)}`,
+      }
+    })()
+    const stored = shared ? await caches.default.match(shared.url) : undefined
+    const resolved = stored
+      ? await stored.text()
+      : await Pool.resolve(env.SESSION_POOL, {
+          key,
+          locationHint: env.SESSION_LOCATION_HINT,
+        })
+    if (shared && !stored)
+      void caches.default.put(
+        shared.url,
+        new Response(resolved, { headers: { 'cache-control': `max-age=${shared.seconds}` } }),
+      )
     options.bound.set(key, resolved)
     if (
       options.bound.size > policy(env.SESSION_POOL_CACHED_NAMES ?? '', 'SESSION_POOL_CACHED_NAMES')
@@ -3965,7 +3983,7 @@ ${input.request_id}`
     if (match?.[2] === 'turns' && match[3] === undefined && request.method === 'POST')
       void primeTurn(request.clone(), env)
     const resolving = performance.now()
-    const session = await sessionObject(env, { account, bound, name })
+    const session = await sessionObject(env, { account, bound, host: target.hostname, name })
     const dispatched = performance.now()
     let response: Response
     try {
