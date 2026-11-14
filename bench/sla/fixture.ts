@@ -161,7 +161,7 @@ const sleepUntil = (target: bigint) =>
     tick()
   })
 
-const write = (res: Http.ServerResponse, text: string) => (res.write(text) ? null : new Promise<void>((resolve) => res.once('drain', () => resolve())))
+const write = (res: Http.ServerResponse, text: string, flushed?: () => void) => (res.write(text, flushed) ? null : new Promise<void>((resolve) => res.once('drain', () => resolve())))
 
 async function stream(res: Http.ServerResponse, enc: ReturnType<typeof encoder>, sc: Scenario, entry: Entry) {
   res.write(enc.begin('text'))
@@ -173,13 +173,17 @@ async function stream(res: Http.ServerResponse, enc: ReturnType<typeof encoder>,
     if (res.destroyed) break
     const due = sc.rate > 0 ? Math.min(texts.length, Math.floor((Number(now() - t0) / 1e9) * sc.rate) + 1) : sent + 1
     const batch = texts.slice(sent, due)
-    entry.first_token_ns ??= now()
-    const wait = write(res, batch.map((text) => enc.delta(text)).join(''))
+    const first = sent === 0
+    const last = due === texts.length
+    const wait = write(res, batch.map((text) => enc.delta(text)).join(''), first || last ? () => {
+      const at = now()
+      if (first) entry.first_token_ns = at
+      if (last) entry.last_token_ns = at
+    } : undefined)
     sent += batch.length
     if (wait) await wait
     if (sc.rate > 0 && sent < texts.length) await sleepUntil(t0 + BigInt(Math.ceil((sent / sc.rate) * 1e9)))
   }
-  entry.last_token_ns = now()
   res.end(enc.end(texts.join('')))
 }
 
