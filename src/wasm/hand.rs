@@ -12,7 +12,7 @@ use nanocode_code_mode::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use nanocode_sync::mpsc;
 
 use super::{
     bridge::{call, spawn},
