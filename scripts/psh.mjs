@@ -6,7 +6,13 @@ import { root } from './wasm.mjs'
 
 export const pin = JSON.parse(readFileSync(join(root, 'psh-revision.json'), 'utf8'))
 
-const paths = ['Cargo.toml', 'Cargo.lock', 'crates/core/shell', 'crates/patches/psh']
+const paths = [
+  'Cargo.toml',
+  'Cargo.lock',
+  'crates/core/shell',
+  'crates/core/sys',
+  'crates/patches/psh',
+]
 const workspace = join('crates', 'patches', 'psh')
 
 function run(command, cwd) {
