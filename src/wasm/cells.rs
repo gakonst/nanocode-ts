@@ -35,6 +35,40 @@ pub fn host(workspace: Option<&str>) -> LocalCells {
     )
 }
 
+pub fn globals(shell: bool, aliases: &[&str]) -> String {
+    let mut text = String::from(
+        "Cells on this host also have these globals, beyond the ones above: `fetch(url, init?)` makes an HTTP request from this host, which may pay for it, with `Request`, `Response` and `Headers`; `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `Blob`, `File`, `FormData`, web streams, `Buffer`, `crypto`, `structuredClone`, `AbortController`, `AbortSignal`, `Event`, `CustomEvent`, `EventTarget`, `Intl`, `process`, `setInterval`, `clearInterval`, `setImmediate` and `clearImmediate`; `require` throws, since cells cannot load modules.",
+    );
+    if shell {
+        text.push_str(" `bash` runs a script in this session's simulated shell over its files, as a tagged template such as ``bash`ls ${dir}` `` or `bash(command, { cwd, stdin, env, timeout })`, and resolves to `{ stdout, stderr, exitCode }`; `bash.readFile(path, encoding?)`, `bash.writeFile(path, content)` and `bash.appendFile(path, content)` reach the same files, and `wasm` and `WebAssembly` run WebAssembly modules.");
+    }
+    if !aliases.is_empty() {
+        let quoted = aliases
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>();
+        let names = match quoted.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => quoted.concat(),
+        };
+        let verb = match quoted.len() {
+            1 => "is a global",
+            _ => "are globals",
+        };
+        text.push_str(&format!(
+            " {names} {verb} too, calling the nested tool of that name"
+        ));
+        if aliases.contains(&"exec_command") {
+            text.push_str("; `exec_command` also takes a bare command string, with its other fields as a second argument, or `{ command }`");
+        }
+        if aliases.contains(&"apply_patch") {
+            text.push_str("; `apply_patch` also takes the patch text or `{ patch }`");
+        }
+        text.push('.');
+    }
+    text
+}
+
 struct Fetch;
 
 struct Shell(String);

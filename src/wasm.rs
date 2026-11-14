@@ -1092,12 +1092,26 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
         if !(placement || local) {
             return Ok(tools);
         }
-        tools
+        let aliases = ["exec_command", "write_stdin", "apply_patch"]
+            .into_iter()
+            .filter(|name| {
+                tools
+                    .registered_tools()
+                    .any(|tool| tool.definition().name() == *name)
+            })
+            .collect::<Vec<_>>();
+        let builder = tools
             .into_builder()
             .without_defaults()
-            .code_mode_host(executors.clone())
-            .build()
-            .map_err(configuration)
+            .code_mode_host(executors.clone());
+        match local && !config.hands {
+            true => {
+                builder.code_tools_heading(cells::globals(config.workspace.is_some(), &aliases))
+            }
+            false => builder,
+        }
+        .build()
+        .map_err(configuration)
     };
     let gated = |tools: Tools| {
         let builder = tools.into_builder().effect_gate(log.gate());
