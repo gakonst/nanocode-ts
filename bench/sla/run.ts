@@ -41,6 +41,7 @@ const rows = 40
 const cols = 120
 
 const base = { HOME: '', LANG: 'C.UTF-8', PATH: process.env.PATH, TERM: 'xterm-256color', USER: process.env.USER }
+const proxy = Object.fromEntries(Object.entries(process.env).filter((entry) => /^(https?_proxy|no_proxy|node_extra_ca_certs|ssl_cert_file)$/i.test(entry[0])))
 const bins = {
   claude: process.env.CLAUDE_BIN ?? 'claude',
   codex: process.env.CODEX_BIN ?? 'codex',
@@ -80,7 +81,7 @@ const lanes: { [name: string]: Lane } = {
   },
   'live-nc-claude': liveNcLane(bins.nc, claudeModel),
   'rejected-claude': {
-    env: (home) => ({ ...base, ANTHROPIC_API_KEY: anthropicKey, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CONFIG_DIR: home + '/.claude', DISABLE_AUTOUPDATER: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_TELEMETRY: '1', HOME: home }),
+    env: (home) => ({ ...base, ...proxy, ANTHROPIC_API_KEY: anthropicKey, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CONFIG_DIR: home + '/.claude', DISABLE_AUTOUPDATER: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_TELEMETRY: '1', HOME: home }),
     ready: '\u276f',
     setup: (home, cwd) => lanes.claude!.setup!(home, cwd),
     tui: () => [bins.claude, '--model', claudeModel],
@@ -121,7 +122,7 @@ function rejectedLane(bin: string, kind: string): Lane {
   const env = kind === 'claude' ? { NANOCODE_ANTHROPIC_API_KEY: anthropicKey, NANOCODE_ANTHROPIC_BASE_URL: 'https://api.anthropic.com/v1' } : { AI_GATEWAY_API_KEY: 'invalid' }
   const args = kind === 'claude' ? ['-m', claudeModel] : ['--gateway', 'vercel', '-m', 'luna']
   return {
-    env: (home) => ({ ...base, ...env, HOME: home, NANOCODE_TELEMETRY: 'off' }),
+    env: (home) => ({ ...base, ...env, ...proxy, HOME: home, NANOCODE_TELEMETRY: 'off' }),
     ready: 'Ask anything',
     tui: (home) => [bin, '--home', home + '/.nanocode', ...args, '--ephemeral'],
   }
