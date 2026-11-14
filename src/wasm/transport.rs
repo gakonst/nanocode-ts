@@ -82,6 +82,9 @@ impl Drop for Body {
 impl Sender for WorkerTransport {
     fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, Error>> {
         Box::pin(async move {
+            if self.0.is_some() {
+                super::remote::settle().await.map_err(layer_error)?;
+            }
             let headers = header_pairs(&request.headers).map_err(layer_error)?;
             let origin = origin::current();
             let subagent = subagent().await;
@@ -116,6 +119,7 @@ struct Socket {
 impl HostConnection for Socket {
     fn send<'a>(&'a self, message: &'a str) -> HostFuture<'a, Result<(), HostError>> {
         Box::pin(async move {
+            super::remote::settle().await.map_err(host_error)?;
             let origin = origin::current();
             let subagent = subagent().await;
             match call_with_body(

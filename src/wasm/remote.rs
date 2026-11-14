@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap},
+    time::Duration,
+};
 
 use std::sync::Arc;
 
@@ -17,6 +21,7 @@ use super::bridge::{call, spawn};
 
 thread_local! {
     static ACTIVITY: RefCell<Vec<RemoteActivity>> = const { RefCell::new(Vec::new()) };
+    static ANSWERED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
 }
 
 fn error(value: impl std::fmt::Display) -> CodeModeHostError {
@@ -77,12 +82,49 @@ fn context(frame: &Frame) -> Option<&RemoteContext> {
     }
 }
 
+fn cell(frame: &Frame) -> Option<&str> {
+    match frame {
+        Frame::Request {
+            operation:
+                RemoteOperation::Execute { context, .. } | RemoteOperation::Wait { context, .. },
+            ..
+        } => Some(&context.call_id),
+        _ => None,
+    }
+}
+
 struct WorkerLink {
     connection: Option<String>,
     tool_selection: bool,
     caches_local_tools: bool,
     resumes: Option<String>,
     max_frame_bytes: usize,
+    scope: String,
+}
+
+async fn commit(scope: &str, cells: &[&str]) -> Result<(), String> {
+    let answered = ANSWERED.with_borrow_mut(|scopes| scopes.remove(scope));
+    let committed = async {
+        let calls = serde_json::value::to_raw_value(cells).map_err(|issue| issue.to_string())?;
+        super::log(scope)
+            .await?
+            .effect("hand", calls)
+            .await
+            .map(drop)
+            .map_err(|issue| issue.to_string())
+    }
+    .await;
+    if committed.is_err() && answered {
+        ANSWERED.with_borrow_mut(|scopes| scopes.insert(scope.to_owned()));
+    }
+    committed
+}
+
+pub async fn settle() -> Result<(), String> {
+    while let Some(scope) = ANSWERED.with_borrow(|scopes| scopes.first().cloned()) {
+        commit(&scope, &[]).await?;
+    }
+    Ok(())
 }
 
 impl RemoteLink for WorkerLink {
@@ -119,6 +161,12 @@ impl RemoteLink for WorkerLink {
                 .map(|frame| frame.encode(self.max_frame_bytes))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|issue| CodeModeHostError::unsent(issue.message()))?;
+            let cells = frames.iter().filter_map(cell).collect::<Vec<_>>();
+            if !cells.is_empty() {
+                commit(&self.scope, &cells)
+                    .await
+                    .map_err(CodeModeHostError::unsent)?;
+            }
             let sent = call(json!({"op": "remote_send", "connection": self.connection, "frames": encoded, "durable": delivery == RemoteDelivery::Durable, "dispatches": dispatches, "origins": origins}))
                 .await
                 .map_err(send_error)?;
@@ -162,13 +210,20 @@ impl RemoteLink for WorkerLink {
             }
             let frames: Vec<String> =
                 serde_json::from_value(value["frames"].clone()).map_err(error)?;
-            frames
+            let frames = frames
                 .iter()
                 .map(|text| {
                     Frame::decode(text, self.max_frame_bytes)
                         .map_err(|issue| error(format!("runner connection failed: {issue}")))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?;
+            if frames
+                .iter()
+                .any(|frame| matches!(frame, Frame::Reply { .. }))
+            {
+                ANSWERED.with_borrow_mut(|scopes| scopes.insert(self.scope.clone()));
+            }
+            Ok(frames)
         })
     }
 
@@ -268,7 +323,7 @@ pub fn catalog(frame: &str, max_frame_bytes: usize) -> Result<Value, String> {
     Ok(json!({"name": catalog.name, "runtime_id": catalog.runtime_id}))
 }
 
-pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, String> {
+pub async fn host(connection: Option<String>, scope: &str) -> Result<RemoteCodeModeHost, String> {
     let catalog = call(json!({"op": "remote_catalog", "connection": connection}))
         .await
         .map_err(|issue| host_error(issue).to_string())?;
@@ -294,6 +349,7 @@ pub async fn host(connection: Option<String>) -> Result<RemoteCodeModeHost, Stri
             caches_local_tools: catalog.caches_local_tools,
             resumes: catalog.resumes().filter(|_| resumes).map(str::to_owned),
             max_frame_bytes,
+            scope: scope.to_owned(),
         },
         Some(Duration::from_millis(timeout_ms)),
     );

@@ -1137,7 +1137,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                     .journals(log.journals().await.map_err(text)?),
             )
         } else {
-            let host = remote::host(None).await?;
+            let host = remote::host(None, &config.scope).await?;
             Arc::new(match &hand_tools {
                 Some(policy) => host.with_tool_selection(policy.clone()),
                 None => host,
@@ -1278,7 +1278,7 @@ async fn init(config: Value) -> Result<Value, String> {
 
 impl Session {
     async fn attach(&self, hand: String, connection: String) -> Result<Value, String> {
-        let host = remote::host(Some(connection.clone())).await?;
+        let host = remote::host(Some(connection.clone()), &self.scope).await?;
         let host: Arc<dyn CodeModeHost> = Arc::new(match &self.hand_tools {
             Some(policy) => host.with_tool_selection(policy.clone()),
             None => host,
