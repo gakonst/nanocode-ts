@@ -8,7 +8,7 @@ export type Env = {
 }
 
 export class SessionPool extends DurableObject<Env> {
-  private filling: Promise<void> | undefined
+  private starting = 0
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -68,35 +68,27 @@ export class SessionPool extends DurableObject<Env> {
     return sql.exec('SELECT 1 FROM ready').toArray().length
   }
 
-  private async fill(): Promise<void> {
+  private async refill(): Promise<void> {
     const size = positive(this.env.SESSION_POOL_SIZE, 'SESSION_POOL_SIZE')
     const sql = this.ctx.storage.sql
-    for (
-      let count = sql.exec('SELECT 1 FROM ready').toArray().length;
-      count < size;
-      count = sql.exec('SELECT 1 FROM ready').toArray().length
-    ) {
-      const ids = Array.from({ length: size - count }, () =>
-        this.env.SESSIONS.newUniqueId().toString(),
-      )
-      const started = await Promise.all(ids.map((id) => this.start(id)))
-      ids.forEach((id, index) => {
-        if (started[index]) sql.exec('INSERT INTO ready (id, at) VALUES (?, ?)', id, Date.now())
-      })
-      if (!started.some(Boolean)) throw new Error('no pooled session object started')
-    }
+    const ids = Array.from(
+      { length: size - this.starting - sql.exec('SELECT 1 FROM ready').toArray().length },
+      () => this.env.SESSIONS.newUniqueId().toString(),
+    )
+    this.starting += ids.length
+    const started = await Promise.all(ids.map((id) => this.start(id))).finally(() => {
+      this.starting -= ids.length
+    })
+    ids.forEach((id, index) => {
+      if (started[index]) sql.exec('INSERT INTO ready (id, at) VALUES (?, ?)', id, Date.now())
+    })
+    if (ids.length > 0 && !started.some(Boolean))
+      throw new Error('no pooled session object started')
 
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(
         Date.now() + positive(this.env.SESSION_POOL_KEEPALIVE_MS, 'SESSION_POOL_KEEPALIVE_MS'),
       )
-  }
-
-  private refill(): Promise<void> {
-    this.filling ??= this.fill().finally(() => {
-      this.filling = undefined
-    })
-    return this.filling
   }
 
   private sealed(): boolean {
