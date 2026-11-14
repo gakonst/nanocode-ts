@@ -62,9 +62,9 @@ const lanes: { [name: string]: Lane } = {
   codex: {
     env: (home) => ({ ...base, BENCH_KEY: 'fixture-key', CODEX_HOME: home + '/.codex', HOME: home }),
     ready: 'bench/model',
-    setup: (home) => {
+    setup: (home, cwd) => {
       Fs.mkdirSync(home + '/.codex', { recursive: true })
-      Fs.writeFileSync(home + '/.codex/config.toml', 'approval_policy = "never"\ncheck_for_update_on_startup = false\nsandbox_mode = "danger-full-access"\n\n[analytics]\nenabled = false\n\n[feedback]\nenabled = false\n')
+      Fs.writeFileSync(home + '/.codex/config.toml', 'approval_policy = "never"\ncheck_for_update_on_startup = false\nsandbox_mode = "danger-full-access"\n\n[analytics]\nenabled = false\n\n[feedback]\nenabled = false\n\n[projects."' + cwd + '"]\ntrust_level = "trusted"\n')
     },
     tui: (home, url) => [bins.codex, '-c', 'model_provider="bench"', '-c', 'model_providers.bench={name="bench",base_url="' + url + '/v1",wire_api="responses",env_key="BENCH_KEY"}', '-m', 'bench/model'],
   },
@@ -75,7 +75,7 @@ const lanes: { [name: string]: Lane } = {
   },
   'live-codex': {
     env: () => ({ ...process.env, TERM: base.TERM }),
-    ready: 'describe a task',
+    ready: '\u203a',
     tui: () => [bins.codex, '-m', codexModel],
   },
   'live-nc-claude': liveNcLane(bins.nc, claudeModel),
