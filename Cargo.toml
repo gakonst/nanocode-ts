@@ -44,3 +44,9 @@ strip = "symbols"
 
 [profile.wasm.package.djs-core]
 opt-level = 3
+
+[profile.wasm.package.nanocode-compression]
+opt-level = 3
+
+[profile.wasm.package.nanocode-digest]
+opt-level = 3
