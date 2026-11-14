@@ -935,7 +935,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert('authority', identity)
               this.metadata.insert(providerKey, descriptor.provider!)
               if (descriptor.model !== undefined) this.metadata.insert(modelKey, descriptor.model)
-              if (descriptor.payer !== undefined) this.metadata.insert(payerKey, descriptor.payer)
+              this.metadata.insert(
+                payerKey,
+                descriptor.payer ?? (descriptor.subscription ? 'plan' : 'deployment'),
+              )
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
