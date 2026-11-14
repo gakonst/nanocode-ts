@@ -1887,8 +1887,8 @@ ${input.request_id}`
         descriptor.executor_id ?? null,
         descriptor.web_search ?? null,
         descriptor.payer ?? null,
-        descriptor.codex_orchestration ?? null,
-        descriptor.subagents ?? null,
+        descriptor.codex_orchestration ?? 'code_mode',
+        descriptor.subagents ?? options.subagents ?? null,
       ])
       if (current)
         return current.runtime.then(async (runtime) => {
