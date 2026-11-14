@@ -5,7 +5,7 @@ import { Bash, MemoryFileSystem } from '../../src/bash/index.ts'
 const root = process.env.CAPI ?? join(process.env.HOME ?? '', 'rpw/capi')
 const module = new WebAssembly.Module(readFileSync(process.argv[2] ?? 'dist/python.wasm'))
 const psh = new WebAssembly.Module(readFileSync('dist/psh.wasm'))
-const kept = new Set(['tokio', 'mio', 'socket2', 'futures-core', 'futures-sink', 'futures-task', 'futures-util', 'futures-channel', 'futures-io', 'futures-macro', 'tracing', 'tracing-core', 'slab', 'pin-project-lite', 'serde', 'serde_core', 'serde_derive', 'syn', 'quote', 'proc-macro2', 'unicode-ident'])
+const kept = new Set(['tokio', 'mio', 'socket2', 'futures-core', 'futures-sink', 'futures-task', 'futures-util', 'futures-channel', 'futures-io', 'futures-macro', 'tracing', 'tracing-core', 'slab', 'pin-project-lite', 'serde', 'serde_core', 'serde_derive', 'syn', 'quote', 'proc-macro2', 'unicode-ident', 'libc', 'wasi', 'windows-sys', 'windows-link', 'bytes', 'rustls-pki-types', 'zeroize'])
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -34,7 +34,8 @@ for (const name of packages) {
   rows.push({ name, extensions: extensions.length, imported: Number(result.stdout.trim()) || 0 })
 }
 
-const symbols = readFileSync(join(root, 'freq.txt'), 'utf8').trim().split('\n').length
+const symbols = readFileSync(join(root, 'freq.txt'), 'utf8').trim().split('\n').map((line) => line.trim().split(/\s+/).pop()!)
+const exported = new Set(WebAssembly.Module.exports(module).map((entry) => entry.name))
 const lock = readFileSync('python/Cargo.lock', 'utf8')
 const external = [...lock.matchAll(/name = "([^"]+)"\nversion = "[^"]+"\nsource = "registry/g)].map((match) => match[1]!).filter((name) => !kept.has(name))
 const limits = await (async () => {
@@ -47,4 +48,4 @@ const limits = await (async () => {
 })()
 const imported = rows.reduce((sum, row) => sum + row.imported, 0)
 const extensions = rows.reduce((sum, row) => sum + row.extensions, 0)
-console.log(JSON.stringify({ imported, extensions, packages: rows.filter((row) => row.extensions && row.imported === row.extensions).length + '/' + rows.length, capi: '0/' + symbols, bytes: statSync(process.argv[2] ?? 'dist/python.wasm').size, external: external.length, externalCrates: external, limits, rows }))
+console.log(JSON.stringify({ imported, extensions, packages: rows.filter((row) => row.extensions && row.imported === row.extensions).length + '/' + rows.length, capi: symbols.filter((symbol) => exported.has(symbol)).length + '/' + symbols.length, bytes: statSync(process.argv[2] ?? 'dist/python.wasm').size, external: external.length, externalCrates: external, limits, rows }))
