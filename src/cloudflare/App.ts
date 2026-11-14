@@ -397,6 +397,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       recoveries: 0,
       runtime_retirements: 0,
       host_tool_calls: 0,
+      requests: 0,
+      child_requests: 0,
     }
 
     constructor(ctx: DurableObjectState, env: E) {
@@ -503,6 +505,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     async fetch(request: Request): Promise<Response> {
+      this.counts.requests++
       const admitted = performance.now()
       if (this.deleted) return json({ error: 'session deleted' }, 410)
       try {
@@ -1012,6 +1015,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       action: string,
       body: unknown,
     ): Promise<Response> {
+      this.counts.child_requests++
       const name = `${descriptor.session_name}/child/${sessionId}`
       const child: SessionDescriptor = {
         account_id: descriptor.account_id,
