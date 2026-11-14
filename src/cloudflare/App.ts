@@ -41,6 +41,7 @@ export type Env = {
   EVENT_COALESCE_MS: string
   MODEL_SOCKET_LINGER_MS: string
   MODEL_PRIME_IDLE_MS?: string
+  PROMPT_CACHE_PRIME_MS?: string
   RUNTIME_MEMORY_BUDGET_BYTES: string
   RUNNER_ENABLED?: string
   REMOTE_MAX_FRAME_BYTES: string
@@ -377,6 +378,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     plans ? plans.egress(env as E & Plans.Env) : options.egress(env)
   const bound = new Map<string, string>()
   const primed = new Map<Contracts.ModelProvider, number>()
+  let promptCachePrimedAt: number | undefined
   const primeModel = (env: E, provider: unknown, model: unknown): Promise<void> =>
     egress(env)
       .fetch(
@@ -472,6 +474,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       recoveries: 0,
       runtime_retirements: 0,
       host_tool_calls: 0,
+      prompt_cache_primes: 0,
+      prompt_cache_prime_failures: 0,
     }
 
     constructor(ctx: DurableObjectState, env: E) {
@@ -613,11 +617,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             ?.store?.(this.env)
             ?.get('nanocode-mcp:prime')
             .catch(() => undefined)
-          this.compiled ??= this.compile().catch((error) => {
+          this.compiled ??= this.compile(false).catch((error) => {
             this.compiled = undefined
             throw error
           })
           await this.compiled
+          this.primePromptCache()
           return new Response(null, { status: 204 })
         }
         let descriptor: SessionDescriptor
@@ -3300,7 +3305,20 @@ ${input.request_id}`
       return true
     }
 
-    private async compile(): Promise<void> {
+    private primePromptCache(): void {
+      if (this.env.PROMPT_CACHE_PRIME_MS === undefined) return
+      const interval = policy(this.env.PROMPT_CACHE_PRIME_MS, 'PROMPT_CACHE_PRIME_MS')
+      if (promptCachePrimedAt !== undefined && Date.now() - promptCachePrimedAt < interval) return
+      promptCachePrimedAt = Date.now()
+      this.counts.prompt_cache_primes++
+      this.ctx.waitUntil(
+        this.compile(true).catch(() => {
+          this.counts.prompt_cache_prime_failures++
+        }),
+      )
+    }
+
+    private async compile(live: boolean): Promise<void> {
       const servers = typeof options.mcp?.servers === 'function' ? [] : (options.mcp?.servers ?? [])
       const mcpStore = servers.length ? options.mcp?.store?.(this.env) : undefined
       const runtime = await AgentRuntime.instantiate(wasm, this.store, { published: () => {} })
@@ -3334,14 +3352,36 @@ ${input.request_id}`
           },
           {
             ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
-            dispatch: async () =>
-              json(
-                { type: 'error', error: { type: 'invalid_request_error', message: 'prestart' } },
-                400,
-              ),
+            dispatch: async (request) => {
+              if (!live || request.provider == null)
+                return json(
+                  { type: 'error', error: { type: 'invalid_request_error', message: 'prestart' } },
+                  400,
+                )
+              this.modelAt = Date.now()
+              return await egress(this.env).fetch(
+                new Request('https://egress.internal/model', {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/octet-stream',
+                    'x-nanocode-model': headerJson({
+                      authority: { account_id: '', session_id: '' },
+                      endpoint: request.endpoint,
+                      headers: request.headers,
+                      origin: request.origin,
+                      provider: request.provider,
+                      subagent: null,
+                      subscription: false,
+                    } satisfies ModelDispatch),
+                  },
+                  body: request.body,
+                }),
+              )
+            },
           },
         )
-        await runtime.sideQuestion({ question: 'prestart' }).catch(() => undefined)
+        const answer = runtime.sideQuestion({ question: 'prestart' })
+        await (live ? answer : answer.catch(() => undefined))
       } finally {
         await runtime.dispose()
       }
