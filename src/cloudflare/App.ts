@@ -426,6 +426,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
     private modelAt?: number
+    private compiled?: Promise<void>
 
     private readonly tripwires = new Map<string, string>()
     private directoryBodies = new Map<string, string>()
@@ -594,6 +595,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
             ?.store?.(this.env)
             ?.get('nanocode-mcp:prime')
             .catch(() => undefined)
+          this.compiled ??= this.compile().catch((error) => {
+            this.compiled = undefined
+            throw error
+          })
+          await this.compiled
           return new Response(null, { status: 204 })
         }
         let descriptor: SessionDescriptor
@@ -3258,6 +3264,53 @@ ${input.request_id}`
       await runtime.preconnect()
       if (!this.pumping && !this.metadata.first('background:')) this.releaseIdle(true)
       return true
+    }
+
+    private async compile(): Promise<void> {
+      const servers = typeof options.mcp?.servers === 'function' ? [] : (options.mcp?.servers ?? [])
+      const mcpStore = servers.length ? options.mcp?.store?.(this.env) : undefined
+      const runtime = await AgentRuntime.instantiate(wasm, this.store, { published: () => {} })
+      try {
+        await runtime.open(
+          {
+            scope: ownerScope,
+            session_id: Contracts.sessionUuid(),
+            provider: 'claude',
+            model: this.env.CLAUDE_MODEL,
+            subscription: false,
+            endpoint: 'https://api.anthropic.com/v1/messages',
+            providers: { codex: { endpoint: 'https://api.openai.com/v1' } },
+            event_coalesce_ms: duration(this.env.EVENT_COALESCE_MS, 'EVENT_COALESCE_MS'),
+            live_deltas: options.liveDeltas ?? true,
+            stream_tool_input: options.streamToolInput ?? true,
+            tools: options.tools?.definitions,
+            ...(servers.length ? { mcp_servers: servers } : {}),
+            ...(options.workspace === false
+              ? {}
+              : {
+                  workspace: options.workspace?.cwd ?? '/workspace',
+                  environment: {
+                    cwd: options.workspace?.cwd ?? '/workspace',
+                    date: new Date().toISOString().slice(0, 10),
+                  },
+                }),
+            ...(options.workspace !== false && options.workspaceTools
+              ? { workspace_tools: options.workspaceTools }
+              : {}),
+          },
+          {
+            ...(mcpStore ? { mcp: { store: mcpStore } } : {}),
+            dispatch: async () =>
+              json(
+                { type: 'error', error: { type: 'invalid_request_error', message: 'prestart' } },
+                400,
+              ),
+          },
+        )
+        await runtime.sideQuestion({ question: 'prestart' }).catch(() => undefined)
+      } finally {
+        await runtime.dispose()
+      }
     }
 
     private claimPrewarmed(scope: string, descriptor: SessionDescriptor): string | undefined {
