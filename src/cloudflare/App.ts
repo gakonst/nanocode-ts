@@ -580,6 +580,17 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const url = new URL(request.url)
         if (url.pathname === '/internal/prestart' && request.method === 'POST') {
           await this.instance(ownerScope)
+          this.prime(
+            [
+              ['claude', undefined],
+              ['codex', undefined],
+            ],
+            undefined,
+          )
+          void options.mcp
+            ?.store?.(this.env)
+            ?.get('nanocode-mcp:prime')
+            .catch(() => undefined)
           return new Response(null, { status: 204 })
         }
         let descriptor: SessionDescriptor
@@ -866,8 +877,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const modelKey = `model:${scope}`
         const payerKey = `payer:${scope}`
         this.prime(
-          this.metadata.get(providerKey) ?? input.provider ?? 'claude',
-          this.metadata.get(modelKey) ?? input.model,
+          [
+            [
+              this.metadata.get(providerKey) ?? input.provider ?? 'claude',
+              this.metadata.get(modelKey) ?? input.model,
+            ],
+          ],
           this.metadata.get(payerKey) ?? input.payer,
         )
         if (!this.opened(scope)?.resident)
@@ -3129,14 +3144,19 @@ ${input.request_id}`
       }
     }
 
-    private prime(provider: unknown, model: unknown, payer: unknown): void {
+    private prime(models: readonly (readonly [unknown, unknown])[], payer: unknown): void {
       if (this.env.MODEL_PRIME_IDLE_MS === undefined) return
       if (payer === 'plan' || payer === 'wallet') return
-      if (typeof model === 'string' && workersAiModels.has(model)) return
+      const primed = models.filter(
+        (entry) => typeof entry[1] !== 'string' || !workersAiModels.has(entry[1]),
+      )
+      if (!primed.length) return
       const idle = policy(this.env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
       if (this.modelAt !== undefined && Date.now() - this.modelAt < idle) return
       this.modelAt = Date.now()
-      this.ctx.waitUntil(primeModel(this.env, provider, model))
+      this.ctx.waitUntil(
+        Promise.all(primed.map((entry) => primeModel(this.env, entry[0], entry[1]))),
+      )
     }
 
     private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
