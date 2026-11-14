@@ -23,6 +23,7 @@ import * as Metadata from './internal/Metadata.ts'
 import * as PlanModels from '../client/Plans.ts'
 import * as Subagents from '../client/Subagents.ts'
 import * as Plans from './Plans.ts'
+import * as Pool from './Pool.ts'
 import * as Relay from './Relay.ts'
 import * as Sql from './Sql.ts'
 
@@ -44,6 +45,8 @@ export type Env = {
   REMOTE_MAX_FRAME_BYTES: string
   REMOTE_TIMEOUT_MS: string
   SESSION_LOCATION_HINT?: DurableObjectLocationHint
+  SESSION_POOL?: DurableObjectNamespace<Pool.SessionPool>
+  SESSION_POOL_CACHED_NAMES?: string
 }
 
 export type Thinking = Contracts.Thinking
@@ -164,6 +167,30 @@ function withHand(
 ): { instructions?: string } {
   const text = [instructions, hand].filter(Boolean).join('\n\n')
   return text ? { instructions: text } : {}
+}
+
+async function sessionObject(
+  env: Env,
+  options: { account: string; bound: Map<string, string>; name: string },
+): Promise<DurableObjectStub> {
+  const key = JSON.stringify([options.account, options.name])
+  const id = await (async () => {
+    if (!env.SESSION_POOL) return env.SESSIONS.idFromName(key)
+    const cached = options.bound.get(key)
+    if (cached) return env.SESSIONS.idFromString(cached)
+
+    const resolved = await Pool.resolve(env.SESSION_POOL, {
+      key,
+      locationHint: env.SESSION_LOCATION_HINT,
+    })
+    options.bound.set(key, resolved)
+    if (
+      options.bound.size > policy(env.SESSION_POOL_CACHED_NAMES ?? '', 'SESSION_POOL_CACHED_NAMES')
+    )
+      options.bound.delete(options.bound.keys().next().value!)
+    return env.SESSIONS.idFromString(resolved)
+  })()
+  return env.SESSIONS.get(id, { locationHint: env.SESSION_LOCATION_HINT })
 }
 
 function policy(value: string, name: string): number {
@@ -326,6 +353,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     : undefined
   const egress = (env: E): PrivateBinding =>
     plans ? plans.egress(env as E & Plans.Env) : options.egress(env)
+  const bound = new Map<string, string>()
   const subscribes =
     options.subscription ??
     (plans &&
@@ -517,6 +545,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       if (this.deleted) return json({ error: 'session deleted' }, 410)
       try {
         const url = new URL(request.url)
+        if (url.pathname === '/internal/prestart' && request.method === 'POST') {
+          await this.instance(ownerScope)
+          return new Response(null, { status: 204 })
+        }
         let descriptor: SessionDescriptor
         try {
           descriptor = JSON.parse(request.headers.get('x-nanocode-descriptor') ?? 'null')
@@ -999,16 +1031,16 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     private sessionStub(account: string, name: string) {
-      return this.env.SESSIONS.get(this.env.SESSIONS.idFromName(JSON.stringify([account, name])), {
-        locationHint: this.env.SESSION_LOCATION_HINT,
-      })
+      return sessionObject(this.env, { account, bound, name })
     }
 
     private async parentPost(action: string, body: unknown): Promise<Response> {
       const child = this.childOf()
       if (!child) throw new Error('this session is not a remote child')
       const parent = JSON.parse(child.parent) as SessionDescriptor
-      return await this.sessionStub(parent.account_id, parent.session_name).fetch(
+      return await (
+        await this.sessionStub(parent.account_id, parent.session_name)
+      ).fetch(
         new Request(`https://session.internal/internal/${action}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-nanocode-descriptor': child.parent },
@@ -1033,7 +1065,9 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         recorded: true,
         ...(descriptor.payer ? { payer: descriptor.payer } : {}),
       }
-      return await this.sessionStub(descriptor.account_id, name).fetch(
+      return await (
+        await this.sessionStub(descriptor.account_id, name)
+      ).fetch(
         new Request(`https://session.internal/internal/${action}`, {
           method: 'POST',
           headers: {
@@ -3761,12 +3795,12 @@ ${input.request_id}`
     headers.set('x-nanocode-descriptor', headerJson(descriptor))
     const target = new URL(request.url)
     target.pathname = path
+    const resolving = performance.now()
+    const session = await sessionObject(env, { account, bound, name })
     const dispatched = performance.now()
     let response: Response
     try {
-      response = await env.SESSIONS.get(env.SESSIONS.idFromName(JSON.stringify([account, name])), {
-        locationHint: env.SESSION_LOCATION_HINT,
-      }).fetch(
+      response = await session.fetch(
         new Request(target, {
           method: head ? 'GET' : request.method,
           headers,
@@ -3782,7 +3816,7 @@ ${input.request_id}`
     const responseHeaders = new Headers(response.headers)
     responseHeaders.set(
       'server-timing',
-      `public_pre_session;dur=${dispatched - started}, session_response;dur=${performance.now() - dispatched}`,
+      `public_pre_session;dur=${resolving - started}, session_resolve;dur=${dispatched - resolving}, session_response;dur=${performance.now() - dispatched}`,
     )
     if (head) await response.body?.cancel()
     return new Response(head ? null : response.body, {
@@ -3806,9 +3840,9 @@ ${input.request_id}`
     }
     let response: Response
     try {
-      response = await env.SESSIONS.get(env.SESSIONS.idFromName(JSON.stringify([account, name])), {
-        locationHint: env.SESSION_LOCATION_HINT,
-      }).fetch(
+      response = await (
+        await sessionObject(env, { account, bound, name })
+      ).fetch(
         new Request('https://session.internal/internal/delete', {
           method: 'POST',
           headers: { 'x-nanocode-descriptor': headerJson(descriptor) },
