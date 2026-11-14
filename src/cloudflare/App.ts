@@ -505,6 +505,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     async fetch(request: Request): Promise<Response> {
+      const started = performance.now()
+      const response = await this.serve(request)
+      if (response.webSocket || response.status === 101) return response
+      const timed = new Response(response.body, response)
+      timed.headers.append('server-timing', 'session;dur=' + Math.round(performance.now() - started))
+      return timed
+    }
+
+    private async serve(request: Request): Promise<Response> {
       this.counts.requests++
       const admitted = performance.now()
       if (this.deleted) return json({ error: 'session deleted' }, 410)
