@@ -267,6 +267,7 @@ const watchTag = 'watch'
 type Watch = { watch: string; cursor: number; live?: boolean }
 type Watcher = { state: Watch; scope: string; descriptor: SessionDescriptor }
 type HandExecutor = Remote.Executor<WebSocket>
+type Admission = Omit<Parameters<AgentRuntime.AgentRuntime['submit']>[1], 'buffered'>
 type Opened = {
   opening: string
   runtime: Promise<AgentRuntime.AgentRuntime>
@@ -424,6 +425,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly blobs: Contracts.BlobHost
     private readonly metadata: Metadata.Metadata
     private readonly lifecycles = new Map<string, Lifecycle>()
+    private readonly buffered = new WeakMap<AgentRuntime.AgentRuntime, Map<string, Admission>>()
     private readonly efforts = new WeakMap<AgentRuntime.AgentRuntime, Thinking>()
     private readonly blocked = new Set<string>()
     private readonly driving = new Map<string, string>()
@@ -1053,10 +1055,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
                     root: options.workspace?.cwd ?? '/workspace',
                   },
                 )
-          submitted = await (
-            await this.instance(scope)
-          ).submit(scope, {
-            ...(streaming ? { buffered: true } : {}),
+          const admission: Admission = {
             request_id: input.request_id,
             prompt: input.prompt,
             ...(images.length ? { images } : {}),
@@ -1065,7 +1064,12 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               ? { instruction_revision: input.instruction_revision }
               : {}),
             metadata: descriptor,
-          })
+          }
+          const admitting = await this.instance(scope)
+          submitted = await admitting.submit(
+            scope,
+            streaming ? { buffered: true, ...admission } : admission,
+          )
           if (submitted.submitted === 'too_large')
             return json(
               {
@@ -1093,6 +1097,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
+            if (streaming) {
+              let held = this.buffered.get(admitting)
+              if (!held) this.buffered.set(admitting, (held = new Map()))
+              held.set(admission.request_id, admission)
+            }
             this.queue = 'pending'
             this.admissions++
             this.turnTimings.set(input.request_id, { started: admitted, checkpoints: {} })
@@ -1665,6 +1674,7 @@ ${input.request_id}`
         if (active) this.blocked.delete(active)
         if (driven.retry) throw new Error('runtime recovery required')
         if (driven.finished) {
+          this.buffered.get(runtime)?.delete(driven.finished.report.request_id)
           if (options.remoteSubagents) this.childFinished(driven.finished.report)
           this.turnTimings.delete(driven.finished.report.request_id)
           this.queue =
@@ -1902,6 +1912,20 @@ ${input.request_id}`
           this.forget(scope, current)
           this.releaseHands(scope)
           await runtime.dispose().catch(() => {})
+          const held = this.buffered.get(runtime)
+          this.buffered.delete(runtime)
+          if (held?.size) {
+            const fresh = await this.instance(scope, true)
+            for (const admission of held.values()) {
+              const readmitted = await fresh.submit(scope, admission)
+              if (readmitted.submitted !== 'accepted' && readmitted.submitted !== 'existing')
+                throw new Contracts.HostFailureError(
+                  `buffered turn ${admission.request_id} was not readmitted: ${readmitted.submitted}`,
+                  'runtime',
+                  false,
+                )
+            }
+          }
           return this.runtime(scope, sessionId, descriptor)
         })
       this.counts.runtime_initializations++
