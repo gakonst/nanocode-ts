@@ -721,6 +721,7 @@ async fn log(scope: &str) -> Result<Arc<Log>, String> {
             restarts: RESTARTS.get().unwrap_or(u64::MAX),
             retain_finished: RETAIN_FINISHED.get(),
             snapshot_ratio: 2,
+            snapshot_rows: Some(64),
         },
     )
     .await

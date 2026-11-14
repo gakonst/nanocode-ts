@@ -13,7 +13,7 @@ export type Transaction = {
   statements: Contracts.Statement[]
 }
 
-type Batch = { transactions: Transaction[] } | { packed: Uint8Array }
+type Batch = ({ transactions: Transaction[] } | { packed: Uint8Array }) & { settled?: true }
 
 type Packed = { transactions: Transaction[]; sizes: number[] }
 
@@ -23,6 +23,8 @@ type Committed = { writer: string }
 
 type Entry = {
   transaction?: Transaction
+  settle?: true
+  at: number
   bytes: number
   resolve(): void
   reject(error: unknown): void
@@ -64,6 +66,8 @@ export type Journal = Contracts.SqlHost & {
   readonly batches: number
   close(): void
   durable(): Promise<void>
+  place(ids: readonly string[]): void
+  settle(): Promise<void>
   readonly stats: Stats
 }
 
@@ -155,6 +159,17 @@ function inputs(state: SessionState): Batch[] {
   )
     batches.push(record.input as Batch)
   return batches
+}
+
+export function settled(state: SessionState, options: settled.Options): boolean {
+  const input = state.effects.get(batchKey(options.batches - 1))?.input as Batch | undefined
+  return input?.settled === true
+}
+
+export declare namespace settled {
+  type Options = {
+    batches: number
+  }
 }
 
 export function committed(state: SessionState): Transaction[][] {
@@ -290,17 +305,28 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
   let flushing = false
   let hurry: (() => void) | undefined
   let lastBatch = -Infinity
+  const placements: { after: number; ids: readonly string[] }[] = []
   const queue: Entry[] = []
   let queued = 0
+  let committedTransactions = 0
+  let enqueuedTransactions = 0
 
-  const enqueue = (transaction: Transaction | undefined): Promise<void> => {
+  const enqueue = (transaction: Transaction | undefined, settle = false): Promise<void> => {
     if (failure) return Promise.reject(failure.error)
-    if (!transaction && !flushing && queue.length === 0) return Promise.resolve()
+    if (!transaction && !settle && !flushing && queue.length === 0) return Promise.resolve()
 
     return new Promise((resolve, reject) => {
       const bytes = weight(transaction)
       queued += bytes
-      queue.push({ transaction, bytes, resolve, reject })
+      if (transaction) enqueuedTransactions++
+      queue.push({
+        transaction,
+        ...(settle ? { settle } : {}),
+        at: performance.now(),
+        bytes,
+        resolve,
+        reject,
+      })
       if (!transaction) hurry?.()
       void flush()
     })
@@ -310,7 +336,7 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
     const wait =
       queued >= batchBytes || queue.some((entry) => !entry.transaction)
         ? 0
-        : lastBatch + batchMs - performance.now()
+        : Math.max(lastBatch, queue[0]!.at) + batchMs - performance.now()
     if (wait <= 0) return new Promise((resolve) => setImmediate(resolve))
 
     return new Promise<void>((resolve) => {
@@ -325,13 +351,22 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
     })
   }
 
-  const commit = async (transactions: Transaction[]): Promise<void> => {
+  const commit = async (
+    transactions: Transaction[],
+    placed: string[],
+    settled: boolean,
+  ): Promise<void> => {
     const n = replica.batches
     const started = performance.now()
     const packed = pack(transactions)
     const output = await ctx.effect(
       batchKey(n),
-      { name: sqlStep, replay: 'safe', input: { packed } satisfies Batch },
+      {
+        name: sqlStep,
+        replay: 'safe',
+        ...(placed.length ? { placed } : {}),
+        input: { packed, ...(settled ? { settled } : {}) } satisfies Batch,
+      },
       async (): Promise<Committed> => ({ writer }),
     )
     stats.batch_wait_ms += performance.now() - started
@@ -341,6 +376,7 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
     if (replica.digests.length === n) replica.digests.push(digest(packed))
     replica.batches = n + 1
     lastBatch = performance.now()
+    committedTransactions += transactions.length
     stats.batches++
   }
 
@@ -361,14 +397,24 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
         let bytes = 0
         while (taken < queue.length && (taken === 0 || bytes + queue[taken]!.bytes <= batchBytes))
           bytes += queue[taken++]!.bytes
-        const entries = queue.splice(0, taken)
+        const taking = queue.splice(0, taken)
         queued -= bytes
-        const transactions = entries.flatMap((entry) =>
+        const transactions = taking.flatMap((entry) =>
           entry.transaction ? [entry.transaction] : [],
         )
+        const settles = taking.some((entry) => entry.settle)
+        const waiting = placements.findIndex((placement) => placement.after > committedTransactions)
+        const ready = waiting === -1 ? placements.length : waiting
+        const settled = settles && queue.length === 0 && ready === placements.length
+        const placed =
+          transactions.length || settled
+            ? placements.splice(0, ready).flatMap((placement) => placement.ids)
+            : []
+        const entries = settles && !settled ? taking.filter((entry) => !entry.settle) : taking
+        if (settles && !settled) queue.unshift(...taking.filter((entry) => entry.settle))
 
         try {
-          if (transactions.length) await commit(transactions)
+          if (transactions.length || settled) await commit(transactions, placed, settled)
         } catch (error) {
           failure = { error }
           queued = 0
@@ -397,6 +443,10 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
       else sql.close()
     },
     durable: () => enqueue(undefined),
+    place(ids) {
+      placements.push({ after: enqueuedTransactions, ids })
+    },
+    settle: () => enqueue(undefined, true),
     stats,
     transaction(kind, operation, statements, access = 'write') {
       if (failure) return Promise.reject(failure.error)

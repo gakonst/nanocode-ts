@@ -344,17 +344,16 @@ export function create(options: create.Options = {}): Harness {
       }
       counts.open_ms = performance.now() - opening
       let applied: Contracts.Thinking | undefined
-      const placing = new Map<string, Promise<unknown>>()
+      const placed = new Set<string>()
       let read = ctx.pending().length > 0
       for (;;) {
-        await Promise.all(placing.values())
         if (read) read = false
         else await ctx.refresh()
-        const pending = ctx.pending()
+        const pending = ctx.pending().filter((submission) => !placed.has(submission.id))
         let thinking =
           pending[0] && effort(ctx.state(), { before: pending[0].id, initial: session.thinking })
         for (const submission of pending) {
-          const placed = await place(
+          const placement = await place(
             ctx,
             journal,
             runtime,
@@ -365,13 +364,8 @@ export function create(options: create.Options = {}): Harness {
             files,
             options.promptImages?.(session) ?? true,
           )
-          thinking = placed.thinking
-          if (!placed.placing) continue
-          placing.set(submission.id, placed.placing)
-          placed.placing.then(
-            () => placing.delete(submission.id),
-            (error: unknown) => ctx.halt?.(error),
-          )
+          thinking = placement.thinking
+          if (placement.submitted) placed.add(submission.id)
         }
         const next = (await runtime.pending(scope))[0]
         if (!next) {
@@ -392,7 +386,7 @@ export function create(options: create.Options = {}): Harness {
           driving,
           next.report.request_id,
           options.maxPrompts,
-          placing,
+          placed,
         )
         const driven = await driving
         await steering
@@ -493,12 +487,7 @@ export function create(options: create.Options = {}): Harness {
           outcome = 'stopped'
           throw ctx.signal.reason
         }
-        await journal.durable()
-        await ctx.effect(
-          settledKey(journal.batches),
-          { name: 'nanocode.settled', replay: 'safe', input: { batches: journal.batches } },
-          async () => ({}),
-        )
+        await journal.settle()
         ctx.live({ type: 'idle' })
         outcome = 'settled'
       } catch (error) {
@@ -633,7 +622,11 @@ export declare namespace exceeds {
 
 export function isIdle(state: SessionState, options: isIdle.Options): boolean {
   const { batches } = options
-  return batches === 0 || state.effects.get(settledKey(batches))?.status === 'completed'
+  return (
+    batches === 0 ||
+    Journal.settled(state, { batches }) ||
+    state.effects.get(settledKey(batches))?.status === 'completed'
+  )
 }
 
 export declare namespace isIdle {
@@ -652,7 +645,7 @@ async function place(
   hand?: string,
   workspace?: FileSystem.FileSystem,
   seesImages = true,
-): Promise<{ thinking: Contracts.Thinking | undefined; placing?: Promise<unknown> }> {
+): Promise<{ thinking: Contracts.Thinking | undefined; submitted?: true }> {
   if (cancels(submission)) {
     await cancelTurn(
       ctx,
@@ -726,18 +719,7 @@ async function place(
     ...(hand ? { hand } : {}),
     metadata: { kind: submission.kind, ...(thinking ? { thinking } : {}) },
   })
-  const placing = journal.durable().then(() =>
-    ctx.effect(
-      `nanocode.place:${submission.id}`,
-      {
-        name: 'nanocode.place',
-        replay: 'safe',
-        placed: [submission.id],
-        input: { request_id: submission.id },
-      },
-      async () => ({ submitted: submitted.submitted }),
-    ),
-  )
+  journal.place([submission.id])
   if (submitted.submitted === 'too_large')
     ctx.live({
       type: 'error',
@@ -748,7 +730,7 @@ async function place(
       type: 'error',
       message: `message ${submission.id} was already submitted with another prompt`,
     })
-  return { thinking, placing }
+  return { thinking, submitted: true }
 }
 
 async function steer(
@@ -758,7 +740,7 @@ async function steer(
   driving: Promise<unknown>,
   active: string,
   limit: number | undefined,
-  placing: ReadonlyMap<string, Promise<unknown>>,
+  placed: Set<string>,
 ): Promise<void> {
   let done = false
   const finished = driving.then(
@@ -774,7 +756,7 @@ async function steer(
     if (done || ctx.signal.aborted) return
     await ctx.refresh()
     for (const submission of ctx.pending()) {
-      if (placing.has(submission.id)) continue
+      if (placed.has(submission.id)) continue
       if (cancels(submission)) {
         await cancelTurn(ctx, journal, runtime, submission, active)
         continue
@@ -790,17 +772,8 @@ async function steer(
         !(await runtime.steer(submission.id, Attachments.parse(submission.text ?? '').text))
       )
         continue
-      await journal.durable()
-      await ctx.effect(
-        `nanocode.place:${submission.id}`,
-        {
-          name: 'nanocode.steer',
-          replay: 'safe',
-          placed: [submission.id],
-          input: { request_id: submission.id },
-        },
-        async () => ({ steered: true }),
-      )
+      journal.place([submission.id])
+      placed.add(submission.id)
       ctx.live({ type: 'steered', request_id: submission.id })
     }
   }
