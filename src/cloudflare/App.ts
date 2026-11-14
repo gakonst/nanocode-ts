@@ -354,6 +354,27 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
   const egress = (env: E): PrivateBinding =>
     plans ? plans.egress(env as E & Plans.Env) : options.egress(env)
   const bound = new Map<string, string>()
+  const primed = new Map<Contracts.ModelProvider, number>()
+  const primeModel = (env: E, provider: unknown, model: unknown): Promise<void> =>
+    egress(env)
+      .fetch(
+        new Request('https://egress.internal/prime', {
+          method: 'POST',
+          headers: {
+            'x-nanocode-model': headerJson({
+              provider,
+              model:
+                typeof model === 'string' && model
+                  ? model
+                  : provider === 'codex'
+                    ? 'gpt-6.1-sol'
+                    : (env.CLAUDE_MODEL ?? 'claude-opus-5-5'),
+            }),
+          },
+        }),
+      )
+      .then((response) => response.body?.cancel())
+      .catch(() => undefined)
   const subscribes =
     options.subscription ??
     (plans &&
@@ -541,6 +562,15 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     }
 
     async fetch(request: Request): Promise<Response> {
+      const started = performance.now()
+      const response = await this.serve(request)
+      if (response.webSocket || response.status === 101) return response
+      const timed = new Response(response.body, response)
+      timed.headers.append('server-timing', 'session;dur=' + Math.round(performance.now() - started))
+      return timed
+    }
+
+    private async serve(request: Request): Promise<Response> {
       const admitted = performance.now()
       if (this.deleted) return json({ error: 'session deleted' }, 410)
       try {
@@ -3056,27 +3086,7 @@ ${input.request_id}`
       const idle = policy(this.env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
       if (this.modelAt !== undefined && Date.now() - this.modelAt < idle) return
       this.modelAt = Date.now()
-      this.ctx.waitUntil(
-        egress(this.env)
-          .fetch(
-            new Request('https://egress.internal/prime', {
-              method: 'POST',
-              headers: {
-                'x-nanocode-model': headerJson({
-                  provider,
-                  model:
-                    typeof model === 'string' && model
-                      ? model
-                      : provider === 'codex'
-                        ? 'gpt-6.1-sol'
-                        : (this.env.CLAUDE_MODEL ?? 'claude-opus-5-5'),
-                }),
-              },
-            }),
-          )
-          .then((response) => response.body?.cancel())
-          .catch(() => undefined),
-      )
+      this.ctx.waitUntil(primeModel(this.env, provider, model))
     }
 
     private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
@@ -3795,6 +3805,8 @@ ${input.request_id}`
     headers.set('x-nanocode-descriptor', headerJson(descriptor))
     const target = new URL(request.url)
     target.pathname = path
+    if (match?.[2] === 'turns' && match[3] === undefined && request.method === 'POST')
+      void primeTurn(request.clone(), env)
     const resolving = performance.now()
     const session = await sessionObject(env, { account, bound, name })
     const dispatched = performance.now()
@@ -3814,7 +3826,7 @@ ${input.request_id}`
     }
     if (response.webSocket) return response
     const responseHeaders = new Headers(response.headers)
-    responseHeaders.set(
+    responseHeaders.append(
       'server-timing',
       `public_pre_session;dur=${resolving - started}, session_resolve;dur=${dispatched - resolving}, session_response;dur=${performance.now() - dispatched}`,
     )
@@ -3824,6 +3836,27 @@ ${input.request_id}`
       statusText: response.statusText,
       headers: responseHeaders,
     })
+  }
+
+  async function primeTurn(request: Request, env: E): Promise<void> {
+    if (env.MODEL_PRIME_IDLE_MS === undefined) return
+    const input = (await request.json().catch(() => null)) as {
+      model?: unknown
+      payer?: unknown
+      provider?: unknown
+    } | null
+    const provider = input?.provider ?? 'claude'
+    if (provider !== 'claude' && provider !== 'codex') return
+    if (input?.payer === 'plan' || input?.payer === 'wallet') return
+    if (typeof input?.model === 'string' && workersAiModels.has(input.model)) return
+    const at = primed.get(provider)
+    if (
+      at !== undefined &&
+      Date.now() - at < policy(env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
+    )
+      return
+    primed.set(provider, Date.now())
+    await primeModel(env, provider, input?.model)
   }
 
   function resetAfterDelete(error: unknown): boolean {
