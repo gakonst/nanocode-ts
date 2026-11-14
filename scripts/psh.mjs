@@ -9,6 +9,7 @@ export const pin = JSON.parse(readFileSync(join(root, 'psh-revision.json'), 'utf
 const paths = [
   'Cargo.toml',
   'Cargo.lock',
+  'crates/core/bytes',
   'crates/core/memchr',
   'crates/core/shell',
   'crates/core/sys',
