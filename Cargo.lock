@@ -363,7 +363,6 @@ dependencies = [
  "nanocode-turnlog",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -373,9 +372,9 @@ dependencies = [
  "nanocode-agent-core",
  "nanocode-durability",
  "nanocode-process-contracts",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
- "tokio",
 ]
 
 [[package]]
@@ -390,7 +389,6 @@ dependencies = [
  "nanocode-types",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -504,7 +502,6 @@ dependencies = [
  "nanocode-tools",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -580,7 +577,6 @@ dependencies = [
  "nanocode-types-core",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -730,6 +726,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-macro-support"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-mcp"
 version = "0.7.0"
 dependencies = [
@@ -741,7 +741,6 @@ dependencies = [
  "nanocode-url",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -847,11 +846,11 @@ dependencies = [
  "nanocode-digest",
  "nanocode-durability-core",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-trace",
  "nanocode-zstd",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -867,7 +866,6 @@ dependencies = [
  "nanocode-trace",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -978,16 +976,14 @@ dependencies = [
 name = "nanocode-tools-macros"
 version = "0.7.0"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "nanocode-macro-support",
 ]
 
 [[package]]
 name = "nanocode-trace"
 version = "0.7.0"
 dependencies = [
- "pin-project-lite",
+ "nanocode-sys",
 ]
 
 [[package]]
@@ -1012,7 +1008,6 @@ dependencies = [
  "nanocode-types-core",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
