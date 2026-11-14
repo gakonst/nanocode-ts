@@ -55,6 +55,14 @@ enum Provider {
     Codex,
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CodexOrchestration {
+    #[default]
+    CodeMode,
+    Direct,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Gateway {
@@ -157,6 +165,8 @@ struct Configuration {
     cell_memory_bytes: Option<usize>,
     #[serde(default)]
     cell_yield_ms: Option<u64>,
+    #[serde(default)]
+    codex_orchestration: CodexOrchestration,
     #[serde(default)]
     service_tier: Option<ServiceTier>,
     #[serde(default)]
@@ -817,6 +827,7 @@ fn codex_harness(
     stream_tool_input: bool,
     auto_compact_window_tokens: Option<u64>,
     environment: Option<ExecutionEnvironment>,
+    orchestration: CodexOrchestration,
     instructions: &dyn Fn(Option<&str>) -> String,
 ) -> Result<CodexHarness, Opening> {
     let openai = match (endpoint.subscription, endpoint.gateway) {
@@ -867,7 +878,12 @@ fn codex_harness(
         None => openai,
     };
     let client = openai.build().map_err(configuration)?;
-    let harness = CodexHarness::new(client).configure(move |codex| {
+    let harness = CodexHarness::new(client);
+    let harness = match orchestration {
+        CodexOrchestration::CodeMode => harness,
+        CodexOrchestration::Direct => harness.direct_tools_for(|_| true),
+    };
+    let harness = harness.configure(move |codex| {
         Ok(match &environment {
             Some(environment) => codex.execution_environment(environment.clone()),
             None => codex,
@@ -963,6 +979,7 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
                 config.stream_tool_input,
                 config.auto_compact_window_tokens,
                 environment.as_ref().map(Environment::codex),
+                config.codex_orchestration,
                 &instructions,
             )?)
         }

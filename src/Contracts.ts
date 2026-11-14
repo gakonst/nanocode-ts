@@ -44,6 +44,8 @@ export type Thinking = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ServiceTier = 'standard' | 'priority' | 'fast' | 'ultrafast'
 
+export type CodexOrchestration = 'code_mode' | 'direct'
+
 export type ReasoningMode = 'standard' | 'pro'
 
 export type RuntimeSettings = { thinking?: Thinking; service_tier?: ServiceTier }
@@ -86,6 +88,7 @@ export type AgentConfiguration = {
   cell_interrupt_checks?: number
   cell_memory_bytes?: number
   cell_yield_ms?: number
+  codex_orchestration?: CodexOrchestration
   service_tier?: ServiceTier
   subagents?: boolean
   remote_children?: boolean
