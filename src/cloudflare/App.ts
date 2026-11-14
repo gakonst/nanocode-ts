@@ -3778,7 +3778,7 @@ ${input.request_id}`
     }
     if (response.webSocket) return response
     const responseHeaders = new Headers(response.headers)
-    responseHeaders.set(
+    responseHeaders.append(
       'server-timing',
       `public_pre_session;dur=${dispatched - started}, session_response;dur=${performance.now() - dispatched}`,
     )
