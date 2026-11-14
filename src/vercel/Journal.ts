@@ -13,13 +13,22 @@ export type Transaction = {
   statements: Contracts.Statement[]
 }
 
-type Batch = ({ transactions: Transaction[] } | { packed: Uint8Array }) & { settled?: true }
+type Batch = ({ transactions: Transaction[] } | { packed: Uint8Array } | { base91: string }) & {
+  settled?: true
+}
 
 type Packed = { transactions: Transaction[]; sizes: number[] }
 
 const brotliQuality = 3
 
-type Committed = { writer: string }
+const base91 = Array.from({ length: 94 }, (_, n) => String.fromCharCode(33 + n))
+  .filter((char) => char !== '"' && char !== '<' && char !== '\\')
+  .join('')
+
+const base91Values = new Int16Array(128).fill(-1)
+for (let n = 0; n < base91.length; n++) base91Values[base91.charCodeAt(n)] = n
+
+type Committed = { writer: string } | string
 
 type Entry = {
   transaction?: Transaction
@@ -146,6 +155,68 @@ function unpack(packed: Uint8Array): Transaction[] {
   }))
 }
 
+function encode91(data: Uint8Array): string {
+  const out = Buffer.allocUnsafe(Math.ceil((data.length * 16) / 13) + 2)
+  let bits = 0
+  let count = 0
+  let length = 0
+  for (const byte of data) {
+    bits |= byte << count
+    count += 8
+    if (count <= 13) continue
+    let value = bits & 8191
+    if (value > 88) {
+      bits >>= 13
+      count -= 13
+    } else {
+      value = bits & 16383
+      bits >>= 14
+      count -= 14
+    }
+    out[length++] = base91.charCodeAt(value % 91)
+    out[length++] = base91.charCodeAt((value / 91) | 0)
+  }
+  if (count) {
+    out[length++] = base91.charCodeAt(bits % 91)
+    if (count > 7 || bits > 90) out[length++] = base91.charCodeAt((bits / 91) | 0)
+  }
+  return out.toString('latin1', 0, length)
+}
+
+function decode91(text: string): Uint8Array {
+  const out = new Uint8Array(Math.ceil((text.length * 14) / 16))
+  let bits = 0
+  let count = 0
+  let length = 0
+  let value = -1
+  for (let n = 0; n < text.length; n++) {
+    const code = text.charCodeAt(n)
+    const digit = code < 128 ? base91Values[code]! : -1
+    if (digit < 0) throw new Fatal(`nanocode: a SQL batch holds a character outside base91 at ${n}`)
+    if (value < 0) {
+      value = digit
+      continue
+    }
+    value += digit * 91
+    bits |= value << count
+    count += (value & 8191) > 88 ? 13 : 14
+    do {
+      out[length++] = bits & 255
+      bits >>= 8
+      count -= 8
+    } while (count > 7)
+    value = -1
+  }
+  if (value >= 0) out[length++] = (bits | (value << count)) & 255
+  return out.subarray(0, length)
+}
+
+function packedOf(input: Batch): Uint8Array | undefined {
+  if ('base91' in input) return decode91(input.base91)
+  if ('packed' in input) return input.packed
+  return undefined
+}
+
 function digest(packed: Uint8Array): string {
   return crypto.createHash('sha256').update(packed).digest('hex')
 }
@@ -173,9 +244,10 @@ export declare namespace settled {
 }
 
 export function committed(state: SessionState): Transaction[][] {
-  return inputs(state).map((input) =>
-    'packed' in input ? unpack(input.packed) : input.transactions,
-  )
+  return inputs(state).map((input) => {
+    const packed = packedOf(input)
+    return packed ? unpack(packed) : (input as { transactions: Transaction[] }).transactions
+  })
 }
 
 export function open(state: SessionState, replicas?: Replicas): Opened {
@@ -188,8 +260,8 @@ export function open(state: SessionState, replicas?: Replicas): Opened {
       return undefined
     }
     const same = kept.digests.every((known, n) => {
-      const input = batches[n]!
-      return 'packed' in input && digest(input.packed) === known
+      const packed = packedOf(batches[n]!)
+      return packed !== undefined && digest(packed) === known
     })
     if (same) return kept
     kept.sql.close()
@@ -207,11 +279,13 @@ export function open(state: SessionState, replicas?: Replicas): Opened {
   try {
     for (let n = from; n < batches.length; n++) {
       const input = batches[n]!
-      const replayed = 'packed' in input ? unpack(input.packed) : input.transactions
+      const packed = packedOf(input)
+      const replayed = packed
+        ? unpack(packed)
+        : (input as { transactions: Transaction[] }).transactions
       replica.sql.replay(replayed, n)
       transactions += replayed.length
-      if ('packed' in input && replica.digests.length === n)
-        replica.digests.push(digest(input.packed))
+      if (packed && replica.digests.length === n) replica.digests.push(digest(packed))
       replica.batches = n + 1
     }
   } catch (error) {
@@ -290,7 +364,7 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
   const batchMs = durability === 'on' ? (options.batchMs ?? defaultBatchMs) : 0
   const { replayed, replica } = open(ctx.state(), options.replicas)
   const sql = replica.sql
-  const writer = crypto.randomUUID()
+  const writer = crypto.randomBytes(16).toString('base64url')
   const stats: Stats = {
     replayed_batches: replayed.batches,
     replayed_transactions: replayed.transactions,
@@ -365,13 +439,13 @@ export function create(ctx: DriveContext, options: create.Options = {}): Journal
         name: sqlStep,
         replay: 'safe',
         ...(placed.length ? { placed } : {}),
-        input: { packed, ...(settled ? { settled } : {}) } satisfies Batch,
+        input: { base91: encode91(packed), ...(settled ? { settled } : {}) } satisfies Batch,
       },
-      async (): Promise<Committed> => ({ writer }),
+      async (): Promise<Committed> => writer,
     )
     stats.batch_wait_ms += performance.now() - started
 
-    if (output.writer !== writer) throw new Restart(`SQL batch ${n} was committed by another drive`)
+    if (output !== writer) throw new Restart(`SQL batch ${n} was committed by another drive`)
 
     if (replica.digests.length === n) replica.digests.push(digest(packed))
     replica.batches = n + 1

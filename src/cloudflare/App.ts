@@ -238,6 +238,8 @@ const pumpResets = 4
 const subagentScanPages = 32
 
 const waitingKey = 'retry_waiting'
+const schemaKey = 'schema'
+const schemaVersion = '1'
 
 function requestedYield(operation: unknown): number {
   const body = operation as { source?: unknown; input?: unknown } | undefined
@@ -324,27 +326,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     : undefined
   const egress = (env: E): PrivateBinding =>
     plans ? plans.egress(env as E & Plans.Env) : options.egress(env)
-  const primed = new Map<Contracts.ModelProvider, number>()
-  const primeModel = (env: E, provider: unknown, model: unknown): Promise<void> =>
-    egress(env)
-      .fetch(
-        new Request('https://egress.internal/prime', {
-          method: 'POST',
-          headers: {
-            'x-nanocode-model': headerJson({
-              provider,
-              model:
-                typeof model === 'string' && model
-                  ? model
-                  : provider === 'codex'
-                    ? 'gpt-6.1-sol'
-                    : (env.CLAUDE_MODEL ?? 'claude-opus-5-5'),
-            }),
-          },
-        }),
-      )
-      .then((response) => response.body?.cancel())
-      .catch(() => undefined)
   const subscribes =
     options.subscription ??
     (plans &&
@@ -418,14 +399,11 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       recoveries: 0,
       runtime_retirements: 0,
       host_tool_calls: 0,
-      requests: 0,
-      child_requests: 0,
     }
 
     constructor(ctx: DurableObjectState, env: E) {
       super(ctx, env)
       this.store = Checkpoints.create(ctx.storage, { valueLimit })
-      this.blobs = Blobs.create(ctx.storage, { partBytes: valueLimit })
       this.metadata = Metadata.create(ctx.storage)
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -438,30 +416,38 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
         CREATE TABLE IF NOT EXISTS subagent_directories (scope TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
       `)
-      if (
-        !this.store
-          .row("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'metadata'")
-          ?.sql?.toString()
-          .includes('WITHOUT ROWID')
-      )
-        ctx.storage.transactionSync(() =>
-          ctx.storage.sql.exec(
-            'CREATE TABLE metadata_rows (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID; INSERT INTO metadata_rows SELECT key, value FROM metadata; DROP TABLE metadata; ALTER TABLE metadata_rows RENAME TO metadata',
-          ),
+      const migrated = this.metadata.get(schemaKey) === schemaVersion
+      if (!migrated) {
+        Blobs.migrate(ctx.storage)
+        if (
+          !this.store
+            .row("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'metadata'")
+            ?.sql?.toString()
+            .includes('WITHOUT ROWID')
         )
-      if (
-        !ctx.storage.sql
-          .exec('PRAGMA table_info(hand_sockets)')
-          .toArray()
-          .some((column) => column.name === 'descriptor')
-      )
-        ctx.storage.sql.exec('ALTER TABLE hand_sockets ADD COLUMN descriptor TEXT')
+          ctx.storage.transactionSync(() =>
+            ctx.storage.sql.exec(
+              'CREATE TABLE metadata_rows (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID; INSERT INTO metadata_rows SELECT key, value FROM metadata; DROP TABLE metadata; ALTER TABLE metadata_rows RENAME TO metadata',
+            ),
+          )
+        if (
+          !ctx.storage.sql
+            .exec('PRAGMA table_info(hand_sockets)')
+            .toArray()
+            .some((column) => column.name === 'descriptor')
+        )
+          ctx.storage.sql.exec('ALTER TABLE hand_sockets ADD COLUMN descriptor TEXT')
+      }
+      this.blobs = Blobs.create(ctx.storage, { partBytes: valueLimit })
       ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
       this.restoreHands()
       this.restoreWatchers()
       this.retryWaiting()
+      if (migrated) return
+
       if (this.store.row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'jobs'"))
         void ctx.blockConcurrencyWhile(() => this.migrate())
+      else this.metadata.set(schemaKey, schemaVersion)
     }
 
     private async migrate(): Promise<void> {
@@ -523,19 +509,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
       for (const [scope, turns] of scopes) await (await this.instance(scope)).import(scope, turns)
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS event_turns; DROP TABLE jobs')
+      this.metadata.set(schemaKey, schemaVersion)
     }
 
     async fetch(request: Request): Promise<Response> {
-      const started = performance.now()
-      const response = await this.serve(request)
-      if (response.webSocket || response.status === 101) return response
-      const timed = new Response(response.body, response)
-      timed.headers.append('server-timing', 'session;dur=' + Math.round(performance.now() - started))
-      return timed
-    }
-
-    private async serve(request: Request): Promise<Response> {
-      this.counts.requests++
       const admitted = performance.now()
       if (this.deleted) return json({ error: 'session deleted' }, 410)
       try {
@@ -928,6 +905,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           submitted = await (
             await this.instance(scope)
           ).submit(scope, {
+            ...(streaming ? { buffered: true } : {}),
             request_id: input.request_id,
             prompt: input.prompt,
             ...(images.length ? { images } : {}),
@@ -956,10 +934,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert('authority', identity)
               this.metadata.insert(providerKey, descriptor.provider!)
               if (descriptor.model !== undefined) this.metadata.insert(modelKey, descriptor.model)
-              this.metadata.insert(
-                payerKey,
-                descriptor.payer ?? (descriptor.subscription ? 'plan' : 'deployment'),
-              )
+              if (descriptor.payer !== undefined) this.metadata.insert(payerKey, descriptor.payer)
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
@@ -1048,7 +1023,6 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       action: string,
       body: unknown,
     ): Promise<Response> {
-      this.counts.child_requests++
       const name = `${descriptor.session_name}/child/${sessionId}`
       const child: SessionDescriptor = {
         account_id: descriptor.account_id,
@@ -2610,10 +2584,12 @@ ${input.request_id}`
         this.handSockets.set(socket, executor)
         this.indexHand(String(row.scope), String(row.hand), connection, executor, true)
       }
-      this.ctx.storage.sql.exec(
-        'DELETE FROM hand_sockets WHERE connection NOT IN (SELECT value FROM json_each(?))',
-        JSON.stringify(live),
-      )
+      if (live.length)
+        this.ctx.storage.sql.exec(
+          'DELETE FROM hand_sockets WHERE connection NOT IN (SELECT value FROM json_each(?))',
+          JSON.stringify(live),
+        )
+      else this.ctx.storage.sql.exec('DELETE FROM hand_sockets')
     }
 
     async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -2705,10 +2681,12 @@ ${input.request_id}`
         .getWebSockets(watchTag)
         .map((socket) => (socket.deserializeAttachment() as Watch | null)?.watch)
         .filter(Boolean)
-      this.ctx.storage.sql.exec(
-        'DELETE FROM watch_sockets WHERE id NOT IN (SELECT value FROM json_each(?))',
-        JSON.stringify(live),
-      )
+      if (live.length)
+        this.ctx.storage.sql.exec(
+          'DELETE FROM watch_sockets WHERE id NOT IN (SELECT value FROM json_each(?))',
+          JSON.stringify(live),
+        )
+      else this.ctx.storage.sql.exec('DELETE FROM watch_sockets')
     }
 
     private watching(): { socket: WebSocket; watcher: Watcher }[] {
@@ -3044,7 +3022,27 @@ ${input.request_id}`
       const idle = policy(this.env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
       if (this.modelAt !== undefined && Date.now() - this.modelAt < idle) return
       this.modelAt = Date.now()
-      this.ctx.waitUntil(primeModel(this.env, provider, model))
+      this.ctx.waitUntil(
+        egress(this.env)
+          .fetch(
+            new Request('https://egress.internal/prime', {
+              method: 'POST',
+              headers: {
+                'x-nanocode-model': headerJson({
+                  provider,
+                  model:
+                    typeof model === 'string' && model
+                      ? model
+                      : provider === 'codex'
+                        ? 'gpt-6.1-sol'
+                        : (this.env.CLAUDE_MODEL ?? 'claude-opus-5-5'),
+                }),
+              },
+            }),
+          )
+          .then((response) => response.body?.cancel())
+          .catch(() => undefined),
+      )
     }
 
     private async warm(scope: string, base: SessionDescriptor): Promise<boolean> {
@@ -3763,8 +3761,6 @@ ${input.request_id}`
     headers.set('x-nanocode-descriptor', headerJson(descriptor))
     const target = new URL(request.url)
     target.pathname = path
-    if (match?.[2] === 'turns' && match[3] === undefined && request.method === 'POST')
-      void primeTurn(request.clone(), env)
     const dispatched = performance.now()
     let response: Response
     try {
@@ -3784,7 +3780,7 @@ ${input.request_id}`
     }
     if (response.webSocket) return response
     const responseHeaders = new Headers(response.headers)
-    responseHeaders.append(
+    responseHeaders.set(
       'server-timing',
       `public_pre_session;dur=${dispatched - started}, session_response;dur=${performance.now() - dispatched}`,
     )
@@ -3794,27 +3790,6 @@ ${input.request_id}`
       statusText: response.statusText,
       headers: responseHeaders,
     })
-  }
-
-  async function primeTurn(request: Request, env: E): Promise<void> {
-    if (env.MODEL_PRIME_IDLE_MS === undefined) return
-    const input = (await request.json().catch(() => null)) as {
-      model?: unknown
-      payer?: unknown
-      provider?: unknown
-    } | null
-    const provider = input?.provider ?? 'claude'
-    if (provider !== 'claude' && provider !== 'codex') return
-    if (input?.payer === 'plan' || input?.payer === 'wallet') return
-    if (typeof input?.model === 'string' && workersAiModels.has(input.model)) return
-    const at = primed.get(provider)
-    if (
-      at !== undefined &&
-      Date.now() - at < policy(env.MODEL_PRIME_IDLE_MS, 'MODEL_PRIME_IDLE_MS')
-    )
-      return
-    primed.set(provider, Date.now())
-    await primeModel(env, provider, input?.model)
   }
 
   function resetAfterDelete(error: unknown): boolean {

@@ -385,6 +385,8 @@ enum Command {
         config: Value,
     },
     Submit {
+        #[serde(default)]
+        buffered: bool,
         scope: String,
         request_id: String,
         prompt: String,
@@ -1348,15 +1350,11 @@ impl Session {
     }
 }
 
-async fn submit(
-    scope: &str,
-    request_id: String,
+fn submitted_prompt(
     prompt: String,
     images: Vec<String>,
-    hand: Option<String>,
     instruction_revision: Option<u64>,
-    metadata: &Value,
-) -> Result<Value, String> {
+) -> Prompt {
     let prompt = if images.is_empty() {
         Prompt::from(prompt)
     } else {
@@ -1367,17 +1365,20 @@ async fn submit(
             }),
         ))
     };
-    let prompt = match instruction_revision {
+    match instruction_revision {
         Some(revision) => prompt.with_instruction_revision(revision),
         None => prompt,
+    }
+}
+
+async fn submit(scope: &str, submission: Submission, buffered: bool) -> Result<Value, String> {
+    let log = log(scope).await?;
+    let submitted = if buffered {
+        log.submit_buffered(&submission).await
+    } else {
+        log.submit(&submission).await
     };
-    let submission = Submission {
-        request_id,
-        prompt,
-        hand,
-        metadata: serde_json::value::to_raw_value(metadata).map_err(text)?,
-    };
-    let (status, record) = match log(scope).await?.submit(&submission).await.map_err(text)? {
+    let (status, record) = match submitted.map_err(text)? {
         Submitted::Accepted { record, event } => {
             events::publish(vec![event]).await?;
             ("accepted", record)
@@ -1681,6 +1682,7 @@ fn execute(command: Command) -> Executed {
         }),
         Command::Init { config } => executed(init(config)),
         Command::Submit {
+            buffered,
             scope,
             request_id,
             prompt,
@@ -1689,16 +1691,13 @@ fn execute(command: Command) -> Executed {
             instruction_revision,
             metadata,
         } => executed(async move {
-            submit(
-                &scope,
+            let submission = Submission {
                 request_id,
-                prompt,
-                images,
+                prompt: submitted_prompt(prompt, images, instruction_revision),
                 hand,
-                instruction_revision,
-                &metadata,
-            )
-            .await
+                metadata: serde_json::value::to_raw_value(&metadata).map_err(text)?,
+            };
+            submit(&scope, submission, buffered).await
         }),
         Command::Append { scope, events } => executed(async move { append(&scope, events).await }),
         Command::Turn { scope, request_id } => executed(async move {

@@ -37,9 +37,28 @@ const listings = new Map<string, Listing>()
 
 const refreshing = new Set<string>()
 
+const reads = new Map<string, Promise<string | null | undefined>>()
+
 function key(endpoint: string) {
   const url = new URL(endpoint)
   return url.origin + url.pathname
+}
+
+function listingKey(endpoint: string, headers: readonly (readonly [string, string])[]) {
+  return (
+    key(endpoint) +
+    '|' +
+    JSON.stringify(
+      headers
+        .filter(
+          ([name]) =>
+            !/^(mcp-session-id|mcp-protocol-version|content-length|content-type|accept|user-agent|last-event-id)$/i.test(
+              name,
+            ),
+        )
+        .sort(),
+    )
+  )
 }
 
 function message(body: Uint8Array): { id?: unknown; method?: string } | undefined {
@@ -79,8 +98,16 @@ async function digest(url: string) {
   )
 }
 
+function read(store: Contracts.McpStore, url: string) {
+  return digest(url)
+    .then((name) => store.get(name))
+    .catch(() => undefined)
+}
+
 async function stored(store: Contracts.McpStore, url: string, stale: number) {
-  const value = await store.get(await digest(url)).catch(() => undefined)
+  const started = reads.get(url)
+  reads.delete(url)
+  const value = await (started ?? read(store, url))
   if (!value) return undefined
 
   const parsed = (() => {
@@ -123,6 +150,17 @@ function reply(id: unknown, result: unknown, source: string) {
   })
 }
 
+export function prefetch(store: Contracts.McpStore, servers: readonly Contracts.McpServer[]): void {
+  for (const server of servers) {
+    const headers: [string, string][] = Object.entries(server.headers ?? {}).map(
+      ([name, value]) => [name.toLowerCase(), value],
+    )
+    if (server.bearer_token) headers.push(['authorization', `Bearer ${server.bearer_token}`])
+    const url = listingKey(server.url, headers)
+    if (!listings.has(url) && !reads.has(url)) reads.set(url, read(store, url))
+  }
+}
+
 export function defer<R extends Request, A extends unknown[]>(
   send: Send<R, A>,
   servers: readonly Contracts.McpServer[] | undefined,
@@ -141,19 +179,7 @@ export function defer<R extends Request, A extends unknown[]>(
       !urls.has(key(request.endpoint))
     )
       return send(request, signal, ...rest)
-    const url =
-      key(request.endpoint) +
-      '|' +
-      JSON.stringify(
-        request.headers
-          .filter(
-            ([name]) =>
-              !/^(mcp-session-id|mcp-protocol-version|content-length|content-type|accept|user-agent|last-event-id)$/i.test(
-                name,
-              ),
-          )
-          .sort(),
-      )
+    const url = listingKey(request.endpoint, request.headers)
     const body = message(request.body)
     let listing = listings.get(url)
     if (listing && Date.now() - listing.at > keep) {

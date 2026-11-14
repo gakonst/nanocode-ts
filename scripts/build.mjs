@@ -90,7 +90,7 @@ if (previousBuild?.inputs !== fingerprint || !existsSync(artifact) || previousBu
   built = true;
 }
 if (built || !existsSync(optimized) || previousBuild?.optimized !== fileDigest(optimized)) {
-  optimize(artifact, optimized, ["-O3", "--one-caller-inline-max-function-size=" + oneCallerInlineMaxSize]);
+  optimize(artifact, optimized, ["-O3", "--one-caller-inline-max-function-size=" + oneCallerInlineMaxSize, "-Oz"]);
   mkdirSync("output", { recursive: true });
   writeFileSync("output/wasm-build-fingerprint", JSON.stringify({ inputs: fingerprint, artifact: fileDigest(artifact), optimized: fileDigest(optimized) }));
 }

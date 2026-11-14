@@ -1237,6 +1237,7 @@ async function create(
     async submit(
       scope: string,
       input: {
+        buffered?: boolean | undefined
         request_id: string
         prompt: string
         images?: string[]

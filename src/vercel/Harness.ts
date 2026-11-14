@@ -292,6 +292,7 @@ export function create(options: create.Options = {}): Harness {
           {
             ...(shell ? { workspace: shell.workspace() } : {}),
             fetch: cellFetch,
+            ...(options.mcp?.store ? { mcp: { store: options.mcp.store } } : {}),
             ...(executor
               ? {
                   remote: {
@@ -542,6 +543,7 @@ export declare namespace create {
     mcp?: {
       fetch?(sessionId: string): typeof fetch
       servers: Contracts.McpServer[]
+      store?: Contracts.McpStore
     }
     model?: string
     module?: () => Promise<WebAssembly.Module>

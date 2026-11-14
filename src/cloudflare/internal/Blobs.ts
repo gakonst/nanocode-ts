@@ -4,17 +4,6 @@ import * as Sql from '../Sql.ts'
 export function create(storage: Sql.Storage, options: create.Options = {}): Contracts.BlobHost {
   const partBytes = options.partBytes ?? Sql.valueLimitBytes
 
-  const tables = new Map(
-    [
-      ...storage.sql
-        .exec(
-          "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name IN ('blobs', 'blob_parts')",
-        )
-        .raw(),
-    ].map(([name, sql]) => [String(name), String(sql)]),
-  )
-  if (tables.get('blobs')?.includes('part INTEGER') && !tables.has('blob_parts'))
-    storage.sql.exec('ALTER TABLE blobs RENAME TO blob_parts')
   storage.sql.exec(
     'CREATE TABLE IF NOT EXISTS blob_parts (key TEXT NOT NULL, part INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (key, part)) WITHOUT ROWID',
   )
@@ -61,4 +50,18 @@ export declare namespace create {
   type Options = {
     partBytes?: number | undefined
   }
+}
+
+export function migrate(storage: Sql.Storage): void {
+  const tables = new Map(
+    [
+      ...storage.sql
+        .exec(
+          "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name IN ('blobs', 'blob_parts')",
+        )
+        .raw(),
+    ].map(([name, sql]) => [String(name), String(sql)]),
+  )
+  if (tables.get('blobs')?.includes('part INTEGER') && !tables.has('blob_parts'))
+    storage.sql.exec('ALTER TABLE blobs RENAME TO blob_parts')
 }

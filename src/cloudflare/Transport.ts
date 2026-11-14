@@ -108,13 +108,32 @@ export function create(options: create.Options): create.ReturnType {
     sink: Sink,
     session: Session,
     signal?: AbortSignal,
+    body?: string,
   ) => {
     let delay = reconnectMs
     while (!signal?.aborted) {
-      const response = await fetch(path(`events?live=1&after=${session.cursor ?? 0}`, session), {
-        headers: headers({ accept: 'text/event-stream' }),
+      const known = await fetch(path(`turns/${encodeURIComponent(requestId)}`, session), {
+        headers: headers(),
         signal,
       }).catch(() => undefined)
+      void known?.body?.cancel().catch(() => undefined)
+      if (known?.status === 404 && body === undefined) {
+        sink.note('error', 'The session object reset before it saved this turn. Send it again.')
+        return
+      }
+      const response = await (
+        known?.status === 404
+          ? fetch(path(`turns?live=1&after=${session.cursor ?? 0}`, session), {
+              method: 'POST',
+              headers: headers({ accept: 'text/event-stream', 'content-type': 'application/json' }),
+              body,
+              signal,
+            })
+          : fetch(path(`events?live=1&after=${session.cursor ?? 0}`, session), {
+              headers: headers({ accept: 'text/event-stream' }),
+              signal,
+            })
+      ).catch(() => undefined)
       if (
         response &&
         (response.status === 408 || response.status === 429 || response.status >= 500)
@@ -146,27 +165,28 @@ export function create(options: create.Options): create.ReturnType {
     const model = options.model()
     try {
       const hand = await options.hand?.(session.id!, signal)
+      const body = JSON.stringify({
+        request_id: requestId,
+        prompt: ClientTransport.prompt(prompt, { attachments }),
+        ...(images(attachments).length ? { images: images(attachments) } : {}),
+        provider: model.provider,
+        model: model.model,
+        ...(model.thinking ? { thinking: model.thinking } : {}),
+        ...(model.web_search !== undefined ? { web_search: model.web_search } : {}),
+        ...(model.payer ? { payer: model.payer } : {}),
+        ...(hand ? { hand } : {}),
+      })
       const response = await fetch(path(`turns?live=1&after=${session.cursor ?? 0}`, session), {
         method: 'POST',
         headers: headers({ accept: 'text/event-stream', 'content-type': 'application/json' }),
-        body: JSON.stringify({
-          request_id: requestId,
-          prompt: ClientTransport.prompt(prompt, { attachments }),
-          ...(images(attachments).length ? { images: images(attachments) } : {}),
-          provider: model.provider,
-          model: model.model,
-          ...(model.thinking ? { thinking: model.thinking } : {}),
-          ...(model.web_search !== undefined ? { web_search: model.web_search } : {}),
-          ...(model.payer ? { payer: model.payer } : {}),
-          ...(hand ? { hand } : {}),
-        }),
+        body,
         signal,
       }).catch((error: unknown) => {
         if (signal?.aborted) return undefined
         throw error
       })
       if (response && !(await follow(response, requestId, sink, session, signal)))
-        await reconnect(requestId, sink, session, signal)
+        await reconnect(requestId, sink, session, signal, body)
     } finally {
       if (!signal?.aborted) {
         session.open = undefined
