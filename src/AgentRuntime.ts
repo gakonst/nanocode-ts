@@ -6,6 +6,8 @@ type Pending = { resolve(value: unknown): void; reject(reason: unknown): void }
 
 const NULL_CELL = 0xffffffff
 
+const maxTimerMs = 2 ** 31 - 1
+
 type Socket = {
   socket: Contracts.MessageSocket
   idle: number
@@ -362,7 +364,14 @@ async function create(
           return null
         case 'sleep':
           return new Promise((resolve) => {
-            const timer = setTimeout(() => resolve(null), request.milliseconds)
+            let timer: ReturnType<typeof setTimeout>
+            const arm = (milliseconds: number) => {
+              timer =
+                milliseconds > maxTimerMs
+                  ? setTimeout(() => arm(milliseconds - maxTimerMs), maxTimerMs)
+                  : setTimeout(() => resolve(null), milliseconds)
+            }
+            arm(request.milliseconds)
             internal.onCancel(id, () => {
               clearTimeout(timer)
               resolve(null)
