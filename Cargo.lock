@@ -336,6 +336,7 @@ version = "0.7.0"
 dependencies = [
  "nanocode-agent-config",
  "nanocode-agent-core",
+ "nanocode-code-mode",
  "nanocode-digest",
  "nanocode-durability",
  "nanocode-platform",
