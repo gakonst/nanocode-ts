@@ -8,7 +8,7 @@ use std::{
 
 use nanocode_platform::{Host, LocalFuture};
 use nanocode_python::{
-    Child, Ended, Exited, Files, Kind, Limit, Limits, Python, Remove, Run, Stat, Why, Write,
+    Child, Ended, Exited, Files, Kind, Limit, Limits, Python, Remove, Run, Stat, Stdio, Why, Write,
 };
 
 #[global_allocator]
@@ -276,7 +276,7 @@ fn request(input: &[u8]) -> (Run, Shell) {
     };
     let run = Run {
         argv,
-        stdin,
+        stdio: Stdio::Held(stdin),
         cwd,
         env,
         limits,
