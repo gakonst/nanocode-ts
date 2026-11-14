@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nanocode::{
-    ChildHost, ChildSpec, NanocodeError, TurnResult,
+    ChildHost, ChildSpec, ChildTurn, NanocodeError, TurnResult,
     backend::{BackendFuture, Prompt, PromptInput},
     tool_contract::{Tool, ToolContext, ToolDefinition, ToolOutput, ToolOutputWire, ToolResult},
 };
@@ -34,6 +34,28 @@ fn prompt_text(prompt: &Prompt) -> nanocode::agent::Result<String> {
 
 async fn send(request: Value) -> nanocode::agent::Result<Value> {
     call(request).await.map_err(|error| failed(&error))
+}
+
+fn turn_result(request_id: String, reply: &Value) -> nanocode::agent::Result<TurnResult> {
+    let usage = reply
+        .get("usage")
+        .filter(|usage| !usage.is_null())
+        .cloned()
+        .map(serde_json::from_value::<nanocode::TurnUsage>)
+        .transpose()
+        .map_err(|error| failed(&json!(error.to_string())))?;
+    let field = |name: &str| reply.get(name).and_then(Value::as_str).map(str::to_owned);
+    match reply.get("status").and_then(Value::as_str) {
+        Some("completed") => Ok(TurnResult {
+            request_id: Some(request_id),
+            turn_id: field("turn_id"),
+            final_message: field("final_message").unwrap_or_default(),
+            usage,
+            boundary: None,
+        }),
+        Some("cancelled") => Err(NanocodeError::TurnCancelled),
+        _ => Err(failed(reply)),
+    }
 }
 
 impl ChildHost for HostChildren {
@@ -122,7 +144,7 @@ impl ChildHost for HostChildren {
         session_id: Arc<str>,
         request_id: String,
         prompt: Prompt,
-    ) -> BackendFuture<nanocode::agent::Result<TurnResult>> {
+    ) -> BackendFuture<nanocode::agent::Result<ChildTurn>> {
         Box::pin(async move {
             let text = prompt_text(&prompt)?;
             let reply = send(json!({
@@ -133,25 +155,20 @@ impl ChildHost for HostChildren {
                 "instruction_revision": prompt.instruction_revision(),
             }))
             .await?;
-            let usage = reply
-                .get("usage")
-                .filter(|usage| !usage.is_null())
-                .cloned()
-                .map(serde_json::from_value::<nanocode::TurnUsage>)
-                .transpose()
-                .map_err(|error| failed(&json!(error.to_string())))?;
-            let field = |name: &str| reply.get(name).and_then(Value::as_str).map(str::to_owned);
-            match reply.get("status").and_then(Value::as_str) {
-                Some("completed") => Ok(TurnResult {
-                    request_id: Some(request_id),
-                    turn_id: field("turn_id"),
-                    final_message: field("final_message").unwrap_or_default(),
-                    usage,
-                    boundary: None,
-                }),
-                Some("cancelled") => Err(NanocodeError::TurnCancelled),
-                _ => Err(failed(&reply)),
+            if reply.get("status").and_then(Value::as_str) != Some("running") {
+                let turn: ChildTurn = Box::pin(async move { turn_result(request_id, &reply) });
+                return Ok(turn);
             }
+            let turn: ChildTurn = Box::pin(async move {
+                let reply = send(json!({
+                    "op": "child_wait",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }))
+                .await?;
+                turn_result(request_id, &reply)
+            });
+            Ok(turn)
         })
     }
 

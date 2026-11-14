@@ -429,6 +429,8 @@ export type ChildTurn = {
   usage?: unknown
 }
 
+export type ChildStart = ChildTurn | { status: 'running' }
+
 export type ChildHost = {
   cancel(session_id: string, request_id: string | null): Promise<void>
   close(session_id: string): Promise<void>
@@ -441,7 +443,7 @@ export type ChildHost = {
     request_id: string,
     prompt: string,
     instruction_revision: number | null,
-  ): Promise<ChildTurn>
+  ): Promise<ChildStart>
   steer(
     session_id: string,
     request_id: string,
@@ -449,6 +451,7 @@ export type ChildHost = {
     prompt: string,
     instruction_revision: number | null,
   ): Promise<boolean>
+  wait(session_id: string, request_id: string): Promise<ChildTurn>
 }
 
 export type RuntimeOptions = {

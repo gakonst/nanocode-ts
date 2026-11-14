@@ -504,6 +504,8 @@ async function create(
               request.prompt,
               request.instruction_revision ?? null,
             )
+        case 'child_wait':
+          return await internal.children().wait(request.session_id, request.request_id)
         case 'child_steer':
           return {
             steered: await internal

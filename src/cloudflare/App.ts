@@ -1113,7 +1113,10 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       }
     }
 
-    private childRuns = new Map<string, (turn: Contracts.ChildTurn) => void>()
+    private childRuns = new Map<
+      string,
+      { done: Promise<Contracts.ChildTurn>; resolve: (turn: Contracts.ChildTurn) => void }
+    >()
 
     private childSpecs = new Map<string, Contracts.ChildOpen>()
 
@@ -1184,12 +1187,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
       requestId: string,
       prompt: string,
       revision: number | null,
-    ): Promise<Contracts.ChildTurn> {
+    ): Promise<Contracts.ChildStart> {
       const spec = this.childSpecs.get(sessionId)
       if (!spec) return { status: 'failed', detail: `remote child ${sessionId} is not open` }
       const key = `${sessionId}
 ${requestId}`
-      const done = new Promise<Contracts.ChildTurn>((resolve) => this.childRuns.set(key, resolve))
+      let resolve: (turn: Contracts.ChildTurn) => void = () => undefined
+      const done = new Promise<Contracts.ChildTurn>((settle) => (resolve = settle))
+      this.childRuns.set(key, { done, resolve })
       const response = await this.childPost(descriptor, sessionId, 'child_turn', {
         spec,
         parent: headerJson({
@@ -1205,14 +1210,15 @@ ${requestId}`
         prompt,
         instruction_revision: revision,
       }).catch((error: unknown) => error as Error)
-      if (response instanceof Error || !response.ok) {
+      if (response instanceof Error) {
+        this.childRuns.delete(key)
+        throw response
+      }
+      if (!response.ok) {
         this.childRuns.delete(key)
         return {
           status: 'failed',
-          detail:
-            response instanceof Error
-              ? response.message
-              : `remote child ${sessionId} refused the turn: ${response.status} ${await response.text()}`,
+          detail: `remote child ${sessionId} refused the turn: ${response.status} ${await response.text()}`,
         }
       }
       const report = (await response.json()) as Contracts.TurnReport
@@ -1220,7 +1226,17 @@ ${requestId}`
         this.childRuns.delete(key)
         return childTurn(report)
       }
-      return await done
+      return { status: 'running' }
+    }
+
+    private async childWait(sessionId: string, requestId: string): Promise<Contracts.ChildTurn> {
+      const key = `${sessionId}
+${requestId}`
+      const run = this.childRuns.get(key)
+      if (!run) throw new Error(`remote child ${sessionId} runs no turn ${requestId}`)
+      const turn = await run.done
+      this.childRuns.delete(key)
+      return turn
     }
 
     private async childRoute(
@@ -1232,10 +1248,9 @@ ${requestId}`
       if (action === 'child_done') {
         const key = `${input.session_id}
 ${input.request_id}`
-        const resolve = this.childRuns.get(key)
-        this.childRuns.delete(key)
-        resolve?.(input.turn as Contracts.ChildTurn)
-        return json({ delivered: resolve !== undefined })
+        const run = this.childRuns.get(key)
+        run?.resolve(input.turn as Contracts.ChildTurn)
+        return json({ delivered: run !== undefined })
       }
       if (action === 'child_tool' || action === 'child_events' || action === 'child_subagent') {
         const runtime = await this.subagentRuntime(scope, descriptor)
@@ -2121,6 +2136,7 @@ ${input.request_id}`
                       close: async (id: string) => {
                         this.childSpecs.delete(id)
                       },
+                      wait: (id: string, requestId: string) => this.childWait(id, requestId),
                     },
                   }
                 : {}),
