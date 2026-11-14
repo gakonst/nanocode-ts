@@ -205,4 +205,8 @@ impl ShellExecutor for HostShell {
     fn terminate_all(&self) -> ProcessFuture<'_, ()> {
         Box::pin(async {})
     }
+
+    fn keeps_sessions(&self) -> bool {
+        false
+    }
 }
