@@ -175,12 +175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "futures-sink"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
-
-[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -194,7 +188,6 @@ checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
  "futures-macro",
- "futures-sink",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -357,7 +350,6 @@ dependencies = [
 name = "nanocode-agent"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-agent-config",
  "nanocode-agent-core",
  "nanocode-digest",
@@ -390,7 +382,6 @@ dependencies = [
 name = "nanocode-agent-core"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-agent-types",
  "nanocode-home",
  "nanocode-platform",
@@ -449,7 +440,6 @@ dependencies = [
 name = "nanocode-backend-claude"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "libc",
  "nanocode-agent-config",
@@ -482,7 +472,6 @@ name = "nanocode-backend-claude-client"
 version = "0.7.0"
 dependencies = [
  "bytes",
- "futures-util",
  "http",
  "memchr",
  "nanocode-agent-types",
@@ -522,7 +511,6 @@ dependencies = [
 name = "nanocode-backend-codex"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "libc",
  "nanocode-agent-config",
@@ -553,7 +541,6 @@ dependencies = [
 name = "nanocode-backend-codex-client"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "memchr",
  "nanocode-agent-types",
@@ -581,7 +568,6 @@ dependencies = [
 name = "nanocode-code-mode"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-audio",
  "nanocode-code-mode-engine",
  "nanocode-digest",
@@ -624,7 +610,6 @@ dependencies = [
 name = "nanocode-computer"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "libc",
  "nanocode-computer-repl",
  "nanocode-jpeg",
@@ -663,7 +648,6 @@ dependencies = [
 name = "nanocode-durability"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-agent-core",
  "nanocode-durability-core",
  "nanocode-platform",
@@ -678,7 +662,6 @@ dependencies = [
 name = "nanocode-durability-core"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-digest",
  "nanocode-platform",
  "nanocode-sync",
@@ -706,7 +689,6 @@ name = "nanocode-http"
 version = "0.7.0"
 dependencies = [
  "bytes",
- "futures-util",
  "http",
  "httparse",
  "nanocode-compression",
@@ -766,7 +748,6 @@ dependencies = [
 name = "nanocode-mcp-http"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "nanocode-http",
  "nanocode-mcp",
@@ -784,7 +765,6 @@ dependencies = [
 name = "nanocode-mcp-tools"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "nanocode-digest",
  "nanocode-home",
@@ -878,7 +858,6 @@ dependencies = [
 name = "nanocode-subagents"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-agent-core",
  "nanocode-durability-core",
  "nanocode-platform",
@@ -895,7 +874,6 @@ dependencies = [
 name = "nanocode-sync"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-platform",
  "nanocode-sys",
  "serde",
@@ -936,7 +914,6 @@ dependencies = [
 name = "nanocode-tool-host"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-code-mode",
  "nanocode-digest",
  "nanocode-home",
@@ -967,7 +944,6 @@ dependencies = [
 name = "nanocode-tool-runtime"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "nanocode-code-mode",
  "nanocode-home",
@@ -1030,7 +1006,6 @@ dependencies = [
 name = "nanocode-types"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "nanocode-platform",
  "nanocode-sync",
  "nanocode-trace",
@@ -1081,11 +1056,11 @@ dependencies = [
 name = "nanocode-websocket"
 version = "0.7.0"
 dependencies = [
- "futures-util",
  "http",
  "httparse",
  "nanocode-digest",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-sys",
  "nanocode-tls",
  "tokio",
