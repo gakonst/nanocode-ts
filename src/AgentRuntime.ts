@@ -322,7 +322,7 @@ async function create(
     },
 
     async execute(id: number, request: any): Promise<unknown> {
-      if (!internal.live(id)) return null
+      if (!internal.live(id) && (state.stopped || request.op !== 'tool_call')) return null
       if (request.op.startsWith('remote_')) {
         if (!state.options.remote) throw new Error('remote executor is not configured')
         internal.onCancel(id, () => state.options.remote!.cancel(id))
