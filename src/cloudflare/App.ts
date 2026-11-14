@@ -20,6 +20,7 @@ import * as Executor from './internal/Executor.ts'
 import * as HandToken from './internal/HandToken.ts'
 import { headerJson, json } from './internal/Http.ts'
 import * as Metadata from './internal/Metadata.ts'
+import * as Replies from './internal/Replies.ts'
 import * as PlanModels from '../client/Plans.ts'
 import * as Subagents from '../client/Subagents.ts'
 import * as Plans from './Plans.ts'
@@ -418,6 +419,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
     private readonly handFrames = new Map<WebSocket, Promise<void>>()
     private readonly handReplies = new Map<string, Set<(frame: string) => void>>()
     private handRequestsPruned = 0
+    private readonly handUpdates = new Map<string, { bytes: number; frames: string[] }>()
     private linger?: ReturnType<typeof setTimeout>
     private pumping = false
     private modelAt?: number
@@ -463,6 +465,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         CREATE TABLE IF NOT EXISTS watch_sockets (id TEXT PRIMARY KEY, scope TEXT NOT NULL, descriptor TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS hand_requests (hand TEXT NOT NULL, runtime TEXT NOT NULL, id INTEGER NOT NULL, scope TEXT NOT NULL, session_id TEXT NOT NULL, call_id TEXT NOT NULL, deadline INTEGER NOT NULL, replied INTEGER, reply TEXT, PRIMARY KEY (hand, runtime, id)) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS hand_request_calls ON hand_requests (session_id, call_id);
+        CREATE TABLE IF NOT EXISTS hand_updates (hand TEXT NOT NULL, runtime TEXT NOT NULL, id INTEGER NOT NULL, seq INTEGER NOT NULL, frame TEXT NOT NULL, PRIMARY KEY (hand, runtime, id, seq)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS subagent_directories (scope TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
       `)
       const migrated = this.metadata.get(schemaKey) === schemaVersion
@@ -2508,6 +2511,10 @@ ${input.request_id}`
           context.call_id,
           now + timeout + requestedYield(operation),
         )
+        this.handUpdates.set(handRequestKey(identity.hand, identity.runtime, parsed.id), {
+          bytes: 0,
+          frames: [],
+        })
       }
       if (now - this.handRequestsPruned < timeout) return
       this.handRequestsPruned = now
@@ -2516,14 +2523,29 @@ ${input.request_id}`
         now - timeout,
         now - timeout,
       )
+      this.ctx.storage.sql.exec(
+        'DELETE FROM hand_updates WHERE NOT EXISTS (SELECT 1 FROM hand_requests WHERE hand_requests.hand = hand_updates.hand AND hand_requests.runtime = hand_updates.runtime AND hand_requests.id = hand_updates.id)',
+      )
     }
 
     private recordHandReply(connection: string | undefined, message: string | ArrayBuffer) {
       if (connection === undefined || typeof message !== 'string') return
-      if (!message.includes('"type":"reply"')) return
+      const update = message.startsWith('{"type":"update"')
+      if (!update && !message.includes('"type":"reply"')) return
       const identity = this.connections.get(connection)
       const id = /"id":(\d+)/.exec(message)?.[1]
       if (!identity?.runtime || id === undefined) return
+      const key = handRequestKey(identity.hand, identity.runtime, Number(id))
+      if (update) {
+        const kept = this.handUpdates.get(key)
+        if (!kept) return
+        kept.bytes += message.length
+        if (kept.bytes > this.handLimits().max_frame_bytes) this.handUpdates.delete(key)
+        else kept.frames.push(message)
+        return
+      }
+      const updates = this.handUpdates.get(key)?.frames ?? []
+      this.handUpdates.delete(key)
       this.ctx.storage.sql.exec(
         'UPDATE hand_requests SET replied = ?, reply = ? WHERE hand = ? AND runtime = ? AND id = ?',
         Date.now(),
@@ -2532,7 +2554,16 @@ ${input.request_id}`
         identity.runtime,
         Number(id),
       )
-      const key = handRequestKey(identity.hand, identity.runtime, Number(id))
+      if (message.includes('"delivered":true'))
+        for (const [seq, frame] of updates.entries())
+          this.ctx.storage.sql.exec(
+            'INSERT OR REPLACE INTO hand_updates (hand, runtime, id, seq, frame) VALUES (?, ?, ?, ?, ?)',
+            identity.hand,
+            identity.runtime,
+            Number(id),
+            seq,
+            frame,
+          )
       for (const waiter of this.handReplies.get(key) ?? []) waiter(message)
       this.handReplies.delete(key)
     }
@@ -2574,9 +2605,23 @@ ${input.request_id}`
         )
         .toArray()[0]
       if (!row) return null
-      if (row.reply != null) return { frame: String(row.reply) }
       const hand = String(row.hand)
       const runtime = String(row.runtime)
+      if (row.reply != null)
+        return {
+          frame: Replies.complete(
+            String(row.reply),
+            this.ctx.storage.sql
+              .exec(
+                'SELECT frame FROM hand_updates WHERE hand = ? AND runtime = ? AND id = ? ORDER BY seq',
+                hand,
+                runtime,
+                Number(row.id),
+              )
+              .toArray()
+              .map((update) => String(update.frame)),
+          ),
+        }
       const key = handRequestKey(hand, runtime, Number(row.id))
       const deadline = Math.max(
         Number(row.deadline),
