@@ -61,6 +61,8 @@ export const thinkingLevels: readonly Contracts.Thinking[] = [
   'max',
 ]
 
+export const codexOrchestrations: readonly Contracts.CodexOrchestration[] = ['code_mode', 'direct']
+
 export type SessionAuthority = {
   account_id: string
   session_id: string
@@ -73,6 +75,7 @@ export type SessionDescriptor = SessionAuthority & {
   model?: string
   thinking?: Contracts.Thinking
   web_search?: boolean
+  codex_orchestration?: Contracts.CodexOrchestration
   session_name: string
   subscription: boolean
   codex_subscription?: boolean
@@ -847,6 +850,14 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           return json({ error: 'steer must be a boolean' }, 400)
         if (input.web_search !== undefined && typeof input.web_search !== 'boolean')
           return json({ error: 'web_search must be a boolean' }, 400)
+        if (
+          input.codex_orchestration !== undefined &&
+          !codexOrchestrations.includes(input.codex_orchestration)
+        )
+          return json(
+            { error: `codex_orchestration must be one of ${codexOrchestrations.join(', ')}` },
+            400,
+          )
         if (input.payer !== undefined && !offered.includes(input.payer))
           return json({ error: `payer must be one of ${offered.join(', ')}` }, 400)
         if (
@@ -876,6 +887,7 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
         const providerKey = `model_provider:${scope}`
         const modelKey = `model:${scope}`
         const payerKey = `payer:${scope}`
+        const orchestrationKey = `codex_orchestration:${scope}`
         this.prime(
           [
             [
@@ -947,6 +959,18 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
           if (boundPayer !== undefined && input.payer !== undefined && input.payer !== boundPayer)
             return json({ error: 'session payer is immutable; create a new session' }, 409)
           descriptor.payer = input.payer ?? boundPayer
+          const boundOrchestration = (this.metadata.get(orchestrationKey) ??
+            (initialized ? 'code_mode' : undefined)) as Contracts.CodexOrchestration | undefined
+          if (
+            boundOrchestration !== undefined &&
+            input.codex_orchestration !== undefined &&
+            input.codex_orchestration !== boundOrchestration
+          )
+            return json(
+              { error: 'session codex_orchestration is immutable; create a new session' },
+              409,
+            )
+          descriptor.codex_orchestration = input.codex_orchestration ?? boundOrchestration
           descriptor.thinking = input.thinking
           descriptor.web_search = input.web_search
           await subscribing
@@ -1015,6 +1039,8 @@ export function create<E extends Env>(options: create.Options<E>): create.Return
               this.metadata.insert(providerKey, descriptor.provider!)
               if (descriptor.model !== undefined) this.metadata.insert(modelKey, descriptor.model)
               if (descriptor.payer !== undefined) this.metadata.insert(payerKey, descriptor.payer)
+              if (descriptor.codex_orchestration !== undefined)
+                this.metadata.insert(orchestrationKey, descriptor.codex_orchestration)
               this.metadata.insert(executorKey, executor)
               this.sessionId(scope, descriptor.session_id || this.claimPrewarmed(scope, descriptor))
             })
@@ -1797,6 +1823,7 @@ ${input.request_id}`
         descriptor.executor_id ?? null,
         descriptor.web_search ?? null,
         descriptor.payer ?? null,
+        descriptor.codex_orchestration ?? null,
       ])
       if (current)
         return current.runtime.then(async (runtime) => {
@@ -1982,6 +2009,9 @@ ${input.request_id}`
                   policy(this.env.RUNTIME_MEMORY_BUDGET_BYTES, 'RUNTIME_MEMORY_BUDGET_BYTES') / 2,
                 ),
               ...(options.cellYieldMs === undefined ? {} : { cell_yield_ms: options.cellYieldMs }),
+              ...(descriptor.codex_orchestration === undefined
+                ? {}
+                : { codex_orchestration: descriptor.codex_orchestration }),
               ...withHand(
                 options.instructions,
                 this.handsMode(scope, descriptor) ? options.handInstructions : undefined,
@@ -3128,6 +3158,9 @@ ${input.request_id}`
       const payer = (this.metadata.get('payer:' + scope) ?? base.payer) as
         | Contracts.Payer
         | undefined
+      const orchestration = this.metadata.get('codex_orchestration:' + scope) as
+        | Contracts.CodexOrchestration
+        | undefined
       return {
         ...base,
         executor_id: executor || undefined,
@@ -3135,6 +3168,7 @@ ${input.request_id}`
         provider,
         ...(model === undefined ? {} : { model }),
         ...(payer === undefined ? {} : { payer }),
+        ...(orchestration === undefined ? {} : { codex_orchestration: orchestration }),
         subscription: served(
           provider,
           model,
