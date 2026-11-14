@@ -238,6 +238,8 @@ function create<S extends Contracts.MessageSocket>(
         case 'remote_close':
           fail(String(request.reason), 1000)
           return null
+        case 'remote_record':
+          return null
         default:
           throw new Error(`unsupported remote operation ${request.op}`)
       }

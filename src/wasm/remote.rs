@@ -163,6 +163,17 @@ impl RemoteLink for WorkerLink {
                 .map_err(|issue| CodeModeHostError::unsent(issue.message()))?;
             let cells = frames.iter().filter_map(cell).collect::<Vec<_>>();
             if !cells.is_empty() {
+                if self.connection.is_some() {
+                    let recorded = frames
+                        .iter()
+                        .zip(&encoded)
+                        .filter(|(frame, _)| cell(frame).is_some())
+                        .map(|(_, text)| text)
+                        .collect::<Vec<_>>();
+                    call(json!({"op": "remote_record", "connection": self.connection, "frames": recorded}))
+                        .await
+                        .map_err(|issue| CodeModeHostError::unsent(host_error(issue).message()))?;
+                }
                 commit(&self.scope, &cells)
                     .await
                     .map_err(CodeModeHostError::unsent)?;
@@ -269,6 +280,14 @@ impl RemoteTransport for Recovering {
 
     fn call(&self, operation: RemoteOperation) -> HostFuture<'_, Result<Value, CodeModeHostError>> {
         self.client.call(operation)
+    }
+
+    fn adopt(&self, context: &RemoteContext, tools: Vec<Arc<dyn Tool>>) {
+        self.client.adopt(context, tools);
+    }
+
+    fn delivered(&self, context: &RemoteContext, execution: &CodeModeExecution) {
+        self.client.delivered(context, execution);
     }
 
     fn recover<'a>(

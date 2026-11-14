@@ -1153,6 +1153,9 @@ async fn open(mut config: Configuration) -> Result<Session, Opening> {
             executors.set_default(Some(name));
         }
     }
+    if config.hands {
+        executors.await_replacement(true);
+    }
     let session_instructions = instructions(config.instructions.as_deref());
     if !session_instructions.is_empty() {
         builder = builder.instructions(session_instructions);
@@ -1315,6 +1318,9 @@ impl Session {
             return Ok(json!({"waiting": true, "busy": true}));
         }
         self.activity.set(Activity::Driving);
+        if next.is_none() {
+            self.executors.await_replacement(false);
+        }
         let driven = self.inbox.drive(next).await;
         self.activity.set(Activity::Idle);
         Ok(match driven.map_err(text)? {

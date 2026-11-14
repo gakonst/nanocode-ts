@@ -110,6 +110,7 @@ impl InboxHost for WorkerInbox {
 
     fn place(&self, session_id: &str, hand: Option<&str>) {
         self.executors.select_prompt_hand(session_id, hand);
+        self.executors.await_replacement(false);
     }
 
     fn idle(&self) -> bool {

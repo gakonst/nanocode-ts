@@ -2112,6 +2112,11 @@ ${input.request_id}`
                 execute: async (request: any, id: number) => {
                   if (request.op === 'remote_recover')
                     return this.recoverHandRequest(scope, request)
+                  if (request.op === 'remote_record') {
+                    if (request.connection != null)
+                      this.recordHandRequests(scope, request.connection, request)
+                    return null
+                  }
                   const executor =
                     request.connection != null
                       ? this.connections.get(request.connection)?.executor
