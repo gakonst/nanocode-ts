@@ -1039,6 +1039,7 @@ dependencies = [
  "http",
  "nanocode",
  "nanocode-code-mode",
+ "nanocode-sync",
  "serde",
  "serde_json",
  "tokio",

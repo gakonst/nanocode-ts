@@ -20,6 +20,7 @@ nanocode = { path = "../nanocodex/crates/nanocode" }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 nanocode-code-mode = { path = "../nanocodex/crates/runtime/code-mode" }
+nanocode-sync = { path = "../nanocodex/crates/core/sync" }
 blake3 = { version = "1.8.7", default-features = false, features = ["wasm32_simd"] }
 futures-channel = "0.3.31"
 futures-executor = "0.3.31"

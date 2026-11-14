@@ -95,7 +95,7 @@ impl Sender for WorkerTransport {
             .await
             .map_err(layer_error)?;
             let id = serde_json::from_value(started["id"].clone()).map_err(layer_error)?;
-            let body = futures_util::stream::try_unfold(Body(id), |body| async move {
+            let body = nanocode_sync::stream::try_unfold(Body(id), |body| async move {
                 let chunk = super::bridge::bytes(json!({"op": "http_read", "id": body.0}))
                     .await
                     .map_err(layer_error)?;
