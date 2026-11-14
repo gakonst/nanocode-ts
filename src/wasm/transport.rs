@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use nanocode_http::{
+    StatusCode,
+    header::{HeaderMap, HeaderName, HeaderValue},
+};
 use nanocode::{
     codex::transport::host::{
         ConnectedHost, HostConnectRequest, HostConnection, HostConnectionMetadata, HostError,

@@ -799,7 +799,7 @@ fn claude_harness(
         nanocode::claude::transport::SenderTransport(transport::WorkerTransport::CLAUDE),
     );
     let mut client =
-        ClaudeClient::with_auth_headers(http, endpoint.endpoint, http::HeaderMap::new());
+        ClaudeClient::with_auth_headers(http, endpoint.endpoint, nanocode_http::header::HeaderMap::new());
     if endpoint.subscription {
         client = client.subscription_compatibility();
     }

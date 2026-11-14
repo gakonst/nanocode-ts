@@ -227,16 +227,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
-dependencies = [
- "bytes",
- "itoa",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1022,9 +1012,9 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "http",
  "nanocode",
  "nanocode-code-mode",
+ "nanocode-http",
  "nanocode-sync",
  "serde",
  "serde_json",
