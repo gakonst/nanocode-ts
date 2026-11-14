@@ -60,6 +60,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocode-bytes"
+version = "0.7.0"
+
+[[package]]
 name = "nanocode-compression"
 version = "0.7.0"
 dependencies = [
@@ -133,7 +137,7 @@ dependencies = [
 name = "nanocode-shell"
 version = "0.7.0"
 dependencies = [
- "bytes",
+ "nanocode-bytes",
  "psh-classify",
  "psh-engine",
  "psh-syntax",
@@ -381,7 +385,6 @@ dependencies = [
  "rustpython-ruff_python_trivia",
  "rustpython-ruff_text_size",
  "rustpython-unicode",
- "unicode-ident",
  "unicode-normalization",
 ]
 
@@ -391,7 +394,7 @@ version = "0.16.5"
 dependencies = [
  "rustpython-ruff_source_file",
  "rustpython-ruff_text_size",
- "unicode-ident",
+ "rustpython-unicode",
 ]
 
 [[package]]
